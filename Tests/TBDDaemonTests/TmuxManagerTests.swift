@@ -17,61 +17,85 @@ import Testing
 }
 
 @Test func testNewServerCommand() {
-    let cmd = TmuxManager.newServerCommand(
+    let args = TmuxManager.newServerCommand(
         server: "tbd-a1b2c3d4",
         session: "main",
         cwd: "/tmp/repo"
     )
-    #expect(cmd.contains("-L tbd-a1b2c3d4"))
-    #expect(cmd.contains("new-session"))
-    #expect(cmd.contains("-s main"))
-    #expect(cmd.contains("-c /tmp/repo"))
+    #expect(args.contains("-L"))
+    #expect(args.contains("tbd-a1b2c3d4"))
+    #expect(args.contains("new-session"))
+    #expect(args.contains("-s"))
+    #expect(args.contains("main"))
+    #expect(args.contains("-c"))
+    #expect(args.contains("/tmp/repo"))
+}
+
+@Test func testHasSessionCommand() {
+    let args = TmuxManager.hasSessionCommand(
+        server: "tbd-a1b2c3d4",
+        session: "main"
+    )
+    #expect(args.contains("-L"))
+    #expect(args.contains("tbd-a1b2c3d4"))
+    #expect(args.contains("has-session"))
+    #expect(args.contains("-t"))
+    #expect(args.contains("main"))
 }
 
 @Test func testNewWindowCommand() {
-    let cmd = TmuxManager.newWindowCommand(
+    let args = TmuxManager.newWindowCommand(
         server: "tbd-a1b2c3d4",
         session: "main",
         cwd: "/tmp/worktree",
         shellCommand: "claude --dangerously-skip-permissions"
     )
-    #expect(cmd.contains("-L tbd-a1b2c3d4"))
-    #expect(cmd.contains("-t main"))
-    #expect(cmd.contains("-c /tmp/worktree"))
-    #expect(cmd.contains("claude --dangerously-skip-permissions"))
+    #expect(args.contains("-L"))
+    #expect(args.contains("tbd-a1b2c3d4"))
+    #expect(args.contains("-t"))
+    #expect(args.contains("main"))
+    #expect(args.contains("-c"))
+    #expect(args.contains("/tmp/worktree"))
+    #expect(args.contains("claude --dangerously-skip-permissions"))
 }
 
 @Test func testKillWindowCommand() {
-    let cmd = TmuxManager.killWindowCommand(
+    let args = TmuxManager.killWindowCommand(
         server: "tbd-a1b2c3d4",
         windowID: "@5"
     )
-    #expect(cmd.contains("-L tbd-a1b2c3d4"))
-    #expect(cmd.contains("kill-window"))
-    #expect(cmd.contains("-t @5"))
+    #expect(args.contains("-L"))
+    #expect(args.contains("tbd-a1b2c3d4"))
+    #expect(args.contains("kill-window"))
+    #expect(args.contains("-t"))
+    #expect(args.contains("@5"))
 }
 
 @Test func testSendKeysCommand() {
-    let cmd = TmuxManager.sendKeysCommand(
+    let args = TmuxManager.sendKeysCommand(
         server: "tbd-a1b2c3d4",
         paneID: "%3",
         text: "hello world"
     )
-    #expect(cmd.contains("-L tbd-a1b2c3d4"))
-    #expect(cmd.contains("send-keys"))
-    #expect(cmd.contains("-l"))
-    #expect(cmd.contains("-t %3"))
-    #expect(cmd.contains("hello world"))
+    #expect(args.contains("-L"))
+    #expect(args.contains("tbd-a1b2c3d4"))
+    #expect(args.contains("send-keys"))
+    #expect(args.contains("-l"))
+    #expect(args.contains("-t"))
+    #expect(args.contains("%3"))
+    #expect(args.contains("hello world"))
 }
 
 @Test func testListWindowsCommand() {
-    let cmd = TmuxManager.listWindowsCommand(
+    let args = TmuxManager.listWindowsCommand(
         server: "tbd-a1b2c3d4",
         session: "main"
     )
-    #expect(cmd.contains("-L tbd-a1b2c3d4"))
-    #expect(cmd.contains("list-windows"))
-    #expect(cmd.contains("-t main"))
+    #expect(args.contains("-L"))
+    #expect(args.contains("tbd-a1b2c3d4"))
+    #expect(args.contains("list-windows"))
+    #expect(args.contains("-t"))
+    #expect(args.contains("main"))
 }
 
 @Test func testDryRunCreateWindow() async throws {

@@ -30,32 +30,44 @@ public struct TmuxManager: Sendable {
         return "tbd-\(hex)"
     }
 
-    public static func newServerCommand(server: String, session: String, cwd: String) -> String {
-        "tmux -L \(server) new-session -d -s \(session) -c \(cwd)"
+    public static func newServerCommand(server: String, session: String, cwd: String) -> [String] {
+        ["-L", server, "new-session", "-d", "-s", session, "-c", cwd]
     }
 
-    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String) -> String {
-        "tmux -L \(server) new-window -t \(session) -c \(cwd) -PF '#{window_id} #{pane_id}' \(shellCommand)"
+    public static func hasSessionCommand(server: String, session: String) -> [String] {
+        ["-L", server, "has-session", "-t", session]
     }
 
-    public static func killWindowCommand(server: String, windowID: String) -> String {
-        "tmux -L \(server) kill-window -t \(windowID)"
+    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String) -> [String] {
+        ["-L", server, "new-window", "-t", session, "-c", cwd, "-PF", "#{window_id} #{pane_id}", shellCommand]
     }
 
-    public static func sendKeysCommand(server: String, paneID: String, text: String) -> String {
-        "tmux -L \(server) send-keys -l -t \(paneID) \(text)"
+    public static func killWindowCommand(server: String, windowID: String) -> [String] {
+        ["-L", server, "kill-window", "-t", windowID]
     }
 
-    public static func listWindowsCommand(server: String, session: String) -> String {
-        "tmux -L \(server) list-windows -t \(session) -F '#{window_id} #{pane_id}'"
+    public static func sendKeysCommand(server: String, paneID: String, text: String) -> [String] {
+        ["-L", server, "send-keys", "-l", "-t", paneID, text]
+    }
+
+    public static func listWindowsCommand(server: String, session: String) -> [String] {
+        ["-L", server, "list-windows", "-t", session, "-F", "#{window_id} #{pane_id}"]
     }
 
     // MARK: - Instance Execution Methods
 
     public func ensureServer(server: String, session: String, cwd: String) async throws {
         if dryRun { return }
-        let cmd = Self.newServerCommand(server: server, session: session, cwd: cwd)
-        try await runShell(cmd)
+        // Check if the session already exists before creating
+        let hasSessionArgs = Self.hasSessionCommand(server: server, session: session)
+        do {
+            try await runTmux(hasSessionArgs)
+            // Session already exists, nothing to do
+        } catch {
+            // Session does not exist, create it
+            let args = Self.newServerCommand(server: server, session: session, cwd: cwd)
+            try await runTmux(args)
+        }
     }
 
     public func createWindow(server: String, session: String, cwd: String, shellCommand: String) async throws -> (windowID: String, paneID: String) {
@@ -63,8 +75,8 @@ public struct TmuxManager: Sendable {
             let n = counter.next()
             return (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
         }
-        let cmd = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand)
-        let output = try await runShell(cmd)
+        let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand)
+        let output = try await runTmux(args)
         let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         guard parts.count == 2 else {
             throw TmuxError.unexpectedOutput(output)
@@ -74,20 +86,20 @@ public struct TmuxManager: Sendable {
 
     public func killWindow(server: String, windowID: String) async throws {
         if dryRun { return }
-        let cmd = Self.killWindowCommand(server: server, windowID: windowID)
-        try await runShell(cmd)
+        let args = Self.killWindowCommand(server: server, windowID: windowID)
+        try await runTmux(args)
     }
 
     public func sendKeys(server: String, paneID: String, text: String) async throws {
         if dryRun { return }
-        let cmd = Self.sendKeysCommand(server: server, paneID: paneID, text: text)
-        try await runShell(cmd)
+        let args = Self.sendKeysCommand(server: server, paneID: paneID, text: text)
+        try await runTmux(args)
     }
 
     public func listWindows(server: String, session: String) async throws -> [(windowID: String, paneID: String)] {
         if dryRun { return [] }
-        let cmd = Self.listWindowsCommand(server: server, session: session)
-        let output = try await runShell(cmd)
+        let args = Self.listWindowsCommand(server: server, session: session)
+        let output = try await runTmux(args)
         return output
             .split(separator: "\n")
             .compactMap { line -> (windowID: String, paneID: String)? in
@@ -99,22 +111,54 @@ public struct TmuxManager: Sendable {
 
     // MARK: - Private
 
-    @discardableResult
-    private func runShell(_ command: String) async throws -> String {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", command]
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 else {
-            throw TmuxError.commandFailed(command: command, status: process.terminationStatus, output: output)
+    /// Resolves the path to the tmux binary, checking common locations.
+    private static func tmuxPath() -> String {
+        for candidate in ["/usr/bin/tmux", "/usr/local/bin/tmux", "/opt/homebrew/bin/tmux"] {
+            if FileManager.default.fileExists(atPath: candidate) {
+                return candidate
+            }
         }
-        return output
+        return "/usr/bin/tmux"
+    }
+
+    @discardableResult
+    private func runTmux(_ arguments: [String]) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+
+            process.executableURL = URL(fileURLWithPath: Self.tmuxPath())
+            process.arguments = arguments
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+
+            let commandDescription = "tmux " + arguments.joined(separator: " ")
+
+            process.terminationHandler = { _ in
+                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                let output = stdout.isEmpty ? stderr : stdout
+
+                if process.terminationStatus != 0 {
+                    continuation.resume(throwing: TmuxError.commandFailed(
+                        command: commandDescription,
+                        status: process.terminationStatus,
+                        output: output
+                    ))
+                } else {
+                    continuation.resume(returning: stdout)
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
     }
 }
 

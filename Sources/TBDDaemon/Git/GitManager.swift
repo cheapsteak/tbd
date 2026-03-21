@@ -21,7 +21,7 @@ public struct GitManager: Sendable {
     /// Returns `true` if the given path is inside a git repository.
     public func isGitRepo(path: String) async -> Bool {
         do {
-            _ = try await run(command: "git rev-parse --git-dir", at: path)
+            _ = try await run(arguments: ["rev-parse", "--git-dir"], at: path)
             return true
         } catch {
             return false
@@ -34,7 +34,7 @@ public struct GitManager: Sendable {
     /// remote's default branch), then falls back to the local HEAD branch name.
     public func detectDefaultBranch(repoPath: String) async throws -> String {
         // Try remote default branch first
-        if let result = try? await run(command: "git symbolic-ref refs/remotes/origin/HEAD", at: repoPath) {
+        if let result = try? await run(arguments: ["symbolic-ref", "refs/remotes/origin/HEAD"], at: repoPath) {
             let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
             // refs/remotes/origin/main -> main
             if let lastSlash = trimmed.lastIndex(of: "/") {
@@ -43,13 +43,13 @@ public struct GitManager: Sendable {
         }
 
         // Fall back to local HEAD branch
-        let result = try await run(command: "git symbolic-ref --short HEAD", at: repoPath)
+        let result = try await run(arguments: ["symbolic-ref", "--short", "HEAD"], at: repoPath)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Returns the URL of the `origin` remote, or `nil` if none is configured.
     public func getRemoteURL(repoPath: String) async -> String? {
-        guard let result = try? await run(command: "git remote get-url origin", at: repoPath) else {
+        guard let result = try? await run(arguments: ["remote", "get-url", "origin"], at: repoPath) else {
             return nil
         }
         let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -58,45 +58,47 @@ public struct GitManager: Sendable {
 
     /// Fetches from origin for the given branch.
     public func fetch(repoPath: String, branch: String) async throws {
-        _ = try await run(command: "git fetch origin \(branch)", at: repoPath)
+        _ = try await run(arguments: ["fetch", "origin", branch], at: repoPath)
     }
 
     /// Creates a new worktree at `worktreePath` on a new branch based on `baseBranch`.
     public func worktreeAdd(repoPath: String, worktreePath: String, branch: String, baseBranch: String) async throws {
-        _ = try await run(command: "git worktree add \(worktreePath) -b \(branch) \(baseBranch)", at: repoPath)
+        _ = try await run(arguments: ["worktree", "add", worktreePath, "-b", branch, baseBranch], at: repoPath)
     }
 
     /// Adds a worktree at `worktreePath` using an existing branch (no -b flag).
     public func worktreeAddExisting(repoPath: String, worktreePath: String, branch: String) async throws {
-        _ = try await run(command: "git worktree add \(worktreePath) \(branch)", at: repoPath)
+        _ = try await run(arguments: ["worktree", "add", worktreePath, branch], at: repoPath)
     }
 
     /// Removes a worktree at the given path.
     public func worktreeRemove(repoPath: String, worktreePath: String) async throws {
-        _ = try await run(command: "git worktree remove \(worktreePath) --force", at: repoPath)
+        _ = try await run(arguments: ["worktree", "remove", worktreePath, "--force"], at: repoPath)
     }
 
     /// Lists all worktrees, returning their path and branch name.
     public func worktreeList(repoPath: String) async throws -> [(path: String, branch: String)] {
-        let output = try await run(command: "git worktree list --porcelain", at: repoPath)
+        let output = try await run(arguments: ["worktree", "list", "--porcelain"], at: repoPath)
         return parseWorktreeList(output)
     }
 
     // MARK: - Private
 
-    /// Runs a shell command at the given directory and returns stdout.
+    /// Runs a git command with the given arguments at the given directory and returns stdout.
     /// Throws `GitError` on non-zero exit.
-    private func run(command: String, at directory: String) async throws -> String {
+    private func run(arguments: [String], at directory: String) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
 
-            process.executableURL = URL(fileURLWithPath: "/bin/bash")
-            process.arguments = ["-c", command]
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = arguments
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
+
+            let commandDescription = "git " + arguments.joined(separator: " ")
 
             process.terminationHandler = { _ in
                 let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
@@ -106,7 +108,7 @@ public struct GitManager: Sendable {
 
                 if process.terminationStatus != 0 {
                     continuation.resume(throwing: GitError(
-                        command: command,
+                        command: commandDescription,
                         exitCode: process.terminationStatus,
                         stderr: stderr
                     ))
