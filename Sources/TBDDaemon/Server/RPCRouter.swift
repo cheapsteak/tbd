@@ -1,0 +1,301 @@
+import Foundation
+import TBDShared
+
+/// Maps RPC method names to handler functions.
+/// Decodes raw JSON params, dispatches to the appropriate subsystem, and returns an RPCResponse.
+public final class RPCRouter: Sendable {
+    public let db: TBDDatabase
+    public let lifecycle: WorktreeLifecycle
+    public let tmux: TmuxManager
+    public let git: GitManager
+    public let startTime: Date
+
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
+
+    public init(
+        db: TBDDatabase,
+        lifecycle: WorktreeLifecycle,
+        tmux: TmuxManager,
+        git: GitManager = GitManager(),
+        startTime: Date = Date()
+    ) {
+        self.db = db
+        self.lifecycle = lifecycle
+        self.tmux = tmux
+        self.git = git
+        self.startTime = startTime
+    }
+
+    /// Handle a raw JSON Data blob representing an RPCRequest.
+    /// Returns an RPCResponse.
+    public func handleRaw(_ data: Data) async -> RPCResponse {
+        do {
+            let request = try decoder.decode(RPCRequest.self, from: data)
+            return await handle(request)
+        } catch {
+            return RPCResponse(error: "Failed to decode request: \(error.localizedDescription)")
+        }
+    }
+
+    /// Handle a decoded RPCRequest and return an RPCResponse.
+    public func handle(_ request: RPCRequest) async -> RPCResponse {
+        do {
+            switch request.method {
+            case RPCMethod.repoAdd:
+                return try await handleRepoAdd(request.params)
+            case RPCMethod.repoRemove:
+                return try await handleRepoRemove(request.params)
+            case RPCMethod.repoList:
+                return try await handleRepoList()
+            case RPCMethod.worktreeCreate:
+                return try await handleWorktreeCreate(request.params)
+            case RPCMethod.worktreeList:
+                return try await handleWorktreeList(request.params)
+            case RPCMethod.worktreeArchive:
+                return try await handleWorktreeArchive(request.params)
+            case RPCMethod.worktreeRevive:
+                return try await handleWorktreeRevive(request.params)
+            case RPCMethod.worktreeRename:
+                return try await handleWorktreeRename(request.params)
+            case RPCMethod.terminalCreate:
+                return try await handleTerminalCreate(request.params)
+            case RPCMethod.terminalList:
+                return try await handleTerminalList(request.params)
+            case RPCMethod.terminalSend:
+                return try await handleTerminalSend(request.params)
+            case RPCMethod.notify:
+                return try await handleNotify(request.params)
+            case RPCMethod.daemonStatus:
+                return try handleDaemonStatus()
+            case RPCMethod.resolvePath:
+                return try await handleResolvePath(request.params)
+            default:
+                return RPCResponse(error: "Unknown method: \(request.method)")
+            }
+        } catch {
+            return RPCResponse(error: "\(error)")
+        }
+    }
+
+    // MARK: - Repo Handlers
+
+    private func handleRepoAdd(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(RepoAddParams.self, from: paramsData)
+
+        // Resolve to absolute path
+        let path = (params.path as NSString).standardizingPath
+
+        // Validate it's a git repo
+        guard await git.isGitRepo(path: path) else {
+            return RPCResponse(error: "Not a git repository: \(path)")
+        }
+
+        // Check if already registered
+        if let existing = try await db.repos.findByPath(path: path) {
+            return try RPCResponse(result: existing)
+        }
+
+        // Detect default branch and remote URL
+        let defaultBranch: String
+        do {
+            defaultBranch = try await git.detectDefaultBranch(repoPath: path)
+        } catch {
+            defaultBranch = "main"
+        }
+
+        let remoteURL = await git.getRemoteURL(repoPath: path)
+
+        // Derive display name from last path component
+        let displayName = (path as NSString).lastPathComponent
+
+        let repo = try await db.repos.create(
+            path: path,
+            displayName: displayName,
+            defaultBranch: defaultBranch,
+            remoteURL: remoteURL
+        )
+
+        return try RPCResponse(result: repo)
+    }
+
+    private func handleRepoRemove(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(RepoRemoveParams.self, from: paramsData)
+
+        guard let repo = try await db.repos.get(id: params.repoID) else {
+            return RPCResponse(error: "Repository not found: \(params.repoID)")
+        }
+
+        // Check for active worktrees
+        let activeWorktrees = try await db.worktrees.list(repoID: repo.id, status: .active)
+
+        if !activeWorktrees.isEmpty {
+            if params.force {
+                // Cascade-archive all active worktrees
+                for wt in activeWorktrees {
+                    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+                }
+            } else {
+                return RPCResponse(
+                    error: "Repository has \(activeWorktrees.count) active worktree(s). Use force to archive them first."
+                )
+            }
+        }
+
+        try await db.repos.remove(id: params.repoID)
+        return .ok()
+    }
+
+    private func handleRepoList() async throws -> RPCResponse {
+        let repos = try await db.repos.list()
+        return try RPCResponse(result: repos)
+    }
+
+    // MARK: - Worktree Handlers
+
+    private func handleWorktreeCreate(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
+        let worktree = try await lifecycle.createWorktree(repoID: params.repoID)
+        return try RPCResponse(result: worktree)
+    }
+
+    private func handleWorktreeList(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeListParams.self, from: paramsData)
+        let worktrees = try await db.worktrees.list(repoID: params.repoID, status: params.status)
+        return try RPCResponse(result: worktrees)
+    }
+
+    private func handleWorktreeArchive(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeArchiveParams.self, from: paramsData)
+        try await lifecycle.archiveWorktree(worktreeID: params.worktreeID, force: params.force)
+        return .ok()
+    }
+
+    private func handleWorktreeRevive(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeReviveParams.self, from: paramsData)
+        let worktree = try await lifecycle.reviveWorktree(worktreeID: params.worktreeID)
+        return try RPCResponse(result: worktree)
+    }
+
+    private func handleWorktreeRename(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeRenameParams.self, from: paramsData)
+        try await db.worktrees.rename(id: params.worktreeID, displayName: params.displayName)
+        return .ok()
+    }
+
+    // MARK: - Terminal Handlers
+
+    private func handleTerminalCreate(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalCreateParams.self, from: paramsData)
+
+        // Look up the worktree to get tmux server and path
+        guard let worktree = try await db.worktrees.get(id: params.worktreeID) else {
+            return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
+        }
+
+        let shellCommand = params.cmd ?? "bash"
+        let window = try await tmux.createWindow(
+            server: worktree.tmuxServer,
+            session: "main",
+            cwd: worktree.path,
+            shellCommand: shellCommand
+        )
+
+        let terminal = try await db.terminals.create(
+            worktreeID: params.worktreeID,
+            tmuxWindowID: window.windowID,
+            tmuxPaneID: window.paneID,
+            label: params.cmd
+        )
+
+        return try RPCResponse(result: terminal)
+    }
+
+    private func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalListParams.self, from: paramsData)
+        let terminals = try await db.terminals.list(worktreeID: params.worktreeID)
+        return try RPCResponse(result: terminals)
+    }
+
+    private func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSendParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+
+        // Look up the worktree to get the tmux server name
+        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+
+        try await tmux.sendKeys(
+            server: worktree.tmuxServer,
+            paneID: terminal.tmuxPaneID,
+            text: params.text
+        )
+
+        return .ok()
+    }
+
+    // MARK: - Notification Handler
+
+    private func handleNotify(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(NotifyParams.self, from: paramsData)
+
+        guard let worktreeID = params.worktreeID else {
+            return RPCResponse(error: "worktreeID is required for notifications")
+        }
+
+        let notification = try await db.notifications.create(
+            worktreeID: worktreeID,
+            type: params.type,
+            message: params.message
+        )
+
+        return try RPCResponse(result: notification)
+    }
+
+    // MARK: - Daemon Status
+
+    private func handleDaemonStatus() throws -> RPCResponse {
+        let uptime = Date().timeIntervalSince(startTime)
+        let status = DaemonStatusResult(
+            version: TBDConstants.version,
+            uptime: uptime,
+            connectedClients: 0  // Will be updated when socket server is implemented
+        )
+        return try RPCResponse(result: status)
+    }
+
+    // MARK: - Resolve Path
+
+    private func handleResolvePath(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ResolvePathParams.self, from: paramsData)
+        let path = (params.path as NSString).standardizingPath
+
+        // Walk up from the given path and try to match against known repos/worktrees
+        var currentPath = path
+
+        while currentPath != "/" && currentPath != "" {
+            // Check if this path matches a worktree
+            if let worktree = try await db.worktrees.findByPath(path: currentPath) {
+                let result = ResolvedPathResult(repoID: worktree.repoID, worktreeID: worktree.id)
+                return try RPCResponse(result: result)
+            }
+
+            // Check if this path matches a repo
+            if let repo = try await db.repos.findByPath(path: currentPath) {
+                let result = ResolvedPathResult(repoID: repo.id, worktreeID: nil)
+                return try RPCResponse(result: result)
+            }
+
+            // Move up one directory
+            currentPath = (currentPath as NSString).deletingLastPathComponent
+        }
+
+        // No match found
+        let result = ResolvedPathResult(repoID: nil, worktreeID: nil)
+        return try RPCResponse(result: result)
+    }
+}
