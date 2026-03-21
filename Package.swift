@@ -70,5 +70,11 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),
+        .testTarget(
+            name: "TBDAppTests",
+            dependencies: [
+                "TBDApp",
+            ]
+        ),
     ]
 )
