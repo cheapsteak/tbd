@@ -16,8 +16,8 @@ let package = Package(
             name: "TBDShared",
             path: "Sources/TBDShared"
         ),
-        .executableTarget(
-            name: "TBDDaemon",
+        .target(
+            name: "TBDDaemonLib",
             dependencies: [
                 "TBDShared",
                 .product(name: "GRDB", package: "GRDB.swift"),
@@ -25,7 +25,17 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
-            path: "Sources/TBDDaemon"
+            path: "Sources/TBDDaemon",
+            exclude: ["main.swift"]
+        ),
+        .executableTarget(
+            name: "TBDDaemon",
+            dependencies: [
+                "TBDDaemonLib",
+            ],
+            path: "Sources/TBDDaemon",
+            exclude: ["Names"],
+            sources: ["main.swift"]
         ),
         .executableTarget(
             name: "TBDCLI",
@@ -44,6 +54,7 @@ let package = Package(
         .testTarget(
             name: "TBDDaemonTests",
             dependencies: [
+                "TBDDaemonLib",
                 "TBDShared",
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
