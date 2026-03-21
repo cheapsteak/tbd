@@ -66,6 +66,11 @@ public struct GitManager: Sendable {
         _ = try await run(command: "git worktree add \(worktreePath) -b \(branch) \(baseBranch)", at: repoPath)
     }
 
+    /// Adds a worktree at `worktreePath` using an existing branch (no -b flag).
+    public func worktreeAddExisting(repoPath: String, worktreePath: String, branch: String) async throws {
+        _ = try await run(command: "git worktree add \(worktreePath) \(branch)", at: repoPath)
+    }
+
     /// Removes a worktree at the given path.
     public func worktreeRemove(repoPath: String, worktreePath: String) async throws {
         _ = try await run(command: "git worktree remove \(worktreePath) --force", at: repoPath)
