@@ -17,6 +17,7 @@ final class AppState: ObservableObject {
     @Published var repoFilter: UUID? = nil
 
     let daemonClient = DaemonClient()
+    let tmuxBridge = TmuxBridge()
 
     init() {
         Task {

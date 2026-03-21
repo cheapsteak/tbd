@@ -229,12 +229,23 @@ private extension View {
 
 // MARK: - TerminalPanelPlaceholder
 
-/// Placeholder view for a terminal panel. Displays split buttons in a toolbar.
-/// The actual TerminalPanelView will replace the placeholder content later.
+/// Terminal panel with split buttons toolbar and real SwiftTerm terminal view.
+/// Looks up the Terminal object from AppState to get tmux server and pane ID.
 struct TerminalPanelPlaceholder: View {
     let terminalID: UUID
     let worktree: Worktree
     @Binding var layout: LayoutNode
+    @EnvironmentObject var appState: AppState
+
+    /// Find the Terminal model matching this terminalID across all worktree terminals.
+    private var terminal: Terminal? {
+        for (_, terms) in appState.terminals {
+            if let t = terms.first(where: { $0.id == terminalID }) {
+                return t
+            }
+        }
+        return nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -272,20 +283,30 @@ struct TerminalPanelPlaceholder: View {
 
             Divider()
 
-            // Placeholder content
-            ZStack {
-                Color(nsColor: .textBackgroundColor)
+            // Real terminal view or fallback placeholder
+            if let terminal = terminal {
+                TerminalPanelView(
+                    terminalID: terminalID,
+                    tmuxServer: worktree.tmuxServer,
+                    tmuxPaneID: terminal.tmuxPaneID,
+                    tmuxBridge: appState.tmuxBridge
+                )
+            } else {
+                // Fallback when terminal data hasn't loaded yet
+                ZStack {
+                    Color(nsColor: .black)
 
-                VStack(spacing: 8) {
-                    Image(systemName: "terminal")
-                        .font(.largeTitle)
-                        .foregroundStyle(.secondary)
-                    Text(worktree.displayName)
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                    Text(worktree.branch)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                    VStack(spacing: 8) {
+                        Image(systemName: "terminal")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                        Text(worktree.displayName)
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                        Text(worktree.branch)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
         }
