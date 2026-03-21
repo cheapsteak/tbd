@@ -1,0 +1,95 @@
+import Foundation
+import GRDB
+import TBDShared
+
+/// GRDB Record type for the `repo` table.
+struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "repo"
+
+    var id: String
+    var path: String
+    var remoteURL: String?
+    var displayName: String
+    var defaultBranch: String
+    var createdAt: Date
+
+    init(from repo: Repo) {
+        self.id = repo.id.uuidString
+        self.path = repo.path
+        self.remoteURL = repo.remoteURL
+        self.displayName = repo.displayName
+        self.defaultBranch = repo.defaultBranch
+        self.createdAt = repo.createdAt
+    }
+
+    func toModel() -> Repo {
+        Repo(
+            id: UUID(uuidString: id)!,
+            path: path,
+            remoteURL: remoteURL,
+            displayName: displayName,
+            defaultBranch: defaultBranch,
+            createdAt: createdAt
+        )
+    }
+}
+
+/// Provides CRUD operations for repos.
+public struct RepoStore: Sendable {
+    let writer: any DatabaseWriter
+
+    init(writer: any DatabaseWriter) {
+        self.writer = writer
+    }
+
+    /// Create a new repo and return it.
+    public func create(
+        path: String,
+        displayName: String,
+        defaultBranch: String,
+        remoteURL: String? = nil
+    ) async throws -> Repo {
+        let repo = Repo(
+            path: path,
+            remoteURL: remoteURL,
+            displayName: displayName,
+            defaultBranch: defaultBranch
+        )
+        let record = RepoRecord(from: repo)
+        try await writer.write { db in
+            try record.insert(db)
+        }
+        return repo
+    }
+
+    /// List all repos.
+    public func list() async throws -> [Repo] {
+        try await writer.read { db in
+            try RepoRecord.fetchAll(db).map { $0.toModel() }
+        }
+    }
+
+    /// Get a repo by ID.
+    public func get(id: UUID) async throws -> Repo? {
+        try await writer.read { db in
+            try RepoRecord.fetchOne(db, key: id.uuidString)?.toModel()
+        }
+    }
+
+    /// Remove a repo by ID.
+    public func remove(id: UUID) async throws {
+        _ = try await writer.write { db in
+            try RepoRecord.deleteOne(db, key: id.uuidString)
+        }
+    }
+
+    /// Find a repo by its filesystem path.
+    public func findByPath(path: String) async throws -> Repo? {
+        try await writer.read { db in
+            try RepoRecord
+                .filter(Column("path") == path)
+                .fetchOne(db)?
+                .toModel()
+        }
+    }
+}
