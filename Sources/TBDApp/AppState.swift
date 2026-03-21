@@ -13,7 +13,7 @@ final class AppState: ObservableObject {
     @Published var notifications: [UUID: NotificationType?] = [:]
     @Published var selectedWorktreeIDs: Set<UUID> = []
     @Published var isConnected: Bool = false
-    @Published var layouts: [UUID: Data] = [:]
+    @Published var layouts: [UUID: LayoutNode] = [:]
     @Published var repoFilter: UUID? = nil
 
     let daemonClient = DaemonClient()
