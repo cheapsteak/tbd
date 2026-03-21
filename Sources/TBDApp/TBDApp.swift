@@ -11,6 +11,9 @@ struct TBDAppMain: App {
                 .environmentObject(appState)
         }
         .defaultSize(width: 1200, height: 800)
+        .commands {
+            TBDCommands(appState: appState)
+        }
 
         Settings {
             SettingsView()

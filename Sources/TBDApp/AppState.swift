@@ -227,6 +227,73 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Keyboard Shortcut Actions
+
+    /// All worktrees in sidebar order (sorted by repo, then by creation date).
+    var allWorktreesOrdered: [Worktree] {
+        repos.flatMap { repo in
+            (worktrees[repo.id] ?? []).sorted { $0.createdAt < $1.createdAt }
+        }
+    }
+
+    /// The repo ID of the first selected worktree (used as "focused repo").
+    var focusedRepoID: UUID? {
+        guard let firstSelected = selectedWorktreeIDs.first else { return nil }
+        for (repoID, wts) in worktrees {
+            if wts.contains(where: { $0.id == firstSelected }) {
+                return repoID
+            }
+        }
+        return nil
+    }
+
+    /// Create a new worktree in the focused repo (or first repo if none focused).
+    func newWorktreeInFocusedRepo() {
+        let repoID = focusedRepoID ?? repos.first?.id
+        guard let repoID else { return }
+        Task {
+            await createWorktree(repoID: repoID)
+        }
+    }
+
+    /// Archive the first selected worktree.
+    func archiveSelectedWorktree() {
+        guard let id = selectedWorktreeIDs.first else { return }
+        Task {
+            await archiveWorktree(id: id)
+        }
+    }
+
+    /// Select a worktree by its index in the sidebar order.
+    func selectWorktreeByIndex(_ index: Int) {
+        let ordered = allWorktreesOrdered
+        guard index >= 0, index < ordered.count else { return }
+        selectedWorktreeIDs = [ordered[index].id]
+    }
+
+    /// Placeholder: new terminal tab in the selected worktree.
+    func newTerminalTab() {
+        guard let worktreeID = selectedWorktreeIDs.first else { return }
+        Task {
+            await createTerminal(worktreeID: worktreeID)
+        }
+    }
+
+    /// Placeholder: close terminal tab.
+    func closeTerminalTab() {
+        // TODO: implement terminal tab close
+    }
+
+    /// Placeholder: split terminal horizontally.
+    func splitTerminalHorizontally() {
+        // TODO: implement horizontal split
+    }
+
+    /// Placeholder: split terminal vertically.
+    func splitTerminalVertically() {
+        // TODO: implement vertical split
+    }
+
     // MARK: - Helpers
 
     private func handleConnectionError(_ error: Error) {
