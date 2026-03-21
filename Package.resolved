@@ -1,5 +1,5 @@
 {
-  "originHash" : "7b8d1b58a00fd8d3eaca3a5ebbe08860376d8412a214a0fe84df6d82e2647e58",
+  "originHash" : "fd32deb23b6bf59c575e70e460abd086f98997de000b62e737dc7e6fbd892f15",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -53,6 +53,15 @@
       "state" : {
         "revision" : "7c6ad0fc39d0763e0b699210e4124afd5041c5df",
         "version" : "1.6.4"
+      }
+    },
+    {
+      "identity" : "swiftterm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/migueldeicaza/SwiftTerm",
+      "state" : {
+        "revision" : "3c45fdcfcf4395c72d2a4ee23c0bce79017b5391",
+        "version" : "1.12.0"
       }
     }
   ],
