@@ -1,0 +1,26 @@
+enum AnimalList {
+    static let words: [String] = [
+        "ant", "ape", "bat", "bear", "bee",
+        "bird", "boar", "buck", "bug", "bull",
+        "calf", "cat", "clam", "claw", "cod",
+        "colt", "cow", "crab", "crow", "deer",
+        "dog", "dove", "duck", "eagle", "eel",
+        "elk", "emu", "ewe", "fawn", "fish",
+        "fly", "foal", "fox", "frog", "gnat",
+        "gnu", "goat", "gull", "hare", "hawk",
+        "hen", "hog", "ibis", "jay", "kite",
+        "kiwi", "koala", "lark", "lion", "lynx",
+        "mare", "mink", "mole", "moth", "mule",
+        "newt", "okapi", "orca", "oryx", "otter",
+        "owl", "ox", "panda", "parrot", "penguin",
+        "perch", "pig", "pike", "pony", "pug",
+        "quail", "ram", "rat", "raven", "ray",
+        "robin", "rooster", "salmon", "seal", "shark",
+        "sheep", "shrew", "skink", "skunk", "sloth",
+        "slug", "snail", "snake", "sole", "squid",
+        "stag", "stork", "swan", "teal", "tern",
+        "toad", "trout", "tuna", "viper", "vole",
+        "wasp", "whale", "wolf", "worm", "wren",
+        "yak", "zebra",
+    ]
+}
