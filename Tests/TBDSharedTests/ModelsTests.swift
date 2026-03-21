@@ -97,7 +97,7 @@ import Testing
     let decoded = try JSONDecoder().decode(RPCRequest.self, from: data)
     #expect(decoded.method == "worktree.create")
     // Verify we can decode the params back
-    let decodedParams = try JSONDecoder().decode(WorktreeCreateParams.self, from: decoded.params)
+    let decodedParams = try JSONDecoder().decode(WorktreeCreateParams.self, from: decoded.paramsData)
     #expect(decodedParams.repoID == params.repoID)
 }
 

@@ -9,6 +9,7 @@ public final class RPCRouter: Sendable {
     public let tmux: TmuxManager
     public let git: GitManager
     public let startTime: Date
+    public let subscriptions: StateSubscriptionManager
 
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
@@ -18,13 +19,15 @@ public final class RPCRouter: Sendable {
         lifecycle: WorktreeLifecycle,
         tmux: TmuxManager,
         git: GitManager = GitManager(),
-        startTime: Date = Date()
+        startTime: Date = Date(),
+        subscriptions: StateSubscriptionManager = StateSubscriptionManager()
     ) {
         self.db = db
         self.lifecycle = lifecycle
         self.tmux = tmux
         self.git = git
         self.startTime = startTime
+        self.subscriptions = subscriptions
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -43,35 +46,35 @@ public final class RPCRouter: Sendable {
         do {
             switch request.method {
             case RPCMethod.repoAdd:
-                return try await handleRepoAdd(request.params)
+                return try await handleRepoAdd(request.paramsData)
             case RPCMethod.repoRemove:
-                return try await handleRepoRemove(request.params)
+                return try await handleRepoRemove(request.paramsData)
             case RPCMethod.repoList:
                 return try await handleRepoList()
             case RPCMethod.worktreeCreate:
-                return try await handleWorktreeCreate(request.params)
+                return try await handleWorktreeCreate(request.paramsData)
             case RPCMethod.worktreeList:
-                return try await handleWorktreeList(request.params)
+                return try await handleWorktreeList(request.paramsData)
             case RPCMethod.worktreeArchive:
-                return try await handleWorktreeArchive(request.params)
+                return try await handleWorktreeArchive(request.paramsData)
             case RPCMethod.worktreeRevive:
-                return try await handleWorktreeRevive(request.params)
+                return try await handleWorktreeRevive(request.paramsData)
             case RPCMethod.worktreeRename:
-                return try await handleWorktreeRename(request.params)
+                return try await handleWorktreeRename(request.paramsData)
             case RPCMethod.terminalCreate:
-                return try await handleTerminalCreate(request.params)
+                return try await handleTerminalCreate(request.paramsData)
             case RPCMethod.terminalList:
-                return try await handleTerminalList(request.params)
+                return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:
-                return try await handleTerminalSend(request.params)
+                return try await handleTerminalSend(request.paramsData)
             case RPCMethod.notify:
-                return try await handleNotify(request.params)
+                return try await handleNotify(request.paramsData)
             case RPCMethod.daemonStatus:
                 return try handleDaemonStatus()
             case RPCMethod.resolvePath:
-                return try await handleResolvePath(request.params)
+                return try await handleResolvePath(request.paramsData)
             case RPCMethod.notificationsMarkRead:
-                return try await handleNotificationsMarkRead(request.params)
+                return try await handleNotificationsMarkRead(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
@@ -118,6 +121,10 @@ public final class RPCRouter: Sendable {
             remoteURL: remoteURL
         )
 
+        subscriptions.broadcast(delta: .repoAdded(RepoDelta(
+            repoID: repo.id, path: repo.path, displayName: repo.displayName
+        )))
+
         return try RPCResponse(result: repo)
     }
 
@@ -145,6 +152,9 @@ public final class RPCRouter: Sendable {
         }
 
         try await db.repos.remove(id: params.repoID)
+
+        subscriptions.broadcast(delta: .repoRemoved(RepoIDDelta(repoID: params.repoID)))
+
         return .ok()
     }
 
@@ -158,6 +168,12 @@ public final class RPCRouter: Sendable {
     private func handleWorktreeCreate(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
         let worktree = try await lifecycle.createWorktree(repoID: params.repoID)
+
+        subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
+            worktreeID: worktree.id, repoID: worktree.repoID,
+            name: worktree.name, path: worktree.path
+        )))
+
         return try RPCResponse(result: worktree)
     }
 
@@ -170,18 +186,34 @@ public final class RPCRouter: Sendable {
     private func handleWorktreeArchive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeArchiveParams.self, from: paramsData)
         try await lifecycle.archiveWorktree(worktreeID: params.worktreeID, force: params.force)
+
+        subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
+            worktreeID: params.worktreeID
+        )))
+
         return .ok()
     }
 
     private func handleWorktreeRevive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeReviveParams.self, from: paramsData)
         let worktree = try await lifecycle.reviveWorktree(worktreeID: params.worktreeID)
+
+        subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
+            worktreeID: worktree.id, repoID: worktree.repoID,
+            name: worktree.name, path: worktree.path
+        )))
+
         return try RPCResponse(result: worktree)
     }
 
     private func handleWorktreeRename(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeRenameParams.self, from: paramsData)
         try await db.worktrees.rename(id: params.worktreeID, displayName: params.displayName)
+
+        subscriptions.broadcast(delta: .worktreeRenamed(WorktreeRenameDelta(
+            worktreeID: params.worktreeID, displayName: params.displayName
+        )))
+
         return .ok()
     }
 
@@ -209,6 +241,10 @@ public final class RPCRouter: Sendable {
             tmuxPaneID: window.paneID,
             label: params.cmd
         )
+
+        subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
+        )))
 
         return try RPCResponse(result: terminal)
     }
@@ -254,6 +290,11 @@ public final class RPCRouter: Sendable {
             type: params.type,
             message: params.message
         )
+
+        subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
+            notificationID: notification.id, worktreeID: notification.worktreeID,
+            type: notification.type, message: notification.message
+        )))
 
         return try RPCResponse(result: notification)
     }

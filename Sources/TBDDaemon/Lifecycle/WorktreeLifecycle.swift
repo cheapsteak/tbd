@@ -247,10 +247,12 @@ public struct WorktreeLifecycle: Sendable {
                     hookPath: hookPath,
                     cwd: worktree.path,
                     env: [
+                        "TBD_EVENT": "archive",
                         "TBD_WORKTREE_ID": worktree.id.uuidString,
                         "TBD_WORKTREE_NAME": worktree.name,
                         "TBD_WORKTREE_PATH": worktree.path,
                         "TBD_REPO_PATH": repo.path,
+                        "TBD_BRANCH": worktree.branch,
                     ],
                     timeout: 60
                 )

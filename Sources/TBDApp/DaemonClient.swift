@@ -101,15 +101,7 @@ actor DaemonClient {
             }
         }
 
-        // 2. Check .build/debug (development builds)
-        if let execURL = Bundle.main.executableURL {
-            let debugBuild = execURL.deletingLastPathComponent().appendingPathComponent("tbdd")
-            if FileManager.default.isExecutableFile(atPath: debugBuild.path) {
-                return debugBuild.path
-            }
-        }
-
-        // 3. Try `which tbdd` via shell
+        // 2. Try `which tbdd` via shell
         let whichProcess = Process()
         let pipe = Pipe()
         whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -130,7 +122,7 @@ actor DaemonClient {
             // Fall through
         }
 
-        // 4. Common paths
+        // 3. Common paths
         let commonPaths = [
             "/usr/local/bin/tbdd",
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/tbdd").path,

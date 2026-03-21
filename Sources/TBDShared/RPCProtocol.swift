@@ -4,11 +4,12 @@ import Foundation
 
 /// RPC request with method string and raw JSON params.
 /// The router decodes params based on the method string.
+/// Params are stored as a JSON string so the wire format is human-readable (not base64).
 public struct RPCRequest: Codable, Sendable {
     public let method: String
-    public let params: Data
+    public let params: String
 
-    public init(method: String, params: Data = Data()) {
+    public init(method: String, params: String = "{}") {
         self.method = method
         self.params = params
     }
@@ -16,20 +17,28 @@ public struct RPCRequest: Codable, Sendable {
     /// Convenience: encode a Codable param struct into an RPCRequest.
     public init<P: Encodable>(method: String, params: P) throws {
         self.method = method
-        self.params = try JSONEncoder().encode(params)
+        let data = try JSONEncoder().encode(params)
+        self.params = String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    /// Decode the params JSON string into Data for JSONDecoder consumption.
+    public var paramsData: Data {
+        Data(params.utf8)
     }
 }
 
 /// RPC response with success flag, optional raw JSON result, and optional error message.
 /// The caller decodes the result based on what it expects for the method it called.
+/// Result is stored as a JSON string so the wire format is human-readable (not base64).
 public struct RPCResponse: Codable, Sendable {
     public let success: Bool
-    public let result: Data?
+    public let result: String?
     public let error: String?
 
     public init<R: Encodable>(result: R) throws {
         self.success = true
-        self.result = try JSONEncoder().encode(result)
+        let data = try JSONEncoder().encode(result)
+        self.result = String(data: data, encoding: .utf8)
         self.error = nil
     }
 
@@ -52,9 +61,10 @@ public struct RPCResponse: Codable, Sendable {
 
     /// Decode the result payload into the expected type.
     public func decodeResult<R: Decodable>(_ type: R.Type) throws -> R {
-        guard let data = result else {
+        guard let resultString = result else {
             throw RPCError.noResultData
         }
+        let data = Data(resultString.utf8)
         return try JSONDecoder().decode(type, from: data)
     }
 }

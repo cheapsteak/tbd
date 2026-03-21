@@ -14,10 +14,12 @@ public final class TBDDatabase: Sendable {
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
     public init(path: String) throws {
         var config = Configuration()
+        #if DEBUG
         config.prepareDatabase { db in
             db.trace { print($0) }
         }
-        let pool = try DatabasePool(path: path)
+        #endif
+        let pool = try DatabasePool(path: path, configuration: config)
         self.writer = pool
         self.repos = RepoStore(writer: pool)
         self.worktrees = WorktreeStore(writer: pool)

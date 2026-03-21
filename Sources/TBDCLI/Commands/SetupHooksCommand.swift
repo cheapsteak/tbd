@@ -61,7 +61,7 @@ struct SetupHooksCommand: AsyncParsableCommand {
         var stopHooks = hooks["Stop"] as? [[String: Any]] ?? []
 
         // The hook command we want to add
-        let tbdNotifyCommand = "tbd notify --type response_complete"
+        let tbdNotifyCommand = "tbd notify --type response_complete 2>/dev/null || true"
 
         // Check if our hook already exists
         let alreadyExists = stopHooks.contains { hook in
