@@ -15,7 +15,9 @@ struct SidebarContextMenu: View {
         }
 
         Button("Archive") {
-            appState.archiveWorktree(id: worktree.id)
+            Task {
+                await appState.archiveWorktree(id: worktree.id)
+            }
         }
 
         Divider()

@@ -32,6 +32,8 @@ struct RepoSectionView: View {
     }
 
     private func createWorktree() {
-        appState.createWorktree(repoID: repo.id)
+        Task {
+            await appState.createWorktree(repoID: repo.id)
+        }
     }
 }

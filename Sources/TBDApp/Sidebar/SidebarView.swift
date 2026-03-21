@@ -47,7 +47,9 @@ struct SidebarView: View {
         panel.canCreateDirectories = false
 
         if panel.runModal() == .OK, let url = panel.url {
-            appState.addRepo(path: url.path)
+            Task {
+                await appState.addRepo(path: url.path)
+            }
         }
     }
 }

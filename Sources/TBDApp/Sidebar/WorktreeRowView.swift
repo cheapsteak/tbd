@@ -56,7 +56,9 @@ struct WorktreeRowView: View {
             TextField("Name", text: $renameText)
             Button("Cancel", role: .cancel) {}
             Button("Rename") {
-                appState.renameWorktree(id: worktree.id, newName: renameText)
+                Task {
+                    await appState.renameWorktree(id: worktree.id, displayName: renameText)
+                }
             }
         } message: {
             Text("Enter a new display name for this worktree.")
