@@ -81,6 +81,12 @@ public enum RPCMethod {
     public static let daemonStatus = "daemon.status"
     public static let stateSubscribe = "state.subscribe"
     public static let resolvePath = "resolve.path"
+    public static let notificationsMarkRead = "notifications.markRead"
+}
+
+public struct NotificationsMarkReadParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
 }
 
 // MARK: - Parameter Structs

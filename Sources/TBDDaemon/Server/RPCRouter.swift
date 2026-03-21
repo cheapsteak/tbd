@@ -70,6 +70,8 @@ public final class RPCRouter: Sendable {
                 return try handleDaemonStatus()
             case RPCMethod.resolvePath:
                 return try await handleResolvePath(request.params)
+            case RPCMethod.notificationsMarkRead:
+                return try await handleNotificationsMarkRead(request.params)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
@@ -254,6 +256,14 @@ public final class RPCRouter: Sendable {
         )
 
         return try RPCResponse(result: notification)
+    }
+
+    // MARK: - Notifications Mark Read
+
+    private func handleNotificationsMarkRead(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(NotificationsMarkReadParams.self, from: paramsData)
+        try await db.notifications.markRead(worktreeID: params.worktreeID)
+        return .ok()
     }
 
     // MARK: - Daemon Status

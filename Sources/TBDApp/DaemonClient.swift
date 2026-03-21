@@ -5,6 +5,9 @@ import Darwin
 import Glibc
 #endif
 import TBDShared
+import os
+
+private let daemonClientLogger = Logger(subsystem: "com.tbd.app", category: "DaemonClient")
 
 /// Errors from the DaemonClient.
 enum DaemonClientError: Error, CustomStringConvertible, Sendable {
@@ -46,7 +49,38 @@ actor DaemonClient {
     // MARK: - Connection
 
     /// Attempt to connect to the daemon (verifies socket exists and is reachable).
-    func connect() -> Bool {
+    /// If the daemon is not running, tries to find and launch `tbdd` automatically.
+    func connect() async -> Bool {
+        // First try to connect directly
+        if tryConnect() {
+            return true
+        }
+
+        // Daemon not running — try to auto-start it
+        daemonClientLogger.info("Daemon not running, attempting auto-start...")
+        if let tbddPath = findTbddBinary() {
+            daemonClientLogger.info("Found tbdd at \(tbddPath), launching...")
+            launchDaemon(at: tbddPath)
+
+            // Wait for daemon to start (up to 4 seconds, polling every 0.5s)
+            for attempt in 1...8 {
+                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                if tryConnect() {
+                    daemonClientLogger.info("Connected to daemon after \(attempt) attempts")
+                    return true
+                }
+            }
+            daemonClientLogger.warning("Daemon launched but could not connect")
+        } else {
+            daemonClientLogger.warning("Could not find tbdd binary")
+        }
+
+        connected = false
+        return false
+    }
+
+    /// Try a single connection attempt (non-async).
+    private func tryConnect() -> Bool {
         do {
             _ = try sendRaw(RPCRequest(method: RPCMethod.daemonStatus))
             connected = true
@@ -54,6 +88,75 @@ actor DaemonClient {
         } catch {
             connected = false
             return false
+        }
+    }
+
+    /// Find the tbdd binary by checking several locations.
+    private func findTbddBinary() -> String? {
+        // 1. Same directory as the running app binary
+        if let execURL = Bundle.main.executableURL {
+            let siblingURL = execURL.deletingLastPathComponent().appendingPathComponent("tbdd")
+            if FileManager.default.isExecutableFile(atPath: siblingURL.path) {
+                return siblingURL.path
+            }
+        }
+
+        // 2. Check .build/debug (development builds)
+        if let execURL = Bundle.main.executableURL {
+            let debugBuild = execURL.deletingLastPathComponent().appendingPathComponent("tbdd")
+            if FileManager.default.isExecutableFile(atPath: debugBuild.path) {
+                return debugBuild.path
+            }
+        }
+
+        // 3. Try `which tbdd` via shell
+        let whichProcess = Process()
+        let pipe = Pipe()
+        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        whichProcess.arguments = ["which", "tbdd"]
+        whichProcess.standardOutput = pipe
+        whichProcess.standardError = FileHandle.nullDevice
+        do {
+            try whichProcess.run()
+            whichProcess.waitUntilExit()
+            if whichProcess.terminationStatus == 0 {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let path, FileManager.default.isExecutableFile(atPath: path) {
+                    return path
+                }
+            }
+        } catch {
+            // Fall through
+        }
+
+        // 4. Common paths
+        let commonPaths = [
+            "/usr/local/bin/tbdd",
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/tbdd").path,
+        ]
+        for path in commonPaths {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+
+        return nil
+    }
+
+    /// Launch the tbdd daemon as a background process.
+    private func launchDaemon(at path: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        // Detach so the daemon outlives the app
+        process.qualityOfService = .utility
+        do {
+            try process.run()
+            daemonClientLogger.info("Launched tbdd (pid: \(process.processIdentifier))")
+        } catch {
+            daemonClientLogger.error("Failed to launch tbdd: \(error)")
         }
     }
 
@@ -287,6 +390,14 @@ actor DaemonClient {
             method: RPCMethod.resolvePath,
             params: ResolvePathParams(path: path),
             resultType: ResolvedPathResult.self
+        )
+    }
+
+    /// Mark notifications as read for a worktree.
+    func markNotificationsRead(worktreeID: UUID) throws {
+        try callVoid(
+            method: RPCMethod.notificationsMarkRead,
+            params: NotificationsMarkReadParams(worktreeID: worktreeID)
         )
     }
 }

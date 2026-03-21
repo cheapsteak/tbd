@@ -28,6 +28,7 @@ final class AppState: ObservableObject {
     // MARK: - Connection
 
     /// Connect to the daemon and fetch initial state.
+    /// The daemon client will attempt to auto-start tbdd if not running.
     func connectAndLoadInitialState() async {
         let didConnect = await daemonClient.connect()
         isConnected = didConnect
@@ -210,6 +211,20 @@ final class AppState: ObservableObject {
         } catch {
             logger.error("Failed to send notification: \(error)")
             handleConnectionError(error)
+        }
+    }
+
+    // MARK: - Notification Actions
+
+    /// Mark all notifications for a worktree as read.
+    func markNotificationsRead(worktreeID: UUID) async {
+        do {
+            try await daemonClient.markNotificationsRead(worktreeID: worktreeID)
+            notifications[worktreeID] = nil
+        } catch {
+            // Not critical — just clear locally
+            logger.warning("Failed to mark notifications read for \(worktreeID): \(error)")
+            notifications[worktreeID] = nil
         }
     }
 
