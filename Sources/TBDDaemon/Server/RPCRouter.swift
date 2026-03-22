@@ -104,6 +104,18 @@ public final class RPCRouter: Sendable {
 
         // Check if already registered
         if let existing = try await db.repos.findByPath(path: path) {
+            // Ensure main worktree exists (may be missing if repo was added via reconciliation)
+            let mainWts = try await db.worktrees.list(repoID: existing.id, status: .main)
+            if mainWts.isEmpty {
+                let serverName = TmuxManager.serverName(forRepoID: existing.id)
+                _ = try await db.worktrees.createMain(
+                    repoID: existing.id,
+                    name: existing.defaultBranch,
+                    branch: existing.defaultBranch,
+                    path: existing.path,
+                    tmuxServer: serverName
+                )
+            }
             return try RPCResponse(result: existing)
         }
 
