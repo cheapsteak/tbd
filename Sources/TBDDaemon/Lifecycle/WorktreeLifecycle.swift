@@ -12,6 +12,7 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible {
     case nothingToMerge
     case rebaseConflict(String)
     case mergeFailed(String)
+    case invalidOperation(String)
 
     public var description: String {
         switch self {
@@ -33,6 +34,8 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible {
             return "Rebase failed with conflicts: \(detail)"
         case .mergeFailed(let detail):
             return "Merge failed: \(detail)"
+        case .invalidOperation(let detail):
+            return detail
         }
     }
 }
@@ -261,6 +264,11 @@ public struct WorktreeLifecycle: Sendable {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
 
+        // Refuse to archive the main branch worktree
+        if worktree.status == .main {
+            throw WorktreeLifecycleError.invalidOperation("Cannot archive the main branch worktree")
+        }
+
         guard let repo = try await db.repos.get(id: worktree.repoID) else {
             throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
         }
@@ -418,6 +426,12 @@ public struct WorktreeLifecycle: Sendable {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
+
+        // Refuse to merge the main branch worktree
+        if worktree.status == .main {
+            throw WorktreeLifecycleError.invalidOperation("Cannot merge the main branch worktree")
+        }
+
         guard let repo = try await db.repos.get(id: worktree.repoID) else {
             throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
         }

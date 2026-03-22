@@ -127,6 +127,16 @@ public final class RPCRouter: Sendable {
             remoteURL: remoteURL
         )
 
+        // Create synthetic "main" worktree entry pointing at repo root
+        let tmuxServer = TmuxManager.serverName(forRepoID: repo.id)
+        _ = try await db.worktrees.createMain(
+            repoID: repo.id,
+            name: defaultBranch,
+            branch: defaultBranch,
+            path: path,
+            tmuxServer: tmuxServer
+        )
+
         subscriptions.broadcast(delta: .repoAdded(RepoDelta(
             repoID: repo.id, path: repo.path, displayName: repo.displayName
         )))
@@ -156,6 +166,9 @@ public final class RPCRouter: Sendable {
                 )
             }
         }
+
+        // Delete any remaining worktrees (e.g. main worktree) for this repo
+        try await db.worktrees.deleteForRepo(repoID: params.repoID)
 
         try await db.repos.remove(id: params.repoID)
 

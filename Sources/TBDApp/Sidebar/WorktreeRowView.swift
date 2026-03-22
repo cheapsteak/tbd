@@ -3,6 +3,7 @@ import TBDShared
 
 struct WorktreeRowView: View {
     let worktree: Worktree
+    var isMain: Bool = false
     @EnvironmentObject var appState: AppState
     @State private var isEditing = false
     @State private var editText = ""
@@ -35,6 +36,11 @@ struct WorktreeRowView: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            if isMain {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if let color = badgeColor {
                 Circle()
                     .fill(color)
@@ -63,7 +69,7 @@ struct WorktreeRowView: View {
                 } else {
                     appState.selectedWorktreeIDs.insert(worktree.id)
                 }
-            } else if appState.selectedWorktreeIDs.contains(worktree.id) && !isEditing {
+            } else if !isMain && appState.selectedWorktreeIDs.contains(worktree.id) && !isEditing {
                 startRename()
             } else {
                 appState.selectedWorktreeIDs = [worktree.id]
@@ -81,6 +87,7 @@ struct WorktreeRowView: View {
     }
 
     func startRename() {
+        guard !isMain else { return }
         editText = worktree.displayName
         isEditing = true
         isTextFieldFocused = true

@@ -76,6 +76,12 @@ private struct SingleWorktreeView: View {
                 layoutContent(worktree: worktree)
             }
             // TmuxBridge sessions are created on-demand by TerminalPanelView
+            .task(id: worktreeID) {
+                // Auto-create a terminal when selecting a main worktree with none
+                if worktree.status == .main && terminals.isEmpty {
+                    await appState.createTerminal(worktreeID: worktreeID)
+                }
+            }
         } else {
             Text("Worktree not found")
                 .foregroundStyle(.secondary)

@@ -94,9 +94,13 @@ final class AppState: ObservableObject {
     }
 
     /// Refresh worktrees for all repos (or a specific repo).
+    /// Fetches both active and main worktrees.
     func refreshWorktrees(repoID: UUID? = nil) async {
         do {
-            let fetched = try await daemonClient.listWorktrees(repoID: repoID, status: .active)
+            // Fetch active and main worktrees separately and combine
+            let activeWts = try await daemonClient.listWorktrees(repoID: repoID, status: .active)
+            let mainWts = try await daemonClient.listWorktrees(repoID: repoID, status: .main)
+            let fetched = mainWts + activeWts
             if let repoID {
                 let existing = worktrees[repoID] ?? []
                 if fetched.map(\.id) != existing.map(\.id) {
@@ -359,9 +363,12 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Archive the first selected worktree.
+    /// Archive the first selected worktree (refuses main worktrees).
     func archiveSelectedWorktree() {
         guard let id = selectedWorktreeIDs.first else { return }
+        // Don't archive the main branch worktree
+        let allWts = worktrees.values.flatMap { $0 }
+        if let wt = allWts.first(where: { $0.id == id }), wt.status == .main { return }
         Task {
             await archiveWorktree(id: id)
         }
