@@ -3,8 +3,6 @@ import TBDShared
 
 // MARK: - TerminalTabBar
 
-/// A horizontal tab bar showing labels for each terminal in the current worktree.
-/// Styled to resemble a native macOS tab bar with subtle background and selected-tab highlighting.
 struct TerminalTabBar: View {
     let terminals: [Terminal]
     @Binding var activeTabIndex: Int
@@ -14,6 +12,13 @@ struct TerminalTabBar: View {
     var body: some View {
         HStack(spacing: 0) {
             ForEach(Array(terminals.enumerated()), id: \.element.id) { index, terminal in
+                if index > 0 {
+                    // Subtle vertical divider between tabs (iTerm2-style)
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: 1, height: 18)
+                }
+
                 TerminalTabItem(
                     terminal: terminal,
                     index: index,
@@ -21,21 +26,18 @@ struct TerminalTabBar: View {
                     onSelect: { activeTabIndex = index },
                     onClose: { onCloseTab(index) }
                 )
-
-                // Divider between tabs (not after the last one)
-                if index < terminals.count - 1 {
-                    Divider()
-                        .frame(height: 16)
-                        .opacity(0.4)
-                }
             }
 
-            // "+" button for new tab
+            // Divider before + button
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(width: 1, height: 18)
+
             Button(action: onAddTab) {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 34, height: 28)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -43,7 +45,7 @@ struct TerminalTabBar: View {
 
             Spacer()
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 0)
         .frame(height: 30)
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -51,7 +53,6 @@ struct TerminalTabBar: View {
 
 // MARK: - TerminalTabItem
 
-/// A single tab in the terminal tab bar.
 private struct TerminalTabItem: View {
     let terminal: Terminal
     let index: Int
@@ -60,39 +61,51 @@ private struct TerminalTabItem: View {
     let onClose: () -> Void
 
     @State private var isHovering = false
+    @State private var isHoveringClose = false
+
+    private var showClose: Bool {
+        isSelected || isHovering
+    }
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 0) {
+            // Close button area — always takes space, visibility changes via opacity
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(isHoveringClose ? .primary : .secondary)
+                    .frame(width: 16, height: 16)
+                    .background(
+                        Circle()
+                            .fill(Color.primary.opacity(isHoveringClose ? 0.12 : 0))
+                    )
+                    .onHover { hovering in
+                        isHoveringClose = hovering
+                    }
+            }
+            .buttonStyle(.plain)
+            .opacity(showClose ? 1 : 0)
+            .animation(.easeInOut(duration: 0.12), value: showClose)
+
             Text(tabLabel)
                 .font(.system(size: 11))
                 .lineLimit(1)
                 .foregroundStyle(isSelected ? .primary : .secondary)
+                .frame(maxWidth: .infinity)
 
-            // Close button — visible on hover or when selected
-            if isSelected || isHovering {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 14, height: 14)
-                        .background(
-                            Circle()
-                                .fill(Color.primary.opacity(isHovering ? 0.1 : 0))
-                        )
-                }
-                .buttonStyle(.plain)
-            }
+            // Invisible spacer matching close button width for centering
+            Color.clear
+                .frame(width: 16, height: 16)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .frame(minWidth: 60, maxWidth: 160, minHeight: 26)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .frame(minWidth: 80, maxWidth: 180, minHeight: 28)
         .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(isSelected
-                    ? Color(nsColor: .controlBackgroundColor)
-                    : Color.clear)
-                .shadow(color: isSelected ? .black.opacity(0.1) : .clear, radius: 1, y: 1)
+            isSelected
+                ? Color(nsColor: .controlBackgroundColor)
+                : (isHovering ? Color.primary.opacity(0.04) : Color.clear)
         )
+        .animation(.easeInOut(duration: 0.1), value: isHovering)
         .onHover { hovering in
             isHovering = hovering
         }
