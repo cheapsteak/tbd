@@ -218,17 +218,12 @@ struct WorktreeRename: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeNameOrID(nameOrID, client: client)
 
-        let worktree: Worktree = try client.call(
+        try client.callVoid(
             method: RPCMethod.worktreeRename,
-            params: WorktreeRenameParams(worktreeID: worktreeID, displayName: newName),
-            resultType: Worktree.self
+            params: WorktreeRenameParams(worktreeID: worktreeID, displayName: newName)
         )
 
-        if json {
-            printJSON(worktree)
-        } else {
-            print("Worktree renamed to: \(worktree.displayName)")
-        }
+        print("Worktree renamed to: \(newName)")
     }
 }
 
