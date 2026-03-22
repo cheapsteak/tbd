@@ -198,7 +198,7 @@ public final class RPCRouter: Sendable {
 
     private func handleWorktreeCreate(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
-        let worktree = try await lifecycle.createWorktree(repoID: params.repoID)
+        let worktree = try await lifecycle.createWorktree(repoID: params.repoID, name: params.name)
 
         subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
             worktreeID: worktree.id, repoID: worktree.repoID,

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDDaemonLib
+@testable import TBDShared
 
 @Test func testNameFormat() {
     let name = NameGenerator.generate()

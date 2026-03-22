@@ -117,7 +117,8 @@ public struct RepoRemoveParams: Codable, Sendable {
 
 public struct WorktreeCreateParams: Codable, Sendable {
     public let repoID: UUID
-    public init(repoID: UUID) { self.repoID = repoID }
+    public let name: String?
+    public init(repoID: UUID, name: String? = nil) { self.repoID = repoID; self.name = name }
 }
 
 public struct WorktreeListParams: Codable, Sendable {

@@ -9,6 +9,10 @@ struct WorktreeRowView: View {
     @State private var editText = ""
     @FocusState private var isTextFieldFocused: Bool
 
+    private var isPending: Bool {
+        appState.pendingWorktreeIDs.contains(worktree.id)
+    }
+
     private var notification: NotificationType? {
         appState.notifications[worktree.id] ?? nil
     }
@@ -41,7 +45,10 @@ struct WorktreeRowView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if let color = badgeColor {
+            if isPending && !isEditing {
+                ProgressView()
+                    .controlSize(.small)
+            } else if let color = badgeColor {
                 Circle()
                     .fill(color)
                     .frame(width: 8, height: 8)
@@ -56,9 +63,16 @@ struct WorktreeRowView: View {
                         if !focused { commitRename() }
                     }
             } else {
-                Text(worktree.displayName)
-                    .fontWeight(hasBoldNotification ? .bold : .regular)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(worktree.displayName)
+                        .fontWeight(hasBoldNotification ? .bold : .regular)
+                        .lineLimit(1)
+                    if isPending {
+                        Text("Creating worktree…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
         }
         .contentShape(Rectangle())
@@ -83,6 +97,12 @@ struct WorktreeRowView: View {
         )
         .contextMenu {
             SidebarContextMenu(worktree: worktree, onRename: startRename)
+        }
+        .onChange(of: appState.editingWorktreeID) { _, newID in
+            if newID == worktree.id {
+                startRename()
+                appState.editingWorktreeID = nil
+            }
         }
     }
 

@@ -16,6 +16,8 @@ final class AppState: ObservableObject {
     @Published var isConnected: Bool = false
     @Published var layouts: [UUID: LayoutNode] = [:]
     @Published var repoFilter: UUID? = nil
+    @Published var pendingWorktreeIDs: Set<UUID> = []
+    @Published var editingWorktreeID: UUID? = nil
 
     // Alert state for user feedback
     @Published var alertMessage: String? = nil
@@ -111,6 +113,14 @@ final class AppState: ObservableObject {
                 for wt in fetched {
                     grouped[wt.repoID, default: []].append(wt)
                 }
+                // Preserve pending placeholders that aren't in the server response yet
+                for (repoID, wts) in worktrees {
+                    for wt in wts where pendingWorktreeIDs.contains(wt.id) {
+                        if !grouped[repoID, default: []].contains(where: { $0.id == wt.id }) {
+                            grouped[repoID, default: []].append(wt)
+                        }
+                    }
+                }
                 // Only update if changed
                 let oldIDs = Set(worktrees.values.flatMap { $0.map(\.id) })
                 let newIDs = Set(grouped.values.flatMap { $0.map(\.id) })
@@ -177,15 +187,47 @@ final class AppState: ObservableObject {
     // MARK: - Worktree Actions
 
     /// Create a new worktree in a repo.
-    func createWorktree(repoID: UUID) async {
-        do {
-            let wt = try await daemonClient.createWorktree(repoID: repoID)
-            worktrees[repoID, default: []].append(wt)
-            selectedWorktreeIDs = [wt.id]
-            await refreshTerminals(worktreeID: wt.id)
-        } catch {
-            logger.error("Failed to create worktree: \(error)")
-            handleConnectionError(error)
+    /// Inserts a placeholder immediately and creates the real worktree in the background.
+    func createWorktree(repoID: UUID) {
+        let name = NameGenerator.generate()
+        let placeholderID = UUID()
+        let placeholder = Worktree(
+            id: placeholderID, repoID: repoID, name: name, displayName: name,
+            branch: "tbd/\(name)", path: "", status: .active, tmuxServer: ""
+        )
+        worktrees[repoID, default: []].append(placeholder)
+        selectedWorktreeIDs = [placeholderID]
+        pendingWorktreeIDs.insert(placeholderID)
+        editingWorktreeID = placeholderID
+
+        Task {
+            do {
+                let wt = try await daemonClient.createWorktree(repoID: repoID, name: name)
+                // Replace placeholder with real worktree
+                if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholderID }) {
+                    // Preserve any display name the user set while waiting
+                    let userDisplayName = worktrees[repoID]?[idx].displayName
+                    worktrees[repoID]?[idx] = wt
+                    if let userDisplayName, userDisplayName != name {
+                        worktrees[repoID]?[idx].displayName = userDisplayName
+                        // Persist the rename on the server
+                        try? await daemonClient.renameWorktree(id: wt.id, displayName: userDisplayName)
+                    }
+                }
+                pendingWorktreeIDs.remove(placeholderID)
+                if selectedWorktreeIDs.contains(placeholderID) {
+                    selectedWorktreeIDs.remove(placeholderID)
+                    selectedWorktreeIDs.insert(wt.id)
+                }
+                await refreshTerminals(worktreeID: wt.id)
+            } catch {
+                logger.error("Failed to create worktree: \(error)")
+                // Remove placeholder on failure
+                worktrees[repoID]?.removeAll { $0.id == placeholderID }
+                pendingWorktreeIDs.remove(placeholderID)
+                selectedWorktreeIDs.remove(placeholderID)
+                handleConnectionError(error)
+            }
         }
     }
 
@@ -244,6 +286,15 @@ final class AppState: ObservableObject {
 
     /// Rename a worktree.
     func renameWorktree(id: UUID, displayName: String) async {
+        // For pending worktrees, just update locally — the name will be applied when creation finishes
+        if pendingWorktreeIDs.contains(id) {
+            for repoID in worktrees.keys {
+                if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == id }) {
+                    worktrees[repoID]?[idx].displayName = displayName
+                }
+            }
+            return
+        }
         do {
             try await daemonClient.renameWorktree(id: id, displayName: displayName)
             for repoID in worktrees.keys {
@@ -358,9 +409,7 @@ final class AppState: ObservableObject {
     func newWorktreeInFocusedRepo() {
         let repoID = focusedRepoID ?? repos.first?.id
         guard let repoID else { return }
-        Task {
-            await createWorktree(repoID: repoID)
-        }
+        createWorktree(repoID: repoID)
     }
 
     /// Archive the first selected worktree (refuses main worktrees).

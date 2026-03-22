@@ -93,7 +93,7 @@ public struct WorktreeLifecycle: Sendable {
     ///   - repoID: The repository to create the worktree in.
     ///   - skipClaude: If true, skip launching claude in the first terminal window.
     /// - Returns: The newly created worktree.
-    public func createWorktree(repoID: UUID, skipClaude: Bool = false) async throws -> Worktree {
+    public func createWorktree(repoID: UUID, name: String? = nil, skipClaude: Bool = false) async throws -> Worktree {
         // 1. Fetch repo
         guard let repo = try await db.repos.get(id: repoID) else {
             throw WorktreeLifecycleError.repoNotFound(repoID)
@@ -107,7 +107,7 @@ public struct WorktreeLifecycle: Sendable {
         }
 
         // 3. Generate name and construct path
-        let name = NameGenerator.generate()
+        let name = name ?? NameGenerator.generate()
         let branch = "tbd/\(name)"
         let worktreePath = (repo.path as NSString)
             .appendingPathComponent(".tbd/worktrees/\(name)")
