@@ -38,7 +38,8 @@ final class AppState: ObservableObject {
     }
 
     /// Poll daemon for state changes every 2 seconds.
-    /// This is a simple alternative to streaming subscriptions.
+    /// Merge status for selected worktree checked every 5th cycle (~10s).
+    private var pollCycle = 0
     private func startPolling() {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -49,6 +50,12 @@ final class AppState: ObservableObject {
                     if !didConnect { return }
                 }
                 await self.refreshAll()
+
+                // Check merge status for selected worktree every ~10s
+                self.pollCycle += 1
+                if self.pollCycle % 5 == 0, let selectedID = self.selectedWorktreeIDs.first {
+                    await self.refreshMergeStatus(worktreeID: selectedID)
+                }
             }
         }
     }
