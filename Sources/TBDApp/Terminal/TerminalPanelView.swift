@@ -25,9 +25,9 @@ struct TerminalPanelView: NSViewRepresentable {
             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         )
 
-        // Use SwiftTerm's default color scheme (xterm-256color compatible)
-        // Don't hardcode — let it inherit reasonable defaults
-        tv.configureNativeColors()
+        // Dark terminal
+        tv.nativeBackgroundColor = NSColor.black
+        tv.nativeForegroundColor = NSColor(white: 0.85, alpha: 1.0)
 
         // Set delegate for terminal events
         tv.terminalDelegate = context.coordinator
@@ -36,8 +36,11 @@ struct TerminalPanelView: NSViewRepresentable {
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
 
-        // Prepare the grouped session and start the tmux client
-        DispatchQueue.main.async {
+        // Delay process start to let SwiftUI lay out the view first
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak tv] in
+            guard let tv else { return }
+            // Capture frame on main thread before calling startTmuxClient
+            context.coordinator.initialFrame = tv.frame
             context.coordinator.startTmuxClient(
                 terminalView: tv,
                 bridge: tmuxBridge,
@@ -51,11 +54,10 @@ struct TerminalPanelView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TerminalView, context: Context) {
-        // Nothing to do — resize is handled by the PTY automatically
+        // Resize is handled by sizeChanged delegate
     }
 
     static func dismantleNSView(_ nsView: TerminalView, coordinator: Coordinator) {
-        // Clean up the grouped session when the view is removed
         coordinator.cleanup()
     }
 
@@ -70,6 +72,7 @@ struct TerminalPanelView: NSViewRepresentable {
         var tmuxBridge: TmuxBridge?
         var tmuxServer: String = ""
         var panelID: UUID = UUID()
+        var initialFrame: NSRect = .zero
         private var localProcess: LocalProcess?
 
         func startTmuxClient(
@@ -88,23 +91,18 @@ struct TerminalPanelView: NSViewRepresentable {
                 return
             }
 
-            debugLog("PANEL: Starting tmux client: \(args.joined(separator: " "))")
-
-            // Use SwiftTerm's LocalProcess to spawn tmux in a PTY
-            let process = LocalProcess(delegate: self)
-            self.localProcess = process
-
-            // args[0] = "tmux", rest are arguments
-            let executable = args[0]
+            let tmuxPath = findExecutable(args[0])
             let processArgs = Array(args.dropFirst())
 
-            // Find tmux path
-            let tmuxPath = findExecutable(executable)
+            debugLog("PANEL: Starting: \(tmuxPath) \(processArgs.joined(separator: " "))")
 
-            // Inherit environment but ensure TERM is set for 256-color support
+            // Inherit environment with proper TERM
             var env = ProcessInfo.processInfo.environment
             env["TERM"] = "xterm-256color"
             let envPairs = env.map { "\($0.key)=\($0.value)" }
+
+            let process = LocalProcess(delegate: self)
+            self.localProcess = process
 
             process.startProcess(
                 executable: tmuxPath,
@@ -113,8 +111,16 @@ struct TerminalPanelView: NSViewRepresentable {
                 execName: nil
             )
 
-            // Make sure the terminal view accepts keyboard focus
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // Send correct initial size based on view frame
+            if initialFrame.width > 0 && initialFrame.height > 0 && process.childfd >= 0 {
+                let (cols, rows) = Self.colsRows(from: initialFrame)
+                var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+                _ = ioctl(process.childfd, TIOCSWINSZ, &size)
+                debugLog("PANEL: initial resize \(cols)x\(rows) from frame \(initialFrame.width)x\(initialFrame.height)")
+            }
+
+            // Focus
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 terminalView.window?.makeFirstResponder(terminalView)
             }
         }
@@ -126,7 +132,6 @@ struct TerminalPanelView: NSViewRepresentable {
 
         deinit {
             debugLog("PANEL: deinit for \(panelID.uuidString.prefix(8))")
-            // Note: cleanup is called by dismantleNSView, not deinit
         }
 
         // MARK: - LocalProcessDelegate
@@ -139,47 +144,53 @@ struct TerminalPanelView: NSViewRepresentable {
         }
 
         func dataReceived(slice: ArraySlice<UInt8>) {
-            // Data from the PTY → feed into SwiftTerm for rendering
             DispatchQueue.main.async { [weak self] in
                 self?.terminalView?.feed(byteArray: slice)
             }
         }
 
         func getWindowSize() -> winsize {
-            // Return default size — the actual size will be set by SwiftTerm
-            // when the view lays out, triggering a SIGWINCH to the PTY
+            if initialFrame.width > 0 {
+                let (cols, rows) = Self.colsRows(from: initialFrame)
+                debugLog("PANEL: getWindowSize \(cols)x\(rows)")
+                return winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+            }
+            debugLog("PANEL: getWindowSize fallback 80x24")
             return winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
+        }
+
+        static func colsRows(from frame: NSRect) -> (Int, Int) {
+            let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+            let charWidth = ("M" as NSString).size(withAttributes: [.font: font]).width
+            let lineHeight = ceil(font.ascender - font.descender + font.leading)
+            let cols = max(Int(frame.width / charWidth), 20)
+            let rows = max(Int(frame.height / lineHeight), 5)
+            return (cols, rows)
         }
 
         // MARK: - TerminalViewDelegate
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            // User keystrokes → write to PTY
             localProcess?.send(data: data)
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            // SwiftTerm notifies us of size change → LocalProcess handles SIGWINCH
-            debugLog("PANEL: sizeChanged cols=\(newCols) rows=\(newRows)")
+            // Propagate resize to the PTY so tmux/shell gets SIGWINCH
+            guard newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 else { return }
+            var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
+            _ = ioctl(fd, TIOCSWINSZ, &size)
+            debugLog("PANEL: resize -> \(newCols)x\(newRows)")
         }
 
-        func setTerminalTitle(source: TerminalView, title: String) {
-            // Could update tab title
-        }
-
+        func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-
         func scrolled(source: TerminalView, position: Double) {}
 
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            if let url = URL(string: link) {
-                NSWorkspace.shared.open(url)
-            }
+            if let url = URL(string: link) { NSWorkspace.shared.open(url) }
         }
 
-        func bell(source: TerminalView) {
-            NSSound.beep()
-        }
+        func bell(source: TerminalView) { NSSound.beep() }
 
         func clipboardCopy(source: TerminalView, content: Data) {
             if let text = String(data: content, encoding: .utf8) {
@@ -190,19 +201,14 @@ struct TerminalPanelView: NSViewRepresentable {
         }
 
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
-
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
 
         // MARK: - Helpers
 
         private func findExecutable(_ name: String) -> String {
-            // Check common paths
             for path in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"] {
-                if FileManager.default.isExecutableFile(atPath: path) {
-                    return path
-                }
+                if FileManager.default.isExecutableFile(atPath: path) { return path }
             }
-            // Fall back to using env to find it
             return "/usr/bin/env"
         }
     }
