@@ -462,28 +462,27 @@ public struct WorktreeLifecycle: Sendable {
             }
         }
 
-        // 6. Fetch from origin
+        // 6. Fetch from origin and update default branch
         try await git.fetch(repoPath: repo.path)
 
-        // 7. Rebase worktree branch onto origin/<default_branch>
-        let rebaseResult = await git.rebase(
-            repoPath: worktree.path,
-            onto: "origin/\(repo.defaultBranch)"
-        )
-        if !rebaseResult.success {
-            // Abort the failed rebase
-            try? await git.rebaseAbort(repoPath: worktree.path)
-            throw WorktreeLifecycleError.rebaseConflict(rebaseResult.output)
-        }
-
-        // 8. Checkout default branch in repo root
+        // 7. Checkout default branch in repo root
         try await git.checkout(repoPath: repo.path, branch: repo.defaultBranch)
 
-        // 9. Fast-forward merge worktree branch into default branch
+        // 8. Squash merge worktree branch — stages all changes as one commit
         do {
-            try await git.mergeFFOnly(repoPath: repo.path, branch: worktree.branch)
+            try await git.mergeSquash(repoPath: repo.path, branch: worktree.branch)
         } catch {
-            throw WorktreeLifecycleError.mergeFailed("\(error)")
+            throw WorktreeLifecycleError.mergeFailed("Squash merge failed (conflicts?): check the main repo")
+        }
+
+        // 9. Commit the squashed changes
+        do {
+            try await git.commit(
+                repoPath: repo.path,
+                message: "Squash merge \(worktree.displayName) (\(worktree.branch))"
+            )
+        } catch {
+            throw WorktreeLifecycleError.mergeFailed("Commit failed after squash merge")
         }
 
         // 10. Fire postMerge hook (async, best effort)

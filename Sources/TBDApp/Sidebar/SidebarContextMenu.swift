@@ -14,6 +14,18 @@ struct SidebarContextMenu: View {
             showRenameAlert = true
         }
 
+        Button("Merge to Main") {
+            Task {
+                await appState.mergeWorktree(id: worktree.id)
+            }
+        }
+
+        Button("Merge to Main & Archive") {
+            Task {
+                await appState.mergeWorktree(id: worktree.id, archiveAfter: true)
+            }
+        }
+
         Button("Archive") {
             Task {
                 await appState.archiveWorktree(id: worktree.id)

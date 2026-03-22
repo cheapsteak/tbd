@@ -93,6 +93,16 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["merge", "--ff-only", branch], at: repoPath)
     }
 
+    /// Performs a squash merge of the given branch (stages all changes, no commit).
+    public func mergeSquash(repoPath: String, branch: String) async throws {
+        _ = try await run(arguments: ["merge", "--squash", branch], at: repoPath)
+    }
+
+    /// Commits staged changes with the given message.
+    public func commit(repoPath: String, message: String) async throws {
+        _ = try await run(arguments: ["commit", "-m", message], at: repoPath)
+    }
+
     /// Returns `true` if there are uncommitted changes (staged or unstaged).
     public func hasUncommittedChanges(repoPath: String) async throws -> Bool {
         let output = try await run(arguments: ["status", "--porcelain"], at: repoPath)

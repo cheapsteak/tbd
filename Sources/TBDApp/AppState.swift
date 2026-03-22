@@ -188,6 +188,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Merge a worktree branch into main via rebase.
+    func mergeWorktree(id: UUID, archiveAfter: Bool = false) async {
+        do {
+            try await daemonClient.mergeWorktree(id: id, archiveAfter: archiveAfter)
+            if archiveAfter {
+                for repoID in worktrees.keys {
+                    worktrees[repoID]?.removeAll { $0.id == id }
+                }
+                selectedWorktreeIDs.remove(id)
+                terminals.removeValue(forKey: id)
+            }
+            logger.info("Worktree merged successfully")
+        } catch {
+            logger.error("Failed to merge worktree: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
     /// Revive an archived worktree.
     func reviveWorktree(id: UUID) async {
         do {
