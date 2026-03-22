@@ -30,7 +30,7 @@ done
 if [ "$skip_build" = false ]; then
     echo "Building..."
     t0=$SECONDS
-    swift build -C "$REPO_ROOT" 2>&1 | tail -3
+    (cd "$REPO_ROOT" && swift build) 2>&1 | tail -3
     echo "  Build: $((SECONDS - t0))s"
 fi
 
