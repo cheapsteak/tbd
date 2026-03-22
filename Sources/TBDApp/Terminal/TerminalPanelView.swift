@@ -19,8 +19,8 @@ struct TerminalPanelView: NSViewRepresentable {
     let tmuxWindowID: String
     let tmuxBridge: TmuxBridge
 
-    func makeNSView(context: Context) -> TerminalView {
-        let tv = TerminalView(
+    func makeNSView(context: Context) -> TBDTerminalView {
+        let tv = TBDTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 600),
             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         )
@@ -57,11 +57,11 @@ struct TerminalPanelView: NSViewRepresentable {
         return tv
     }
 
-    func updateNSView(_ nsView: TerminalView, context: Context) {
+    func updateNSView(_ nsView: TBDTerminalView, context: Context) {
         // Resize is handled by sizeChanged delegate
     }
 
-    static func dismantleNSView(_ nsView: TerminalView, coordinator: Coordinator) {
+    static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
         coordinator.cleanup()
     }
 

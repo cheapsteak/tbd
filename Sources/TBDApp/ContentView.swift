@@ -21,6 +21,8 @@ struct ContentView: View {
                     TerminalContainerView()
                 }
             }
+            .navigationSplitViewStyle(.prominentDetail)
+            .toolbar(removing: .sidebarToggle)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button(action: addRepo) {
