@@ -4,9 +4,8 @@ import TBDShared
 
 struct SidebarContextMenu: View {
     let worktree: Worktree
+    var onRename: () -> Void
     @EnvironmentObject var appState: AppState
-    @Binding var showRenameAlert: Bool
-    @Binding var renameText: String
 
     private var status: WorktreeMergeStatusResult? {
         appState.mergeStatus[worktree.id]
@@ -23,8 +22,7 @@ struct SidebarContextMenu: View {
     var body: some View {
         Group {
             Button("Rename...") {
-                renameText = worktree.displayName
-                showRenameAlert = true
+                onRename()
             }
 
             if let reason = mergeTooltip, !canMerge {

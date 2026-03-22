@@ -4,8 +4,9 @@ import TBDShared
 struct WorktreeRowView: View {
     let worktree: Worktree
     @EnvironmentObject var appState: AppState
-    @State private var showRenameAlert = false
-    @State private var renameText = ""
+    @State private var isEditing = false
+    @State private var editText = ""
+    @FocusState private var isTextFieldFocused: Bool
 
     private var notification: NotificationType? {
         appState.notifications[worktree.id] ?? nil
@@ -39,13 +40,18 @@ struct WorktreeRowView: View {
                     .fill(color)
                     .frame(width: 8, height: 8)
             }
-            VStack(alignment: .leading, spacing: 2) {
+            if isEditing {
+                TextField("Name", text: $editText)
+                    .textFieldStyle(.plain)
+                    .focused($isTextFieldFocused)
+                    .onSubmit { commitRename() }
+                    .onExitCommand { cancelRename() }
+                    .onChange(of: isTextFieldFocused) { _, focused in
+                        if !focused { commitRename() }
+                    }
+            } else {
                 Text(worktree.displayName)
                     .fontWeight(hasBoldNotification ? .bold : .regular)
-                    .lineLimit(1)
-                Text(worktree.branch)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
         }
@@ -57,6 +63,8 @@ struct WorktreeRowView: View {
                 } else {
                     appState.selectedWorktreeIDs.insert(worktree.id)
                 }
+            } else if appState.selectedWorktreeIDs.contains(worktree.id) && !isEditing {
+                startRename()
             } else {
                 appState.selectedWorktreeIDs = [worktree.id]
             }
@@ -68,18 +76,26 @@ struct WorktreeRowView: View {
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
         )
         .contextMenu {
-            SidebarContextMenu(worktree: worktree, showRenameAlert: $showRenameAlert, renameText: $renameText)
+            SidebarContextMenu(worktree: worktree, onRename: startRename)
         }
-        .alert("Rename Worktree", isPresented: $showRenameAlert) {
-            TextField("Name", text: $renameText)
-            Button("Cancel", role: .cancel) {}
-            Button("Rename") {
-                Task {
-                    await appState.renameWorktree(id: worktree.id, displayName: renameText)
-                }
-            }
-        } message: {
-            Text("Enter a new display name for this worktree.")
+    }
+
+    func startRename() {
+        editText = worktree.displayName
+        isEditing = true
+        isTextFieldFocused = true
+    }
+
+    private func commitRename() {
+        let trimmed = editText.trimmingCharacters(in: .whitespaces)
+        isEditing = false
+        guard !trimmed.isEmpty, trimmed != worktree.displayName else { return }
+        Task {
+            await appState.renameWorktree(id: worktree.id, displayName: trimmed)
         }
+    }
+
+    private func cancelRename() {
+        isEditing = false
     }
 }
