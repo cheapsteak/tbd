@@ -103,6 +103,11 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["commit", "-m", message], at: repoPath)
     }
 
+    /// Pushes a branch to origin.
+    public func push(repoPath: String, branch: String) async throws {
+        _ = try await run(arguments: ["push", "origin", branch], at: repoPath)
+    }
+
     /// Returns the HEAD SHA for a branch or ref.
     public func headSHA(repoPath: String, ref: String = "HEAD") async throws -> String {
         let output = try await run(arguments: ["rev-parse", ref], at: repoPath)

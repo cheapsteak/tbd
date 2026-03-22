@@ -515,7 +515,10 @@ public struct WorktreeLifecycle: Sendable {
             throw WorktreeLifecycleError.mergeFailed("Commit failed after squash merge")
         }
 
-        // 10. Fire postMerge hook (async, best effort)
+        // 10. Push main to origin so next worktree branches off the latest
+        try? await git.push(repoPath: repo.path, branch: repo.defaultBranch)
+
+        // 11. Fire postMerge hook (async, best effort)
         let postMergeHookPath = hooks.resolve(
             event: .postMerge,
             repoPath: repo.path,
