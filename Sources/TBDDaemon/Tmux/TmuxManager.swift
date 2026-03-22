@@ -67,6 +67,9 @@ public struct TmuxManager: Sendable {
             // Session does not exist, create it
             let args = Self.newServerCommand(server: server, session: session, cwd: cwd)
             try await runTmux(args)
+            // Hide tmux chrome globally — TBD app provides its own UI
+            try? await runTmux(["-L", server, "set", "-g", "status", "off"])
+            try? await runTmux(["-L", server, "set", "-g", "pane-border-style", "fg=black"])
         }
     }
 

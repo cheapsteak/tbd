@@ -7,15 +7,16 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "TerminalPanel")
 
 // MARK: - TerminalPanelView
 
-/// Wraps SwiftTerm's `TerminalView` (AppKit NSView) in a SwiftUI `NSViewRepresentable`.
+/// Wraps SwiftTerm's `TerminalView` in a SwiftUI `NSViewRepresentable`.
 ///
-/// Connects to the TmuxBridge for a specific pane: receives decoded output bytes
-/// and feeds them into the terminal emulator, and captures user keystrokes to send
-/// back through the bridge.
+/// Uses tmux grouped sessions for session persistence:
+/// 1. TmuxBridge creates a grouped session pointing at the right window
+/// 2. SwiftTerm spawns `tmux attach -t <grouped-session>` in a native PTY
+/// 3. All input, output, and resize handled natively by the terminal driver
 struct TerminalPanelView: NSViewRepresentable {
     let terminalID: UUID
     let tmuxServer: String
-    let tmuxPaneID: String
+    let tmuxWindowID: String
     let tmuxBridge: TmuxBridge
 
     func makeNSView(context: Context) -> TerminalView {
@@ -28,32 +29,34 @@ struct TerminalPanelView: NSViewRepresentable {
         tv.nativeBackgroundColor = NSColor.black
         tv.nativeForegroundColor = NSColor(white: 0.9, alpha: 1.0)
 
-        // Set the delegate so we capture keystrokes
+        // Set delegate for terminal events
         tv.terminalDelegate = context.coordinator
+        context.coordinator.terminalView = tv
+        context.coordinator.tmuxBridge = tmuxBridge
+        context.coordinator.tmuxServer = tmuxServer
+        context.coordinator.panelID = terminalID
 
-        // Register with TmuxBridge to receive pane output
-        context.coordinator.registerWithBridge(
-            terminalView: tv,
-            tmuxBridge: tmuxBridge,
-            server: tmuxServer,
-            paneID: tmuxPaneID
-        )
+        // Prepare the grouped session and start the tmux client
+        DispatchQueue.main.async {
+            context.coordinator.startTmuxClient(
+                terminalView: tv,
+                bridge: tmuxBridge,
+                server: tmuxServer,
+                windowID: tmuxWindowID,
+                panelID: terminalID
+            )
+        }
 
         return tv
     }
 
     func updateNSView(_ nsView: TerminalView, context: Context) {
-        // On resize, use the terminal's current cols/rows (which SwiftTerm updates
-        // internally on frame change) and compare with our last-sent dimensions.
-        let currentCols = nsView.getTerminal().cols
-        let currentRows = nsView.getTerminal().rows
+        // Nothing to do — resize is handled by the PTY automatically
+    }
 
-        guard currentCols > 0, currentRows > 0 else { return }
-
-        if currentCols != context.coordinator.lastCols ||
-           currentRows != context.coordinator.lastRows {
-            context.coordinator.handleResize(cols: currentCols, rows: currentRows)
-        }
+    static func dismantleNSView(_ nsView: TerminalView, coordinator: Coordinator) {
+        // Clean up the grouped session when the view is removed
+        coordinator.cleanup()
     }
 
     func makeCoordinator() -> Coordinator {
@@ -62,102 +65,106 @@ struct TerminalPanelView: NSViewRepresentable {
 
     // MARK: - Coordinator
 
-    /// Bridges TmuxBridge output to the SwiftTerm TerminalView, and captures
-    /// user keystrokes to send back via the bridge.
-    final class Coordinator: NSObject, TerminalViewDelegate {
-        private weak var terminalView: TerminalView?
-        private var tmuxBridge: TmuxBridge?
-        private var server: String = ""
-        private var paneID: String = ""
-        fileprivate var lastCols: Int = 0
-        fileprivate var lastRows: Int = 0
+    final class Coordinator: NSObject, TerminalViewDelegate, LocalProcessDelegate, @unchecked Sendable {
+        weak var terminalView: TerminalView?
+        var tmuxBridge: TmuxBridge?
+        var tmuxServer: String = ""
+        var panelID: UUID = UUID()
+        private var localProcess: LocalProcess?
 
-        /// Register with the TmuxBridge to receive output for this pane.
-        func registerWithBridge(
+        func startTmuxClient(
             terminalView: TerminalView,
-            tmuxBridge: TmuxBridge,
+            bridge: TmuxBridge,
             server: String,
-            paneID: String
+            windowID: String,
+            panelID: UUID
         ) {
-            self.terminalView = terminalView
-            self.tmuxBridge = tmuxBridge
-            self.server = server
-            self.paneID = paneID
+            guard let args = bridge.prepareSession(
+                panelID: panelID,
+                server: server,
+                windowID: windowID
+            ) else {
+                debugLog("PANEL: Failed to prepare session for \(panelID.uuidString.prefix(8))")
+                return
+            }
 
-            // Register a handler that feeds decoded bytes into the terminal view
-            let weakTV = Weak(terminalView)
-            Task {
-                await tmuxBridge.registerPane(server: server, paneID: paneID) { data in
-                    let bytes = ArraySlice<UInt8>(data)
-                    DispatchQueue.main.async {
-                        guard let tv = weakTV.value else { return }
-                        tv.feed(byteArray: bytes)
-                    }
-                }
+            debugLog("PANEL: Starting tmux client: \(args.joined(separator: " "))")
+
+            // Use SwiftTerm's LocalProcess to spawn tmux in a PTY
+            let process = LocalProcess(delegate: self)
+            self.localProcess = process
+
+            // args[0] = "tmux", rest are arguments
+            let executable = args[0]
+            let processArgs = Array(args.dropFirst())
+
+            // Find tmux path
+            let tmuxPath = findExecutable(executable)
+
+            process.startProcess(
+                executable: tmuxPath,
+                args: processArgs,
+                environment: nil, // inherit
+                execName: nil
+            )
+
+            // Make sure the terminal view accepts keyboard focus
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                terminalView.window?.makeFirstResponder(terminalView)
             }
         }
 
-        /// Handle view resize by notifying tmux of new dimensions.
-        func handleResize(cols: Int, rows: Int) {
-            guard cols != lastCols || rows != lastRows else { return }
-            lastCols = cols
-            lastRows = rows
-
-            let bridge = tmuxBridge
-            let srv = server
-            // tmux resize uses window ID; for control mode, pane ID works with resize-pane
-            let pane = paneID
-
-            Task {
-                // Use resize-pane for per-pane resizing in control mode
-                await bridge?.writeCommand(
-                    server: srv,
-                    command: "resize-pane -t \(pane) -x \(cols) -y \(rows)\n"
-                )
-            }
+        func cleanup() {
+            debugLog("PANEL: cleanup for \(panelID.uuidString.prefix(8))")
+            tmuxBridge?.cleanupSession(panelID: panelID, server: tmuxServer)
         }
 
-        /// Unregister from the bridge on deinit.
         deinit {
-            let bridge = tmuxBridge
-            let srv = server
-            let pid = paneID
-            Task {
-                await bridge?.unregisterPane(server: srv, paneID: pid)
+            debugLog("PANEL: deinit for \(panelID.uuidString.prefix(8))")
+            // Note: cleanup is called by dismantleNSView, not deinit
+        }
+
+        // MARK: - LocalProcessDelegate
+
+        func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+            debugLog("PANEL: process terminated, exitCode=\(exitCode ?? -1)")
+            DispatchQueue.main.async { [weak self] in
+                self?.terminalView?.feed(text: "\r\n[Process exited with code \(exitCode ?? -1)]\r\n")
             }
+        }
+
+        func dataReceived(slice: ArraySlice<UInt8>) {
+            // Data from the PTY → feed into SwiftTerm for rendering
+            DispatchQueue.main.async { [weak self] in
+                self?.terminalView?.feed(byteArray: slice)
+            }
+        }
+
+        func getWindowSize() -> winsize {
+            // Return default size — the actual size will be set by SwiftTerm
+            // when the view lays out, triggering a SIGWINCH to the PTY
+            return winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
         }
 
         // MARK: - TerminalViewDelegate
 
-        /// Called when the terminal emulator wants to send data back (user keystrokes).
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            guard let bridge = tmuxBridge else { return }
-            let text = String(bytes: data, encoding: .utf8) ?? ""
-            guard !text.isEmpty else { return }
-
-            let srv = server
-            let pid = paneID
-            Task {
-                await bridge.sendKeys(server: srv, paneID: pid, text: text)
-            }
+            // User keystrokes → write to PTY
+            localProcess?.send(data: data)
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            handleResize(cols: newCols, rows: newRows)
+            // SwiftTerm notifies us of size change → LocalProcess handles SIGWINCH
+            debugLog("PANEL: sizeChanged cols=\(newCols) rows=\(newRows)")
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {
-            // Could update tab title in the future
-            logger.debug("Terminal title changed: \(title)")
+            // Could update tab title
         }
 
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
-            // Could track CWD in the future
-        }
+        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 
-        func scrolled(source: TerminalView, position: Double) {
-            // Scroll position tracking — no-op for now
-        }
+        func scrolled(source: TerminalView, position: Double) {}
 
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
             if let url = URL(string: link) {
@@ -171,28 +178,27 @@ struct TerminalPanelView: NSViewRepresentable {
 
         func clipboardCopy(source: TerminalView, content: Data) {
             if let text = String(data: content, encoding: .utf8) {
-                let pasteboard = NSPasteboard.general
-                pasteboard.clearContents()
-                pasteboard.setString(text, forType: .string)
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.setString(text, forType: .string)
             }
         }
 
-        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {
-            // Not handled
+        func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}
+
+        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
+
+        // MARK: - Helpers
+
+        private func findExecutable(_ name: String) -> String {
+            // Check common paths
+            for path in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"] {
+                if FileManager.default.isExecutableFile(atPath: path) {
+                    return path
+                }
+            }
+            // Fall back to using env to find it
+            return "/usr/bin/env"
         }
-
-        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {
-            // Visual change notification — no-op
-        }
-    }
-}
-
-// MARK: - Weak Reference Helper
-
-/// A simple weak reference wrapper to allow capturing in @Sendable closures.
-private final class Weak<T: AnyObject>: @unchecked Sendable {
-    weak var value: T?
-    init(_ value: T) {
-        self.value = value
     }
 }

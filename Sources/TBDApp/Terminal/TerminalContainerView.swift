@@ -75,6 +75,7 @@ private struct SingleWorktreeView: View {
                 // Split layout view for the active tab's layout
                 layoutContent(worktree: worktree)
             }
+            // TmuxBridge sessions are created on-demand by TerminalPanelView
         } else {
             Text("Worktree not found")
                 .foregroundStyle(.secondary)
@@ -83,28 +84,24 @@ private struct SingleWorktreeView: View {
 
     @ViewBuilder
     private func layoutContent(worktree: Worktree) -> some View {
-        let layoutBinding = Binding<LayoutNode>(
-            get: {
-                if let existing = appState.layouts[worktreeID] {
-                    return existing
+        if let terminal = activeTerminal {
+            // Each tab shows one terminal (with optional splits stored per-terminal)
+            let layoutKey = terminal.id
+            let layoutBinding = Binding<LayoutNode>(
+                get: {
+                    appState.layouts[layoutKey] ?? .terminal(terminalID: terminal.id)
+                },
+                set: { newLayout in
+                    appState.layouts[layoutKey] = newLayout
                 }
-                // Create a default layout from the active terminal
-                if let terminal = activeTerminal {
-                    return .terminal(terminalID: terminal.id)
-                }
-                return .terminal(terminalID: UUID())
-            },
-            set: { newLayout in
-                appState.layouts[worktreeID] = newLayout
-            }
-        )
+            )
 
-        if !terminals.isEmpty {
             SplitLayoutView(
                 node: layoutBinding.wrappedValue,
                 worktree: worktree,
                 layout: layoutBinding
             )
+            .id(terminal.id) // Force new view hierarchy when switching tabs
         } else {
             VStack(spacing: 12) {
                 Image(systemName: "terminal")

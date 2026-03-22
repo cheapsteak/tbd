@@ -248,6 +248,7 @@ struct TerminalPanelPlaceholder: View {
     }
 
     var body: some View {
+        let _ = debugLogPlaceholder()
         VStack(spacing: 0) {
             // Mini toolbar with split buttons
             HStack(spacing: 8) {
@@ -288,9 +289,10 @@ struct TerminalPanelPlaceholder: View {
                 TerminalPanelView(
                     terminalID: terminalID,
                     tmuxServer: worktree.tmuxServer,
-                    tmuxPaneID: terminal.tmuxPaneID,
+                    tmuxWindowID: terminal.tmuxWindowID,
                     tmuxBridge: appState.tmuxBridge
                 )
+                .id(terminalID) // Force SwiftUI to create a unique view per terminal
             } else {
                 // Fallback when terminal data hasn't loaded yet
                 ZStack {
@@ -308,6 +310,25 @@ struct TerminalPanelPlaceholder: View {
                             .foregroundStyle(.tertiary)
                     }
                 }
+            }
+        }
+    }
+
+    // Throttle: only log once per terminal ID
+    private static var loggedTerminals: Set<String> = []
+    private func debugLogPlaceholder() {
+        let key = "\(terminalID.uuidString.prefix(8))-\(terminal != nil)"
+        guard !Self.loggedTerminals.contains(key) else { return }
+        Self.loggedTerminals.insert(key)
+        let allTermIDs = appState.terminals.values.flatMap { $0.map { $0.id.uuidString.prefix(8) } }
+        let msg = "PLACEHOLDER: terminalID=\(terminalID.uuidString.prefix(8)) found=\(terminal != nil) allTermIDs=\(allTermIDs) wtID=\(worktree.id.uuidString.prefix(8))"
+        if let data = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n".data(using: .utf8) {
+            if let fh = FileHandle(forWritingAtPath: "/tmp/tbd-bridge.log") {
+                fh.seekToEndOfFile()
+                fh.write(data)
+                fh.closeFile()
+            } else {
+                FileManager.default.createFile(atPath: "/tmp/tbd-bridge.log", contents: data)
             }
         }
     }

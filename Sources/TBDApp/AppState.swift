@@ -68,11 +68,13 @@ final class AppState: ObservableObject {
         await refreshWorktrees()
     }
 
-    /// Refresh the repo list.
+    /// Refresh the repo list. Only updates if data changed.
     func refreshRepos() async {
         do {
             let fetchedRepos = try await daemonClient.listRepos()
-            repos = fetchedRepos
+            if fetchedRepos.map(\.id) != repos.map(\.id) {
+                repos = fetchedRepos
+            }
         } catch {
             logger.error("Failed to list repos: \(error)")
             handleConnectionError(error)
@@ -84,14 +86,21 @@ final class AppState: ObservableObject {
         do {
             let fetched = try await daemonClient.listWorktrees(repoID: repoID, status: .active)
             if let repoID {
-                worktrees[repoID] = fetched
+                let existing = worktrees[repoID] ?? []
+                if fetched.map(\.id) != existing.map(\.id) {
+                    worktrees[repoID] = fetched
+                }
             } else {
-                // Group by repoID
                 var grouped: [UUID: [Worktree]] = [:]
                 for wt in fetched {
                     grouped[wt.repoID, default: []].append(wt)
                 }
-                worktrees = grouped
+                // Only update if changed
+                let oldIDs = Set(worktrees.values.flatMap { $0.map(\.id) })
+                let newIDs = Set(grouped.values.flatMap { $0.map(\.id) })
+                if oldIDs != newIDs {
+                    worktrees = grouped
+                }
             }
             // Refresh terminals for visible worktrees
             let allWorktrees: [Worktree]
@@ -109,11 +118,14 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Refresh terminals for a specific worktree.
+    /// Refresh terminals for a specific worktree. Only updates if data changed.
     func refreshTerminals(worktreeID: UUID) async {
         do {
             let fetched = try await daemonClient.listTerminals(worktreeID: worktreeID)
-            terminals[worktreeID] = fetched
+            let existing = terminals[worktreeID] ?? []
+            if fetched.map(\.id) != existing.map(\.id) {
+                terminals[worktreeID] = fetched
+            }
         } catch {
             logger.error("Failed to list terminals for worktree \(worktreeID): \(error)")
             handleConnectionError(error)
