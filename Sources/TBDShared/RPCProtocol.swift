@@ -93,6 +93,7 @@ public enum RPCMethod {
     public static let resolvePath = "resolve.path"
     public static let notificationsMarkRead = "notifications.markRead"
     public static let worktreeMerge = "worktree.merge"
+    public static let cleanup = "cleanup"
 }
 
 public struct NotificationsMarkReadParams: Codable, Sendable {
@@ -206,5 +207,16 @@ public struct ResolvedPathResult: Codable, Sendable {
     public let worktreeID: UUID?
     public init(repoID: UUID?, worktreeID: UUID?) {
         self.repoID = repoID; self.worktreeID = worktreeID
+    }
+}
+
+public struct CleanupResult: Codable, Sendable {
+    public let reposProcessed: Int
+    public let worktreesReconciled: Int
+    public let errors: [String]
+    public init(reposProcessed: Int, worktreesReconciled: Int, errors: [String] = []) {
+        self.reposProcessed = reposProcessed
+        self.worktreesReconciled = worktreesReconciled
+        self.errors = errors
     }
 }

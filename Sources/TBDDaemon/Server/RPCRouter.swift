@@ -77,6 +77,8 @@ public final class RPCRouter: Sendable {
                 return try await handleResolvePath(request.paramsData)
             case RPCMethod.notificationsMarkRead:
                 return try await handleNotificationsMarkRead(request.paramsData)
+            case RPCMethod.cleanup:
+                return try await handleCleanup()
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
@@ -321,6 +323,41 @@ public final class RPCRouter: Sendable {
         let params = try decoder.decode(NotificationsMarkReadParams.self, from: paramsData)
         try await db.notifications.markRead(worktreeID: params.worktreeID)
         return .ok()
+    }
+
+    // MARK: - Cleanup
+
+    private func handleCleanup() async throws -> RPCResponse {
+        let repos = try await db.repos.list()
+        var errors: [String] = []
+        var worktreesReconciled = 0
+
+        for repo in repos {
+            // Prune stale worktree tracking entries
+            do {
+                try await git.worktreePrune(repoPath: repo.path)
+            } catch {
+                errors.append("Prune failed for \(repo.displayName): \(error)")
+            }
+
+            // Reconcile DB against actual git worktree list
+            do {
+                let beforeCount = try await db.worktrees.list(repoID: repo.id, status: .active).count
+                try await lifecycle.reconcile(repoID: repo.id)
+                let afterCount = try await db.worktrees.list(repoID: repo.id, status: .active).count
+                let delta = abs(beforeCount - afterCount)
+                worktreesReconciled += delta
+            } catch {
+                errors.append("Reconcile failed for \(repo.displayName): \(error)")
+            }
+        }
+
+        let result = CleanupResult(
+            reposProcessed: repos.count,
+            worktreesReconciled: worktreesReconciled,
+            errors: errors
+        )
+        return try RPCResponse(result: result)
     }
 
     // MARK: - Daemon Status

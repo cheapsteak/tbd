@@ -120,6 +120,11 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["worktree", "remove", worktreePath, "--force"], at: repoPath)
     }
 
+    /// Prunes stale worktree tracking entries.
+    public func worktreePrune(repoPath: String) async throws {
+        _ = try await run(arguments: ["worktree", "prune"], at: repoPath)
+    }
+
     /// Lists all worktrees, returning their path and branch name.
     public func worktreeList(repoPath: String) async throws -> [(path: String, branch: String)] {
         let output = try await run(arguments: ["worktree", "list", "--porcelain"], at: repoPath)
