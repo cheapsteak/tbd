@@ -475,11 +475,12 @@ public struct WorktreeLifecycle: Sendable {
             }
         }
 
-        // 6. Fetch from origin and update default branch
+        // 6. Fetch from origin
         try await git.fetch(repoPath: repo.path)
 
-        // 7. Checkout default branch in repo root
+        // 7. Checkout default branch and fast-forward to origin
         try await git.checkout(repoPath: repo.path, branch: repo.defaultBranch)
+        try? await git.mergeFFOnly(repoPath: repo.path, branch: "origin/\(repo.defaultBranch)")
 
         // 8. Squash merge worktree branch — stages all changes as one commit
         do {
