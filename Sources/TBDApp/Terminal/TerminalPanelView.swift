@@ -25,9 +25,9 @@ struct TerminalPanelView: NSViewRepresentable {
             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         )
 
-        // Dark terminal appearance
-        tv.nativeBackgroundColor = NSColor.black
-        tv.nativeForegroundColor = NSColor(white: 0.9, alpha: 1.0)
+        // Use SwiftTerm's default color scheme (xterm-256color compatible)
+        // Don't hardcode — let it inherit reasonable defaults
+        tv.configureNativeColors()
 
         // Set delegate for terminal events
         tv.terminalDelegate = context.coordinator
@@ -101,10 +101,15 @@ struct TerminalPanelView: NSViewRepresentable {
             // Find tmux path
             let tmuxPath = findExecutable(executable)
 
+            // Inherit environment but ensure TERM is set for 256-color support
+            var env = ProcessInfo.processInfo.environment
+            env["TERM"] = "xterm-256color"
+            let envPairs = env.map { "\($0.key)=\($0.value)" }
+
             process.startProcess(
                 executable: tmuxPath,
                 args: processArgs,
-                environment: nil, // inherit
+                environment: envPairs,
                 execName: nil
             )
 

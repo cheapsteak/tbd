@@ -57,10 +57,13 @@ final class TmuxBridge: @unchecked Sendable {
             "new-session", "-d", "-t", "main", "-s", sessionName
         ])
 
-        // Hide tmux chrome — our app provides its own UI
-        let _ = runTmux(server: server, args: ["set", "-t", sessionName, "status", "off"])
-        let _ = runTmux(server: server, args: ["set", "-t", sessionName, "pane-border-style", "fg=black"])
-        let _ = runTmux(server: server, args: ["set", "-t", sessionName, "pane-border-indicators", "off"])
+        // Hide ALL tmux chrome — our app provides its own UI
+        // Set globally so it applies to main session and all grouped sessions
+        let _ = runTmux(server: server, args: ["set", "-g", "status", "off"])
+        let _ = runTmux(server: server, args: ["set", "-g", "pane-border-style", "fg=black"])
+        let _ = runTmux(server: server, args: ["set", "-g", "pane-border-indicators", "off"])
+        // Also set default-terminal for proper color support
+        let _ = runTmux(server: server, args: ["set", "-g", "default-terminal", "xterm-256color"])
 
         if !createResult.success {
             // Session might already exist, try to use it
