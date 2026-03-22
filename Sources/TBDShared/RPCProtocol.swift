@@ -92,6 +92,7 @@ public enum RPCMethod {
     public static let stateSubscribe = "state.subscribe"
     public static let resolvePath = "resolve.path"
     public static let notificationsMarkRead = "notifications.markRead"
+    public static let worktreeMerge = "worktree.merge"
 }
 
 public struct NotificationsMarkReadParams: Codable, Sendable {
@@ -143,6 +144,14 @@ public struct WorktreeRenameParams: Codable, Sendable {
     public let displayName: String
     public init(worktreeID: UUID, displayName: String) {
         self.worktreeID = worktreeID; self.displayName = displayName
+    }
+}
+
+public struct WorktreeMergeParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let archiveAfter: Bool
+    public init(worktreeID: UUID, archiveAfter: Bool = false) {
+        self.worktreeID = worktreeID; self.archiveAfter = archiveAfter
     }
 }
 

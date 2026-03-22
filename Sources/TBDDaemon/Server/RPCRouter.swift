@@ -61,6 +61,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeRevive(request.paramsData)
             case RPCMethod.worktreeRename:
                 return try await handleWorktreeRename(request.paramsData)
+            case RPCMethod.worktreeMerge:
+                return try await handleWorktreeMerge(request.paramsData)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData)
             case RPCMethod.terminalList:
@@ -212,6 +214,20 @@ public final class RPCRouter: Sendable {
 
         subscriptions.broadcast(delta: .worktreeRenamed(WorktreeRenameDelta(
             worktreeID: params.worktreeID, displayName: params.displayName
+        )))
+
+        return .ok()
+    }
+
+    private func handleWorktreeMerge(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeMergeParams.self, from: paramsData)
+        try await lifecycle.mergeWorktree(
+            worktreeID: params.worktreeID,
+            archiveAfter: params.archiveAfter
+        )
+
+        subscriptions.broadcast(delta: .worktreeMerged(WorktreeIDDelta(
+            worktreeID: params.worktreeID
         )))
 
         return .ok()

@@ -4,11 +4,15 @@ import TBDShared
 public enum HookEvent: String, Sendable {
     case setup
     case archive
+    case preMerge
+    case postMerge
 
     public var conductorKey: String {
         switch self {
         case .setup: return "setup"
         case .archive: return "archive"
+        case .preMerge: return "preMerge"
+        case .postMerge: return "postMerge"
         }
     }
 
@@ -16,6 +20,8 @@ public enum HookEvent: String, Sendable {
         switch self {
         case .setup: return "worktree_created"
         case .archive: return "before_worktree_remove"
+        case .preMerge: return "pre_merge"
+        case .postMerge: return "post_merge"
         }
     }
 }

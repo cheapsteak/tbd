@@ -8,6 +8,10 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible {
     case worktreeNotArchived(UUID)
     case worktreeAlreadyActive(UUID)
     case createFailed(String)
+    case uncommittedChanges(String)
+    case nothingToMerge
+    case rebaseConflict(String)
+    case mergeFailed(String)
 
     public var description: String {
         switch self {
@@ -21,6 +25,14 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible {
             return "Worktree is already active: \(id)"
         case .createFailed(let reason):
             return "Failed to create worktree: \(reason)"
+        case .uncommittedChanges(let detail):
+            return detail
+        case .nothingToMerge:
+            return "Nothing to merge"
+        case .rebaseConflict(let detail):
+            return "Rebase failed with conflicts: \(detail)"
+        case .mergeFailed(let detail):
+            return "Merge failed: \(detail)"
         }
     }
 }
@@ -371,6 +383,128 @@ public struct WorktreeLifecycle: Sendable {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
         return revived
+    }
+
+    // MARK: - Merge
+
+    /// Merges a worktree branch back into the default branch using rebase + fast-forward merge.
+    ///
+    /// Flow:
+    /// 1. Validate no uncommitted changes in worktree or main repo
+    /// 2. Check there are commits to merge
+    /// 3. Fetch from origin
+    /// 4. Rebase worktree branch onto origin/<default_branch>
+    /// 5. Fast-forward merge into default branch
+    /// 6. Optionally archive the worktree
+    ///
+    /// - Parameters:
+    ///   - worktreeID: The worktree to merge.
+    ///   - archiveAfter: If true, archive the worktree after a successful merge.
+    public func mergeWorktree(worktreeID: UUID, archiveAfter: Bool = false) async throws {
+        // 1. Get worktree and repo from DB
+        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+            throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
+        }
+        guard let repo = try await db.repos.get(id: worktree.repoID) else {
+            throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
+        }
+
+        // 2. Check worktree has no uncommitted changes
+        if try await git.hasUncommittedChanges(repoPath: worktree.path) {
+            throw WorktreeLifecycleError.uncommittedChanges(
+                "Commit or stash changes first"
+            )
+        }
+
+        // 3. Check main repo has no uncommitted changes
+        if try await git.hasUncommittedChanges(repoPath: repo.path) {
+            throw WorktreeLifecycleError.uncommittedChanges(
+                "Main repo has uncommitted changes"
+            )
+        }
+
+        // 4. Check there are commits to merge
+        let count = try await git.commitCount(
+            repoPath: repo.path,
+            from: repo.defaultBranch,
+            to: worktree.branch
+        )
+        if count == 0 {
+            throw WorktreeLifecycleError.nothingToMerge
+        }
+
+        // Build hook environment
+        let hookEnv: [String: String] = [
+            "TBD_EVENT": "merge",
+            "TBD_WORKTREE_ID": worktree.id.uuidString,
+            "TBD_WORKTREE_NAME": worktree.name,
+            "TBD_WORKTREE_PATH": worktree.path,
+            "TBD_REPO_PATH": repo.path,
+            "TBD_BRANCH": worktree.branch,
+            "TBD_TARGET_BRANCH": repo.defaultBranch,
+        ]
+
+        // 5. Fire preMerge hook
+        let preMergeHookPath = hooks.resolve(
+            event: .preMerge,
+            repoPath: repo.path,
+            appHookPath: nil
+        )
+        if let hookPath = preMergeHookPath {
+            let (success, output) = try await hooks.execute(
+                hookPath: hookPath,
+                cwd: worktree.path,
+                env: hookEnv,
+                timeout: 60
+            )
+            if !success {
+                throw WorktreeLifecycleError.mergeFailed("preMerge hook failed: \(output)")
+            }
+        }
+
+        // 6. Fetch from origin
+        try await git.fetch(repoPath: repo.path)
+
+        // 7. Rebase worktree branch onto origin/<default_branch>
+        let rebaseResult = await git.rebase(
+            repoPath: worktree.path,
+            onto: "origin/\(repo.defaultBranch)"
+        )
+        if !rebaseResult.success {
+            // Abort the failed rebase
+            try? await git.rebaseAbort(repoPath: worktree.path)
+            throw WorktreeLifecycleError.rebaseConflict(rebaseResult.output)
+        }
+
+        // 8. Checkout default branch in repo root
+        try await git.checkout(repoPath: repo.path, branch: repo.defaultBranch)
+
+        // 9. Fast-forward merge worktree branch into default branch
+        do {
+            try await git.mergeFFOnly(repoPath: repo.path, branch: worktree.branch)
+        } catch {
+            throw WorktreeLifecycleError.mergeFailed("\(error)")
+        }
+
+        // 10. Fire postMerge hook (async, best effort)
+        let postMergeHookPath = hooks.resolve(
+            event: .postMerge,
+            repoPath: repo.path,
+            appHookPath: nil
+        )
+        if let hookPath = postMergeHookPath {
+            _ = try? await hooks.execute(
+                hookPath: hookPath,
+                cwd: repo.path,
+                env: hookEnv,
+                timeout: 60
+            )
+        }
+
+        // 11. Optionally archive
+        if archiveAfter {
+            try await archiveWorktree(worktreeID: worktreeID, force: true)
+        }
     }
 
     // MARK: - Reconcile

@@ -14,6 +14,7 @@ public enum StateDelta: Codable, Sendable {
     case repoRemoved(RepoIDDelta)
     case terminalCreated(TerminalDelta)
     case terminalRemoved(TerminalIDDelta)
+    case worktreeMerged(WorktreeIDDelta)
 }
 
 /// Delta payload for worktree creation/revival.
