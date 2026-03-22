@@ -35,6 +35,11 @@ public struct WorktreeLifecycle: Sendable {
     public let tmux: TmuxManager
     public let hooks: HookResolver
 
+    /// The user's default shell (from $SHELL, falls back to /bin/zsh)
+    private var defaultShell: String {
+        ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    }
+
     public init(db: TBDDatabase, git: GitManager, tmux: TmuxManager, hooks: HookResolver) {
         self.db = db
         self.git = git
@@ -178,7 +183,7 @@ public struct WorktreeLifecycle: Sendable {
         // Create terminal 1: claude (or shell if skipClaude)
         let claudeCommand: String
         if skipClaude {
-            claudeCommand = "bash"
+            claudeCommand = defaultShell
         } else {
             claudeCommand = "claude --dangerously-skip-permissions"
         }
@@ -201,7 +206,7 @@ public struct WorktreeLifecycle: Sendable {
             repoPath: repo.path,
             appHookPath: nil
         )
-        let setupCommand = setupHookPath ?? "bash"
+        let setupCommand = setupHookPath ?? defaultShell
         let window2 = try await tmux.createWindow(
             server: tmuxServer,
             session: "main",
@@ -324,7 +329,7 @@ public struct WorktreeLifecycle: Sendable {
         )
 
         // Create terminal 1: claude (or shell)
-        let claudeCommand = skipClaude ? "bash" : "claude --dangerously-skip-permissions"
+        let claudeCommand = skipClaude ? defaultShell : "claude --dangerously-skip-permissions"
         let window1 = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
@@ -344,7 +349,7 @@ public struct WorktreeLifecycle: Sendable {
             repoPath: repo.path,
             appHookPath: nil
         )
-        let setupCommand = setupHookPath ?? "bash"
+        let setupCommand = setupHookPath ?? defaultShell
         let window2 = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
