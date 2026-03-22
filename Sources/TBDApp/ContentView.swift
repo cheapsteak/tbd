@@ -45,6 +45,17 @@ struct ContentView: View {
         .onChange(of: appState.selectedWorktreeIDs) { _, newSelection in
             markSelectedWorktreesAsRead(newSelection)
         }
+        .alert(
+            appState.alertIsError ? "Error" : "Success",
+            isPresented: Binding(
+                get: { appState.alertMessage != nil },
+                set: { if !$0 { appState.alertMessage = nil } }
+            )
+        ) {
+            Button("OK") { appState.alertMessage = nil }
+        } message: {
+            Text(appState.alertMessage ?? "")
+        }
     }
 
     // MARK: - Empty State

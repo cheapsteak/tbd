@@ -103,6 +103,12 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["commit", "-m", message], at: repoPath)
     }
 
+    /// Returns commit messages in the range `from..to`, newest first.
+    public func commitMessages(repoPath: String, from: String, to: String) async throws -> [String] {
+        let output = try await run(arguments: ["log", "--format=%s", "\(from)..\(to)"], at: repoPath)
+        return output.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    }
+
     /// Returns `true` if there are uncommitted changes (staged or unstaged).
     public func hasUncommittedChanges(repoPath: String) async throws -> Bool {
         let output = try await run(arguments: ["status", "--porcelain"], at: repoPath)

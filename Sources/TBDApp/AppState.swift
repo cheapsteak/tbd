@@ -17,6 +17,10 @@ final class AppState: ObservableObject {
     @Published var layouts: [UUID: LayoutNode] = [:]
     @Published var repoFilter: UUID? = nil
 
+    // Alert state for user feedback
+    @Published var alertMessage: String? = nil
+    @Published var alertIsError: Bool = false
+
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
     private var pollTimer: Timer?
@@ -191,6 +195,8 @@ final class AppState: ObservableObject {
 
     /// Merge a worktree branch into main via rebase.
     func mergeWorktree(id: UUID, archiveAfter: Bool = false) async {
+        // Find the worktree name for the alert message
+        let worktreeName = worktrees.values.flatMap { $0 }.first { $0.id == id }?.displayName ?? "worktree"
         do {
             try await daemonClient.mergeWorktree(id: id, archiveAfter: archiveAfter)
             if archiveAfter {
@@ -199,12 +205,19 @@ final class AppState: ObservableObject {
                 }
                 selectedWorktreeIDs.remove(id)
                 terminals.removeValue(forKey: id)
+                showAlert("Merged and archived \(worktreeName)")
+            } else {
+                showAlert("Merged \(worktreeName) to main")
             }
-            logger.info("Worktree merged successfully")
         } catch {
             logger.error("Failed to merge worktree: \(error)")
-            handleConnectionError(error)
+            showAlert("Merge failed: \(error)", isError: true)
         }
+    }
+
+    func showAlert(_ message: String, isError: Bool = false) {
+        alertMessage = message
+        alertIsError = isError
     }
 
     /// Revive an archived worktree.

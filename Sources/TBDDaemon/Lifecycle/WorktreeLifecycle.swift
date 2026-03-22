@@ -488,12 +488,28 @@ public struct WorktreeLifecycle: Sendable {
             throw WorktreeLifecycleError.mergeFailed("Squash merge failed (conflicts?): check the main repo")
         }
 
-        // 9. Commit the squashed changes
+        // 9. Build commit message from worktree's commit history and commit
+        let commitMessages = (try? await git.commitMessages(
+            repoPath: repo.path,
+            from: repo.defaultBranch,
+            to: worktree.branch
+        )) ?? []
+
+        let commitMessage: String
+        if commitMessages.count == 1 {
+            // Single commit — just use its message directly
+            commitMessage = commitMessages[0]
+        } else if commitMessages.isEmpty {
+            commitMessage = "Merge \(worktree.displayName)"
+        } else {
+            // Multiple commits — use first as title, list rest as bullets
+            let title = commitMessages[0]
+            let rest = commitMessages.dropFirst().map { "- \($0)" }.joined(separator: "\n")
+            commitMessage = "\(title)\n\n\(rest)"
+        }
+
         do {
-            try await git.commit(
-                repoPath: repo.path,
-                message: "Squash merge \(worktree.displayName) (\(worktree.branch))"
-            )
+            try await git.commit(repoPath: repo.path, message: commitMessage)
         } catch {
             throw WorktreeLifecycleError.mergeFailed("Commit failed after squash merge")
         }
