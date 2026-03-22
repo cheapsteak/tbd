@@ -337,6 +337,15 @@ actor DaemonClient {
         )
     }
 
+    /// Check merge status for a worktree.
+    func checkMergeability(worktreeID: UUID) throws -> WorktreeMergeStatusResult {
+        return try call(
+            method: RPCMethod.worktreeMergeStatus,
+            params: WorktreeMergeStatusParams(worktreeID: worktreeID),
+            resultType: WorktreeMergeStatusResult.self
+        )
+    }
+
     /// Rename a worktree's display name.
     func renameWorktree(id: UUID, displayName: String) throws {
         try callVoid(

@@ -11,6 +11,7 @@ final class AppState: ObservableObject {
     @Published var worktrees: [UUID: [Worktree]] = [:]
     @Published var terminals: [UUID: [Terminal]] = [:]
     @Published var notifications: [UUID: NotificationType?] = [:]
+    @Published var mergeStatus: [UUID: WorktreeMergeStatusResult] = [:]
     @Published var selectedWorktreeIDs: Set<UUID> = []
     @Published var isConnected: Bool = false
     @Published var layouts: [UUID: LayoutNode] = [:]
@@ -228,6 +229,19 @@ final class AppState: ObservableObject {
             }
         } catch {
             logger.error("Failed to rename worktree: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
+    // MARK: - Merge Status
+
+    /// Refresh the merge status for a specific worktree (called on-demand, not during polling).
+    func refreshMergeStatus(worktreeID: UUID) async {
+        do {
+            let status = try await daemonClient.checkMergeability(worktreeID: worktreeID)
+            mergeStatus[worktreeID] = status
+        } catch {
+            logger.error("Failed to check merge status for \(worktreeID): \(error)")
             handleConnectionError(error)
         }
     }

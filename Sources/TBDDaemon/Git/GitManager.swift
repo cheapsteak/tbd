@@ -141,6 +141,69 @@ public struct GitManager: Sendable {
         return parseWorktreeList(output)
     }
 
+    /// Checks for merge conflicts between two branches using `git merge-tree`.
+    ///
+    /// Uses the three-way merge-tree command to detect conflicts without modifying
+    /// the working directory. Falls back to `(false, [])` if the command fails.
+    ///
+    /// - Parameters:
+    ///   - repoPath: Path to the repository.
+    ///   - branch: The source branch (e.g. worktree branch).
+    ///   - targetBranch: The target branch (e.g. main).
+    /// - Returns: A tuple of whether conflicts exist and the list of conflicting file paths.
+    public func checkMergeConflicts(repoPath: String, branch: String, targetBranch: String) async -> (hasConflicts: Bool, conflictFiles: [String]) {
+        do {
+            // Find merge base
+            let mergeBase = try await run(
+                arguments: ["merge-base", targetBranch, branch],
+                at: repoPath
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Run merge-tree with the merge base
+            let output = try await run(
+                arguments: ["merge-tree", mergeBase, targetBranch, branch],
+                at: repoPath
+            )
+
+            // Parse conflict markers from merge-tree output
+            // merge-tree outputs sections starting with lines like:
+            // changed in both
+            //   base   100644 <hash> <file>
+            //   our    100644 <hash> <file>
+            //   their  100644 <hash> <file>
+            // followed by conflict content with <<<<<<< markers
+            var conflictFiles: [String] = []
+            let lines = output.components(separatedBy: "\n")
+            var inConflict = false
+
+            for line in lines {
+                if line.contains("changed in both") {
+                    inConflict = true
+                    continue
+                }
+                if inConflict, line.hasPrefix("  base") || line.hasPrefix("  our") || line.hasPrefix("  their") {
+                    // Extract filename from "  base   100644 <hash> <filename>"
+                    let components = line.split(whereSeparator: { $0.isWhitespace })
+                    if components.count >= 4 {
+                        let fileName = String(components[3...].joined(separator: " "))
+                        if !conflictFiles.contains(fileName) {
+                            conflictFiles.append(fileName)
+                        }
+                    }
+                    continue
+                }
+                if line.contains("<<<<<<<") {
+                    inConflict = false
+                }
+            }
+
+            return (hasConflicts: !conflictFiles.isEmpty, conflictFiles: conflictFiles)
+        } catch {
+            // If merge-tree isn't available or fails, assume no conflicts
+            return (hasConflicts: false, conflictFiles: [])
+        }
+    }
+
     // MARK: - Private
 
     /// Runs a git command with the given arguments at the given directory and returns stdout.

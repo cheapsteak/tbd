@@ -63,6 +63,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeRename(request.paramsData)
             case RPCMethod.worktreeMerge:
                 return try await handleWorktreeMerge(request.paramsData)
+            case RPCMethod.worktreeMergeStatus:
+                return try await handleWorktreeMergeStatus(request.paramsData)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData)
             case RPCMethod.terminalList:
@@ -233,6 +235,17 @@ public final class RPCRouter: Sendable {
         )))
 
         return .ok()
+    }
+
+    private func handleWorktreeMergeStatus(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeMergeStatusParams.self, from: paramsData)
+        let status = try await lifecycle.checkWorktreeMergeability(worktreeID: params.worktreeID)
+        let result = WorktreeMergeStatusResult(
+            canMerge: status.canMerge,
+            reason: status.reason,
+            commitCount: status.commitCount
+        )
+        return try RPCResponse(result: result)
     }
 
     // MARK: - Terminal Handlers

@@ -37,6 +37,19 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible {
     }
 }
 
+/// Result of checking whether a worktree can be merged.
+public struct WorktreeMergeStatus: Sendable {
+    public let canMerge: Bool
+    public let reason: String?
+    public let commitCount: Int
+
+    public init(canMerge: Bool, reason: String?, commitCount: Int) {
+        self.canMerge = canMerge
+        self.reason = reason
+        self.commitCount = commitCount
+    }
+}
+
 /// Orchestrates the full lifecycle of worktrees: create, archive, revive, and reconcile.
 ///
 /// Coordinates between git, the database, tmux, and hooks to provide
@@ -504,6 +517,71 @@ public struct WorktreeLifecycle: Sendable {
         if archiveAfter {
             try await archiveWorktree(worktreeID: worktreeID, force: true)
         }
+    }
+
+    // MARK: - Merge Status Check
+
+    /// Checks whether a worktree can be merged and returns detailed status.
+    ///
+    /// This is a non-destructive pre-check that determines:
+    /// - Whether there are uncommitted changes
+    /// - Whether there are commits to merge
+    /// - Whether the branch conflicts with the target branch
+    public func checkWorktreeMergeability(worktreeID: UUID) async throws -> WorktreeMergeStatus {
+        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+            throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
+        }
+        guard let repo = try await db.repos.get(id: worktree.repoID) else {
+            throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
+        }
+
+        // Check for uncommitted changes in the worktree
+        let hasUncommitted = try await git.hasUncommittedChanges(repoPath: worktree.path)
+        if hasUncommitted {
+            let count = (try? await git.commitCount(
+                repoPath: repo.path, from: repo.defaultBranch, to: worktree.branch
+            )) ?? 0
+            return WorktreeMergeStatus(
+                canMerge: false,
+                reason: "Has uncommitted changes",
+                commitCount: count
+            )
+        }
+
+        // Check commit count
+        let commitCount = try await git.commitCount(
+            repoPath: repo.path,
+            from: repo.defaultBranch,
+            to: worktree.branch
+        )
+        if commitCount == 0 {
+            return WorktreeMergeStatus(
+                canMerge: false,
+                reason: "Nothing to merge",
+                commitCount: 0
+            )
+        }
+
+        // Check for merge conflicts
+        let (hasConflicts, conflictFiles) = await git.checkMergeConflicts(
+            repoPath: repo.path,
+            branch: worktree.branch,
+            targetBranch: repo.defaultBranch
+        )
+        if hasConflicts {
+            let fileList = conflictFiles.joined(separator: ", ")
+            return WorktreeMergeStatus(
+                canMerge: false,
+                reason: "Conflicts with \(repo.defaultBranch): \(fileList)",
+                commitCount: commitCount
+            )
+        }
+
+        return WorktreeMergeStatus(
+            canMerge: true,
+            reason: nil,
+            commitCount: commitCount
+        )
     }
 
     // MARK: - Reconcile
