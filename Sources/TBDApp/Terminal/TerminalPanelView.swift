@@ -29,6 +29,10 @@ struct TerminalPanelView: NSViewRepresentable {
         tv.nativeBackgroundColor = NSColor.black
         tv.nativeForegroundColor = NSColor(white: 0.85, alpha: 1.0)
 
+        // Disable mouse reporting so click-drag selects text locally
+        // instead of forwarding mouse events to tmux
+        tv.allowMouseReporting = false
+
         // Set delegate for terminal events
         tv.terminalDelegate = context.coordinator
         context.coordinator.terminalView = tv
