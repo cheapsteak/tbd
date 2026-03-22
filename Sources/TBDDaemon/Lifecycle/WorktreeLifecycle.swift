@@ -537,12 +537,28 @@ public struct WorktreeLifecycle: Sendable {
 
     // MARK: - Merge Status Check
 
+    /// Cache for merge status keyed by (worktreeID, worktreeHead, targetHead)
+    struct MergeCacheKey: Hashable, Sendable {
+        let worktreeID: UUID
+        let worktreeHead: String
+        let targetHead: String
+        let hasUncommitted: Bool
+    }
+
+    private static let mergeStatusCache = MergeStatusCache()
+
+    final class MergeStatusCache: @unchecked Sendable {
+        private var cache: [MergeCacheKey: WorktreeMergeStatus] = [:]
+        private let lock = NSLock()
+
+        subscript(key: MergeCacheKey) -> WorktreeMergeStatus? {
+            get { lock.lock(); defer { lock.unlock() }; return cache[key] }
+            set { lock.lock(); defer { lock.unlock() }; cache[key] = newValue }
+        }
+    }
+
     /// Checks whether a worktree can be merged and returns detailed status.
-    ///
-    /// This is a non-destructive pre-check that determines:
-    /// - Whether there are uncommitted changes
-    /// - Whether there are commits to merge
-    /// - Whether the branch conflicts with the target branch
+    /// Results are cached based on HEAD SHAs — only re-runs git merge-tree when something changes.
     public func checkWorktreeMergeability(worktreeID: UUID) async throws -> WorktreeMergeStatus {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
@@ -551,53 +567,56 @@ public struct WorktreeLifecycle: Sendable {
             throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
         }
 
-        // Check for uncommitted changes in the worktree
+        // Get current SHAs for cache key
+        let worktreeHead = (try? await git.headSHA(repoPath: worktree.path)) ?? ""
+        let targetHead = (try? await git.headSHA(repoPath: repo.path, ref: repo.defaultBranch)) ?? ""
         let hasUncommitted = try await git.hasUncommittedChanges(repoPath: worktree.path)
+
+        let cacheKey = MergeCacheKey(
+            worktreeID: worktreeID,
+            worktreeHead: worktreeHead,
+            targetHead: targetHead,
+            hasUncommitted: hasUncommitted
+        )
+
+        // Return cached result if nothing changed
+        if let cached = Self.mergeStatusCache[cacheKey] {
+            return cached
+        }
+
+        // Compute fresh status
+        let result: WorktreeMergeStatus
+
         if hasUncommitted {
             let count = (try? await git.commitCount(
                 repoPath: repo.path, from: repo.defaultBranch, to: worktree.branch
             )) ?? 0
-            return WorktreeMergeStatus(
-                canMerge: false,
-                reason: "Has uncommitted changes",
-                commitCount: count
+            result = WorktreeMergeStatus(canMerge: false, reason: "Has uncommitted changes", commitCount: count)
+        } else {
+            let commitCount = try await git.commitCount(
+                repoPath: repo.path, from: repo.defaultBranch, to: worktree.branch
             )
+            if commitCount == 0 {
+                result = WorktreeMergeStatus(canMerge: false, reason: "Nothing to merge", commitCount: 0)
+            } else {
+                let (hasConflicts, conflictFiles) = await git.checkMergeConflicts(
+                    repoPath: repo.path, branch: worktree.branch, targetBranch: repo.defaultBranch
+                )
+                if hasConflicts {
+                    let fileList = conflictFiles.joined(separator: ", ")
+                    result = WorktreeMergeStatus(
+                        canMerge: false,
+                        reason: "Conflicts with \(repo.defaultBranch): \(fileList)",
+                        commitCount: commitCount
+                    )
+                } else {
+                    result = WorktreeMergeStatus(canMerge: true, reason: nil, commitCount: commitCount)
+                }
+            }
         }
 
-        // Check commit count
-        let commitCount = try await git.commitCount(
-            repoPath: repo.path,
-            from: repo.defaultBranch,
-            to: worktree.branch
-        )
-        if commitCount == 0 {
-            return WorktreeMergeStatus(
-                canMerge: false,
-                reason: "Nothing to merge",
-                commitCount: 0
-            )
-        }
-
-        // Check for merge conflicts
-        let (hasConflicts, conflictFiles) = await git.checkMergeConflicts(
-            repoPath: repo.path,
-            branch: worktree.branch,
-            targetBranch: repo.defaultBranch
-        )
-        if hasConflicts {
-            let fileList = conflictFiles.joined(separator: ", ")
-            return WorktreeMergeStatus(
-                canMerge: false,
-                reason: "Conflicts with \(repo.defaultBranch): \(fileList)",
-                commitCount: commitCount
-            )
-        }
-
-        return WorktreeMergeStatus(
-            canMerge: true,
-            reason: nil,
-            commitCount: commitCount
-        )
+        Self.mergeStatusCache[cacheKey] = result
+        return result
     }
 
     // MARK: - Reconcile

@@ -103,6 +103,12 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["commit", "-m", message], at: repoPath)
     }
 
+    /// Returns the HEAD SHA for a branch or ref.
+    public func headSHA(repoPath: String, ref: String = "HEAD") async throws -> String {
+        let output = try await run(arguments: ["rev-parse", ref], at: repoPath)
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Returns commit messages in the range `from..to`, newest first.
     public func commitMessages(repoPath: String, from: String, to: String) async throws -> [String] {
         let output = try await run(arguments: ["log", "--format=%s", "\(from)..\(to)"], at: repoPath)
