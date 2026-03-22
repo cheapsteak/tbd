@@ -5,6 +5,45 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "TerminalPanel")
 
+// MARK: - ScrollInterceptView
+
+/// Wraps a TerminalView to intercept scroll wheel events and forward them
+/// to tmux as mouse button presses. SwiftTerm's built-in scrollWheel only
+/// scrolls its local buffer, which is empty when tmux manages the scrollback.
+///
+/// This works independently of `allowMouseReporting` — we keep that disabled
+/// so click-drag selects text locally, while scroll events are still forwarded
+/// to tmux for history navigation.
+class ScrollInterceptView: NSView {
+    weak var terminalView: TerminalView?
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let tv = terminalView, event.deltaY != 0 else { return }
+
+        // When tmux has mouse mode on, the terminal's mouseMode will be set.
+        // Send scroll as mouse button 4 (up) / 5 (down) press events
+        // directly to the terminal, bypassing allowMouseReporting.
+        if tv.terminal.mouseMode != .off {
+            let isUp = event.deltaY > 0
+            let buttonFlags = tv.terminal.encodeButton(
+                button: isUp ? 4 : 5,
+                release: false, shift: false, meta: false, control: false
+            )
+            let col = tv.terminal.cols / 2
+            let row = tv.terminal.rows / 2
+            // Send multiple events for faster scroll velocity
+            let lines = max(1, Int(abs(event.deltaY)))
+            for _ in 0..<lines {
+                tv.terminal.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
+            }
+            return
+        }
+
+        // Fall through to SwiftTerm's default scroll behavior
+        tv.scrollWheel(with: event)
+    }
+}
+
 // MARK: - TerminalPanelView
 
 /// Wraps SwiftTerm's `TerminalView` in a SwiftUI `NSViewRepresentable`.
@@ -19,7 +58,8 @@ struct TerminalPanelView: NSViewRepresentable {
     let tmuxWindowID: String
     let tmuxBridge: TmuxBridge
 
-    func makeNSView(context: Context) -> TBDTerminalView {
+    func makeNSView(context: Context) -> ScrollInterceptView {
+        let container = ScrollInterceptView()
         let tv = TBDTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 600),
             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -40,6 +80,17 @@ struct TerminalPanelView: NSViewRepresentable {
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
 
+        // Embed TerminalView in the scroll-intercept container
+        tv.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(tv)
+        NSLayoutConstraint.activate([
+            tv.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            tv.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            tv.topAnchor.constraint(equalTo: container.topAnchor),
+            tv.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        container.terminalView = tv
+
         // Delay process start to let SwiftUI lay out the view first
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak tv] in
             guard let tv else { return }
@@ -54,14 +105,14 @@ struct TerminalPanelView: NSViewRepresentable {
             )
         }
 
-        return tv
+        return container
     }
 
-    func updateNSView(_ nsView: TBDTerminalView, context: Context) {
+    func updateNSView(_ nsView: ScrollInterceptView, context: Context) {
         // Resize is handled by sizeChanged delegate
     }
 
-    static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
+    static func dismantleNSView(_ nsView: ScrollInterceptView, coordinator: Coordinator) {
         coordinator.cleanup()
     }
 
