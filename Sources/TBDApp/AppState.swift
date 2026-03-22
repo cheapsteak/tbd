@@ -18,10 +18,33 @@ final class AppState: ObservableObject {
 
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
+    private var pollTimer: Timer?
 
     init() {
         Task {
             await connectAndLoadInitialState()
+            startPolling()
+        }
+    }
+
+    func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    /// Poll daemon for state changes every 2 seconds.
+    /// This is a simple alternative to streaming subscriptions.
+    private func startPolling() {
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if !self.isConnected {
+                    let didConnect = await self.daemonClient.connect()
+                    self.isConnected = didConnect
+                    if !didConnect { return }
+                }
+                await self.refreshAll()
+            }
         }
     }
 
