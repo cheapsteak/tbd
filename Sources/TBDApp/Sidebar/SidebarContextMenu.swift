@@ -27,13 +27,18 @@ struct SidebarContextMenu: View {
                 showRenameAlert = true
             }
 
+            if let reason = mergeTooltip, !canMerge {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Button("Merge to Main") {
                 Task {
                     await appState.mergeWorktree(id: worktree.id)
                 }
             }
             .disabled(!canMerge)
-            .help(mergeTooltip ?? "")
 
             Button("Merge to Main & Archive") {
                 Task {
@@ -41,7 +46,6 @@ struct SidebarContextMenu: View {
                 }
             }
             .disabled(!canMerge)
-            .help(mergeTooltip ?? "")
 
             Button("Archive") {
                 Task {
