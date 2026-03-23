@@ -81,15 +81,15 @@ public struct SSHAgentResolver: Sendable {
     }
 
     private func probeWithSSHAdd(socketPath: String) async -> Bool {
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
-                process.arguments = ["-l"]
-                process.environment = ["SSH_AUTH_SOCK": socketPath]
-                process.standardOutput = FileHandle.nullDevice
-                process.standardError = FileHandle.nullDevice
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
+        process.arguments = ["-l"]
+        process.environment = ["SSH_AUTH_SOCK": socketPath]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
 
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
                 do {
                     try process.run()
                     process.waitUntilExit()
@@ -101,6 +101,10 @@ public struct SSHAgentResolver: Sendable {
 
             group.addTask {
                 try? await Task.sleep(for: .seconds(2))
+                if process.isRunning {
+                    process.terminate()
+                    logger.debug("SSH probe timed out for \(socketPath)")
+                }
                 return false
             }
 
