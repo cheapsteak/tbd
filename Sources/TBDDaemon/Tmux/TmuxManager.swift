@@ -39,7 +39,11 @@ public struct TmuxManager: Sendable {
     }
 
     public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String) -> [String] {
-        ["-L", server, "new-window", "-t", session, "-c", cwd, "-PF", "#{window_id} #{pane_id}", shellCommand]
+        // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
+        // -i keeps it interactive (loads .zshrc), -c runs the command
+        // After the command exits, the pane closes (tmux default behavior)
+        let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        return ["-L", server, "new-window", "-t", session, "-c", cwd, "-PF", "#{window_id} #{pane_id}", userShell, "-ic", shellCommand]
     }
 
     public static func killWindowCommand(server: String, windowID: String) -> [String] {

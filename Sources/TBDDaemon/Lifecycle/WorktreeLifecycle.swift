@@ -214,7 +214,7 @@ public struct WorktreeLifecycle: Sendable {
         if skipClaude {
             claudeCommand = defaultShell
         } else {
-            claudeCommand = shellWrapped("claude --dangerously-skip-permissions")
+            claudeCommand = "claude --dangerously-skip-permissions"
         }
         let window1 = try await tmux.createWindow(
             server: tmuxServer,
