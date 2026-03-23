@@ -109,7 +109,7 @@ public final class RPCRouter: Sendable {
             // Ensure main worktree exists (may be missing if repo was added via reconciliation)
             let mainWts = try await db.worktrees.list(repoID: existing.id, status: .main)
             if mainWts.isEmpty {
-                let serverName = TmuxManager.serverName(forRepoID: existing.id)
+                let serverName = TmuxManager.serverName(forRepoPath: existing.path)
                 _ = try await db.worktrees.createMain(
                     repoID: existing.id,
                     name: existing.defaultBranch,
@@ -142,7 +142,7 @@ public final class RPCRouter: Sendable {
         )
 
         // Create synthetic "main" worktree entry pointing at repo root
-        let tmuxServer = TmuxManager.serverName(forRepoID: repo.id)
+        let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         _ = try await db.worktrees.createMain(
             repoID: repo.id,
             name: defaultBranch,

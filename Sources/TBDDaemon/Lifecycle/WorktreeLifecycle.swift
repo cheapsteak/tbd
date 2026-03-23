@@ -260,7 +260,7 @@ public struct WorktreeLifecycle: Sendable {
         repo: Repo, name: String, branch: String,
         worktreePath: String, skipClaude: Bool
     ) async throws -> Worktree {
-        let tmuxServer = TmuxManager.serverName(forRepoID: repo.id)
+        let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
 
         // Insert worktree into db
         let worktree = try await db.worktrees.create(
@@ -715,7 +715,7 @@ public struct WorktreeLifecycle: Sendable {
             guard gitWt.path.hasPrefix(tbdWorktreePrefix) else { continue }
 
             let name = (gitWt.path as NSString).lastPathComponent
-            let tmuxServer = TmuxManager.serverName(forRepoID: repoID)
+            let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
             _ = try await db.worktrees.create(
                 repoID: repoID,
                 name: name,
@@ -726,7 +726,7 @@ public struct WorktreeLifecycle: Sendable {
         }
 
         // Clean up orphaned tmux windows — windows not tracked by any active terminal
-        let tmuxServer = TmuxManager.serverName(forRepoID: repoID)
+        let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         let activeWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
         if activeWorktrees.isEmpty {
             // No active worktrees — kill the entire tmux server

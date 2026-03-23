@@ -25,6 +25,18 @@ public struct TmuxManager: Sendable {
 
     // MARK: - Static Command Builders
 
+    /// Derive tmux server name from repo path (stable across DB recreations).
+    /// Falls back to UUID-based name for backwards compatibility.
+    public static func serverName(forRepoPath path: String) -> String {
+        // Simple stable hash: take first 8 hex chars of path's hash
+        var hasher = Hasher()
+        hasher.combine(path)
+        let hash = abs(hasher.finalize())
+        let hex = String(hash, radix: 16).prefix(8)
+        return "tbd-\(hex)"
+    }
+
+    /// Legacy: derive from UUID (for tests and backwards compat)
     public static func serverName(forRepoID id: UUID) -> String {
         let hex = id.uuidString.replacingOccurrences(of: "-", with: "").prefix(8).lowercased()
         return "tbd-\(hex)"
