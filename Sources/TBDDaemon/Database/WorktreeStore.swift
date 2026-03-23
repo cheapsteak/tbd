@@ -13,6 +13,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var branch: String
     var path: String
     var status: String
+    var gitStatus: String
     var createdAt: Date
     var archivedAt: Date?
     var tmuxServer: String
@@ -25,6 +26,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.branch = wt.branch
         self.path = wt.path
         self.status = wt.status.rawValue
+        self.gitStatus = wt.gitStatus.rawValue
         self.createdAt = wt.createdAt
         self.archivedAt = wt.archivedAt
         self.tmuxServer = wt.tmuxServer
@@ -39,6 +41,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             branch: branch,
             path: path,
             status: WorktreeStatus(rawValue: status)!,
+            gitStatus: GitStatus(rawValue: gitStatus) ?? .current,
             createdAt: createdAt,
             archivedAt: archivedAt,
             tmuxServer: tmuxServer
@@ -158,6 +161,17 @@ public struct WorktreeStore: Sendable {
                 throw DatabaseError(message: "Worktree not found")
             }
             record.displayName = displayName
+            try record.update(db)
+        }
+    }
+
+    /// Update a worktree's git status.
+    public func updateGitStatus(id: UUID, gitStatus: GitStatus) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.gitStatus = gitStatus.rawValue
             try record.update(db)
         }
     }
