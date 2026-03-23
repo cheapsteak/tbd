@@ -180,6 +180,9 @@ struct TerminalPanelView: NSViewRepresentable {
 
         deinit {
             debugLog("PANEL: deinit for \(panelID.uuidString.prefix(8))")
+            if let monitor = scrollMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
         }
 
         // MARK: - LocalProcessDelegate
