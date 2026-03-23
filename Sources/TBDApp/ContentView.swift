@@ -96,14 +96,14 @@ struct ContentView: View {
                 .font(.title2)
                 .fontWeight(.medium)
 
-            Text("The TBD daemon is not running or could not be reached.\nThe app will attempt to reconnect automatically.")
+            Text("The TBD daemon is not running.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 360)
 
-            Button("Retry Connection") {
+            Button("Start Daemon") {
                 Task {
-                    await appState.connectAndLoadInitialState()
+                    await appState.startDaemonAndConnect()
                 }
             }
             .buttonStyle(.borderedProminent)

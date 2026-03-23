@@ -47,9 +47,14 @@ final class AppState: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if !self.isConnected {
-                    let didConnect = await self.daemonClient.connect()
-                    self.isConnected = didConnect
-                    if !didConnect { return }
+                    // Try to start the daemon if socket doesn't exist
+                    if !FileManager.default.fileExists(atPath: TBDConstants.socketPath) {
+                        await self.startDaemonAndConnect()
+                    } else {
+                        let didConnect = await self.daemonClient.connect()
+                        self.isConnected = didConnect
+                    }
+                    if !self.isConnected { return }
                 }
                 await self.refreshAll()
 
@@ -74,6 +79,54 @@ final class AppState: ObservableObject {
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }
+    }
+
+    /// Launch the daemon process and connect.
+    func startDaemonAndConnect() async {
+        // Find TBDDaemon binary next to this executable
+        let selfPath = ProcessInfo.processInfo.arguments.first ?? ""
+        let siblingPath = (selfPath as NSString).deletingLastPathComponent + "/TBDDaemon"
+
+        let candidates = [
+            siblingPath,
+            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("TBDDaemon").path,
+        ].compactMap { $0 }
+
+        var tbddPath: String?
+        for path in candidates {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                tbddPath = path
+                break
+            }
+        }
+
+        guard let path = tbddPath else {
+            showAlert("Could not find TBDDaemon binary", isError: true)
+            return
+        }
+
+        logger.info("Starting daemon from: \(path)")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.standardOutput = FileHandle(forWritingAtPath: "/tmp/tbdd.log") ?? .nullDevice
+        process.standardError = FileHandle(forWritingAtPath: "/tmp/tbdd.log") ?? .nullDevice
+        do {
+            try process.run()
+        } catch {
+            showAlert("Failed to start daemon: \(error)", isError: true)
+            return
+        }
+
+        // Wait for socket
+        for _ in 0..<20 {
+            try? await Task.sleep(for: .milliseconds(200))
+            if FileManager.default.fileExists(atPath: TBDConstants.socketPath) {
+                break
+            }
+        }
+
+        await connectAndLoadInitialState()
     }
 
     /// Refresh all state from the daemon.
