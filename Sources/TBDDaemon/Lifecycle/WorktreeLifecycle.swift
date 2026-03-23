@@ -62,17 +62,19 @@ public struct WorktreeLifecycle: Sendable {
     public let git: GitManager
     public let tmux: TmuxManager
     public let hooks: HookResolver
+    public let subscriptions: StateSubscriptionManager?
 
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
 
-    public init(db: TBDDatabase, git: GitManager, tmux: TmuxManager, hooks: HookResolver) {
+    public init(db: TBDDatabase, git: GitManager, tmux: TmuxManager, hooks: HookResolver, subscriptions: StateSubscriptionManager? = nil) {
         self.db = db
         self.git = git
         self.tmux = tmux
         self.hooks = hooks
+        self.subscriptions = subscriptions
     }
 
     // MARK: - Create
@@ -626,6 +628,53 @@ public struct WorktreeLifecycle: Sendable {
 
         Self.mergeStatusCache[cacheKey] = result
         return result
+    }
+
+    // MARK: - Git Status
+
+    /// Recompute git status for all active worktrees in a repo.
+    /// Runs git checks concurrently and updates the DB + broadcasts deltas.
+    public func refreshGitStatuses(repoID: UUID) async {
+        guard let repo = try? await db.repos.get(id: repoID) else { return }
+        let worktrees = (try? await db.worktrees.list(repoID: repoID, status: .active)) ?? []
+
+        await withTaskGroup(of: Void.self) { group in
+            for wt in worktrees {
+                // Skip already-merged worktrees (terminal state)
+                if wt.gitStatus == .merged { continue }
+
+                group.addTask {
+                    guard let newStatus = await self.computeGitStatus(
+                        repoPath: repo.path,
+                        defaultBranch: repo.defaultBranch,
+                        branch: wt.branch
+                    ), newStatus != wt.gitStatus else { return }
+                    try? await self.db.worktrees.updateGitStatus(id: wt.id, gitStatus: newStatus)
+                    self.subscriptions?.broadcast(delta: .worktreeGitStatusChanged(
+                        WorktreeGitStatusDelta(worktreeID: wt.id, gitStatus: newStatus)
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Compute git status for a single branch relative to the default branch.
+    /// Returns nil if git commands fail (leaves status unchanged).
+    private func computeGitStatus(repoPath: String, defaultBranch: String, branch: String) async -> GitStatus? {
+        guard let isAncestor = await git.isMergeBaseAncestor(
+            repoPath: repoPath, base: defaultBranch, branch: branch
+        ) else {
+            return nil  // git error — leave status unchanged
+        }
+        if isAncestor {
+            return .current
+        }
+
+        // Branches have diverged — check for conflicts
+        let (hasConflicts, _) = await git.checkMergeConflicts(
+            repoPath: repoPath, branch: branch, targetBranch: defaultBranch
+        )
+        return hasConflicts ? .conflicts : .behind
     }
 
     // MARK: - Reconcile

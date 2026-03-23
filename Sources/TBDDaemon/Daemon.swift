@@ -68,15 +68,15 @@ public final class Daemon: Sendable {
         let database = try TBDDatabase(path: TBDConstants.databasePath)
         self.db = database
 
-        // 6. Initialize managers
+        // 6. Initialize state subscriptions (before lifecycle/router so they can broadcast)
+        let subs = StateSubscriptionManager()
+        self.subscriptions = subs
+
+        // 7. Initialize managers
         let git = GitManager()
         let tmux = TmuxManager()
         let hooks = HookResolver()
-        let lifecycle = WorktreeLifecycle(db: database, git: git, tmux: tmux, hooks: hooks)
-
-        // 7. Initialize state subscriptions
-        let subs = StateSubscriptionManager()
-        self.subscriptions = subs
+        let lifecycle = WorktreeLifecycle(db: database, git: git, tmux: tmux, hooks: hooks, subscriptions: subs)
 
         // 8. Initialize RPC router
         let rpcRouter = RPCRouter(
@@ -84,7 +84,8 @@ public final class Daemon: Sendable {
             lifecycle: lifecycle,
             tmux: tmux,
             git: git,
-            startTime: startTime
+            startTime: startTime,
+            subscriptions: subs
         )
         self.router = rpcRouter
 
@@ -113,6 +114,14 @@ public final class Daemon: Sendable {
         }
 
         print("[Daemon] Started successfully (PID \(ProcessInfo.processInfo.processIdentifier))")
+
+        // 12. Refresh git statuses for all repos in background (cold recovery)
+        Task {
+            let allRepos = (try? await database.repos.list()) ?? []
+            for repo in allRepos {
+                await lifecycle.refreshGitStatuses(repoID: repo.id)
+            }
+        }
     }
 
     /// Stop the daemon: shut down servers, remove PID and socket files.

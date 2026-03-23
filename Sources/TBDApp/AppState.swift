@@ -169,7 +169,7 @@ final class AppState: ObservableObject {
             let fetched = mainWts + activeWts
             if let repoID {
                 let existing = worktrees[repoID] ?? []
-                if fetched.map(\.id) != existing.map(\.id) {
+                if fetched != existing {
                     worktrees[repoID] = fetched
                 }
             } else {
@@ -185,10 +185,7 @@ final class AppState: ObservableObject {
                         }
                     }
                 }
-                // Only update if changed
-                let oldIDs = Set(worktrees.values.flatMap { $0.map(\.id) })
-                let newIDs = Set(grouped.values.flatMap { $0.map(\.id) })
-                if oldIDs != newIDs {
+                if grouped != worktrees {
                     worktrees = grouped
                 }
             }
