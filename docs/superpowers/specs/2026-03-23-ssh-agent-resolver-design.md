@@ -10,11 +10,15 @@ Normal terminals work because they're launched fresh by the window server with t
 
 A stable symlink (`~/.ssh/tbd-agent.sock`) that always points to the live SSH agent socket. TBD sets `SSH_AUTH_SOCK` to this symlink path in all tmux sessions. A background task keeps the symlink target current.
 
-This fixes existing sessions instantly — processes resolve the symlink at use time, not at shell startup.
+### How "fixes existing sessions" works
+
+The symlink is the indirection that makes this work. Once a shell was started with `SSH_AUTH_SOCK=~/.ssh/tbd-agent.sock`, every subsequent `git commit` (or any SSH operation) resolves the symlink at connect time. When the symlink target is updated, the next git command in that shell follows the new target — no shell restart needed.
+
+Limitation: shells that were started *before* this feature is deployed still have the old literal socket path in their env, not the symlink. Those shells won't benefit until they're restarted. This is a one-time migration cost.
 
 ## Components
 
-### `SSHAgentResolver` (new, in `TBDDaemonLib`)
+### `SSHAgentResolver` (new, under `Sources/TBDDaemon/SSH/`)
 
 A `Sendable` struct with two public methods:
 
@@ -28,18 +32,23 @@ public struct SSHAgentResolver: Sendable {
     public func resolve() async -> Bool
 
     /// Check if the current symlink target is reachable.
+    /// Uses raw socket connect(2), not ssh-add — fast and cheap.
     public func isValid() -> Bool
 }
 ```
 
 **Probing logic in `resolve()`:**
 
-1. Fast path: if the current symlink target responds to `ssh-add -l` (exit 0 or 1), return true — no work needed.
-2. Slow path: glob `/private/tmp/com.apple.launchd.*/Listeners`, test each socket with `ssh-add -l`. Exit code 0 or 1 means live agent (exit 2 = no agent on that socket).
-3. Update the symlink atomically: write to a temp path, then `rename()` over the target.
+1. Fast path: if the current symlink target is reachable via `connect(2)` on the Unix domain socket, return true — no work needed.
+2. Slow path: glob `/private/tmp/com.apple.launchd.*/Listeners`. Filter for Unix domain sockets via `stat(2)` / `S_ISSOCK`. Test each with `ssh-add -l`. Exit code 0 or 1 means live SSH agent (exit 2 = agent protocol not spoken on that socket).
+3. Update the symlink atomically: `symlink()` to a temp path in `~/.ssh/`, then `Darwin.rename()` over the target (not `FileManager.moveItem`, which may resolve symlinks). Both paths are on the same volume, so `rename(2)` is atomic.
 4. Return false if no live agent found among any socket.
 
-**Process execution:** Uses `Process` with `/usr/bin/ssh-add` and arguments `["-l"]`, setting the `SSH_AUTH_SOCK` environment variable per probe. Timeout each probe at 2 seconds to avoid hanging on unresponsive sockets.
+**`isValid()` implementation:** Attempt `connect(2)` on the symlink path using a `AF_UNIX` socket. If it connects, the agent is alive. This avoids spawning a process and completes in microseconds.
+
+**Process timeout for probing:** `Foundation.Process` has no built-in timeout. Wrap each probe in a `Task` that races against `Task.sleep(for: .seconds(2))`. If the sleep wins, call `process.terminate()` and skip that socket.
+
+**Symlink directory:** If `~/.ssh/` doesn't exist, create it with mode 0700. If `~/.ssh/tbd-agent.sock` exists as a regular file or directory (not a symlink), remove it before creating the symlink.
 
 ### Integration: `TmuxManager.ensureServer`
 
@@ -49,19 +58,19 @@ After creating a new tmux server, set the SSH agent socket in the tmux global en
 try? await runTmux(["-L", server, "setenv", "-g", "SSH_AUTH_SOCK", SSHAgentResolver.symlinkPath])
 ```
 
-This goes alongside the existing `set -g status off` and `set -g mouse on` calls.
+This goes alongside the existing `set -g status off` and `set -g mouse on` calls. New panes/windows created in this tmux server will inherit this env var.
 
 ### Integration: Daemon startup
 
-In the daemon's startup sequence, call `resolver.resolve()` once to create/update the symlink before any tmux sessions are created.
+In the daemon's startup sequence, call `resolver.resolve()` once to create/update the symlink before any tmux sessions are created. Also update the daemon's own process environment via `setenv("SSH_AUTH_SOCK", symlinkPath, 1)` so that any `Process` calls within the daemon (e.g., `GitManager` git operations) also use the stable symlink.
 
 ### Integration: Periodic refresh
 
 A background `Task` in the daemon that runs every 60 seconds:
 
-1. Call `resolver.isValid()` (cheap — just tests the current symlink target)
-2. If invalid, call `resolver.resolve()` (probes all sockets)
-3. If resolved, update all active tmux servers: `tmux -L <server> setenv -g SSH_AUTH_SOCK <symlinkPath>`
+1. Call `resolver.isValid()` (cheap — raw socket connect, no process spawn)
+2. If invalid, call `resolver.resolve()` (probes all sockets, ~100ms)
+3. After resolving, the symlink is updated on disk. No need to re-run `tmux setenv` since the env already points to the stable symlink path — the symlink indirection handles it.
 
 The periodic task is cancellable and tied to the daemon's lifecycle.
 
@@ -89,14 +98,17 @@ launchd creates SSH agent at /private/tmp/com.apple.launchd.XXX/Listeners
 - **No live agent found:** `resolve()` returns false, symlink is left as-is (or not created). Git signing fails as it does today — no worse than current behavior.
 - **Multiple live agents:** Take the first one that responds. In practice, only one launchd socket is the SSH agent.
 - **Daemon restart:** Symlink persists on disk. On next startup, fast path likely succeeds immediately.
-- **Symlink already exists from previous run:** Overwritten atomically via `rename()`.
+- **Symlink already exists from previous run:** Overwritten atomically via `rename(2)`.
 - **`~/.ssh/` doesn't exist:** Create it with mode 0700 before creating the symlink.
+- **`~/.ssh/tbd-agent.sock` is a regular file/directory:** Remove it before creating the symlink.
+- **Pre-existing sessions (migration):** Shells started before this feature was deployed have the old literal socket path. They won't benefit from the symlink until restarted. This is expected — a one-time cost.
 
 ## Testing
 
-- Unit test `SSHAgentResolver` with a mock socket (create a Unix domain socket in a temp dir, test probing logic).
-- Unit test the fast path (valid symlink) vs slow path (stale symlink triggers re-probe).
-- Integration: verify `tmux setenv` is called with the correct path after `ensureServer`.
+- Unit test `SSHAgentResolver` probing with a mock Unix domain socket in a temp dir.
+- Unit test the fast path (valid symlink → `isValid()` returns true) vs slow path (stale symlink → triggers re-probe).
+- Unit test atomic symlink update (verify old symlink is replaced).
+- Test timeout behavior: mock a socket that accepts connections but never responds.
 
 ## Files to create/modify
 
@@ -104,6 +116,6 @@ launchd creates SSH agent at /private/tmp/com.apple.launchd.XXX/Listeners
 |------|--------|
 | `Sources/TBDDaemon/SSH/SSHAgentResolver.swift` | Create |
 | `Sources/TBDDaemon/Tmux/TmuxManager.swift` | Modify — add `setenv` call in `ensureServer` |
-| `Sources/TBDDaemon/main.swift` | Modify — call `resolve()` at startup |
+| `Sources/TBDDaemon/main.swift` | Modify — call `resolve()` at startup, `setenv` in-process |
 | `Sources/TBDDaemon/Server/DaemonServer.swift` (or equivalent lifecycle owner) | Modify — add periodic refresh task |
 | `Tests/TBDDaemonTests/SSHAgentResolverTests.swift` | Create |
