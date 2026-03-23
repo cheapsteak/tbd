@@ -15,6 +15,7 @@ public enum StateDelta: Codable, Sendable {
     case terminalCreated(TerminalDelta)
     case terminalRemoved(TerminalIDDelta)
     case worktreeMerged(WorktreeIDDelta)
+    case worktreeGitStatusChanged(WorktreeGitStatusDelta)
 }
 
 /// Delta payload for worktree creation/revival.
@@ -86,6 +87,15 @@ public struct TerminalDelta: Codable, Sendable {
 public struct TerminalIDDelta: Codable, Sendable {
     public let terminalID: UUID
     public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+/// Delta payload for worktree git status change.
+public struct WorktreeGitStatusDelta: Codable, Sendable {
+    public let worktreeID: UUID
+    public let gitStatus: GitStatus
+    public init(worktreeID: UUID, gitStatus: GitStatus) {
+        self.worktreeID = worktreeID; self.gitStatus = gitStatus
+    }
 }
 
 // MARK: - State Subscription Manager
