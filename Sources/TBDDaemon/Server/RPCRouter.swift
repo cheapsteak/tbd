@@ -301,6 +301,13 @@ public final class RPCRouter: Sendable {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
 
+        // Ensure tmux server exists before creating window
+        _ = try await tmux.ensureServer(
+            server: worktree.tmuxServer,
+            session: "main",
+            cwd: worktree.path
+        )
+
         let shellCommand = params.cmd ?? (ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
