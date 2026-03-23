@@ -77,6 +77,8 @@ public final class RPCRouter: Sendable {
                 return try handleDaemonStatus()
             case RPCMethod.resolvePath:
                 return try await handleResolvePath(request.paramsData)
+            case RPCMethod.notificationsList:
+                return try await handleNotificationsList()
             case RPCMethod.notificationsMarkRead:
                 return try await handleNotificationsMarkRead(request.paramsData)
             case RPCMethod.cleanup:
@@ -353,6 +355,13 @@ public final class RPCRouter: Sendable {
         )))
 
         return try RPCResponse(result: notification)
+    }
+
+    // MARK: - Notifications List
+
+    private func handleNotificationsList() async throws -> RPCResponse {
+        let notifications = try await db.notifications.allUnreadByWorktree()
+        return try RPCResponse(result: NotificationsListResult(notifications: notifications))
     }
 
     // MARK: - Notifications Mark Read

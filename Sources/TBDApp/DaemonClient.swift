@@ -402,6 +402,12 @@ actor DaemonClient {
         )
     }
 
+    /// List unread notifications grouped by worktree (highest severity per worktree).
+    func listNotifications() throws -> [UUID: NotificationType] {
+        let result = try callNoParams(method: RPCMethod.notificationsList, resultType: NotificationsListResult.self)
+        return result.notifications
+    }
+
     /// Mark notifications as read for a worktree.
     func markNotificationsRead(worktreeID: UUID) throws {
         try callVoid(

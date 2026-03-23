@@ -91,10 +91,16 @@ public enum RPCMethod {
     public static let daemonStatus = "daemon.status"
     public static let stateSubscribe = "state.subscribe"
     public static let resolvePath = "resolve.path"
+    public static let notificationsList = "notifications.list"
     public static let notificationsMarkRead = "notifications.markRead"
     public static let worktreeMerge = "worktree.merge"
     public static let worktreeMergeStatus = "worktree.mergeStatus"
     public static let cleanup = "cleanup"
+}
+
+public struct NotificationsListResult: Codable, Sendable {
+    public let notifications: [UUID: NotificationType]
+    public init(notifications: [UUID: NotificationType]) { self.notifications = notifications }
 }
 
 public struct NotificationsMarkReadParams: Codable, Sendable {
