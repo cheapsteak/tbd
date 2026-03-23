@@ -4,6 +4,9 @@ import TBDShared
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let worktreeName = detectWorktreeName()
+        NSApp.applicationIconImage = generateAppIcon(worktreeName: worktreeName)
+
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
