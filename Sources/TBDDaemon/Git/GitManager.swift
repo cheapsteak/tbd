@@ -132,6 +132,16 @@ public struct GitManager: Sendable {
         return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
+    /// Returns true if `base` is an ancestor of `branch` (i.e., branch is ahead or equal, no divergence).
+    public func isMergeBaseAncestor(repoPath: String, base: String, branch: String) async -> Bool {
+        do {
+            _ = try await run(arguments: ["merge-base", "--is-ancestor", base, branch], at: repoPath)
+            return true  // exit code 0 means base IS an ancestor
+        } catch {
+            return false  // exit code 1 means it's NOT an ancestor
+        }
+    }
+
     /// Creates a new worktree at `worktreePath` on a new branch based on `baseBranch`.
     public func worktreeAdd(repoPath: String, worktreePath: String, branch: String, baseBranch: String) async throws {
         _ = try await run(arguments: ["worktree", "add", worktreePath, "-b", branch, baseBranch], at: repoPath)

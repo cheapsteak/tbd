@@ -56,4 +56,48 @@ struct GitStatusTests {
         let current = try await db.worktrees.get(id: wt.id)
         #expect(current?.gitStatus == .current)
     }
+
+    @Test func isMergeBaseAncestor() async throws {
+        // Set up a temp repo
+        let repoDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("tbd-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: repoDir) }
+
+        func shell(_ cmd: String, at dir: URL? = nil) async throws {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            p.arguments = ["-c", cmd]
+            p.currentDirectoryURL = dir ?? repoDir
+            try p.run()
+            p.waitUntilExit()
+            guard p.terminationStatus == 0 else {
+                throw NSError(domain: "shell", code: Int(p.terminationStatus))
+            }
+        }
+
+        // Init repo and make initial commit on main
+        try await shell("git init -b main")
+        try await shell("git config commit.gpgSign false")
+        try await shell("git config user.email 'test@test.com'")
+        try await shell("git config user.name 'Test'")
+        try await shell("touch README.md && git add . && git commit -m 'initial'")
+
+        // Create feature branch with a commit
+        try await shell("git checkout -b feature")
+        try await shell("touch feature.txt && git add . && git commit -m 'feature commit'")
+
+        // main IS an ancestor of feature
+        let git = GitManager()
+        let repoPath = repoDir.path
+        let mainIsAncestor = await git.isMergeBaseAncestor(repoPath: repoPath, base: "main", branch: "feature")
+        #expect(mainIsAncestor == true)
+
+        // Now add a commit to main (diverge)
+        try await shell("git checkout main")
+        try await shell("touch main-extra.txt && git add . && git commit -m 'main diverges'")
+
+        // main is now NOT an ancestor of feature (main has diverged)
+        let mainIsAncestorAfterDiverge = await git.isMergeBaseAncestor(repoPath: repoPath, base: "main", branch: "feature")
+        #expect(mainIsAncestorAfterDiverge == false)
+    }
 }
