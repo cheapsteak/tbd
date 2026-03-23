@@ -25,14 +25,14 @@ public struct TmuxManager: Sendable {
 
     // MARK: - Static Command Builders
 
-    /// Derive tmux server name from repo path (stable across DB recreations).
-    /// Falls back to UUID-based name for backwards compatibility.
+    /// Derive tmux server name from repo path (stable across DB recreations AND process restarts).
+    /// Uses a simple deterministic hash (djb2) — NOT Swift's Hasher which is randomized per process.
     public static func serverName(forRepoPath path: String) -> String {
-        // Simple stable hash: take first 8 hex chars of path's hash
-        var hasher = Hasher()
-        hasher.combine(path)
-        let hash = abs(hasher.finalize())
-        let hex = String(hash, radix: 16).prefix(8)
+        var hash: UInt64 = 5381
+        for byte in path.utf8 {
+            hash = ((hash &<< 5) &+ hash) &+ UInt64(byte) // hash * 33 + byte
+        }
+        let hex = String(hash & 0xFFFFFFFF, radix: 16, uppercase: false)
         return "tbd-\(hex)"
     }
 

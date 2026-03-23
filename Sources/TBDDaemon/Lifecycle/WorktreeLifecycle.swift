@@ -689,7 +689,16 @@ public struct WorktreeLifecycle: Sendable {
         }
 
         let gitWorktrees = try await git.worktreeList(repoPath: repo.path)
-        let dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
+        let correctTmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
+        var dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
+
+        // Fix stale tmux server names (e.g. after migration from UUID-based to path-based naming)
+        let mainWorktrees = try await db.worktrees.list(repoID: repoID, status: .main)
+        for wt in (dbWorktrees + mainWorktrees) where wt.tmuxServer != correctTmuxServer {
+            try? await db.worktrees.updateTmuxServer(id: wt.id, tmuxServer: correctTmuxServer)
+        }
+        // Re-fetch with corrected names
+        dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
 
         let gitPaths = Set(gitWorktrees.map(\.path))
         let dbPaths = Set(dbWorktrees.map(\.path))

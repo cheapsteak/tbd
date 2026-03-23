@@ -176,6 +176,17 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Update the tmux server name for a worktree.
+    public func updateTmuxServer(id: UUID, tmuxServer: String) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.tmuxServer = tmuxServer
+            try record.update(db)
+        }
+    }
+
     /// Find a worktree by its filesystem path.
     public func findByPath(path: String) async throws -> Worktree? {
         try await writer.read { db in
