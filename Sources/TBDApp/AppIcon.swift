@@ -176,24 +176,26 @@ private func drawWorktreeRibbon(ctx: CGContext, size: CGFloat, name: String) {
     ctx.saveGState()
 
     let ribbonColor = colorForWorktreeName(name)
-    let ribbonWidth = size * 0.18
+    let ribbonWidth = size * 0.20
 
-    // Position the ribbon diagonally across the bottom-right corner
-    ctx.translateBy(x: size, y: 0)
-    ctx.rotate(by: -.pi / 4)
+    // Translate to center of bottom-right corner area, then rotate 45°.
+    // The squircle clip path (set in drawSquircleBackground) trims the edges.
+    let cx = size * 0.75
+    let cy = size * 0.25
+    ctx.translateBy(x: cx, y: cy)
+    ctx.rotate(by: .pi / 4)
 
-    let centerOffset = size * 0.72
+    let bandLength = size * 0.8
     let ribbonRect = CGRect(
-        x: -size * 0.05,
-        y: centerOffset - ribbonWidth / 2,
-        width: size * 0.55,
+        x: -bandLength / 2,
+        y: -ribbonWidth / 2,
+        width: bandLength,
         height: ribbonWidth
     )
-
     ctx.setFillColor(ribbonColor)
     ctx.fill(ribbonRect)
 
-    // Ribbon text
+    // Ribbon text — drawn in the rotated frame, centered at origin
     let abbreviatedName = abbreviateWorktreeName(name)
     let ribbonFontSize = size * 0.065
     let ribbonFont = NSFont.systemFont(ofSize: ribbonFontSize, weight: .semibold) as CTFont
@@ -206,8 +208,8 @@ private func drawWorktreeRibbon(ctx: CGContext, size: CGFloat, name: String) {
     let textLine = CTLineCreateWithAttributedString(textString)
     let textBounds = CTLineGetBoundsWithOptions(textLine, .useOpticalBounds)
 
-    let textX = ribbonRect.midX - textBounds.width / 2 - textBounds.origin.x
-    let textY = ribbonRect.midY - textBounds.height / 2 - textBounds.origin.y
+    let textX = -textBounds.width / 2 - textBounds.origin.x
+    let textY = -textBounds.height / 2 - textBounds.origin.y
 
     ctx.textPosition = CGPoint(x: textX, y: textY)
     CTLineDraw(textLine, ctx)
