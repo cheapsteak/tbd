@@ -29,6 +29,7 @@ done
 
 if [ "$skip_build" = false ]; then
     echo "Building..."
+    "$REPO_ROOT/scripts/generate-version.sh"
     t0=$SECONDS
     (cd "$REPO_ROOT" && swift build) 2>&1 | tail -3
     echo "  Build: $((SECONDS - t0))s"
