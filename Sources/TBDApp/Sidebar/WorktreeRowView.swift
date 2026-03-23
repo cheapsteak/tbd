@@ -38,6 +38,25 @@ struct WorktreeRowView: View {
         }
     }
 
+    private var gitStatusIcon: String? {
+        guard !isMain else { return nil }
+        switch worktree.gitStatus {
+        case .current: return nil
+        case .behind: return "arrow.down"
+        case .conflicts: return "exclamationmark.triangle"
+        case .merged: return "checkmark.circle"
+        }
+    }
+
+    private var gitStatusColor: Color {
+        switch worktree.gitStatus {
+        case .current: return .secondary
+        case .behind: return .secondary
+        case .conflicts: return .orange
+        case .merged: return .green
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             if isMain {
@@ -52,6 +71,11 @@ struct WorktreeRowView: View {
                 Circle()
                     .fill(color)
                     .frame(width: 8, height: 8)
+            }
+            if let icon = gitStatusIcon {
+                Image(systemName: icon)
+                    .font(.caption2)
+                    .foregroundStyle(gitStatusColor)
             }
             if isEditing {
                 TextField("Name", text: $editText)
