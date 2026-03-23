@@ -77,6 +77,8 @@ public struct TmuxManager: Sendable {
             try? await runTmux(["-L", server, "set", "-g", "pane-border-style", "fg=black"])
             // Enable mouse so scroll wheel enters copy-mode and scrolls history
             try? await runTmux(["-L", server, "set", "-g", "mouse", "on"])
+            // Set SSH_AUTH_SOCK to stable symlink so shells get a resilient path
+            try? await runTmux(["-L", server, "setenv", "-g", "SSH_AUTH_SOCK", SSHAgentResolver.defaultSymlinkPath])
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
