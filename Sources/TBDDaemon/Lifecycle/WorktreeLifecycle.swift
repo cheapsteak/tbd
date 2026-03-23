@@ -185,6 +185,14 @@ public struct WorktreeLifecycle: Sendable {
         )
     }
 
+    /// Wraps a command so the user's shell takes over when it exits,
+    /// preventing tmux from destroying the window and jumping to another.
+    /// If the command is already the user's shell, returns it unchanged.
+    private func shellWrapped(_ command: String) -> String {
+        if command == defaultShell { return command }
+        return "\(command); exec \(defaultShell)"
+    }
+
     /// Completes the creation flow after the git worktree has been added.
     private func finishCreate(
         repo: Repo, name: String, branch: String,
@@ -201,8 +209,8 @@ public struct WorktreeLifecycle: Sendable {
             tmuxServer: tmuxServer
         )
 
-        // Ensure tmux server exists
-        try await tmux.ensureServer(
+        // Ensure tmux server exists — capture initial window ID to kill later
+        let initialWindowID = try await tmux.ensureServer(
             server: tmuxServer,
             session: "main",
             cwd: worktreePath
@@ -213,7 +221,7 @@ public struct WorktreeLifecycle: Sendable {
         if skipClaude {
             claudeCommand = defaultShell
         } else {
-            claudeCommand = "claude --dangerously-skip-permissions"
+            claudeCommand = shellWrapped("claude --dangerously-skip-permissions")
         }
         let window1 = try await tmux.createWindow(
             server: tmuxServer,
@@ -234,7 +242,7 @@ public struct WorktreeLifecycle: Sendable {
             repoPath: repo.path,
             appHookPath: nil
         )
-        let setupCommand = setupHookPath ?? defaultShell
+        let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
         let window2 = try await tmux.createWindow(
             server: tmuxServer,
             session: "main",
@@ -247,6 +255,11 @@ public struct WorktreeLifecycle: Sendable {
             tmuxPaneID: window2.paneID,
             label: "setup"
         )
+
+        // Kill the untracked initial window that new-session created
+        if let windowID = initialWindowID {
+            try? await tmux.killWindow(server: tmuxServer, windowID: windowID)
+        }
 
         return worktree
     }
@@ -354,15 +367,15 @@ public struct WorktreeLifecycle: Sendable {
             branch: worktree.branch
         )
 
-        // Ensure tmux server
-        try await tmux.ensureServer(
+        // Ensure tmux server — capture initial window ID to kill later
+        let initialWindowID = try await tmux.ensureServer(
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path
         )
 
         // Create terminal 1: claude (or shell)
-        let claudeCommand = skipClaude ? defaultShell : "claude --dangerously-skip-permissions"
+        let claudeCommand = skipClaude ? defaultShell : shellWrapped("claude --dangerously-skip-permissions")
         let window1 = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
@@ -382,7 +395,7 @@ public struct WorktreeLifecycle: Sendable {
             repoPath: repo.path,
             appHookPath: nil
         )
-        let setupCommand = setupHookPath ?? defaultShell
+        let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
         let window2 = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
@@ -395,6 +408,11 @@ public struct WorktreeLifecycle: Sendable {
             tmuxPaneID: window2.paneID,
             label: "setup"
         )
+
+        // Kill the untracked initial window that new-session created
+        if let windowID = initialWindowID {
+            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: windowID)
+        }
 
         // Update status to active
         try await db.worktrees.revive(id: worktreeID)
@@ -654,9 +672,15 @@ public struct WorktreeLifecycle: Sendable {
         let gitPaths = Set(gitWorktrees.map(\.path))
         let dbPaths = Set(dbWorktrees.map(\.path))
 
-        // Mark missing worktrees as archived
+        // Mark missing worktrees as archived — also kill their tmux windows
         for wt in dbWorktrees where !gitPaths.contains(wt.path) {
-            // Clean up terminals
+            let terminals = try await db.terminals.list(worktreeID: wt.id)
+            for terminal in terminals {
+                try? await tmux.killWindow(
+                    server: wt.tmuxServer,
+                    windowID: terminal.tmuxWindowID
+                )
+            }
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
             try await db.worktrees.archive(id: wt.id)
         }
@@ -677,6 +701,30 @@ public struct WorktreeLifecycle: Sendable {
                 path: gitWt.path,
                 tmuxServer: tmuxServer
             )
+        }
+
+        // Clean up orphaned tmux windows — windows not tracked by any active terminal
+        let tmuxServer = TmuxManager.serverName(forRepoID: repoID)
+        let activeWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
+        if activeWorktrees.isEmpty {
+            // No active worktrees — kill the entire tmux server
+            try? await tmux.killServer(server: tmuxServer)
+        } else {
+            // Collect all tracked window IDs
+            var trackedWindowIDs: Set<String> = []
+            for wt in activeWorktrees {
+                let terminals = try await db.terminals.list(worktreeID: wt.id)
+                for t in terminals {
+                    trackedWindowIDs.insert(t.tmuxWindowID)
+                }
+            }
+
+            // List actual tmux windows and kill any that aren't tracked
+            if let tmuxWindows = try? await tmux.listWindows(server: tmuxServer, session: "main") {
+                for window in tmuxWindows where !trackedWindowIDs.contains(window.windowID) {
+                    try? await tmux.killWindow(server: tmuxServer, windowID: window.windowID)
+                }
+            }
         }
     }
 }

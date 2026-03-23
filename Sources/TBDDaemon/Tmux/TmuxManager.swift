@@ -56,23 +56,35 @@ public struct TmuxManager: Sendable {
 
     // MARK: - Instance Execution Methods
 
-    public func ensureServer(server: String, session: String, cwd: String) async throws {
-        if dryRun { return }
+    /// Ensures a tmux server and session exist.
+    /// - Returns: The initial window ID if a new session was created (caller should kill it after
+    ///   creating real windows), or `nil` if the session already existed.
+    @discardableResult
+    public func ensureServer(server: String, session: String, cwd: String) async throws -> String? {
+        if dryRun { return nil }
         // Check if the session already exists before creating
         let hasSessionArgs = Self.hasSessionCommand(server: server, session: session)
         do {
             try await runTmux(hasSessionArgs)
             // Session already exists, nothing to do
+            return nil
         } catch {
-            // Session does not exist, create it
-            let args = Self.newServerCommand(server: server, session: session, cwd: cwd)
-            try await runTmux(args)
+            // Session does not exist, create it — capture the initial window ID
+            let args = ["-L", server, "new-session", "-d", "-s", session, "-c", cwd, "-PF", "#{window_id}"]
+            let output = try await runTmux(args)
             // Hide tmux chrome globally — TBD app provides its own UI
             try? await runTmux(["-L", server, "set", "-g", "status", "off"])
             try? await runTmux(["-L", server, "set", "-g", "pane-border-style", "fg=black"])
             // Enable mouse so scroll wheel enters copy-mode and scrolls history
             try? await runTmux(["-L", server, "set", "-g", "mouse", "on"])
+            return output.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+    }
+
+    /// Kills an entire tmux server and all its sessions.
+    public func killServer(server: String) async throws {
+        if dryRun { return }
+        try await runTmux(["-L", server, "kill-server"])
     }
 
     public func createWindow(server: String, session: String, cwd: String, shellCommand: String) async throws -> (windowID: String, paneID: String) {
