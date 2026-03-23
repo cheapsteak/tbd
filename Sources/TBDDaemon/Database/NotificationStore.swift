@@ -89,4 +89,25 @@ public struct NotificationStore: Sendable {
             .map(\.type)
             .max(by: { $0.severity < $1.severity })
     }
+
+    /// Get the highest severity unread notification type for all worktrees.
+    public func allUnreadByWorktree() async throws -> [UUID: NotificationType] {
+        let records = try await writer.read { db in
+            try NotificationRecord
+                .filter(Column("read") == false)
+                .fetchAll(db)
+        }
+        var result: [UUID: NotificationType] = [:]
+        for record in records {
+            let model = record.toModel()
+            if let existing = result[model.worktreeID] {
+                if model.type.severity > existing.severity {
+                    result[model.worktreeID] = model.type
+                }
+            } else {
+                result[model.worktreeID] = model.type
+            }
+        }
+        return result
+    }
 }

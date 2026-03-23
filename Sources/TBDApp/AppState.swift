@@ -143,6 +143,7 @@ final class AppState: ObservableObject {
     func refreshAll() async {
         await refreshRepos()
         await refreshWorktrees()
+        await refreshNotifications()
     }
 
     /// Refresh the repo list. Only updates if data changed.
@@ -218,6 +219,23 @@ final class AppState: ObservableObject {
         } catch {
             logger.error("Failed to list terminals for worktree \(worktreeID): \(error)")
             handleConnectionError(error)
+        }
+    }
+
+    /// Refresh unread notifications from the daemon.
+    func refreshNotifications() async {
+        do {
+            let fetched = try await daemonClient.listNotifications()
+            if fetched != notifications.compactMapValues({ $0 }) {
+                // Merge: keep nil entries for worktrees we've locally dismissed
+                var updated: [UUID: NotificationType?] = [:]
+                for (id, type) in fetched {
+                    updated[id] = type
+                }
+                notifications = updated
+            }
+        } catch {
+            logger.error("Failed to list notifications: \(error)")
         }
     }
 
