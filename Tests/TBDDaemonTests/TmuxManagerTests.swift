@@ -29,6 +29,8 @@ import Testing
     #expect(args.contains("main"))
     #expect(args.contains("-c"))
     #expect(args.contains("/tmp/repo"))
+    #expect(args.contains("-PF"))
+    #expect(args.contains("#{window_id}"))
 }
 
 @Test func testHasSessionCommand() {
