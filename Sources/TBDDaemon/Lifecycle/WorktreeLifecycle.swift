@@ -644,12 +644,11 @@ public struct WorktreeLifecycle: Sendable {
                 if wt.gitStatus == .merged { continue }
 
                 group.addTask {
-                    let newStatus = await self.computeGitStatus(
+                    guard let newStatus = await self.computeGitStatus(
                         repoPath: repo.path,
                         defaultBranch: repo.defaultBranch,
                         branch: wt.branch
-                    )
-                    guard newStatus != wt.gitStatus else { return }
+                    ), newStatus != wt.gitStatus else { return }
                     try? await self.db.worktrees.updateGitStatus(id: wt.id, gitStatus: newStatus)
                     self.subscriptions?.broadcast(delta: .worktreeGitStatusChanged(
                         WorktreeGitStatusDelta(worktreeID: wt.id, gitStatus: newStatus)
@@ -660,10 +659,13 @@ public struct WorktreeLifecycle: Sendable {
     }
 
     /// Compute git status for a single branch relative to the default branch.
-    private func computeGitStatus(repoPath: String, defaultBranch: String, branch: String) async -> GitStatus {
-        let isAncestor = await git.isMergeBaseAncestor(
+    /// Returns nil if git commands fail (leaves status unchanged).
+    private func computeGitStatus(repoPath: String, defaultBranch: String, branch: String) async -> GitStatus? {
+        guard let isAncestor = await git.isMergeBaseAncestor(
             repoPath: repoPath, base: defaultBranch, branch: branch
-        )
+        ) else {
+            return nil  // git error — leave status unchanged
+        }
         if isAncestor {
             return .current
         }

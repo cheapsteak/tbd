@@ -30,7 +30,7 @@ public enum GitStatus: String, Codable, Sendable {
     case merged      // squash-merged into main (set by TBD's merge flow)
 }
 
-public struct Worktree: Codable, Sendable, Identifiable {
+public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var repoID: UUID
     public var name: String

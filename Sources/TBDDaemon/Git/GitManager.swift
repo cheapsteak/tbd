@@ -133,12 +133,15 @@ public struct GitManager: Sendable {
     }
 
     /// Returns true if `base` is an ancestor of `branch` (i.e., branch is ahead or equal, no divergence).
-    public func isMergeBaseAncestor(repoPath: String, base: String, branch: String) async -> Bool {
+    /// Returns nil if the git command fails for reasons other than "not an ancestor" (e.g., unknown ref).
+    public func isMergeBaseAncestor(repoPath: String, base: String, branch: String) async -> Bool? {
         do {
             _ = try await run(arguments: ["merge-base", "--is-ancestor", base, branch], at: repoPath)
             return true  // exit code 0 means base IS an ancestor
-        } catch {
+        } catch let error as GitError where error.exitCode == 1 {
             return false  // exit code 1 means it's NOT an ancestor
+        } catch {
+            return nil  // real error (bad ref, corrupt repo, etc.)
         }
     }
 

@@ -169,13 +169,7 @@ final class AppState: ObservableObject {
             let fetched = mainWts + activeWts
             if let repoID {
                 let existing = worktrees[repoID] ?? []
-                let changed = fetched.count != existing.count ||
-                    zip(fetched.sorted { $0.id.uuidString < $1.id.uuidString },
-                        existing.sorted { $0.id.uuidString < $1.id.uuidString })
-                    .contains { new, old in
-                        new.id != old.id || new.gitStatus != old.gitStatus || new.displayName != old.displayName
-                    }
-                if changed {
+                if fetched != existing {
                     worktrees[repoID] = fetched
                 }
             } else {
@@ -191,14 +185,7 @@ final class AppState: ObservableObject {
                         }
                     }
                 }
-                // Update if IDs changed or any worktree content changed (gitStatus, displayName)
-                let oldWts = worktrees.values.flatMap { $0 }.sorted { $0.id.uuidString < $1.id.uuidString }
-                let newWts = grouped.values.flatMap { $0 }.sorted { $0.id.uuidString < $1.id.uuidString }
-                let changed = oldWts.count != newWts.count ||
-                    zip(oldWts, newWts).contains { old, new in
-                        old.id != new.id || old.gitStatus != new.gitStatus || old.displayName != new.displayName
-                    }
-                if changed {
+                if grouped != worktrees {
                     worktrees = grouped
                 }
             }
