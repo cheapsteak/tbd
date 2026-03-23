@@ -151,6 +151,9 @@ public final class RPCRouter: Sendable {
             tmuxServer: tmuxServer
         )
 
+        // Reconcile existing git worktrees into the DB
+        try? await lifecycle.reconcile(repoID: repo.id)
+
         subscriptions.broadcast(delta: .repoAdded(RepoDelta(
             repoID: repo.id, path: repo.path, displayName: repo.displayName
         )))
