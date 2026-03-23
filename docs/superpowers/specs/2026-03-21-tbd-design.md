@@ -312,7 +312,10 @@ Users opt in by adding a Claude Code hook. Two approaches:
 {
   "hooks": {
     "Stop": [{
-      "command": "tbd notify --type response_complete 2>/dev/null || true"
+      "hooks": [{
+        "type": "command",
+        "command": "tbd notify --type response_complete 2>/dev/null || true"
+      }]
     }]
   }
 }

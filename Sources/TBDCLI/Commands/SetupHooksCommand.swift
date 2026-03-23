@@ -63,21 +63,36 @@ struct SetupHooksCommand: AsyncParsableCommand {
         // The hook command we want to add
         let tbdNotifyCommand = "tbd notify --type response_complete 2>/dev/null || true"
 
-        // Check if our hook already exists
-        let alreadyExists = stopHooks.contains { hook in
-            guard let command = hook["command"] as? String else { return false }
-            return command.contains("tbd notify")
+        let correctEntry: [String: Any] = [
+            "hooks": [
+                [
+                    "type": "command",
+                    "command": tbdNotifyCommand,
+                ] as [String: Any],
+            ],
+        ]
+
+        // Migrate legacy bare-format entries and check if hook already exists
+        var found = false
+        for (i, matcher) in stopHooks.enumerated() {
+            if let innerHooks = matcher["hooks"] as? [[String: Any]] {
+                // Correct format — check if it's ours
+                if innerHooks.contains(where: { ($0["command"] as? String)?.contains("tbd notify") == true }) {
+                    found = true
+                }
+            } else if let command = matcher["command"] as? String, command.contains("tbd notify") {
+                // Legacy bare format — migrate in place
+                stopHooks[i] = correctEntry
+                found = true
+            }
         }
 
-        if !alreadyExists {
-            let hookEntry: [String: Any] = [
-                "type": "command",
-                "command": tbdNotifyCommand,
-            ]
-            stopHooks.append(hookEntry)
-            hooks["Stop"] = stopHooks
-            settings["hooks"] = hooks
+        if !found {
+            stopHooks.append(correctEntry)
         }
+
+        hooks["Stop"] = stopHooks
+        settings["hooks"] = hooks
 
         // Write back
         let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
