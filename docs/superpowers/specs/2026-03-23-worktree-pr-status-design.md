@@ -74,7 +74,7 @@ gh api graphql -f query='
 '
 ```
 
-- Aliases use `wt_<worktreeID>` (with hyphens replaced) to safely round-trip UUIDs through GraphQL alias syntax.
+- Aliases use `wt_<worktreeID>` (with hyphens replaced by underscores, e.g. `wt_550e8400_e29b_41d4_a716_446655440000`) to safely round-trip UUIDs through GraphQL alias syntax (GraphQL identifiers cannot contain hyphens).
 - The response is a JSON dict keyed by alias — each value is either an empty `nodes` array (no PR) or one PR node.
 - If `gh` exits non-zero (no auth, network error), the cache entry is left unchanged (stale is better than missing).
 - If `nodes` is empty for a branch, that worktree's entry is removed from the cache.
@@ -119,7 +119,7 @@ public struct PRRefreshParams: Codable, Sendable {
 
 Handlers added to `RPCRouter`:
 - `handlePRList()` — returns `PRStatusManager.allStatuses()`
-- `handlePRRefresh(params)` — calls `PRStatusManager.refresh(worktreeID:...)`, returns updated `PRStatus?`
+- `handlePRRefresh(params)` — looks up the worktree and its repo from `db` to obtain `branch` and `remoteURL`, then calls `PRStatusManager.refresh(worktreeID:branch:repoPath:remoteURL:)`, returns updated `PRStatus?`
 
 `PRStatusManager` is injected into `RPCRouter` alongside existing dependencies.
 
