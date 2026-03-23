@@ -311,6 +311,7 @@ final class AppState: ObservableObject {
 
     /// Archive a worktree.
     func archiveWorktree(id: UUID, force: Bool = false) async {
+        let worktreeName = worktrees.values.flatMap { $0 }.first { $0.id == id }?.displayName ?? "worktree"
         do {
             try await daemonClient.archiveWorktree(id: id, force: force)
             for repoID in worktrees.keys {
@@ -318,9 +319,10 @@ final class AppState: ObservableObject {
             }
             selectedWorktreeIDs.remove(id)
             terminals.removeValue(forKey: id)
+            logger.info("Archived \(worktreeName)")
         } catch {
             logger.error("Failed to archive worktree: \(error)")
-            handleConnectionError(error)
+            showAlert("Archive failed: \(error)", isError: true)
         }
     }
 

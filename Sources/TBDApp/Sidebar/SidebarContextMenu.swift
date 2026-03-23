@@ -56,9 +56,10 @@ struct SidebarContextMenu: View {
                 }
                 .disabled(!canMerge)
 
-                Button("Archive") {
+                Button("Archive", role: .destructive) {
+                    let wtID = worktree.id
                     Task {
-                        await appState.archiveWorktree(id: worktree.id)
+                        await appState.archiveWorktree(id: wtID)
                     }
                 }
 
