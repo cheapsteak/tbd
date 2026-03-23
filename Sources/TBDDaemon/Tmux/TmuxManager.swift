@@ -31,7 +31,7 @@ public struct TmuxManager: Sendable {
     }
 
     public static func newServerCommand(server: String, session: String, cwd: String) -> [String] {
-        ["-L", server, "new-session", "-d", "-s", session, "-c", cwd]
+        ["-L", server, "new-session", "-d", "-s", session, "-c", cwd, "-PF", "#{window_id}"]
     }
 
     public static func hasSessionCommand(server: String, session: String) -> [String] {
@@ -70,7 +70,7 @@ public struct TmuxManager: Sendable {
             return nil
         } catch {
             // Session does not exist, create it — capture the initial window ID
-            let args = ["-L", server, "new-session", "-d", "-s", session, "-c", cwd, "-PF", "#{window_id}"]
+            let args = Self.newServerCommand(server: server, session: session, cwd: cwd)
             let output = try await runTmux(args)
             // Hide tmux chrome globally — TBD app provides its own UI
             try? await runTmux(["-L", server, "set", "-g", "status", "off"])
