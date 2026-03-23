@@ -1,4 +1,5 @@
 import SwiftUI
+import TBDShared
 
 struct StatusBarView: View {
     @EnvironmentObject var appState: AppState
@@ -15,6 +16,8 @@ struct StatusBarView: View {
             Text(appState.isConnected ? "tbdd connected" : "tbdd disconnected")
             Spacer()
             Text("\(activeWorktreeCount) active worktree\(activeWorktreeCount == 1 ? "" : "s")")
+            Text(GitVersion.commitHash)
+                .foregroundStyle(.secondary)
         }
         .font(.caption)
         .padding(.horizontal)
