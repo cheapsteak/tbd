@@ -257,9 +257,22 @@ public final class RPCRouter: Sendable {
             archiveAfter: params.archiveAfter
         )
 
+        // Mark the merged worktree's git status
+        try await db.worktrees.updateGitStatus(id: params.worktreeID, gitStatus: .merged)
+
         subscriptions.broadcast(delta: .worktreeMerged(WorktreeIDDelta(
             worktreeID: params.worktreeID
         )))
+        subscriptions.broadcast(delta: .worktreeGitStatusChanged(
+            WorktreeGitStatusDelta(worktreeID: params.worktreeID, gitStatus: .merged)
+        ))
+
+        // Refresh all other active worktrees in background (main just moved)
+        if let mergedWt = try await db.worktrees.get(id: params.worktreeID) {
+            Task {
+                await lifecycle.refreshGitStatuses(repoID: mergedWt.repoID)
+            }
+        }
 
         return .ok()
     }
