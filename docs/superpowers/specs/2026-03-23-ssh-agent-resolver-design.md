@@ -40,7 +40,7 @@ public struct SSHAgentResolver: Sendable {
 **Probing logic in `resolve()`:**
 
 1. Fast path: if the current symlink target is reachable via `connect(2)` on the Unix domain socket, return true — no work needed.
-2. Slow path: glob `/private/tmp/com.apple.launchd.*/Listeners`. Filter for Unix domain sockets via `stat(2)` / `S_ISSOCK`. Test each with `ssh-add -l`. Exit code 0 or 1 means live SSH agent (exit 2 = agent protocol not spoken on that socket).
+2. Slow path: glob `/private/tmp/com.apple.launchd.*/Listeners`. Filter for Unix domain sockets via `stat(2)` / `S_ISSOCK`. Cap at 10 candidates (sorted newest first by mtime) to bound probe time. Test each with `ssh-add -l`. Exit code 0 or 1 means live SSH agent (exit 2 = agent protocol not spoken on that socket). Stop at the first match.
 3. Update the symlink atomically: `symlink()` to a temp path in `~/.ssh/`, then `Darwin.rename()` over the target (not `FileManager.moveItem`, which may resolve symlinks). Both paths are on the same volume, so `rename(2)` is atomic.
 4. Return false if no live agent found among any socket.
 
@@ -73,6 +73,14 @@ A background `Task` in the daemon that runs every 60 seconds:
 3. After resolving, the symlink is updated on disk. No need to re-run `tmux setenv` since the env already points to the stable symlink path — the symlink indirection handles it.
 
 The periodic task is cancellable and tied to the daemon's lifecycle.
+
+### Logging
+
+Use `os.Logger` (subsystem `com.tbd.daemon`, category `SSHAgent`). Log:
+- Symlink created/updated: old target → new target
+- Resolve failure: no live agent found (list candidates checked)
+- Periodic refresh recovery: symlink was stale, updated to new target
+- Probe timeouts: which socket path timed out
 
 ## Data flow
 
@@ -117,5 +125,5 @@ launchd creates SSH agent at /private/tmp/com.apple.launchd.XXX/Listeners
 | `Sources/TBDDaemon/SSH/SSHAgentResolver.swift` | Create |
 | `Sources/TBDDaemon/Tmux/TmuxManager.swift` | Modify — add `setenv` call in `ensureServer` |
 | `Sources/TBDDaemon/main.swift` | Modify — call `resolve()` at startup, `setenv` in-process |
-| `Sources/TBDDaemon/Server/DaemonServer.swift` (or equivalent lifecycle owner) | Modify — add periodic refresh task |
+| `Sources/TBDDaemon/Daemon.swift` | Modify — add periodic refresh task |
 | `Tests/TBDDaemonTests/SSHAgentResolverTests.swift` | Create |
