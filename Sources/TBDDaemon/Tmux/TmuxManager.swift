@@ -70,6 +70,8 @@ public struct TmuxManager: Sendable {
             // Hide tmux chrome globally — TBD app provides its own UI
             try? await runTmux(["-L", server, "set", "-g", "status", "off"])
             try? await runTmux(["-L", server, "set", "-g", "pane-border-style", "fg=black"])
+            // Enable mouse so scroll wheel enters copy-mode and scrolls history
+            try? await runTmux(["-L", server, "set", "-g", "mouse", "on"])
         }
     }
 
