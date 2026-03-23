@@ -5,43 +5,11 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "TerminalPanel")
 
-// MARK: - ScrollInterceptView
-
-/// Wraps a TerminalView to intercept scroll wheel events and forward them
-/// to tmux as mouse button presses. SwiftTerm's built-in scrollWheel only
-/// scrolls its local buffer, which is empty when tmux manages the scrollback.
-///
-/// This works independently of `allowMouseReporting` — we keep that disabled
-/// so click-drag selects text locally, while scroll events are still forwarded
-/// to tmux for history navigation.
-class ScrollInterceptView: NSView {
-    weak var terminalView: TerminalView?
-
-    override func scrollWheel(with event: NSEvent) {
-        guard let tv = terminalView, event.deltaY != 0 else { return }
-
-        // When tmux has mouse mode on, the terminal's mouseMode will be set.
-        // Send scroll as mouse button 4 (up) / 5 (down) press events
-        // directly to the terminal, bypassing allowMouseReporting.
-        if tv.terminal.mouseMode != .off {
-            let isUp = event.deltaY > 0
-            let buttonFlags = tv.terminal.encodeButton(
-                button: isUp ? 4 : 5,
-                release: false, shift: false, meta: false, control: false
-            )
-            let col = tv.terminal.cols / 2
-            let row = tv.terminal.rows / 2
-            // Send multiple events for faster scroll velocity
-            let lines = max(1, Int(abs(event.deltaY)))
-            for _ in 0..<lines {
-                tv.terminal.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
-            }
-            return
-        }
-
-        // Fall through to SwiftTerm's default scroll behavior
-        tv.scrollWheel(with: event)
-    }
+/// Sendable wrapper for a weak TerminalView reference, used to pass the
+/// reference into an `NSEvent` local monitor closure under strict concurrency.
+private final class WeakTerminalRef: @unchecked Sendable {
+    weak var view: TerminalView?
+    init(_ view: TerminalView) { self.view = view }
 }
 
 // MARK: - TerminalPanelView
@@ -58,8 +26,7 @@ struct TerminalPanelView: NSViewRepresentable {
     let tmuxWindowID: String
     let tmuxBridge: TmuxBridge
 
-    func makeNSView(context: Context) -> ScrollInterceptView {
-        let container = ScrollInterceptView()
+    func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 600),
             font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -80,17 +47,6 @@ struct TerminalPanelView: NSViewRepresentable {
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
 
-        // Embed TerminalView in the scroll-intercept container
-        tv.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(tv)
-        NSLayoutConstraint.activate([
-            tv.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            tv.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            tv.topAnchor.constraint(equalTo: container.topAnchor),
-            tv.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-        container.terminalView = tv
-
         // Delay process start to let SwiftUI lay out the view first
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak tv] in
             guard let tv else { return }
@@ -105,14 +61,14 @@ struct TerminalPanelView: NSViewRepresentable {
             )
         }
 
-        return container
+        return tv
     }
 
-    func updateNSView(_ nsView: ScrollInterceptView, context: Context) {
+    func updateNSView(_ nsView: TBDTerminalView, context: Context) {
         // Resize is handled by sizeChanged delegate
     }
 
-    static func dismantleNSView(_ nsView: ScrollInterceptView, coordinator: Coordinator) {
+    static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
         coordinator.cleanup()
     }
 
@@ -129,6 +85,7 @@ struct TerminalPanelView: NSViewRepresentable {
         var panelID: UUID = UUID()
         var initialFrame: NSRect = .zero
         private var localProcess: LocalProcess?
+        private var scrollMonitor: Any?
 
         func startTmuxClient(
             terminalView: TerminalView,
@@ -178,15 +135,54 @@ struct TerminalPanelView: NSViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 terminalView.window?.makeFirstResponder(terminalView)
             }
+
+            // Intercept scroll wheel events before they reach TerminalView.
+            // TerminalView.scrollWheel is not `open`, so we can't override it
+            // in TBDTerminalView. Instead, a local event monitor intercepts
+            // scroll events and forwards them to tmux as mouse button presses.
+            let ref = WeakTerminalRef(terminalView)
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                let deltaY = event.deltaY
+                let location = event.locationInWindow
+                guard deltaY != 0 else { return event }
+
+                let consumed = MainActor.assumeIsolated {
+                    guard let tv = ref.view else { return false }
+                    let point = tv.convert(location, from: nil)
+                    guard tv.bounds.contains(point) else { return false }
+                    guard tv.terminal.mouseMode != .off else { return false }
+
+                    let isUp = deltaY > 0
+                    let buttonFlags = tv.terminal.encodeButton(
+                        button: isUp ? 4 : 5,
+                        release: false, shift: false, meta: false, control: false
+                    )
+                    let col = tv.terminal.cols / 2
+                    let row = tv.terminal.rows / 2
+                    let lines = max(1, Int(abs(deltaY)))
+                    for _ in 0..<lines {
+                        tv.terminal.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
+                    }
+                    return true
+                }
+                return consumed ? nil : event
+            }
         }
 
         func cleanup() {
             debugLog("PANEL: cleanup for \(panelID.uuidString.prefix(8))")
+            if let monitor = scrollMonitor {
+                NSEvent.removeMonitor(monitor)
+                scrollMonitor = nil
+            }
             tmuxBridge?.cleanupSession(panelID: panelID, server: tmuxServer)
         }
 
         deinit {
             debugLog("PANEL: deinit for \(panelID.uuidString.prefix(8))")
+            if let monitor = scrollMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
         }
 
         // MARK: - LocalProcessDelegate
