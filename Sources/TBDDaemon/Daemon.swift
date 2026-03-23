@@ -11,6 +11,7 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var socketServer: SocketServer?
     public nonisolated(unsafe) var httpServer: HTTPServer?
     public nonisolated(unsafe) var subscriptions: StateSubscriptionManager?
+    public nonisolated(unsafe) var sshRefreshTask: Task<Void, Never>?
     public let pidFile: PIDFile
     public let startTime: Date
 
@@ -43,6 +44,25 @@ public final class Daemon: Sendable {
 
         // 4. Write PID file
         try pidFile.write()
+
+        // 4a. Resolve SSH agent symlink and update daemon's own environment
+        let sshResolver = SSHAgentResolver()
+        if await sshResolver.resolve() {
+            setenv("SSH_AUTH_SOCK", sshResolver.symlinkPath, 1)
+            print("[Daemon] SSH agent symlink resolved: \(sshResolver.symlinkPath)")
+        }
+
+        // 4b. Start periodic SSH agent refresh (every 60s)
+        self.sshRefreshTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                if !sshResolver.isValid() {
+                    if await sshResolver.resolve() {
+                        print("[Daemon] SSH agent symlink refreshed")
+                    }
+                }
+            }
+        }
 
         // 5. Initialize database
         let database = try TBDDatabase(path: TBDConstants.databasePath)
@@ -98,6 +118,9 @@ public final class Daemon: Sendable {
     /// Stop the daemon: shut down servers, remove PID and socket files.
     public func stop() async {
         print("[Daemon] Shutting down...")
+
+        // Cancel SSH refresh
+        sshRefreshTask?.cancel()
 
         // Stop servers
         if let sock = socketServer {
