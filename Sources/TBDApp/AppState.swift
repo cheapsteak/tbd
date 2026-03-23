@@ -227,7 +227,6 @@ final class AppState: ObservableObject {
         do {
             let fetched = try await daemonClient.listNotifications()
             if fetched != notifications.compactMapValues({ $0 }) {
-                // Merge: keep nil entries for worktrees we've locally dismissed
                 var updated: [UUID: NotificationType?] = [:]
                 for (id, type) in fetched {
                     updated[id] = type
@@ -236,6 +235,7 @@ final class AppState: ObservableObject {
             }
         } catch {
             logger.error("Failed to list notifications: \(error)")
+            handleConnectionError(error)
         }
     }
 
