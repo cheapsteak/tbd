@@ -83,6 +83,16 @@ final class AppState: ObservableObject {
 
     /// Launch the daemon process and connect.
     func startDaemonAndConnect() async {
+        // Check if daemon is already running (PID file + process alive)
+        let pidPath = TBDConstants.pidFilePath
+        if let pidStr = try? String(contentsOfFile: pidPath, encoding: .utf8),
+           let pid = pid_t(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)),
+           kill(pid, 0) == 0 {
+            // Daemon is running, just connect
+            await connectAndLoadInitialState()
+            return
+        }
+
         // Find TBDDaemon binary next to this executable
         let selfPath = ProcessInfo.processInfo.arguments.first ?? ""
         let siblingPath = (selfPath as NSString).deletingLastPathComponent + "/TBDDaemon"
