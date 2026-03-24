@@ -12,11 +12,6 @@ struct GitFileStatus: Identifiable {
 
     var displayName: String { URL(fileURLWithPath: path).lastPathComponent }
 
-    var directory: String {
-        let dir = URL(fileURLWithPath: path).deletingLastPathComponent().path
-        return dir == "." ? "" : dir
-    }
-
     var isStaged: Bool { indexStatus != " " && indexStatus != "?" }
     var isUntracked: Bool { workingStatus == "?" }
     var isUnstaged: Bool { !isUntracked && workingStatus != " " }
@@ -200,18 +195,11 @@ private struct GitFileRow: View {
                     .fontWeight(.bold)
                     .foregroundStyle(file.statusColor)
                     .frame(width: 12, alignment: .center)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(file.displayName)
-                        .font(.caption)
-                        .lineLimit(1)
-                    if !file.directory.isEmpty {
-                        Text(file.directory)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
-                }
-                Spacer()
+                Text(file.path)
+                    .font(.system(.caption, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 3)

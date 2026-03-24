@@ -4,7 +4,7 @@ import TBDShared
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
-    @AppStorage("filePanel.isVisible") private var showFilePanel = false
+    @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
 
     private var selectedWorktree: Worktree? {
