@@ -45,11 +45,10 @@ New actor: `Sources/TBDDaemon/PR/PRStatusManager.swift`
 
 ```swift
 actor PRStatusManager {
-    private var cache: [UUID: PRStatus] = [:]           // worktreeID → status
-    private var lastFetched: [UUID: Date] = [:]
+    private var cache: [UUID: PRStatus] = [:]    // worktreeID → status
 
-    func fetchAll(worktrees: [(id: UUID, branch: String, repoPath: String, remoteURL: String?)]) async
-    func refresh(worktreeID: UUID, branch: String, repoPath: String, remoteURL: String?) async -> PRStatus?
+    func fetchAll(worktrees: [(id: UUID, branch: String, repoPath: String)]) async
+    func refresh(worktreeID: UUID, branch: String, repoPath: String) async -> PRStatus?
     func invalidate(worktreeID: UUID)
     func allStatuses() -> [UUID: PRStatus]
 }
@@ -57,35 +56,36 @@ actor PRStatusManager {
 
 ### Fetching Strategy
 
-Worktrees are grouped by repo. For each repo, a **single** `gh api graphql` call fetches PR status for all worktrees in that repo using GraphQL aliases:
+A **single** `gh api graphql` call fetches the authenticated user's most recent 50 PRs across all repos:
 
 ```bash
 gh api graphql -f query='
   query {
-    repository(owner: "OWNER", name: "REPO") {
-      wt_<uuid1>: pullRequests(headRefName: "tbd/branch-a", first: 1, states: [OPEN, MERGED, CLOSED]) {
-        nodes { number url state mergeStateStatus }
-      }
-      wt_<uuid2>: pullRequests(headRefName: "tbd/branch-b", first: 1, states: [OPEN, MERGED, CLOSED]) {
-        nodes { number url state mergeStateStatus }
+    viewer {
+      pullRequests(first: 50, states: [OPEN, MERGED, CLOSED],
+                   orderBy: {field: CREATED_AT, direction: DESC}) {
+        nodes {
+          number url state mergeStateStatus headRefName
+          repository { nameWithOwner }
+        }
       }
     }
   }
-'
+' --repo <any-repo-path>
 ```
 
-- Aliases use `wt_<worktreeID>` (with hyphens replaced by underscores, e.g. `wt_550e8400_e29b_41d4_a716_446655440000`) to safely round-trip UUIDs through GraphQL alias syntax (GraphQL identifiers cannot contain hyphens).
-- The response is a JSON dict keyed by alias — each value is either an empty `nodes` array (no PR) or one PR node.
-- If `gh` exits non-zero (no auth, network error), the cache entry is left unchanged (stale is better than missing).
-- If `nodes` is empty for a branch, that worktree's entry is removed from the cache.
+The call is made from any known repo path (for `gh` to infer the host). The response is filtered client-side:
 
-### Remote URL Parsing
+1. Keep only nodes where `headRefName` starts with `tbd/`
+2. Match each node to a worktree by `headRefName` (exact match against `worktree.branch`)
+3. Update cache for matched worktrees; remove cache entries for worktrees with no matching PR node
 
-Owner/repo slug extracted from the `Repo.remoteURL` field (already stored at repo-add time). Handles both:
-- `git@github.com:owner/repo.git`
-- `https://github.com/owner/repo.git`
+This approach requires no dynamic query building, no per-repo grouping, and no owner/slug parsing. One HTTP call covers all repos the user has worktrees in.
 
-Non-GitHub remotes (GitLab, etc.) are skipped silently — no icon shown.
+- If `gh` exits non-zero (not installed, not authenticated, network error): cache is left unchanged — stale is better than missing. Logged at debug level.
+- `first: 50` is sufficient in practice: active TBD worktrees would appear in the user's most recent PRs. If a worktree's PR is not in the top 50, it is treated as having no PR.
+
+**On-demand refresh** (`pr.refresh` for a single worktree): runs `gh pr view <branch> --json number,url,state,mergeStateStatus` from `repoPath` — a targeted single-PR lookup used when the user selects a worktree.
 
 ### State Mapping
 
@@ -119,7 +119,7 @@ public struct PRRefreshParams: Codable, Sendable {
 
 Handlers added to `RPCRouter`:
 - `handlePRList()` — returns `PRStatusManager.allStatuses()`
-- `handlePRRefresh(params)` — looks up the worktree and its repo from `db` to obtain `branch` and `remoteURL`, then calls `PRStatusManager.refresh(worktreeID:branch:repoPath:remoteURL:)`, returns updated `PRStatus?`
+- `handlePRRefresh(params)` — looks up the worktree and its repo from `db` to obtain `branch` and `repoPath`, then calls `PRStatusManager.refresh(worktreeID:branch:repoPath:)`, returns updated `PRStatus?`
 
 `PRStatusManager` is injected into `RPCRouter` alongside existing dependencies.
 
@@ -185,7 +185,6 @@ No tooltip required for MVP — the color is sufficient for at-a-glance status.
 ## Error Handling
 
 - `gh` not installed or not authenticated: `PRStatusManager` catches the non-zero exit, logs at debug level, leaves cache unchanged. No error surfaces to the user.
-- Non-GitHub remote: skip silently — no icon shown, no error.
 - GraphQL parse failure: log warning, leave cache unchanged.
 - Daemon not running: standard `handleConnectionError` path in `AppState.refreshPRStatuses()`.
 
