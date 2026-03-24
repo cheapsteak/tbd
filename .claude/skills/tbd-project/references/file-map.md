@@ -7,7 +7,7 @@ Key source files and what they do.
 
 ## Sources/TBDShared/
 - `Constants.swift` — paths (~/.tbd/), version string, socket path
-- `Models.swift` — Repo, Worktree (with GitStatus), Terminal, TBDNotification, NotificationType, WorktreeStatus (.active/.archived/.main)
+- `Models.swift` — Repo, Worktree (with GitStatus), Terminal, TBDNotification, NotificationType, WorktreeStatus (.active/.archived/.main/.creating)
 - `RPCProtocol.swift` — RPCRequest/Response, all param/result structs, RPCMethod constants
 - `NameGenerator.swift` — YYYYMMDD-adjective-animal name generation
 - `Adjectives.swift` — ~1,179 curated adjectives (from unique-names-generator)
@@ -24,7 +24,7 @@ Key source files and what they do.
 - `NotificationStore.swift` — Notification CRUD, unread, highestSeverity
 
 ### Git/
-- `GitManager.swift` — all git operations (fetch, worktree add/remove/list, rebase, merge, conflict check, headSHA, isMergeBaseAncestor)
+- `GitManager.swift` — all git operations (fetch, worktree add/remove/list, conflict check, headSHA, isMergeBaseAncestor)
 
 ### Hooks/
 - `HookResolver.swift` — hook priority chain resolution + async execution
@@ -36,17 +36,23 @@ Key source files and what they do.
 - `TmuxManager.swift` — tmux server lifecycle, window CRUD, dryRun mode for tests
 
 ### Lifecycle/
-- `WorktreeLifecycle.swift` — orchestrates create/archive/revive/merge/reconcile, git status refresh, merge status caching
+- `WorktreeLifecycle.swift` — base struct, error enum, init (coordinates db/git/tmux/hooks/subscriptions)
+- `WorktreeLifecycle+Create.swift` — two-phase async creation (beginCreate inserts DB row with .creating, completeCreate does git+tmux setup)
+- `WorktreeLifecycle+Archive.swift` — archive (run hook, kill tmux, git worktree remove) and revive (recreate worktree from archived branch)
+- `WorktreeLifecycle+Reconcile.swift` — reconcile DB against git worktree list on startup, git status refresh
 
 ### Server/
-- `RPCRouter.swift` — maps RPC method names to handler functions
+- `RPCRouter.swift` — maps RPC method names to handler functions (dispatch switch)
+- `RPCRouter+RepoHandlers.swift` — repo.add, repo.remove, repo.list handlers
+- `RPCRouter+WorktreeHandlers.swift` — worktree.create, worktree.list, worktree.archive, worktree.revive, worktree.rename handlers
+- `RPCRouter+TerminalHandlers.swift` — terminal.create, terminal.list, terminal.send, notify, notifications.list, notifications.markRead, cleanup, daemon.status, resolve.path handlers
 - `SocketServer.swift` — Unix domain socket server (NIO)
 - `HTTPServer.swift` — HTTP server on localhost (NIO + NIOHTTP1)
 - `StateSubscription.swift` — StateDelta events + StateSubscriptionManager for streaming deltas to clients
 
 ### Root files
 - `main.swift` — daemon entry point (signal handlers, start/stop)
-- `Daemon.swift` — top-level orchestrator (init all subsystems, startup/shutdown)
+- `Daemon.swift` — top-level orchestrator (init all subsystems, startup/shutdown, background git fetch every 60s)
 - `PIDFile.swift` — PID file management + stale detection
 
 ## Sources/TBDCLI/
@@ -55,7 +61,7 @@ Key source files and what they do.
 - `PathResolver.swift` — resolves $PWD to repo/worktree ID
 - `Utilities.swift` — printJSON, resolvePath helpers
 - `Commands/RepoCommands.swift` — tbd repo add/remove/list
-- `Commands/WorktreeCommands.swift` — tbd worktree create/list/archive/revive/rename/merge
+- `Commands/WorktreeCommands.swift` — tbd worktree create/list/archive/revive/rename
 - `Commands/TerminalCommands.swift` — tbd terminal create/list/send
 - `Commands/NotifyCommand.swift` — tbd notify (auto-resolves worktree from PWD)
 - `Commands/DaemonCommands.swift` — tbd daemon status
@@ -63,14 +69,20 @@ Key source files and what they do.
 - `Commands/CleanupCommand.swift` — tbd cleanup
 
 ## Sources/TBDApp/
-- `TBDApp.swift` — @main App, AppDelegate for dock visibility
-- `AppState.swift` — @MainActor ObservableObject, all published state, daemon polling
+- `TBDApp.swift` — @main App, AppDelegate for dock visibility + programmatic icon
+- `AppIcon.swift` — programmatic icon generation (purple gradient, branch lines, "TBD" text, optional worktree ribbon)
+- `AppState.swift` — @MainActor ObservableObject, published state properties, daemon polling, connection management
+- `AppState+Repos.swift` — repo actions (add, remove, refresh)
+- `AppState+Worktrees.swift` — worktree actions (create, archive, revive, rename, refresh)
+- `AppState+Terminals.swift` — terminal actions (refresh, send)
+- `AppState+Notifications.swift` — notification refresh and alert helpers
 - `DaemonClient.swift` — actor, POSIX socket RPC client for app
 - `ContentView.swift` — NavigationSplitView, toolbar, empty/disconnected states
+- `FileViewer/FileViewerPanel.swift` — git status file viewer (staged/unstaged changes)
 - `Sidebar/SidebarView.swift` — repo list with filter, add repo button
 - `Sidebar/RepoSectionView.swift` — collapsible repo section with + button
-- `Sidebar/WorktreeRowView.swift` — worktree item with badge, selection handling
-- `Sidebar/SidebarContextMenu.swift` — right-click menu (rename, merge, archive, etc.)
+- `Sidebar/WorktreeRowView.swift` — worktree item with badge, inline rename, selection handling
+- `Sidebar/SidebarContextMenu.swift` — right-click menu (rename, archive, etc.)
 - `Terminal/TmuxBridge.swift` — grouped session management for terminal panels
 - `Terminal/TBDTerminalView.swift` — SwiftTerm subclass with natural text editing (Cmd+Arrow, Opt+Delete)
 - `Terminal/TerminalPanelView.swift` — NSViewRepresentable wrapping TBDTerminalView + LocalProcess
@@ -105,4 +117,4 @@ Key source files and what they do.
 - `docs/superpowers/specs/2026-03-21-tbd-design.md` — original design spec
 - `docs/superpowers/specs/2026-03-23-ssh-agent-resolver-design.md` — SSH agent resolver design
 - `docs/superpowers/specs/2026-03-23-worktree-git-status-design.md` — git status tracking design
-- `docs/superpowers/plans/` — implementation plans (Phase 1 + Phase 2, SSH agent, git status)
+- `docs/superpowers/plans/` — implementation plans (Phase 1 + Phase 2, SSH agent, git status, simplify god objects)
