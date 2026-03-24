@@ -143,7 +143,7 @@ final class AppState: ObservableObject {
     func refreshRepos() async {
         do {
             let fetchedRepos = try await daemonClient.listRepos()
-            if fetchedRepos.map(\.id) != repos.map(\.id) {
+            if fetchedRepos != repos {
                 repos = fetchedRepos
             }
         } catch {
@@ -203,7 +203,7 @@ final class AppState: ObservableObject {
         do {
             let fetched = try await daemonClient.listTerminals(worktreeID: worktreeID)
             let existing = terminals[worktreeID] ?? []
-            if fetched.map(\.id) != existing.map(\.id) {
+            if fetched != existing {
                 terminals[worktreeID] = fetched
             }
         } catch {

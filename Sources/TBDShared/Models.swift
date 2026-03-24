@@ -1,6 +1,6 @@
 import Foundation
 
-public struct Repo: Codable, Sendable, Identifiable {
+public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var path: String
     public var remoteURL: String?
@@ -61,7 +61,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
-public struct Terminal: Codable, Sendable, Identifiable {
+public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var worktreeID: UUID
     public var tmuxWindowID: String
