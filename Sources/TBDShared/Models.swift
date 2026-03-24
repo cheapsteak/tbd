@@ -114,3 +114,22 @@ public struct TBDNotification: Codable, Sendable, Identifiable {
         self.createdAt = createdAt
     }
 }
+
+public enum PRMergeableState: String, Codable, Sendable {
+    case open        // PR exists but not ready to merge
+    case mergeable   // GitHub considers it clean (checks + reviews satisfied)
+    case merged      // PR was merged
+    case closed      // PR was closed without merging
+}
+
+public struct PRStatus: Codable, Sendable, Equatable {
+    public let number: Int
+    public let url: String
+    public let state: PRMergeableState
+
+    public init(number: Int, url: String, state: PRMergeableState) {
+        self.number = number
+        self.url = url
+        self.state = state
+    }
+}
