@@ -412,6 +412,31 @@ struct RPCRouterTests {
         #expect(result.worktreeID == nil)
     }
 
+    // MARK: - PR Status Tests
+
+    @Test("pr.list returns empty result when no PRs cached")
+    func prListEmpty() async throws {
+        let request = RPCRequest(method: RPCMethod.prList)
+        let response = await router.handle(request)
+
+        #expect(response.success)
+        let result = try response.decodeResult(PRListResult.self)
+        #expect(result.statuses.isEmpty)
+    }
+
+    @Test("pr.refresh returns nil for unknown worktree (no gh available in test)")
+    func prRefreshUnknown() async throws {
+        let request = try RPCRequest(
+            method: RPCMethod.prRefresh,
+            params: PRRefreshParams(worktreeID: UUID())
+        )
+        let response = await router.handle(request)
+        // Should succeed (gracefully returns nil status)
+        #expect(response.success)
+        let result = try response.decodeResult(PRRefreshResult.self)
+        #expect(result.status == nil)
+    }
+
     // MARK: - Unknown Method
 
     @Test("unknown method returns error")
