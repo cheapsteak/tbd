@@ -70,17 +70,25 @@ final class TmuxBridge: @unchecked Sendable {
             debugLog("PREPARE: new-session failed (may already exist): \(createResult.output)")
         }
 
-        // Select the right window in the grouped session
-        let selectResult = runTmux(server: server, args: [
-            "select-window", "-t", "\(sessionName):\(windowID)"
+        // Verify the window still exists before selecting it
+        let checkResult = runTmux(server: server, args: [
+            "list-panes", "-t", windowID
         ])
 
-        if !selectResult.success {
-            debugLog("PREPARE: select-window failed: \(selectResult.output)")
-            // Try without the session prefix
-            let _ = runTmux(server: server, args: [
-                "select-window", "-t", windowID
+        if checkResult.success {
+            // Window exists — select it in the grouped session
+            let selectResult = runTmux(server: server, args: [
+                "select-window", "-t", "\(sessionName):\(windowID)"
             ])
+            if !selectResult.success {
+                debugLog("PREPARE: select-window failed: \(selectResult.output)")
+            }
+        } else {
+            // Window is dead — return nil so the caller can recreate the terminal
+            debugLog("PREPARE: window \(windowID) is dead on server \(server)")
+            // Clean up the grouped session we just created
+            let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
+            return nil
         }
 
         lock.lock()

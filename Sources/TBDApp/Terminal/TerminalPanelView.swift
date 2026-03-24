@@ -99,7 +99,10 @@ struct TerminalPanelView: NSViewRepresentable {
                 server: server,
                 windowID: windowID
             ) else {
-                debugLog("PANEL: Failed to prepare session for \(panelID.uuidString.prefix(8))")
+                debugLog("PANEL: Window \(windowID) is dead — showing message")
+                DispatchQueue.main.async {
+                    terminalView.feed(text: "\r\n  Terminal session expired.\r\n  Close this tab and create a new terminal.\r\n")
+                }
                 return
             }
 
