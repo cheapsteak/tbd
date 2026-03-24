@@ -57,6 +57,26 @@ struct WorktreeRowView: View {
         }
     }
 
+    private var prIcon: String? {
+        guard !isMain, let status = appState.prStatuses[worktree.id] else { return nil }
+        switch status.state {
+        case .open:      return "arrow.triangle.pull"
+        case .mergeable: return "arrow.triangle.pull"
+        case .merged:    return "checkmark.circle.fill"
+        case .closed:    return "xmark.circle.fill"
+        }
+    }
+
+    private var prIconColor: Color {
+        guard let status = appState.prStatuses[worktree.id] else { return .secondary }
+        switch status.state {
+        case .open:      return .secondary
+        case .mergeable: return .green
+        case .merged:    return .purple
+        case .closed:    return .red
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             if isMain {
@@ -76,6 +96,11 @@ struct WorktreeRowView: View {
                 Image(systemName: icon)
                     .font(.caption2)
                     .foregroundStyle(gitStatusColor)
+            }
+            if let icon = prIcon {
+                Image(systemName: icon)
+                    .font(.caption2)
+                    .foregroundStyle(prIconColor)
             }
             if isEditing {
                 TextField("Name", text: $editText)
