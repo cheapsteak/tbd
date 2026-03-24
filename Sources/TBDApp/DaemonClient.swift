@@ -398,4 +398,21 @@ actor DaemonClient {
             params: NotificationsMarkReadParams(worktreeID: worktreeID)
         )
     }
+
+    /// Fetch all cached PR statuses from the daemon.
+    func listPRStatuses() throws -> [UUID: PRStatus] {
+        let result = try callNoParams(method: RPCMethod.prList, resultType: PRListResult.self)
+        return result.statuses
+    }
+
+    /// Trigger an immediate PR status refresh for one worktree.
+    /// Returns nil if no PR exists for the worktree's branch.
+    func refreshPRStatus(worktreeID: UUID) throws -> PRStatus? {
+        let result = try call(
+            method: RPCMethod.prRefresh,
+            params: PRRefreshParams(worktreeID: worktreeID),
+            resultType: PRRefreshResult.self
+        )
+        return result.status
+    }
 }
