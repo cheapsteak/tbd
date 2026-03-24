@@ -116,10 +116,11 @@ public struct TBDNotification: Codable, Sendable, Identifiable {
 }
 
 public enum PRMergeableState: String, Codable, Sendable {
-    case open        // PR exists but not ready to merge
-    case mergeable   // GitHub considers it clean (checks + reviews satisfied)
-    case merged      // PR was merged
-    case closed      // PR was closed without merging
+    case open               // PR exists, no review decision yet
+    case changesRequested   // reviewer requested changes
+    case mergeable          // GitHub considers it clean (checks + reviews satisfied)
+    case merged             // PR was merged
+    case closed             // PR was closed without merging
 }
 
 public struct PRStatus: Codable, Sendable, Equatable {

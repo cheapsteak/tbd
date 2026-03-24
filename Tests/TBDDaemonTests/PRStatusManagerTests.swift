@@ -38,6 +38,18 @@ struct PRStatusManagerTests {
         #expect(status == .closed)
     }
 
+    @Test("maps OPEN + CHANGES_REQUESTED to .changesRequested")
+    func mapsChangesRequested() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BLOCKED", reviewDecision: "CHANGES_REQUESTED")
+        #expect(status == .changesRequested)
+    }
+
+    @Test("maps OPEN + CLEAN + CHANGES_REQUESTED to .changesRequested (review wins)")
+    func mapsChangesRequestedOverClean() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "CLEAN", reviewDecision: "CHANGES_REQUESTED")
+        #expect(status == .changesRequested)
+    }
+
     // MARK: - JSON parsing
 
     @Test("parseGraphQLResponse extracts matching branches")
@@ -53,6 +65,7 @@ struct PRStatusManagerTests {
                     "url": "https://github.com/owner/repo/pull/42",
                     "state": "OPEN",
                     "mergeStateStatus": "CLEAN",
+                    "reviewDecision": null,
                     "headRefName": "tbd/cool-feature"
                   },
                   {
@@ -60,6 +73,7 @@ struct PRStatusManagerTests {
                     "url": "https://github.com/owner/repo/pull/7",
                     "state": "MERGED",
                     "mergeStateStatus": "UNKNOWN",
+                    "reviewDecision": null,
                     "headRefName": "tbd/old-feature"
                   },
                   {
@@ -67,6 +81,7 @@ struct PRStatusManagerTests {
                     "url": "https://github.com/owner/repo/pull/99",
                     "state": "OPEN",
                     "mergeStateStatus": "CLEAN",
+                    "reviewDecision": null,
                     "headRefName": "feature/not-tbd"
                   }
                 ]

@@ -44,7 +44,7 @@ public actor PRStatusManager {
                 cache[wt.id] = PRStatus(
                     number: node.number,
                     url: node.url,
-                    state: Self.mapState(ghState: node.state, mergeStateStatus: node.mergeStateStatus)
+                    state: Self.mapState(ghState: node.state, mergeStateStatus: node.mergeStateStatus, reviewDecision: node.reviewDecision)
                 )
             } else {
                 cache.removeValue(forKey: wt.id)
@@ -55,7 +55,7 @@ public actor PRStatusManager {
     /// Refresh a single worktree using `gh pr view`. Used for on-select refresh.
     public func refresh(worktreeID: UUID, branch: String, repoPath: String) async -> PRStatus? {
         let args = ["pr", "view", branch,
-                    "--json", "number,url,state,mergeStateStatus",
+                    "--json", "number,url,state,mergeStateStatus,reviewDecision",
                     "-R", "."]
         guard let output = await runGH(args: args, repoPath: repoPath),
               let data = output.data(using: .utf8),
@@ -67,7 +67,9 @@ public actor PRStatusManager {
         let status = PRStatus(
             number: obj.number,
             url: obj.url,
-            state: Self.mapState(ghState: obj.state, mergeStateStatus: obj.mergeStateStatus)
+            state: Self.mapState(ghState: obj.state,
+                                 mergeStateStatus: obj.mergeStateStatus,
+                                 reviewDecision: obj.reviewDecision ?? "")
         )
         cache[worktreeID] = status
         return status
@@ -80,11 +82,13 @@ public actor PRStatusManager {
 
     // MARK: - State mapping (internal but static for testability)
 
-    public static func mapState(ghState: String, mergeStateStatus: String) -> PRMergeableState {
+    public static func mapState(ghState: String, mergeStateStatus: String, reviewDecision: String = "") -> PRMergeableState {
         switch ghState {
         case "MERGED": return .merged
         case "CLOSED": return .closed
-        default:       return mergeStateStatus == "CLEAN" ? .mergeable : .open
+        default:
+            if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
+            return mergeStateStatus == "CLEAN" ? .mergeable : .open
         }
     }
 
@@ -95,6 +99,7 @@ public actor PRStatusManager {
         public let url: String
         public let state: String
         public let mergeStateStatus: String
+        public let reviewDecision: String   // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or ""
         public let headRefName: String
     }
 
@@ -114,8 +119,12 @@ public actor PRStatusManager {
                   let mergeStateStatus = node["mergeStateStatus"] as? String,
                   let headRefName = node["headRefName"] as? String,
                   headRefName.hasPrefix("tbd/") else { return nil }
+            // reviewDecision can be null in JSON (no reviews yet)
+            let reviewDecision = node["reviewDecision"] as? String ?? ""
             return PRNode(number: number, url: url, state: state,
-                          mergeStateStatus: mergeStateStatus, headRefName: headRefName)
+                          mergeStateStatus: mergeStateStatus,
+                          reviewDecision: reviewDecision,
+                          headRefName: headRefName)
         }
     }
 
@@ -128,7 +137,7 @@ public actor PRStatusManager {
             pullRequests(first: 100, states: [OPEN, MERGED, CLOSED],
                          orderBy: {field: CREATED_AT, direction: DESC}) {
               nodes {
-                number url state mergeStateStatus headRefName
+                number url state mergeStateStatus reviewDecision headRefName
               }
             }
           }
@@ -200,6 +209,7 @@ private struct GHPRViewResult: Codable {
     let url: String
     let state: String
     let mergeStateStatus: String
+    let reviewDecision: String?
 }
 
 public enum PRStatusError: Error {

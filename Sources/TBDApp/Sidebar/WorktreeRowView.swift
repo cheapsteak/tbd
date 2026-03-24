@@ -60,19 +60,21 @@ struct WorktreeRowView: View {
     private var prIcon: String? {
         guard !isMain, let status = appState.prStatuses[worktree.id] else { return nil }
         switch status.state {
-        case .open, .mergeable: return "arrow.triangle.pull"
-        case .merged:           return "checkmark.circle.fill"
-        case .closed:           return "xmark.circle.fill"
+        case .open, .changesRequested: return "git-pull-request"
+        case .mergeable:               return "git-pull-request"
+        case .merged:                  return "git-merge"
+        case .closed:                  return "git-pull-request-closed"
         }
     }
 
     private var prIconColor: Color {
         guard !isMain, let status = appState.prStatuses[worktree.id] else { return .secondary }
         switch status.state {
-        case .open:      return .secondary
-        case .mergeable: return .green
-        case .merged:    return .purple
-        case .closed:    return .red
+        case .open:             return .secondary
+        case .changesRequested: return .red
+        case .mergeable:        return .green
+        case .merged:           return .purple
+        case .closed:           return .secondary
         }
     }
 
@@ -97,8 +99,11 @@ struct WorktreeRowView: View {
                     .foregroundStyle(gitStatusColor)
             }
             if let icon = prIcon {
-                Image(systemName: icon)
-                    .font(.caption2)
+                Image(icon)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 12, height: 12)
                     .foregroundStyle(prIconColor)
             }
             if isEditing {
