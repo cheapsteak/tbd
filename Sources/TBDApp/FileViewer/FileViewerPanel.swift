@@ -15,17 +15,15 @@ struct GitFileStatus: Identifiable {
     var isStaged: Bool { indexStatus != " " && indexStatus != "?" }
     var isUntracked: Bool { workingStatus == "?" }
     var isUnstaged: Bool { !isUntracked && workingStatus != " " }
+}
 
-    var displayStatus: Character { isStaged ? indexStatus : workingStatus }
-
-    var statusColor: Color {
-        switch displayStatus {
-        case "M": return .yellow
-        case "A": return .green
-        case "D": return .red
-        case "R", "C": return .blue
-        default: return .gray
-        }
+private func statusColor(for char: Character) -> Color {
+    switch char {
+    case "M": return .yellow
+    case "A": return .green
+    case "D": return .red
+    case "R", "C": return .blue
+    default: return .gray
     }
 }
 
@@ -34,18 +32,25 @@ struct GitFileStatus: Identifiable {
 func loadGitStatus(at path: String) async -> [GitFileStatus] {
     guard !path.isEmpty else { return [] }
     return await withCheckedContinuation { continuation in
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-C", path, "status", "--porcelain=v1", "-u"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        process.terminationHandler = { _ in
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            continuation.resume(returning: parseGitStatus(output))
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = ["-C", path, "status", "--porcelain=v1", "-u"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                // Read while the process runs to drain the pipe — prevents deadlock
+                // when stdout exceeds the kernel buffer (~64KB) on large worktrees.
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let output = String(data: data, encoding: .utf8) ?? ""
+                continuation.resume(returning: parseGitStatus(output))
+            } catch {
+                continuation.resume(returning: [])
+            }
         }
-        do { try process.run() } catch { continuation.resume(returning: []) }
     }
 }
 
@@ -113,13 +118,13 @@ struct FileViewerPanel: View {
                         .padding(.vertical, 20)
                 }
                 if !staged.isEmpty {
-                    FileStatusSection(title: "Staged", files: staged, worktreePath: worktree.path)
+                    FileStatusSection(title: "Staged", files: staged, useIndexStatus: true, worktreePath: worktree.path)
                 }
                 if !unstaged.isEmpty {
-                    FileStatusSection(title: "Changes", files: unstaged, worktreePath: worktree.path)
+                    FileStatusSection(title: "Changes", files: unstaged, useIndexStatus: false, worktreePath: worktree.path)
                 }
                 if !untracked.isEmpty {
-                    FileStatusSection(title: "Untracked", files: untracked, worktreePath: worktree.path)
+                    FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.path)
                 }
             }
             .padding(.vertical, 4)
@@ -141,6 +146,9 @@ struct FileViewerPanel: View {
 private struct FileStatusSection: View {
     let title: String
     let files: [GitFileStatus]
+    /// When true, show indexStatus (X) per row; when false, show workingStatus (Y).
+    /// Staged section uses index; Changes/Untracked sections use working tree.
+    let useIndexStatus: Bool
     let worktreePath: String
     @State private var isExpanded = true
 
@@ -170,7 +178,8 @@ private struct FileStatusSection: View {
 
             if isExpanded {
                 ForEach(files) { file in
-                    GitFileRow(file: file, worktreePath: worktreePath)
+                    let statusChar = useIndexStatus ? file.indexStatus : file.workingStatus
+                    GitFileRow(file: file, statusChar: statusChar, worktreePath: worktreePath)
                 }
             }
         }
@@ -181,6 +190,7 @@ private struct FileStatusSection: View {
 
 private struct GitFileRow: View {
     let file: GitFileStatus
+    let statusChar: Character
     let worktreePath: String
     @State private var isHovered = false
 
@@ -190,10 +200,10 @@ private struct GitFileRow: View {
             NSWorkspace.shared.open(url)
         } label: {
             HStack(spacing: 6) {
-                Text(String(file.displayStatus))
+                Text(String(statusChar))
                     .font(.system(.caption2, design: .monospaced))
                     .fontWeight(.bold)
-                    .foregroundStyle(file.statusColor)
+                    .foregroundStyle(statusColor(for: statusChar))
                     .frame(width: 12, alignment: .center)
                 Text(file.path)
                     .font(.system(.caption, design: .monospaced))
