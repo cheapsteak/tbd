@@ -93,6 +93,8 @@ public enum RPCMethod {
     public static let resolvePath = "resolve.path"
     public static let notificationsList = "notifications.list"
     public static let notificationsMarkRead = "notifications.markRead"
+    public static let prList    = "pr.list"
+    public static let prRefresh = "pr.refresh"
     public static let cleanup = "cleanup"
 }
 
@@ -104,6 +106,23 @@ public struct NotificationsListResult: Codable, Sendable {
 public struct NotificationsMarkReadParams: Codable, Sendable {
     public let worktreeID: UUID
     public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct PRListResult: Codable, Sendable {
+    public let statuses: [UUID: PRStatus]
+    public init(statuses: [UUID: PRStatus]) { self.statuses = statuses }
+}
+
+public struct PRRefreshParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+// PRRefreshResult wraps an optional PRStatus.
+// nil means no PR found for this worktree's branch.
+public struct PRRefreshResult: Codable, Sendable {
+    public let status: PRStatus?
+    public init(status: PRStatus?) { self.status = status }
 }
 
 // MARK: - Parameter Structs
