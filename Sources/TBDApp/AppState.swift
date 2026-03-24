@@ -73,6 +73,7 @@ final class AppState: ObservableObject {
         isConnected = didConnect
         if didConnect {
             await refreshAll()
+            await refreshPRStatuses()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }

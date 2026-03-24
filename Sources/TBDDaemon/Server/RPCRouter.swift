@@ -97,6 +97,11 @@ public final class RPCRouter: Sendable {
     // MARK: - PR Status
 
     private func handlePRList() async throws -> RPCResponse {
+        // Fetch fresh PR data for all active worktrees before returning the cache.
+        // This is called every ~30s by the app, so one GraphQL call per poll is acceptable.
+        let worktrees = try await db.worktrees.list(status: .active)
+        let infos = worktrees.map { (id: $0.id, branch: $0.branch, repoPath: $0.path) }
+        await prManager.fetchAll(worktrees: infos)
         let statuses = await prManager.allStatuses()
         return try RPCResponse(result: PRListResult(statuses: statuses))
     }
