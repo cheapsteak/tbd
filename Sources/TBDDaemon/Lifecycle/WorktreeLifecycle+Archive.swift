@@ -51,10 +51,14 @@ extension WorktreeLifecycle {
         // Kill all tmux windows for this worktree
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
         for terminal in terminals {
-            try? await tmux.killWindow(
-                server: worktree.tmuxServer,
-                windowID: terminal.tmuxWindowID
-            )
+            do {
+                try await tmux.killWindow(
+                    server: worktree.tmuxServer,
+                    windowID: terminal.tmuxWindowID
+                )
+            } catch {
+                print("[TBD] archive: failed to kill window \(terminal.tmuxWindowID): \(error)")
+            }
         }
 
         // Delete terminals from db

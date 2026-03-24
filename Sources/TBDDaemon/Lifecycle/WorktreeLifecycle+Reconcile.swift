@@ -67,7 +67,11 @@ extension WorktreeLifecycle {
         // Fix stale tmux server names (e.g. after migration from UUID-based to path-based naming)
         let mainWorktrees = try await db.worktrees.list(repoID: repoID, status: .main)
         for wt in (dbWorktrees + mainWorktrees) where wt.tmuxServer != correctTmuxServer {
-            try? await db.worktrees.updateTmuxServer(id: wt.id, tmuxServer: correctTmuxServer)
+            do {
+                try await db.worktrees.updateTmuxServer(id: wt.id, tmuxServer: correctTmuxServer)
+            } catch {
+                print("[TBD] reconcile: failed to update tmux server for worktree \(wt.id): \(error)")
+            }
         }
         // Re-fetch with corrected names
         dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
@@ -79,10 +83,14 @@ extension WorktreeLifecycle {
         for wt in dbWorktrees where !gitPaths.contains(wt.path) {
             let terminals = try await db.terminals.list(worktreeID: wt.id)
             for terminal in terminals {
-                try? await tmux.killWindow(
-                    server: wt.tmuxServer,
-                    windowID: terminal.tmuxWindowID
-                )
+                do {
+                    try await tmux.killWindow(
+                        server: wt.tmuxServer,
+                        windowID: terminal.tmuxWindowID
+                    )
+                } catch {
+                    print("[TBD] reconcile: failed to kill window \(terminal.tmuxWindowID): \(error)")
+                }
             }
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
             try await db.worktrees.archive(id: wt.id)
@@ -111,7 +119,11 @@ extension WorktreeLifecycle {
         let activeWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
         if activeWorktrees.isEmpty {
             // No active worktrees — kill the entire tmux server
-            try? await tmux.killServer(server: tmuxServer)
+            do {
+                try await tmux.killServer(server: tmuxServer)
+            } catch {
+                print("[TBD] reconcile: failed to kill tmux server \(tmuxServer): \(error)")
+            }
         } else {
             // Collect all tracked window IDs
             var trackedWindowIDs: Set<String> = []
@@ -123,10 +135,17 @@ extension WorktreeLifecycle {
             }
 
             // List actual tmux windows and kill any that aren't tracked
-            if let tmuxWindows = try? await tmux.listWindows(server: tmuxServer, session: "main") {
+            do {
+                let tmuxWindows = try await tmux.listWindows(server: tmuxServer, session: "main")
                 for window in tmuxWindows where !trackedWindowIDs.contains(window.windowID) {
-                    try? await tmux.killWindow(server: tmuxServer, windowID: window.windowID)
+                    do {
+                        try await tmux.killWindow(server: tmuxServer, windowID: window.windowID)
+                    } catch {
+                        print("[TBD] reconcile: failed to kill orphaned window \(window.windowID): \(error)")
+                    }
                 }
+            } catch {
+                print("[TBD] reconcile: failed to list tmux windows for server \(tmuxServer): \(error)")
             }
         }
     }
