@@ -141,6 +141,13 @@ struct WorktreeRowView: View {
         let trimmed = editText.trimmingCharacters(in: .whitespaces)
         isEditing = false
         guard !trimmed.isEmpty, trimmed != worktree.displayName else { return }
+        // Update local model immediately so the UI reflects the new name
+        for repoID in appState.worktrees.keys {
+            if let idx = appState.worktrees[repoID]?.firstIndex(where: { $0.id == worktree.id }) {
+                appState.worktrees[repoID]?[idx].displayName = trimmed
+            }
+        }
+        // Then persist to daemon
         Task {
             await appState.renameWorktree(id: worktree.id, displayName: trimmed)
         }
