@@ -57,7 +57,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
             path: "Sources/TBDApp",
-            resources: [.process("Resources/Assets.xcassets")]
+            resources: [.copy("Resources/Icons")]
         ),
         .testTarget(
             name: "TBDSharedTests",
