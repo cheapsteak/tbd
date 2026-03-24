@@ -63,7 +63,8 @@ public struct WorktreeStore: Sendable {
         name: String,
         branch: String,
         path: String,
-        tmuxServer: String
+        tmuxServer: String,
+        status: WorktreeStatus = .active
     ) async throws -> Worktree {
         let wt = Worktree(
             repoID: repoID,
@@ -71,7 +72,7 @@ public struct WorktreeStore: Sendable {
             displayName: name,
             branch: branch,
             path: path,
-            status: .active,
+            status: status,
             tmuxServer: tmuxServer
         )
         let record = WorktreeRecord(from: wt)
@@ -79,6 +80,24 @@ public struct WorktreeStore: Sendable {
             try record.insert(db)
         }
         return wt
+    }
+
+    /// Update a worktree's status.
+    public func updateStatus(id: UUID, status: WorktreeStatus) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.status = status.rawValue
+            try record.update(db)
+        }
+    }
+
+    /// Delete a worktree by ID.
+    public func delete(id: UUID) async throws {
+        _ = try await writer.write { db in
+            try WorktreeRecord.deleteOne(db, key: id.uuidString)
+        }
     }
 
     /// Create a synthetic "main" worktree entry pointing at the repo root.
@@ -135,6 +154,9 @@ public struct WorktreeStore: Sendable {
             }
             if record.status == WorktreeStatus.main.rawValue {
                 throw DatabaseError(message: "Cannot archive the main branch worktree")
+            }
+            if record.status == WorktreeStatus.creating.rawValue {
+                throw DatabaseError(message: "Cannot archive a worktree that is still being created")
             }
             record.status = WorktreeStatus.archived.rawValue
             record.archivedAt = Date()

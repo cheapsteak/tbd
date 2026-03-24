@@ -8,45 +8,17 @@ extension AppState {
     // MARK: - Worktree Actions
 
     /// Create a new worktree in a repo.
-    /// Inserts a placeholder immediately and creates the real worktree in the background.
+    /// The daemon returns a worktree with `status = .creating` immediately.
+    /// The 2-second polling will pick up the status change to `.active` when creation completes.
     func createWorktree(repoID: UUID) {
-        let name = NameGenerator.generate()
-        let placeholderID = UUID()
-        let placeholder = Worktree(
-            id: placeholderID, repoID: repoID, name: name, displayName: name,
-            branch: "tbd/\(name)", path: "", status: .active, tmuxServer: ""
-        )
-        worktrees[repoID, default: []].append(placeholder)
-        selectedWorktreeIDs = [placeholderID]
-        pendingWorktreeIDs.insert(placeholderID)
-        editingWorktreeID = placeholderID
-
         Task {
             do {
-                let wt = try await daemonClient.createWorktree(repoID: repoID, name: name)
-                // Replace placeholder with real worktree
-                if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholderID }) {
-                    // Preserve any display name the user set while waiting
-                    let userDisplayName = worktrees[repoID]?[idx].displayName
-                    worktrees[repoID]?[idx] = wt
-                    if let userDisplayName, userDisplayName != name {
-                        worktrees[repoID]?[idx].displayName = userDisplayName
-                        // Persist the rename on the server
-                        try? await daemonClient.renameWorktree(id: wt.id, displayName: userDisplayName)
-                    }
-                }
-                pendingWorktreeIDs.remove(placeholderID)
-                if selectedWorktreeIDs.contains(placeholderID) {
-                    selectedWorktreeIDs.remove(placeholderID)
-                    selectedWorktreeIDs.insert(wt.id)
-                }
-                await refreshTerminals(worktreeID: wt.id)
+                let wt = try await daemonClient.createWorktree(repoID: repoID)
+                worktrees[repoID, default: []].append(wt)
+                selectedWorktreeIDs = [wt.id]
+                editingWorktreeID = wt.id
             } catch {
                 logger.error("Failed to create worktree: \(error)")
-                // Remove placeholder on failure
-                worktrees[repoID]?.removeAll { $0.id == placeholderID }
-                pendingWorktreeIDs.remove(placeholderID)
-                selectedWorktreeIDs.remove(placeholderID)
                 handleConnectionError(error)
             }
         }
@@ -82,8 +54,9 @@ extension AppState {
 
     /// Rename a worktree.
     func renameWorktree(id: UUID, displayName: String) async {
-        // For pending worktrees, just update locally — the name will be applied when creation finishes
-        if pendingWorktreeIDs.contains(id) {
+        // For creating worktrees, just update locally — the name will be applied when creation finishes
+        let isCreating = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id })?.status == .creating
+        if isCreating {
             for repoID in worktrees.keys {
                 if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == id }) {
                     worktrees[repoID]?[idx].displayName = displayName
@@ -136,7 +109,7 @@ extension AppState {
         guard let id = selectedWorktreeIDs.first else { return }
         // Don't archive the main branch worktree
         let allWts = worktrees.values.flatMap { $0 }
-        if let wt = allWts.first(where: { $0.id == id }), wt.status == .main { return }
+        if let wt = allWts.first(where: { $0.id == id }), wt.status == .main || wt.status == .creating { return }
         Task {
             await archiveWorktree(id: id)
         }

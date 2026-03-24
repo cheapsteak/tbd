@@ -7,14 +7,32 @@ extension RPCRouter {
 
     func handleWorktreeCreate(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
-        let worktree = try await lifecycle.createWorktree(repoID: params.repoID, name: params.name)
 
-        subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
-            worktreeID: worktree.id, repoID: worktree.repoID,
-            name: worktree.name, path: worktree.path
-        )))
+        // Phase 1: Fast — insert DB row with status = .creating, return immediately
+        let pending = try await lifecycle.beginCreateWorktree(repoID: params.repoID, name: params.name)
 
-        return try RPCResponse(result: worktree)
+        // Phase 2: Fire-and-forget — git operations + tmux setup in background
+        let lifecycle = self.lifecycle
+        let subs = self.subscriptions
+        Task.detached {
+            do {
+                try await lifecycle.completeCreateWorktree(worktreeID: pending.id)
+                // Broadcast the completed worktree
+                subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
+                    worktreeID: pending.id, repoID: pending.repoID,
+                    name: pending.name, path: pending.path
+                )))
+            } catch {
+                // completeCreateWorktree already deletes the DB row on failure.
+                // Broadcast an archive delta so clients remove the pending entry.
+                subs.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
+                    worktreeID: pending.id
+                )))
+                print("[RPCRouter] Background worktree creation failed for \(pending.id): \(error)")
+            }
+        }
+
+        return try RPCResponse(result: pending)
     }
 
     func handleWorktreeList(_ paramsData: Data) async throws -> RPCResponse {

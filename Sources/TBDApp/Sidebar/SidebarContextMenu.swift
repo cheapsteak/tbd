@@ -9,15 +9,17 @@ struct SidebarContextMenu: View {
 
     var body: some View {
         Group {
-            if worktree.status == .main {
-                // Main worktree: only Finder and Copy Path
-                Button("Open in Finder") {
-                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.path)
-                }
+            if worktree.status == .main || worktree.status == .creating {
+                // Main / creating worktree: only Finder and Copy Path (no rename/archive)
+                if !worktree.path.isEmpty {
+                    Button("Open in Finder") {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.path)
+                    }
 
-                Button("Copy Path") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(worktree.path, forType: .string)
+                    Button("Copy Path") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(worktree.path, forType: .string)
+                    }
                 }
             } else {
                 Button("Rename...") {

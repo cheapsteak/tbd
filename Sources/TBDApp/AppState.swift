@@ -156,10 +156,11 @@ final class AppState: ObservableObject {
     /// Fetches both active and main worktrees.
     func refreshWorktrees(repoID: UUID? = nil) async {
         do {
-            // Fetch active and main worktrees separately and combine
+            // Fetch active, main, and creating worktrees separately and combine
             let activeWts = try await daemonClient.listWorktrees(repoID: repoID, status: .active)
             let mainWts = try await daemonClient.listWorktrees(repoID: repoID, status: .main)
-            let fetched = mainWts + activeWts
+            let creatingWts = try await daemonClient.listWorktrees(repoID: repoID, status: .creating)
+            let fetched = mainWts + activeWts + creatingWts
             if let repoID {
                 let existing = worktrees[repoID] ?? []
                 if fetched != existing {
@@ -169,14 +170,6 @@ final class AppState: ObservableObject {
                 var grouped: [UUID: [Worktree]] = [:]
                 for wt in fetched {
                     grouped[wt.repoID, default: []].append(wt)
-                }
-                // Preserve pending placeholders that aren't in the server response yet
-                for (repoID, wts) in worktrees {
-                    for wt in wts where pendingWorktreeIDs.contains(wt.id) {
-                        if !grouped[repoID, default: []].contains(where: { $0.id == wt.id }) {
-                            grouped[repoID, default: []].append(wt)
-                        }
-                    }
                 }
                 if grouped != worktrees {
                     worktrees = grouped

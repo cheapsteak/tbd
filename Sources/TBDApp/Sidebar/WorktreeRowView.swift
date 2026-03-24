@@ -10,7 +10,7 @@ struct WorktreeRowView: View {
     @FocusState private var isTextFieldFocused: Bool
 
     private var isPending: Bool {
-        appState.pendingWorktreeIDs.contains(worktree.id)
+        worktree.status == .creating
     }
 
     private var notification: NotificationType? {
