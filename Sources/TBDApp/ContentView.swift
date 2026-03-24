@@ -4,6 +4,13 @@ import TBDShared
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
+    @AppStorage("filePanel.isVisible") private var showFilePanel = true
+    @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
+
+    private var selectedWorktree: Worktree? {
+        guard let id = appState.selectedWorktreeIDs.first else { return nil }
+        return appState.worktrees.values.flatMap { $0 }.first { $0.id == id }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,7 +25,17 @@ struct ContentView: View {
                     Text("Select a worktree or click + to create one")
                         .foregroundStyle(.secondary)
                 } else {
-                    TerminalContainerView()
+                    HStack(spacing: 0) {
+                        TerminalContainerView()
+                        if showFilePanel, let worktree = selectedWorktree, !worktree.path.isEmpty {
+                            FilePanelDivider(panelWidth: Binding(
+                                get: { CGFloat(filePanelWidth) },
+                                set: { filePanelWidth = Double($0) }
+                            ))
+                            FileViewerPanel(worktree: worktree)
+                                .frame(width: CGFloat(filePanelWidth))
+                        }
+                    }
                 }
             }
             .navigationSplitViewStyle(.prominentDetail)
@@ -39,6 +56,14 @@ struct ContentView: View {
                     }
                     .pickerStyle(.menu)
                     .help("Filter sidebar by repository")
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { showFilePanel.toggle() }
+                    } label: {
+                        Image(systemName: "sidebar.right")
+                    }
+                    .help("Toggle file panel (⌘⇧E)")
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
                 }
             }
 
@@ -137,5 +162,35 @@ struct ContentView: View {
                 await appState.markNotificationsRead(worktreeID: worktreeID)
             }
         }
+    }
+}
+
+// MARK: - FilePanelDivider
+
+/// A draggable 1pt divider that resizes the file panel.
+/// Uses an 8pt hit target (invisible) centered over the visible line.
+private struct FilePanelDivider: View {
+    @Binding var panelWidth: CGFloat
+    let minWidth: CGFloat = 180
+    let maxWidth: CGFloat = 700
+    @State private var dragStartWidth: CGFloat = 0
+
+    var body: some View {
+        Color.clear
+            .frame(width: 8)
+            .overlay(Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1))
+            .onHover { hovering in
+                if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        if dragStartWidth == 0 { dragStartWidth = panelWidth }
+                        // Dragging left → wider panel, dragging right → narrower
+                        let proposed = dragStartWidth - value.translation.width
+                        panelWidth = max(minWidth, min(maxWidth, proposed))
+                    }
+                    .onEnded { _ in dragStartWidth = 0 }
+            )
     }
 }
