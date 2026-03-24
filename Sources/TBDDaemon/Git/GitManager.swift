@@ -66,70 +66,16 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["fetch", "origin"], at: repoPath)
     }
 
-    /// Rebases the current branch onto the given target. Returns (success, output).
-    public func rebase(repoPath: String, onto: String) async -> (success: Bool, output: String) {
-        do {
-            let output = try await run(arguments: ["rebase", onto], at: repoPath)
-            return (true, output)
-        } catch let error as GitError {
-            return (false, error.stderr)
-        } catch {
-            return (false, error.localizedDescription)
-        }
-    }
-
-    /// Aborts an in-progress rebase.
-    public func rebaseAbort(repoPath: String) async throws {
-        _ = try await run(arguments: ["rebase", "--abort"], at: repoPath)
-    }
-
-    /// Checks out the given branch.
-    public func checkout(repoPath: String, branch: String) async throws {
-        _ = try await run(arguments: ["checkout", branch], at: repoPath)
-    }
-
-    /// Performs a fast-forward-only merge of the given branch.
-    public func mergeFFOnly(repoPath: String, branch: String) async throws {
-        _ = try await run(arguments: ["merge", "--ff-only", branch], at: repoPath)
-    }
-
-    /// Performs a squash merge of the given branch (stages all changes, no commit).
-    public func mergeSquash(repoPath: String, branch: String) async throws {
-        _ = try await run(arguments: ["merge", "--squash", branch], at: repoPath)
-    }
-
-    /// Commits staged changes with the given message.
-    public func commit(repoPath: String, message: String) async throws {
-        _ = try await run(arguments: ["commit", "-m", message], at: repoPath)
-    }
-
-    /// Pushes a branch to origin.
-    public func push(repoPath: String, branch: String) async throws {
-        _ = try await run(arguments: ["push", "origin", branch], at: repoPath)
-    }
-
     /// Returns the HEAD SHA for a branch or ref.
     public func headSHA(repoPath: String, ref: String = "HEAD") async throws -> String {
         let output = try await run(arguments: ["rev-parse", ref], at: repoPath)
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Returns commit messages in the range `from..to`, newest first.
-    public func commitMessages(repoPath: String, from: String, to: String) async throws -> [String] {
-        let output = try await run(arguments: ["log", "--format=%s", "\(from)..\(to)"], at: repoPath)
-        return output.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
-    }
-
     /// Returns `true` if there are uncommitted changes (staged or unstaged).
     public func hasUncommittedChanges(repoPath: String) async throws -> Bool {
         let output = try await run(arguments: ["status", "--porcelain"], at: repoPath)
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// Returns the number of commits in the range `from..to`.
-    public func commitCount(repoPath: String, from: String, to: String) async throws -> Int {
-        let output = try await run(arguments: ["rev-list", "--count", "\(from)..\(to)"], at: repoPath)
-        return Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
     /// Returns true if `base` is an ancestor of `branch` (i.e., branch is ahead or equal, no divergence).

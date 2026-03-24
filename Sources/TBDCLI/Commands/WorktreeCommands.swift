@@ -12,7 +12,6 @@ struct WorktreeCommand: ParsableCommand {
             WorktreeArchive.self,
             WorktreeRevive.self,
             WorktreeRename.self,
-            WorktreeMerge.self,
         ]
     )
 }
@@ -225,43 +224,6 @@ struct WorktreeRename: AsyncParsableCommand {
         )
 
         print("Worktree renamed to: \(newName)")
-    }
-}
-
-// MARK: - worktree merge
-
-struct WorktreeMerge: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "merge",
-        abstract: "Merge a worktree branch into the default branch via rebase"
-    )
-
-    @Argument(help: "Worktree name or ID")
-    var nameOrID: String
-
-    @Flag(name: .long, help: "Archive the worktree after a successful merge")
-    var archive = false
-
-    @Flag(name: .long, help: "Output JSON")
-    var json = false
-
-    mutating func run() async throws {
-        let client = SocketClient()
-        let worktreeID = try resolveWorktreeNameOrID(nameOrID, client: client)
-
-        try client.callVoid(
-            method: RPCMethod.worktreeMerge,
-            params: WorktreeMergeParams(worktreeID: worktreeID, archiveAfter: archive)
-        )
-
-        if json {
-            printJSON(["status": "merged", "id": worktreeID.uuidString])
-        } else {
-            print("Worktree merged successfully.")
-            if archive {
-                print("Worktree archived.")
-            }
-        }
     }
 }
 

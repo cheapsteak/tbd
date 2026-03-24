@@ -11,7 +11,6 @@ final class AppState: ObservableObject {
     @Published var worktrees: [UUID: [Worktree]] = [:]
     @Published var terminals: [UUID: [Terminal]] = [:]
     @Published var notifications: [UUID: NotificationType?] = [:]
-    @Published var mergeStatus: [UUID: WorktreeMergeStatusResult] = [:]
     @Published var selectedWorktreeIDs: Set<UUID> = []
     @Published var isConnected: Bool = false
     @Published var layouts: [UUID: LayoutNode] = [:]
@@ -40,8 +39,6 @@ final class AppState: ObservableObject {
     }
 
     /// Poll daemon for state changes every 2 seconds.
-    /// Merge status for selected worktree checked every 5th cycle (~10s).
-    private var pollCycle = 0
     private func startPolling() {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -57,12 +54,6 @@ final class AppState: ObservableObject {
                     if !self.isConnected { return }
                 }
                 await self.refreshAll()
-
-                // Check merge status for selected worktree every ~10s
-                self.pollCycle += 1
-                if self.pollCycle % 5 == 0, let selectedID = self.selectedWorktreeIDs.first {
-                    await self.refreshMergeStatus(worktreeID: selectedID)
-                }
             }
         }
     }
@@ -326,28 +317,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Merge a worktree branch into main via rebase.
-    func mergeWorktree(id: UUID, archiveAfter: Bool = false) async {
-        // Find the worktree name for the alert message
-        let worktreeName = worktrees.values.flatMap { $0 }.first { $0.id == id }?.displayName ?? "worktree"
-        do {
-            try await daemonClient.mergeWorktree(id: id, archiveAfter: archiveAfter)
-            if archiveAfter {
-                for repoID in worktrees.keys {
-                    worktrees[repoID]?.removeAll { $0.id == id }
-                }
-                selectedWorktreeIDs.remove(id)
-                terminals.removeValue(forKey: id)
-                showAlert("Merged and archived \(worktreeName)")
-            } else {
-                showAlert("Merged \(worktreeName) to main")
-            }
-        } catch {
-            logger.error("Failed to merge worktree: \(error)")
-            showAlert("Merge failed: \(error)", isError: true)
-        }
-    }
-
     func showAlert(_ message: String, isError: Bool = false) {
         alertMessage = message
         alertIsError = isError
@@ -384,19 +353,6 @@ final class AppState: ObservableObject {
             }
         } catch {
             logger.error("Failed to rename worktree: \(error)")
-            handleConnectionError(error)
-        }
-    }
-
-    // MARK: - Merge Status
-
-    /// Refresh the merge status for a specific worktree (called on-demand, not during polling).
-    func refreshMergeStatus(worktreeID: UUID) async {
-        do {
-            let status = try await daemonClient.checkMergeability(worktreeID: worktreeID)
-            mergeStatus[worktreeID] = status
-        } catch {
-            logger.error("Failed to check merge status for \(worktreeID): \(error)")
             handleConnectionError(error)
         }
     }

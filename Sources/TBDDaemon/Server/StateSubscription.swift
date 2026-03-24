@@ -14,7 +14,6 @@ public enum StateDelta: Codable, Sendable {
     case repoRemoved(RepoIDDelta)
     case terminalCreated(TerminalDelta)
     case terminalRemoved(TerminalIDDelta)
-    case worktreeMerged(WorktreeIDDelta)
     case worktreeGitStatusChanged(WorktreeGitStatusDelta)
 }
 

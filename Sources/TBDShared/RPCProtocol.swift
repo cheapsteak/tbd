@@ -93,8 +93,6 @@ public enum RPCMethod {
     public static let resolvePath = "resolve.path"
     public static let notificationsList = "notifications.list"
     public static let notificationsMarkRead = "notifications.markRead"
-    public static let worktreeMerge = "worktree.merge"
-    public static let worktreeMergeStatus = "worktree.mergeStatus"
     public static let cleanup = "cleanup"
 }
 
@@ -156,19 +154,6 @@ public struct WorktreeRenameParams: Codable, Sendable {
     }
 }
 
-public struct WorktreeMergeParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public let archiveAfter: Bool
-    public init(worktreeID: UUID, archiveAfter: Bool = false) {
-        self.worktreeID = worktreeID; self.archiveAfter = archiveAfter
-    }
-}
-
-public struct WorktreeMergeStatusParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
-}
-
 public struct TerminalCreateParams: Codable, Sendable {
     public let worktreeID: UUID
     public let cmd: String?
@@ -220,15 +205,6 @@ public struct ResolvedPathResult: Codable, Sendable {
     public let worktreeID: UUID?
     public init(repoID: UUID?, worktreeID: UUID?) {
         self.repoID = repoID; self.worktreeID = worktreeID
-    }
-}
-
-public struct WorktreeMergeStatusResult: Codable, Sendable {
-    public let canMerge: Bool
-    public let reason: String?
-    public let commitCount: Int
-    public init(canMerge: Bool, reason: String?, commitCount: Int) {
-        self.canMerge = canMerge; self.reason = reason; self.commitCount = commitCount
     }
 }
 

@@ -329,23 +329,6 @@ actor DaemonClient {
         )
     }
 
-    /// Merge a worktree branch into main via rebase.
-    func mergeWorktree(id: UUID, archiveAfter: Bool = false) throws {
-        try callVoid(
-            method: RPCMethod.worktreeMerge,
-            params: WorktreeMergeParams(worktreeID: id, archiveAfter: archiveAfter)
-        )
-    }
-
-    /// Check merge status for a worktree.
-    func checkMergeability(worktreeID: UUID) throws -> WorktreeMergeStatusResult {
-        return try call(
-            method: RPCMethod.worktreeMergeStatus,
-            params: WorktreeMergeStatusParams(worktreeID: worktreeID),
-            resultType: WorktreeMergeStatusResult.self
-        )
-    }
-
     /// Rename a worktree's display name.
     func renameWorktree(id: UUID, displayName: String) throws {
         try callVoid(

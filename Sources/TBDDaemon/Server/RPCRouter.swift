@@ -61,10 +61,6 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeRevive(request.paramsData)
             case RPCMethod.worktreeRename:
                 return try await handleWorktreeRename(request.paramsData)
-            case RPCMethod.worktreeMerge:
-                return try await handleWorktreeMerge(request.paramsData)
-            case RPCMethod.worktreeMergeStatus:
-                return try await handleWorktreeMergeStatus(request.paramsData)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData)
             case RPCMethod.terminalList:
@@ -251,44 +247,6 @@ public final class RPCRouter: Sendable {
         )))
 
         return .ok()
-    }
-
-    private func handleWorktreeMerge(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(WorktreeMergeParams.self, from: paramsData)
-        try await lifecycle.mergeWorktree(
-            worktreeID: params.worktreeID,
-            archiveAfter: params.archiveAfter
-        )
-
-        // Mark the merged worktree's git status
-        try await db.worktrees.updateGitStatus(id: params.worktreeID, gitStatus: .merged)
-
-        subscriptions.broadcast(delta: .worktreeMerged(WorktreeIDDelta(
-            worktreeID: params.worktreeID
-        )))
-        subscriptions.broadcast(delta: .worktreeGitStatusChanged(
-            WorktreeGitStatusDelta(worktreeID: params.worktreeID, gitStatus: .merged)
-        ))
-
-        // Refresh all other active worktrees in background (main just moved)
-        if let mergedWt = try await db.worktrees.get(id: params.worktreeID) {
-            Task {
-                await lifecycle.refreshGitStatuses(repoID: mergedWt.repoID)
-            }
-        }
-
-        return .ok()
-    }
-
-    private func handleWorktreeMergeStatus(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(WorktreeMergeStatusParams.self, from: paramsData)
-        let status = try await lifecycle.checkWorktreeMergeability(worktreeID: params.worktreeID)
-        let result = WorktreeMergeStatusResult(
-            canMerge: status.canMerge,
-            reason: status.reason,
-            commitCount: status.commitCount
-        )
-        return try RPCResponse(result: result)
     }
 
     // MARK: - Terminal Handlers
