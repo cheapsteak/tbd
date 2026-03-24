@@ -22,6 +22,7 @@ public actor PRStatusManager {
     /// worktrees: list of (id, branch, repoPath) for active non-main worktrees.
     public func fetchAll(worktrees: [(id: UUID, branch: String, repoPath: String)]) async {
         guard !worktrees.isEmpty else { return }
+        // All worktrees share one repo; any path works as gh's working directory for auth.
         let repoPath = worktrees[0].repoPath
 
         guard let jsonData = await runGHGraphQL(repoPath: repoPath) else { return }
@@ -128,7 +129,6 @@ public actor PRStatusManager {
                          orderBy: {field: CREATED_AT, direction: DESC}) {
               nodes {
                 number url state mergeStateStatus headRefName
-                repository { nameWithOwner }
               }
             }
           }
@@ -202,6 +202,6 @@ private struct GHPRViewResult: Codable {
     let mergeStateStatus: String
 }
 
-enum PRStatusError: Error {
+public enum PRStatusError: Error {
     case invalidJSON
 }

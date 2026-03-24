@@ -53,24 +53,21 @@ struct PRStatusManagerTests {
                     "url": "https://github.com/owner/repo/pull/42",
                     "state": "OPEN",
                     "mergeStateStatus": "CLEAN",
-                    "headRefName": "tbd/cool-feature",
-                    "repository": { "nameWithOwner": "owner/repo" }
+                    "headRefName": "tbd/cool-feature"
                   },
                   {
                     "number": 7,
                     "url": "https://github.com/owner/repo/pull/7",
                     "state": "MERGED",
                     "mergeStateStatus": "UNKNOWN",
-                    "headRefName": "tbd/old-feature",
-                    "repository": { "nameWithOwner": "owner/repo" }
+                    "headRefName": "tbd/old-feature"
                   },
                   {
                     "number": 99,
                     "url": "https://github.com/owner/repo/pull/99",
                     "state": "OPEN",
                     "mergeStateStatus": "CLEAN",
-                    "headRefName": "feature/not-tbd",
-                    "repository": { "nameWithOwner": "owner/repo" }
+                    "headRefName": "feature/not-tbd"
                   }
                 ]
               }
