@@ -57,6 +57,27 @@ struct WorktreeRowView: View {
         }
     }
 
+    private var prIcon: String? {
+        guard !isMain, let status = appState.prStatuses[worktree.id] else { return nil }
+        switch status.state {
+        case .open, .changesRequested: return "git-pull-request"
+        case .mergeable:               return "git-pull-request"
+        case .merged:                  return "git-merge"
+        case .closed:                  return "git-pull-request-closed"
+        }
+    }
+
+    private var prIconColor: Color {
+        guard !isMain, let status = appState.prStatuses[worktree.id] else { return .secondary }
+        switch status.state {
+        case .open:             return .secondary
+        case .changesRequested: return .red
+        case .mergeable:        return .green
+        case .merged:           return .purple
+        case .closed:           return .secondary
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             if isMain {
@@ -76,6 +97,14 @@ struct WorktreeRowView: View {
                 Image(systemName: icon)
                     .font(.caption2)
                     .foregroundStyle(gitStatusColor)
+            }
+            if let icon = prIcon, let nsImage = loadOcticon(icon) {
+                Image(nsImage: nsImage)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 12, height: 12)
+                    .foregroundStyle(prIconColor)
             }
             if isEditing {
                 TextField("Name", text: $editText)
@@ -155,5 +184,12 @@ struct WorktreeRowView: View {
 
     private func cancelRename() {
         isEditing = false
+    }
+
+    private func loadOcticon(_ name: String) -> NSImage? {
+        guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.isTemplate = true
+        return image
     }
 }

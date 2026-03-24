@@ -69,8 +69,12 @@ struct ContentView: View {
 
             StatusBarView()
         }
-        .onChange(of: appState.selectedWorktreeIDs) { _, newSelection in
+        .onChange(of: appState.selectedWorktreeIDs) { oldSelection, newSelection in
             markSelectedWorktreesAsRead(newSelection)
+            let newlySelected = newSelection.subtracting(oldSelection)
+            for worktreeID in newlySelected {
+                Task { await appState.refreshPRStatus(worktreeID: worktreeID) }
+            }
         }
         .alert(
             appState.alertIsError ? "Error" : "Success",

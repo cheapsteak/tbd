@@ -35,7 +35,7 @@ let package = Package(
                 "TBDDaemonLib",
             ],
             path: "Sources/TBDDaemon",
-            exclude: ["Database", "Git", "Hooks", "Tmux", "Lifecycle", "Server", "Daemon.swift", "PIDFile.swift"],
+            exclude: ["Database", "Git", "Hooks", "Tmux", "Lifecycle", "Server", "SSH", "PR", "Daemon.swift", "PIDFile.swift"],
             sources: ["main.swift"]
         ),
         .executableTarget(
@@ -56,7 +56,8 @@ let package = Package(
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
-            path: "Sources/TBDApp"
+            path: "Sources/TBDApp",
+            resources: [.copy("Resources/Icons")]
         ),
         .testTarget(
             name: "TBDSharedTests",

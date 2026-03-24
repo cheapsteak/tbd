@@ -78,6 +78,7 @@ public final class Daemon: Sendable {
         let tmux = TmuxManager()
         let hooks = HookResolver()
         let lifecycle = WorktreeLifecycle(db: database, git: git, tmux: tmux, hooks: hooks, subscriptions: subs)
+        let prManager = PRStatusManager()
 
         // 8. Initialize RPC router
         let rpcRouter = RPCRouter(
@@ -86,7 +87,8 @@ public final class Daemon: Sendable {
             tmux: tmux,
             git: git,
             startTime: startTime,
-            subscriptions: subs
+            subscriptions: subs,
+            prManager: prManager
         )
         self.router = rpcRouter
 

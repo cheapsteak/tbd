@@ -10,6 +10,7 @@ public final class RPCRouter: Sendable {
     public let git: GitManager
     public let startTime: Date
     public let subscriptions: StateSubscriptionManager
+    public let prManager: PRStatusManager
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -20,7 +21,8 @@ public final class RPCRouter: Sendable {
         tmux: TmuxManager,
         git: GitManager = GitManager(),
         startTime: Date = Date(),
-        subscriptions: StateSubscriptionManager = StateSubscriptionManager()
+        subscriptions: StateSubscriptionManager = StateSubscriptionManager(),
+        prManager: PRStatusManager = PRStatusManager()
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -28,6 +30,7 @@ public final class RPCRouter: Sendable {
         self.git = git
         self.startTime = startTime
         self.subscriptions = subscriptions
+        self.prManager = prManager
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -79,11 +82,44 @@ public final class RPCRouter: Sendable {
                 return try await handleNotificationsMarkRead(request.paramsData)
             case RPCMethod.cleanup:
                 return try await handleCleanup()
+            case RPCMethod.prList:
+                return try await handlePRList()
+            case RPCMethod.prRefresh:
+                return try await handlePRRefresh(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
         } catch {
             return RPCResponse(error: "\(error)")
         }
+    }
+
+    // MARK: - PR Status
+
+    private func handlePRList() async throws -> RPCResponse {
+        // Fetch fresh PR data for all active worktrees before returning the cache.
+        // This is called every ~30s by the app, so one GraphQL call per poll is acceptable.
+        let worktrees = try await db.worktrees.list(status: .active)
+        let infos = worktrees.map { (id: $0.id, branch: $0.branch, repoPath: $0.path) }
+        await prManager.fetchAll(worktrees: infos)
+        let statuses = await prManager.allStatuses()
+        return try RPCResponse(result: PRListResult(statuses: statuses))
+    }
+
+    private func handlePRRefresh(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(PRRefreshParams.self, from: paramsData)
+
+        // Look up worktree and repo to get branch and repoPath
+        guard let wt = try await db.worktrees.get(id: params.worktreeID),
+              let repo = try await db.repos.get(id: wt.repoID) else {
+            return try RPCResponse(result: PRRefreshResult(status: nil))
+        }
+
+        let status = await prManager.refresh(
+            worktreeID: wt.id,
+            branch: wt.branch,
+            repoPath: repo.path
+        )
+        return try RPCResponse(result: PRRefreshResult(status: status))
     }
 }
