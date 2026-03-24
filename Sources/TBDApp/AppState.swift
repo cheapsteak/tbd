@@ -17,6 +17,7 @@ final class AppState: ObservableObject {
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
     @Published var editingWorktreeID: UUID? = nil
+    @Published var prStatuses: [UUID: PRStatus] = [:]
 
     // Alert state for user feedback
     @Published var alertMessage: String? = nil
@@ -25,6 +26,7 @@ final class AppState: ObservableObject {
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
     private var pollTimer: Timer?
+    private var pollCycle = 0
 
     init() {
         Task {
@@ -54,6 +56,10 @@ final class AppState: ObservableObject {
                     if !self.isConnected { return }
                 }
                 await self.refreshAll()
+                self.pollCycle += 1
+                if self.pollCycle % 15 == 0 {
+                    await self.refreshPRStatuses()
+                }
             }
         }
     }
@@ -201,6 +207,33 @@ final class AppState: ObservableObject {
             }
         } catch {
             logger.error("Failed to list terminals for worktree \(worktreeID): \(error)")
+            handleConnectionError(error)
+        }
+    }
+
+    /// Poll all cached PR statuses from the daemon (background, every ~30s).
+    func refreshPRStatuses() async {
+        do {
+            let fetched = try await daemonClient.listPRStatuses()
+            // Only update if changed to avoid unnecessary SwiftUI redraws
+            if fetched != prStatuses {
+                prStatuses = fetched
+            }
+        } catch {
+            logger.error("Failed to list PR statuses: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
+    /// Trigger an immediate PR refresh for one worktree (on-select).
+    func refreshPRStatus(worktreeID: UUID) async {
+        do {
+            let status = try await daemonClient.refreshPRStatus(worktreeID: worktreeID)
+            if status != prStatuses[worktreeID] {
+                prStatuses[worktreeID] = status
+            }
+        } catch {
+            logger.error("Failed to refresh PR status for \(worktreeID): \(error)")
             handleConnectionError(error)
         }
     }
