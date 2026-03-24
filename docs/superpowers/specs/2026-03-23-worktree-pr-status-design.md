@@ -62,7 +62,7 @@ A **single** `gh api graphql` call fetches the authenticated user's most recent 
 gh api graphql -f query='
   query {
     viewer {
-      pullRequests(first: 50, states: [OPEN, MERGED, CLOSED],
+      pullRequests(first: 100, states: [OPEN, MERGED, CLOSED],
                    orderBy: {field: CREATED_AT, direction: DESC}) {
         nodes {
           number url state mergeStateStatus headRefName
@@ -83,7 +83,7 @@ The call is made from any known repo path (for `gh` to infer the host). The resp
 This approach requires no dynamic query building, no per-repo grouping, and no owner/slug parsing. One HTTP call covers all repos the user has worktrees in.
 
 - If `gh` exits non-zero (not installed, not authenticated, network error): cache is left unchanged — stale is better than missing. Logged at debug level.
-- `first: 50` is sufficient in practice: active TBD worktrees would appear in the user's most recent PRs. If a worktree's PR is not in the top 50, it is treated as having no PR.
+- `first: 100` is sufficient in practice: active TBD worktrees would appear in the user's most recent PRs. If a worktree's PR is not in the top 100, it is treated as having no PR.
 
 **On-demand refresh** (`pr.refresh` for a single worktree): runs `gh pr view <branch> --json number,url,state,mergeStateStatus` from `repoPath` — a targeted single-PR lookup used when the user selects a worktree.
 
