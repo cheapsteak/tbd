@@ -198,6 +198,17 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Update the branch name for a worktree.
+    public func updateBranch(id: UUID, branch: String) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.branch = branch
+            try record.update(db)
+        }
+    }
+
     /// Update the tmux server name for a worktree.
     public func updateTmuxServer(id: UUID, tmuxServer: String) async throws {
         try await writer.write { db in

@@ -5,10 +5,23 @@ extension WorktreeLifecycle {
     // MARK: - Git Status
 
     /// Recompute conflict status for all active worktrees in a repo.
+    /// Also detects branch name changes (e.g., `git checkout -b` inside a worktree).
     /// Runs git checks concurrently and updates the DB + broadcasts deltas.
     public func refreshGitStatuses(repoID: UUID) async {
         guard let repo = try? await db.repos.get(id: repoID) else { return }
-        let worktrees = (try? await db.worktrees.list(repoID: repoID, status: .active)) ?? []
+        var worktrees = (try? await db.worktrees.list(repoID: repoID, status: .active)) ?? []
+
+        // Sync branch names: one `git worktree list` call gives us
+        // the current branch for every worktree — update DB if changed.
+        if let gitWorktrees = try? await git.worktreeList(repoPath: repo.path) {
+            let branchByPath = Dictionary(gitWorktrees.map { ($0.path, $0.branch) }, uniquingKeysWith: { _, b in b })
+            for (i, wt) in worktrees.enumerated() {
+                if let gitBranch = branchByPath[wt.path], gitBranch != wt.branch {
+                    try? await db.worktrees.updateBranch(id: wt.id, branch: gitBranch)
+                    worktrees[i].branch = gitBranch  // use updated branch for conflict check below
+                }
+            }
+        }
 
         await withTaskGroup(of: Void.self) { group in
             for wt in worktrees {
