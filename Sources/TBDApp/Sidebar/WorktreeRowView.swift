@@ -262,7 +262,15 @@ struct WorktreeRowView: View {
         // Re-focus after popover dismissal animation completes
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             isTextFieldFocused = true
-            isInsertingEmoji = false
+            // Place cursor at end instead of selecting all text
+            DispatchQueue.main.async {
+                if let window = NSApp.keyWindow,
+                   let fieldEditor = window.fieldEditor(false, for: nil) {
+                    let end = fieldEditor.string.count
+                    fieldEditor.selectedRange = NSRange(location: end, length: 0)
+                }
+                isInsertingEmoji = false
+            }
         }
     }
 
