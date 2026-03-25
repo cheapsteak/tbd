@@ -10,9 +10,9 @@ struct SplitLayoutView: View {
 
     var body: some View {
         switch node {
-        case .terminal(let id):
+        case .pane(let content):
             TerminalPanelPlaceholder(
-                terminalID: id,
+                terminalID: content.paneID,
                 worktree: worktree,
                 layout: $layout
             )
@@ -134,7 +134,7 @@ struct SplitContainer: View {
         newRatios: [CGFloat]
     ) -> LayoutNode {
         switch node {
-        case .terminal:
+        case .pane:
             return node
         case .split(let dir, let nodeChildren, let nodeRatios):
             if nodeChildren == targetChildren {
@@ -335,19 +335,19 @@ struct TerminalPanelPlaceholder: View {
 
     private func splitRight() {
         let newID = UUID()
-        layout = layout.splitTerminal(
+        layout = layout.splitPane(
             id: terminalID,
             direction: .horizontal,
-            newTerminalID: newID
+            newContent: .terminal(terminalID: newID)
         )
     }
 
     private func splitDown() {
         let newID = UUID()
-        layout = layout.splitTerminal(
+        layout = layout.splitPane(
             id: terminalID,
             direction: .vertical,
-            newTerminalID: newID
+            newContent: .terminal(terminalID: newID)
         )
     }
 }

@@ -95,7 +95,7 @@ private struct SingleWorktreeView: View {
             let layoutKey = terminal.id
             let layoutBinding = Binding<LayoutNode>(
                 get: {
-                    appState.layouts[layoutKey] ?? .terminal(terminalID: terminal.id)
+                    appState.layouts[layoutKey] ?? .pane(.terminal(terminalID: terminal.id))
                 },
                 set: { newLayout in
                     appState.layouts[layoutKey] = newLayout
@@ -139,7 +139,7 @@ private struct SingleWorktreeView: View {
 
         // Remove terminal from layout
         if let currentLayout = appState.layouts[worktreeID] {
-            if let newLayout = currentLayout.removeTerminal(id: terminal.id) {
+            if let newLayout = currentLayout.removePane(id: terminal.id) {
                 appState.layouts[worktreeID] = newLayout
             } else {
                 appState.layouts.removeValue(forKey: worktreeID)
@@ -252,7 +252,7 @@ private struct MultiWorktreeCell: View {
                 let layoutBinding = Binding<LayoutNode>(
                     get: {
                         appState.layouts[worktreeID]
-                            ?? .terminal(terminalID: terminal.id)
+                            ?? .pane(.terminal(terminalID: terminal.id))
                     },
                     set: { newLayout in
                         appState.layouts[worktreeID] = newLayout

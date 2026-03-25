@@ -10,22 +10,22 @@ enum SplitDirection: String, Codable, Sendable {
 // MARK: - LayoutNode
 
 indirect enum LayoutNode: Equatable, Sendable {
-    case terminal(terminalID: UUID)
+    case pane(PaneContent)
     case split(direction: SplitDirection, children: [LayoutNode], ratios: [CGFloat])
 
     // MARK: - Helpers
 
-    /// Finds the terminal node with the given ID and replaces it with a split
-    /// containing the original + new terminal at 50/50 ratio.
-    func splitTerminal(id: UUID, direction: SplitDirection, newTerminalID: UUID) -> LayoutNode {
+    /// Finds the pane with the given ID and replaces it with a split
+    /// containing the original + new pane at 50/50 ratio.
+    func splitPane(id: UUID, direction: SplitDirection, newContent: PaneContent) -> LayoutNode {
         switch self {
-        case .terminal(let terminalID):
-            if terminalID == id {
+        case .pane(let content):
+            if content.paneID == id {
                 return .split(
                     direction: direction,
                     children: [
-                        .terminal(terminalID: terminalID),
-                        .terminal(terminalID: newTerminalID),
+                        .pane(content),
+                        .pane(newContent),
                     ],
                     ratios: [0.5, 0.5]
                 )
@@ -34,18 +34,18 @@ indirect enum LayoutNode: Equatable, Sendable {
 
         case .split(let dir, let children, let ratios):
             let newChildren = children.map { child in
-                child.splitTerminal(id: id, direction: direction, newTerminalID: newTerminalID)
+                child.splitPane(id: id, direction: direction, newContent: newContent)
             }
             return .split(direction: dir, children: newChildren, ratios: ratios)
         }
     }
 
-    /// Removes a terminal, simplifying the tree. If a split has one child left,
-    /// unwrap it. Returns nil if the last terminal is removed.
-    func removeTerminal(id: UUID) -> LayoutNode? {
+    /// Removes a pane, simplifying the tree. If a split has one child left,
+    /// unwrap it. Returns nil if the last pane is removed.
+    func removePane(id: UUID) -> LayoutNode? {
         switch self {
-        case .terminal(let terminalID):
-            if terminalID == id {
+        case .pane(let content):
+            if content.paneID == id {
                 return nil
             }
             return self
@@ -55,7 +55,7 @@ indirect enum LayoutNode: Equatable, Sendable {
             var newRatios: [CGFloat] = []
 
             for (index, child) in children.enumerated() {
-                if let remaining = child.removeTerminal(id: id) {
+                if let remaining = child.removePane(id: id) {
                     newChildren.append(remaining)
                     newRatios.append(ratios[index])
                 }
@@ -79,11 +79,26 @@ indirect enum LayoutNode: Equatable, Sendable {
         }
     }
 
-    /// Flat list of all terminal IDs in the tree.
+    /// Flat list of all pane IDs in the tree.
+    func allPaneIDs() -> [UUID] {
+        switch self {
+        case .pane(let content):
+            return [content.paneID]
+        case .split(_, let children, _):
+            return children.flatMap { $0.allPaneIDs() }
+        }
+    }
+
+    // MARK: - Backward-compatible convenience
+
+    /// Flat list of all terminal IDs in the tree (terminals only).
     func allTerminalIDs() -> [UUID] {
         switch self {
-        case .terminal(let terminalID):
-            return [terminalID]
+        case .pane(let content):
+            if case .terminal(let id) = content {
+                return [id]
+            }
+            return []
         case .split(_, let children, _):
             return children.flatMap { $0.allTerminalIDs() }
         }
@@ -95,14 +110,17 @@ indirect enum LayoutNode: Equatable, Sendable {
 extension LayoutNode: Codable {
     private enum CodingKeys: String, CodingKey {
         case type
-        case terminalID
+        case terminalID    // legacy key for backward compat
+        case paneContent   // new key
         case direction
         case children
         case ratios
     }
 
     private enum NodeType: String, Codable {
-        case terminal, split
+        case terminal  // legacy
+        case pane
+        case split
     }
 
     init(from decoder: Decoder) throws {
@@ -111,8 +129,12 @@ extension LayoutNode: Codable {
 
         switch type {
         case .terminal:
+            // Backward compat: old format {"type":"terminal","terminalID":"..."}
             let terminalID = try container.decode(UUID.self, forKey: .terminalID)
-            self = .terminal(terminalID: terminalID)
+            self = .pane(.terminal(terminalID: terminalID))
+        case .pane:
+            let content = try container.decode(PaneContent.self, forKey: .paneContent)
+            self = .pane(content)
         case .split:
             let direction = try container.decode(SplitDirection.self, forKey: .direction)
             let children = try container.decode([LayoutNode].self, forKey: .children)
@@ -125,9 +147,9 @@ extension LayoutNode: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
 
         switch self {
-        case .terminal(let terminalID):
-            try container.encode(NodeType.terminal, forKey: .type)
-            try container.encode(terminalID, forKey: .terminalID)
+        case .pane(let content):
+            try container.encode(NodeType.pane, forKey: .type)
+            try container.encode(content, forKey: .paneContent)
         case .split(let direction, let children, let ratios):
             try container.encode(NodeType.split, forKey: .type)
             try container.encode(direction, forKey: .direction)
