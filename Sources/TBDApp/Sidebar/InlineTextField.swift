@@ -31,11 +31,16 @@ struct InlineTextField: NSViewRepresentable {
             nsView.stringValue = text
         }
         nsView.onKeyDown = onKeyDown
+        nsView.desiredCursorPosition = cursorPosition
 
         if isFocused.wrappedValue {
             DispatchQueue.main.async {
                 if nsView.window?.firstResponder != nsView.currentEditor() {
-                    nsView.window?.makeFirstResponder(nsView)
+                    // Close any popover instantly before refocusing
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0
+                        nsView.window?.makeFirstResponder(nsView)
+                    }
                 }
             }
         }
@@ -96,19 +101,19 @@ struct InlineTextField: NSViewRepresentable {
 /// instead of selecting all text.
 final class FocusStableTextField: NSTextField {
     var onKeyDown: ((_ key: UInt16) -> Bool)?
+    var desiredCursorPosition: Int?
     private var savedSelection: NSRange?
 
     override func becomeFirstResponder() -> Bool {
         let result = super.becomeFirstResponder()
-        // After becoming first responder, restore cursor position
-        if result, let saved = savedSelection {
-            DispatchQueue.main.async { [weak self] in
-                if let editor = self?.currentEditor() {
-                    let clamped = NSRange(
-                        location: min(saved.location, editor.string.count),
-                        length: 0
-                    )
-                    editor.selectedRange = clamped
+        if result {
+            let target = desiredCursorPosition ?? savedSelection?.location
+            if let pos = target {
+                DispatchQueue.main.async { [weak self] in
+                    if let editor = self?.currentEditor() {
+                        let clamped = min(pos, editor.string.count)
+                        editor.selectedRange = NSRange(location: clamped, length: 0)
+                    }
                 }
             }
         }
@@ -116,7 +121,6 @@ final class FocusStableTextField: NSTextField {
     }
 
     override func textDidEndEditing(_ notification: Notification) {
-        // Save cursor position before losing focus
         if let editor = currentEditor() {
             savedSelection = editor.selectedRange
         }

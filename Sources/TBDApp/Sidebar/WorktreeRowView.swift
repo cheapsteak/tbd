@@ -254,16 +254,14 @@ struct WorktreeRowView: View {
     private func replaceColonQuery(with emoji: String) {
         guard let range = activeColonRange else { return }
         isInsertingEmoji = true
+        // Calculate new cursor position: right after the inserted emoji
+        let newCursorUTF16 = editText[editText.startIndex..<range.lowerBound].utf16.count + emoji.utf16.count
         editText.replaceSubrange(range, with: emoji)
-        // Dismiss popover instantly (no animation)
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            emojiQuery = nil
-        }
+        cursorPosition = newCursorUTF16
+        emojiQuery = nil
         var frecency = EmojiFrecency.load()
         frecency.record(emoji)
-        // Refocus immediately on next run loop
+        // Refocus and place cursor
         DispatchQueue.main.async {
             isTextFieldFocused = true
             isInsertingEmoji = false
