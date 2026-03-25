@@ -1,18 +1,23 @@
 import SwiftUI
+import WebKit
 
-// Temporary stub — will be replaced in Task 6
-struct WebviewPaneView: View {
+struct WebviewPaneView: NSViewRepresentable {
     let url: URL
-    var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .font(.largeTitle)
-                .foregroundStyle(.secondary)
-            Text(url.absoluteString)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .textBackgroundColor))
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
+        webView.load(URLRequest(url: url))
+        return webView
     }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        // Don't reload on SwiftUI updates — only initial load matters
+    }
+
+    class Coordinator: NSObject, WKNavigationDelegate {}
 }
