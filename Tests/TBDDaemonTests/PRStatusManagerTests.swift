@@ -66,7 +66,8 @@ struct PRStatusManagerTests {
                     "state": "OPEN",
                     "mergeStateStatus": "CLEAN",
                     "reviewDecision": null,
-                    "headRefName": "tbd/cool-feature"
+                    "headRefName": "tbd/cool-feature",
+                    "createdAt": "2026-03-24T10:00:00Z"
                   },
                   {
                     "number": 7,
@@ -74,7 +75,8 @@ struct PRStatusManagerTests {
                     "state": "MERGED",
                     "mergeStateStatus": "UNKNOWN",
                     "reviewDecision": null,
-                    "headRefName": "tbd/old-feature"
+                    "headRefName": "tbd/old-feature",
+                    "createdAt": "2026-03-20T10:00:00Z"
                   },
                   {
                     "number": 99,
@@ -82,7 +84,8 @@ struct PRStatusManagerTests {
                     "state": "OPEN",
                     "mergeStateStatus": "CLEAN",
                     "reviewDecision": null,
-                    "headRefName": "feature/not-tbd"
+                    "headRefName": "feature/not-tbd",
+                    "createdAt": "2026-03-24T12:00:00Z"
                   }
                 ]
               }
