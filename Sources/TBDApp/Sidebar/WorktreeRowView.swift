@@ -255,7 +255,12 @@ struct WorktreeRowView: View {
         guard let range = activeColonRange else { return }
         isInsertingEmoji = true
         editText.replaceSubrange(range, with: emoji)
-        emojiQuery = nil
+        // Dismiss popover instantly (no animation)
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            emojiQuery = nil
+        }
         var frecency = EmojiFrecency.load()
         frecency.record(emoji)
         // Refocus immediately on next run loop
