@@ -12,6 +12,8 @@ extension AppState {
         do {
             let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cmd: cmd)
             terminals[worktreeID, default: []].append(terminal)
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
+            tabs[worktreeID, default: []].append(tab)
         } catch {
             logger.error("Failed to create terminal: \(error)")
             handleConnectionError(error)

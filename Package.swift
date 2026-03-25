@@ -11,6 +11,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-nio", from: "2.65.0"),
         .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.0.0"),
+        .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
     ],
     targets: [
         .target(
@@ -53,6 +54,7 @@ let package = Package(
             dependencies: [
                 "TBDShared",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
+                .product(name: "Highlightr", package: "Highlightr"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],

@@ -57,6 +57,34 @@ struct ContentView: View {
                     .pickerStyle(.menu)
                     .help("Filter sidebar by repository")
 
+                    if let worktreeID = appState.selectedWorktreeIDs.first,
+                       appState.selectedWorktreeIDs.count == 1,
+                       let prStatus = appState.prStatuses[worktreeID],
+                       let prURL = URL(string: prStatus.url) {
+                        Button {
+                            // Reuse existing PR tab if one exists
+                            let existingTabs = appState.tabs[worktreeID] ?? []
+                            let hasPRTab = existingTabs.contains { tab in
+                                if case .webview(_, let url) = tab.content { return url == prURL }
+                                return false
+                            }
+                            if !hasPRTab {
+                                let webviewID = UUID()
+                                let tab = Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
+                                appState.tabs[worktreeID, default: []].append(tab)
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.triangle.pull")
+                                    .font(.caption)
+                                Text("#\(prStatus.number)")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                            }
+                        }
+                        .help("Open PR in browser pane")
+                    }
+
                     Button {
                         withAnimation(.easeInOut(duration: 0.2)) { showFilePanel.toggle() }
                     } label: {

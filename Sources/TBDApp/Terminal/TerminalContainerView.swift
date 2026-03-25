@@ -42,23 +42,23 @@ private struct SingleWorktreeView: View {
         return nil
     }
 
-    private var terminals: [Terminal] {
-        appState.terminals[worktreeID] ?? []
+    private var worktreeTabs: [Tab] {
+        appState.tabs[worktreeID] ?? []
     }
 
     var body: some View {
         if let worktree {
             VStack(spacing: 0) {
                 // Tab bar
-                if !terminals.isEmpty {
-                    TerminalTabBar(
-                        terminals: terminals,
+                if !worktreeTabs.isEmpty {
+                    TabBar(
+                        tabs: worktreeTabs,
                         activeTabIndex: $activeTabIndex,
                         onAddTab: {
                             Task {
                                 await appState.createTerminal(worktreeID: worktreeID)
                                 // Select the newly added tab
-                                let newCount = appState.terminals[worktreeID]?.count ?? 0
+                                let newCount = appState.tabs[worktreeID]?.count ?? 0
                                 if newCount > 0 {
                                     activeTabIndex = newCount - 1
                                 }
@@ -78,6 +78,7 @@ private struct SingleWorktreeView: View {
             // TmuxBridge sessions are created on-demand by TerminalPanelView
             .task(id: worktreeID) {
                 // Auto-create a terminal when selecting a main worktree with none
+                let terminals = appState.terminals[worktreeID] ?? []
                 if worktree.status == .main && terminals.isEmpty {
                     await appState.createTerminal(worktreeID: worktreeID)
                 }
@@ -90,16 +91,10 @@ private struct SingleWorktreeView: View {
 
     @ViewBuilder
     private func layoutContent(worktree: Worktree) -> some View {
-        if let terminal = activeTerminal {
-            // Each tab shows one terminal (with optional splits stored per-terminal)
-            let layoutKey = terminal.id
+        if let tab = activeTab {
             let layoutBinding = Binding<LayoutNode>(
-                get: {
-                    appState.layouts[layoutKey] ?? .terminal(terminalID: terminal.id)
-                },
-                set: { newLayout in
-                    appState.layouts[layoutKey] = newLayout
-                }
+                get: { appState.layouts[tab.id] ?? .pane(tab.content) },
+                set: { appState.layouts[tab.id] = $0 }
             )
 
             SplitLayoutView(
@@ -107,7 +102,7 @@ private struct SingleWorktreeView: View {
                 worktree: worktree,
                 layout: layoutBinding
             )
-            .id(terminal.id) // Force new view hierarchy when switching tabs
+            .id(tab.id) // Force new view hierarchy when switching tabs
         } else {
             VStack(spacing: 12) {
                 Image(systemName: "terminal")
@@ -125,37 +120,31 @@ private struct SingleWorktreeView: View {
         }
     }
 
-    private var activeTerminal: Terminal? {
-        let terms = terminals
-        guard !terms.isEmpty else { return nil }
-        let clampedIndex = min(activeTabIndex, terms.count - 1)
-        return terms[clampedIndex]
+    private var activeTab: Tab? {
+        let tabs = worktreeTabs
+        guard !tabs.isEmpty else { return nil }
+        return tabs[min(activeTabIndex, tabs.count - 1)]
     }
 
     private func closeTab(at index: Int) {
-        let terms = terminals
-        guard index >= 0, index < terms.count else { return }
-        let terminal = terms[index]
+        let tabs = worktreeTabs
+        guard index >= 0, index < tabs.count else { return }
+        let tab = tabs[index]
 
-        // Remove terminal from layout
-        if let currentLayout = appState.layouts[worktreeID] {
-            if let newLayout = currentLayout.removeTerminal(id: terminal.id) {
-                appState.layouts[worktreeID] = newLayout
-            } else {
-                appState.layouts.removeValue(forKey: worktreeID)
-            }
+        // Remove layout
+        appState.layouts.removeValue(forKey: tab.id)
+
+        // Remove tab
+        appState.tabs[worktreeID]?.remove(at: index)
+
+        // For terminal tabs, also remove from terminals
+        if case .terminal(let terminalID) = tab.content {
+            appState.terminals[worktreeID]?.removeAll { $0.id == terminalID }
         }
-
-        // Remove from terminals list
-        appState.terminals[worktreeID]?.removeAll { $0.id == terminal.id }
 
         // Adjust active tab index
-        let remaining = appState.terminals[worktreeID]?.count ?? 0
-        if remaining > 0 {
-            activeTabIndex = min(activeTabIndex, remaining - 1)
-        } else {
-            activeTabIndex = 0
-        }
+        let remaining = appState.tabs[worktreeID]?.count ?? 0
+        activeTabIndex = remaining > 0 ? min(activeTabIndex, remaining - 1) : 0
     }
 }
 
@@ -252,14 +241,14 @@ private struct MultiWorktreeCell: View {
                 let layoutBinding = Binding<LayoutNode>(
                     get: {
                         appState.layouts[worktreeID]
-                            ?? .terminal(terminalID: terminal.id)
+                            ?? .pane(.terminal(terminalID: terminal.id))
                     },
                     set: { newLayout in
                         appState.layouts[worktreeID] = newLayout
                     }
                 )
-                TerminalPanelPlaceholder(
-                    terminalID: terminal.id,
+                PanePlaceholder(
+                    content: .terminal(terminalID: terminal.id),
                     worktree: worktree,
                     layout: layoutBinding
                 )
