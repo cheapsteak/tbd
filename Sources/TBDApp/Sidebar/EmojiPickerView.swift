@@ -6,40 +6,51 @@ struct EmojiPickerView: View {
     @Binding var selectedIndex: Int
     let onSelect: (String) -> Void
 
-    private var matches: [EmojiData.Entry] {
-        EmojiData.search(query)
+    @State private var frecency = EmojiFrecency.load()
+
+    private static let columns = Array(repeating: GridItem(.fixed(32), spacing: 2), count: 7)
+
+    private var results: [EmojiData.Entry] {
+        if query.isEmpty {
+            return frecency.defaults()
+        }
+        return EmojiData.search(query, limit: 21)
     }
 
     var body: some View {
-        let results = matches
-        if results.isEmpty {
+        let items = results
+        if items.isEmpty {
             Text("No emoji found")
                 .foregroundStyle(.secondary)
                 .font(.caption)
                 .padding(8)
         } else {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(results.enumerated()), id: \.element.name) { index, entry in
-                    HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                if query.isEmpty {
+                    Text("Frequently Used")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 6)
+                }
+                LazyVGrid(columns: Self.columns, spacing: 2) {
+                    ForEach(Array(items.enumerated()), id: \.element.name) { index, entry in
                         Text(entry.emoji)
-                            .font(.body)
-                        Text(entry.name.replacingOccurrences(of: "_", with: " "))
-                            .foregroundStyle(.primary)
-                            .font(.caption)
-                        Spacer()
+                            .font(.title3)
+                            .frame(width: 32, height: 32)
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(index == clampedIndex(items.count) ? Color.accentColor.opacity(0.3) : Color.clear)
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                select(entry.emoji)
+                            }
+                            .help(entry.name.replacingOccurrences(of: "_", with: " "))
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(index == clampedIndex(results.count) ? Color.accentColor.opacity(0.2) : Color.clear)
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture { onSelect(entry.emoji) }
                 }
             }
-            .padding(4)
-            .frame(width: 200)
+            .padding(6)
+            .frame(width: 240)
         }
     }
 
@@ -48,10 +59,84 @@ struct EmojiPickerView: View {
         return min(selectedIndex, count - 1)
     }
 
-    /// Returns the emoji for the currently selected index, if any matches exist.
     func selectedEmoji() -> String? {
-        let results = matches
-        guard !results.isEmpty else { return nil }
-        return results[clampedIndex(results.count)].emoji
+        let items = results
+        guard !items.isEmpty else { return nil }
+        return items[clampedIndex(items.count)].emoji
+    }
+
+    private func select(_ emoji: String) {
+        frecency.record(emoji)
+        onSelect(emoji)
+    }
+}
+
+// MARK: - Frecency tracking
+
+/// Tracks frequently/recently used emoji via UserDefaults.
+struct EmojiFrecency: Sendable {
+    private static let key = "emojiPicker.frecency"
+    private static let maxEntries = 21
+
+    /// Gitmoji defaults — curated for git worktree naming context.
+    static let gitmoji: [String] = [
+        "✨", "🐛", "🚀", "🔥", "♻️", "🎨", "📝",
+        "✅", "🚧", "⚡️", "💄", "🎉", "🔒️", "🩹",
+        "⬆️", "🏗️", "🧪", "💥", "🗑️", "👽️", "🔧",
+    ]
+
+    private var usage: [String: UsageRecord]
+
+    struct UsageRecord: Codable, Sendable {
+        var count: Int
+        var lastUsed: Date
+    }
+
+    static func load() -> EmojiFrecency {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let usage = try? JSONDecoder().decode([String: UsageRecord].self, from: data) else {
+            return EmojiFrecency(usage: [:])
+        }
+        return EmojiFrecency(usage: usage)
+    }
+
+    mutating func record(_ emoji: String) {
+        var record = usage[emoji] ?? UsageRecord(count: 0, lastUsed: .distantPast)
+        record.count += 1
+        record.lastUsed = Date()
+        usage[emoji] = record
+        save()
+    }
+
+    /// Returns frequently used emoji as EmojiData entries, falling back to gitmoji defaults.
+    func defaults() -> [EmojiData.Entry] {
+        let sorted = usage
+            .sorted { a, b in frecencyScore(a.value) > frecencyScore(b.value) }
+            .prefix(Self.maxEntries)
+            .compactMap { pair in EmojiData.all.first(where: { $0.emoji == pair.key }) }
+
+        if sorted.count >= 7 {
+            return Array(sorted)
+        }
+
+        // Pad with gitmoji defaults (skip any already in frequent list)
+        let frequentEmoji = Set(sorted.map(\.emoji))
+        let fallbacks = Self.gitmoji
+            .filter { !frequentEmoji.contains($0) }
+            .compactMap { emoji in EmojiData.all.first(where: { $0.emoji == emoji }) }
+        return Array((sorted + fallbacks).prefix(Self.maxEntries))
+    }
+
+    private func frecencyScore(_ record: UsageRecord) -> Double {
+        let recency = Date().timeIntervalSince(record.lastUsed)
+        let hoursSinceUse = recency / 3600
+        // Decay: halve relevance every 48 hours
+        let decay = pow(0.5, hoursSinceUse / 48)
+        return Double(record.count) * decay
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(usage) else { return }
+        UserDefaults.standard.set(data, forKey: Self.key)
     }
 }

@@ -119,10 +119,20 @@ struct WorktreeRowView: View {
                     }
                     .onKeyPress(.downArrow) {
                         guard emojiQuery != nil else { return .ignored }
-                        emojiSelectedIndex += 1
+                        emojiSelectedIndex += 7 // grid row = 7 columns
                         return .handled
                     }
                     .onKeyPress(.upArrow) {
+                        guard emojiQuery != nil else { return .ignored }
+                        emojiSelectedIndex = max(0, emojiSelectedIndex - 7)
+                        return .handled
+                    }
+                    .onKeyPress(.rightArrow) {
+                        guard emojiQuery != nil else { return .ignored }
+                        emojiSelectedIndex += 1
+                        return .handled
+                    }
+                    .onKeyPress(.leftArrow) {
                         guard emojiQuery != nil else { return .ignored }
                         emojiSelectedIndex = max(0, emojiSelectedIndex - 1)
                         return .handled
@@ -245,11 +255,15 @@ struct WorktreeRowView: View {
         guard let range = activeColonRange else { return }
         editText.replaceSubrange(range, with: emoji)
         emojiQuery = nil
+        var frecency = EmojiFrecency.load()
+        frecency.record(emoji)
     }
 
     private func selectedEmoji() -> String? {
         guard let query = emojiQuery else { return nil }
-        let results = EmojiData.search(query)
+        let results = query.isEmpty
+            ? EmojiFrecency.load().defaults()
+            : EmojiData.search(query, limit: 21)
         guard !results.isEmpty else { return nil }
         let index = min(emojiSelectedIndex, results.count - 1)
         return results[index].emoji
