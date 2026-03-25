@@ -257,6 +257,10 @@ struct WorktreeRowView: View {
         emojiQuery = nil
         var frecency = EmojiFrecency.load()
         frecency.record(emoji)
+        // Re-focus the text field after popover dismissal
+        DispatchQueue.main.async {
+            isTextFieldFocused = true
+        }
     }
 
     private func selectedEmoji() -> String? {
