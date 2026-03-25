@@ -32,15 +32,17 @@ public actor PRStatusManager {
             return
         }
 
-        // Build branch → PRNode lookup, preferring the most relevant PR
-        // when multiple PRs exist for the same branch (e.g., one closed, one open).
-        // Priority: OPEN > MERGED > CLOSED. Within the same state, newer (earlier
-        // in the DESC-ordered list) wins because it's inserted first.
+        // Build branch → PRNode lookup. When multiple PRs share a branch,
+        // pick the best one: sort by state priority (OPEN > MERGED > CLOSED),
+        // then by createdAt descending (newest first within the same state).
         var byBranch: [String: PRNode] = [:]
         for node in nodes {
             if let existing = byBranch[node.headRefName] {
-                // Only replace if the new node has higher priority
-                if Self.prPriority(node.state) > Self.prPriority(existing.state) {
+                let nodePriority = Self.prPriority(node.state)
+                let existingPriority = Self.prPriority(existing.state)
+                if nodePriority > existingPriority {
+                    byBranch[node.headRefName] = node
+                } else if nodePriority == existingPriority && node.createdAt > existing.createdAt {
                     byBranch[node.headRefName] = node
                 }
             } else {
@@ -122,6 +124,7 @@ public actor PRStatusManager {
         public let mergeStateStatus: String
         public let reviewDecision: String   // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or ""
         public let headRefName: String
+        public let createdAt: String        // ISO 8601, e.g. "2026-03-24T15:58:27Z"
     }
 
     public static func parsePRNodes(from data: Data) throws -> [PRNode] {
@@ -139,13 +142,14 @@ public actor PRStatusManager {
                   let state = node["state"] as? String,
                   let mergeStateStatus = node["mergeStateStatus"] as? String,
                   let headRefName = node["headRefName"] as? String,
+                  let createdAt = node["createdAt"] as? String,
                   headRefName.hasPrefix("tbd/") else { return nil }
-            // reviewDecision can be null in JSON (no reviews yet)
             let reviewDecision = node["reviewDecision"] as? String ?? ""
             return PRNode(number: number, url: url, state: state,
                           mergeStateStatus: mergeStateStatus,
                           reviewDecision: reviewDecision,
-                          headRefName: headRefName)
+                          headRefName: headRefName,
+                          createdAt: createdAt)
         }
     }
 
@@ -158,7 +162,7 @@ public actor PRStatusManager {
             pullRequests(first: 100, states: [OPEN, MERGED, CLOSED],
                          orderBy: {field: CREATED_AT, direction: DESC}) {
               nodes {
-                number url state mergeStateStatus reviewDecision headRefName
+                number url state mergeStateStatus reviewDecision headRefName createdAt
               }
             }
           }
