@@ -1,5 +1,60 @@
+import AppKit
 import SwiftUI
 import TBDShared
+
+// MARK: - Panel anchor (manages FloatingPanel lifecycle from SwiftUI)
+
+struct EmojiPanelAnchor: NSViewRepresentable {
+    let isPresented: Bool
+    let query: String
+    @Binding var selectedIndex: Int
+    let onSelect: (String) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let anchor = NSView(frame: .zero)
+        context.coordinator.anchor = anchor
+        return anchor
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        let coordinator = context.coordinator
+        if isPresented {
+            let content = EmojiPickerView(
+                query: query,
+                selectedIndex: $selectedIndex,
+                onSelect: onSelect
+            )
+            .background(.ultraThickMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            if let panel = coordinator.panel {
+                panel.updateContent(content)
+                panel.show(relativeTo: nsView)
+            } else {
+                let panel = FloatingPanel(content: content)
+                coordinator.panel = panel
+                panel.show(relativeTo: nsView)
+            }
+        } else {
+            coordinator.panel?.dismiss()
+            coordinator.panel = nil
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.panel?.dismiss()
+        coordinator.panel = nil
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        var anchor: NSView?
+        var panel: FloatingPanel?
+    }
+}
+
+// MARK: - Emoji picker grid
 
 struct EmojiPickerView: View {
     let query: String

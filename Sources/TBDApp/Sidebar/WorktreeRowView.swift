@@ -11,7 +11,6 @@ struct WorktreeRowView: View {
     @State private var isTextFieldFocused = false
     @State private var emojiQuery: String?
     @State private var emojiSelectedIndex = 0
-    @State private var isInsertingEmoji = false
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -135,24 +134,19 @@ struct WorktreeRowView: View {
                     updateEmojiQuery(newValue)
                 }
                 .onChange(of: isTextFieldFocused) { _, focused in
-                    if !focused && !isInsertingEmoji {
+                    if !focused {
                         emojiQuery = nil
                         commitRename()
                     }
                 }
-                .popover(
-                    isPresented: Binding(
-                        get: { emojiQuery != nil },
-                        set: { if !$0 { emojiQuery = nil } }
-                    ),
-                    arrowEdge: .bottom
-                ) {
-                    EmojiPickerView(
+                .background(
+                    EmojiPanelAnchor(
+                        isPresented: emojiQuery != nil,
                         query: emojiQuery ?? "",
                         selectedIndex: $emojiSelectedIndex,
                         onSelect: { emoji in replaceColonQuery(with: emoji) }
                     )
-                }
+                )
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(worktree.displayName)
@@ -253,19 +247,12 @@ struct WorktreeRowView: View {
 
     private func replaceColonQuery(with emoji: String) {
         guard let range = activeColonRange else { return }
-        isInsertingEmoji = true
-        // Calculate new cursor position: right after the inserted emoji
         let newCursorUTF16 = editText[editText.startIndex..<range.lowerBound].utf16.count + emoji.utf16.count
         editText.replaceSubrange(range, with: emoji)
         cursorPosition = newCursorUTF16
         emojiQuery = nil
         var frecency = EmojiFrecency.load()
         frecency.record(emoji)
-        // Refocus and place cursor
-        DispatchQueue.main.async {
-            isTextFieldFocused = true
-            isInsertingEmoji = false
-        }
     }
 
     private func selectedEmoji() -> String? {
