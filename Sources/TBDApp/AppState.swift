@@ -15,6 +15,7 @@ final class AppState: ObservableObject {
     @Published var isConnected: Bool = false
     @Published var layouts: [UUID: LayoutNode] = [:]
     @Published var tabs: [UUID: [Tab]] = [:]
+    @Published var activeTabIndices: [UUID: Int] = [:]
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
     @Published var editingWorktreeID: UUID? = nil

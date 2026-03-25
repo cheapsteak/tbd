@@ -34,6 +34,7 @@ struct ContentView: View {
                             ))
                             FileViewerPanel(worktree: worktree)
                                 .frame(width: CGFloat(filePanelWidth))
+                                .id(worktree.id)
                         }
                     }
                 }
