@@ -141,8 +141,7 @@ struct WorktreeRowView: View {
                         updateEmojiQuery(newValue)
                     }
                     .onChange(of: isTextFieldFocused) { _, focused in
-                        if !focused {
-                            emojiQuery = nil
+                        if !focused && emojiQuery == nil {
                             commitRename()
                         }
                     }
