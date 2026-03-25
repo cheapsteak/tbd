@@ -67,7 +67,7 @@ private struct SingleWorktreeView: View {
                                 // Select the newly added tab
                                 let newCount = appState.tabs[worktreeID]?.count ?? 0
                                 if newCount > 0 {
-                                    activeTabIndex.wrappedValue = newCount - 1
+                                    activeTabIndex = newCount - 1
                                 }
                             }
                         },
@@ -130,7 +130,7 @@ private struct SingleWorktreeView: View {
     private var activeTab: Tab? {
         let tabs = worktreeTabs
         guard !tabs.isEmpty else { return nil }
-        return tabs[min(activeTabIndex.wrappedValue, tabs.count - 1)]
+        return tabs[min(activeTabIndex, tabs.count - 1)]
     }
 
     private func closeTab(at index: Int) {
@@ -157,7 +157,7 @@ private struct SingleWorktreeView: View {
 
         // Adjust active tab index
         let remaining = appState.tabs[worktreeID]?.count ?? 0
-        activeTabIndex.wrappedValue = remaining > 0 ? min(activeTabIndex.wrappedValue, remaining - 1) : 0
+        activeTabIndex = remaining > 0 ? min(activeTabIndex, remaining - 1) : 0
     }
 }
 
