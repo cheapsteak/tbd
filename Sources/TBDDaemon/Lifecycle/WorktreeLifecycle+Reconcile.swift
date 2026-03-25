@@ -4,7 +4,7 @@ import TBDShared
 extension WorktreeLifecycle {
     // MARK: - Git Status
 
-    /// Recompute git status for all active worktrees in a repo.
+    /// Recompute conflict status for all active worktrees in a repo.
     /// Runs git checks concurrently and updates the DB + broadcasts deltas.
     public func refreshGitStatuses(repoID: UUID) async {
         guard let repo = try? await db.repos.get(id: repoID) else { return }
@@ -12,41 +12,36 @@ extension WorktreeLifecycle {
 
         await withTaskGroup(of: Void.self) { group in
             for wt in worktrees {
-                // Skip already-merged worktrees (terminal state)
-                if wt.gitStatus == .merged { continue }
-
                 group.addTask {
-                    guard let newStatus = await self.computeGitStatus(
+                    guard let newHasConflicts = await self.checkHasConflicts(
                         repoPath: repo.path,
                         defaultBranch: repo.defaultBranch,
                         branch: wt.branch
-                    ), newStatus != wt.gitStatus else { return }
-                    try? await self.db.worktrees.updateGitStatus(id: wt.id, gitStatus: newStatus)
-                    self.subscriptions?.broadcast(delta: .worktreeGitStatusChanged(
-                        WorktreeGitStatusDelta(worktreeID: wt.id, gitStatus: newStatus)
+                    ), newHasConflicts != wt.hasConflicts else { return }
+                    try? await self.db.worktrees.updateHasConflicts(id: wt.id, hasConflicts: newHasConflicts)
+                    self.subscriptions?.broadcast(delta: .worktreeConflictsChanged(
+                        WorktreeConflictDelta(worktreeID: wt.id, hasConflicts: newHasConflicts)
                     ))
                 }
             }
         }
     }
 
-    /// Compute git status for a single branch relative to the default branch.
+    /// Check whether a branch would conflict if merged into the default branch.
     /// Returns nil if git commands fail (leaves status unchanged).
-    private func computeGitStatus(repoPath: String, defaultBranch: String, branch: String) async -> GitStatus? {
+    private func checkHasConflicts(repoPath: String, defaultBranch: String, branch: String) async -> Bool? {
         guard let isAncestor = await git.isMergeBaseAncestor(
             repoPath: repoPath, base: defaultBranch, branch: branch
         ) else {
             return nil  // git error — leave status unchanged
         }
-        if isAncestor {
-            return .current
-        }
+        if isAncestor { return false }
 
         // Branches have diverged — check for conflicts
         let (hasConflicts, _) = await git.checkMergeConflicts(
             repoPath: repoPath, branch: branch, targetBranch: defaultBranch
         )
-        return hasConflicts ? .conflicts : .behind
+        return hasConflicts
     }
 
     // MARK: - Reconcile

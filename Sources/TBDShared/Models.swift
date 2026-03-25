@@ -23,13 +23,6 @@ public enum WorktreeStatus: String, Codable, Sendable {
     case active, archived, main, creating
 }
 
-public enum GitStatus: String, Codable, Sendable {
-    case current     // branch is ahead of or equal to main — no action needed
-    case behind      // main has commits not on this branch
-    case conflicts   // would conflict if merged into main
-    case merged      // squash-merged into main (set by TBD's merge flow)
-}
-
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var repoID: UUID
@@ -38,14 +31,14 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var branch: String
     public var path: String
     public var status: WorktreeStatus
-    public var gitStatus: GitStatus
+    public var hasConflicts: Bool = false
     public var createdAt: Date
     public var archivedAt: Date?
     public var tmuxServer: String
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
-                gitStatus: GitStatus = .current,
+                hasConflicts: Bool = false,
                 createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String) {
         self.id = id
         self.repoID = repoID
@@ -54,10 +47,25 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.branch = branch
         self.path = path
         self.status = status
-        self.gitStatus = gitStatus
+        self.hasConflicts = hasConflicts
         self.createdAt = createdAt
         self.archivedAt = archivedAt
         self.tmuxServer = tmuxServer
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        repoID = try c.decode(UUID.self, forKey: .repoID)
+        name = try c.decode(String.self, forKey: .name)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        branch = try c.decode(String.self, forKey: .branch)
+        path = try c.decode(String.self, forKey: .path)
+        status = try c.decode(WorktreeStatus.self, forKey: .status)
+        hasConflicts = try c.decodeIfPresent(Bool.self, forKey: .hasConflicts) ?? false
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
+        tmuxServer = try c.decode(String.self, forKey: .tmuxServer)
     }
 }
 

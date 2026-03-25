@@ -94,6 +94,14 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v3") { db in
+            try db.alter(table: "worktree") { t in
+                t.add(column: "hasConflicts", .boolean).notNull().defaults(to: false)
+            }
+            // Migrate existing conflict data
+            try db.execute(sql: "UPDATE worktree SET hasConflicts = (gitStatus = 'conflicts')")
+        }
+
         try migrator.migrate(writer)
     }
 }

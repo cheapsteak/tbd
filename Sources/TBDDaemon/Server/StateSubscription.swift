@@ -14,7 +14,7 @@ public enum StateDelta: Codable, Sendable {
     case repoRemoved(RepoIDDelta)
     case terminalCreated(TerminalDelta)
     case terminalRemoved(TerminalIDDelta)
-    case worktreeGitStatusChanged(WorktreeGitStatusDelta)
+    case worktreeConflictsChanged(WorktreeConflictDelta)
 }
 
 /// Delta payload for worktree creation/revival.
@@ -88,12 +88,12 @@ public struct TerminalIDDelta: Codable, Sendable {
     public init(terminalID: UUID) { self.terminalID = terminalID }
 }
 
-/// Delta payload for worktree git status change.
-public struct WorktreeGitStatusDelta: Codable, Sendable {
+/// Delta payload for worktree conflict status change.
+public struct WorktreeConflictDelta: Codable, Sendable {
     public let worktreeID: UUID
-    public let gitStatus: GitStatus
-    public init(worktreeID: UUID, gitStatus: GitStatus) {
-        self.worktreeID = worktreeID; self.gitStatus = gitStatus
+    public let hasConflicts: Bool
+    public init(worktreeID: UUID, hasConflicts: Bool) {
+        self.worktreeID = worktreeID; self.hasConflicts = hasConflicts
     }
 }
 

@@ -38,37 +38,25 @@ struct WorktreeRowView: View {
         }
     }
 
-    private var gitStatusIcon: String? {
+    private var worktreeIcon: String? {
         guard !isMain else { return nil }
-        switch worktree.gitStatus {
-        case .current: return nil
-        case .behind: return "arrow.down"
-        case .conflicts: return "exclamationmark.triangle"
-        case .merged: return "checkmark.circle"
+        if worktree.hasConflicts {
+            return "git-merge-conflict"
         }
-    }
-
-    private var gitStatusColor: Color {
-        switch worktree.gitStatus {
-        case .current: return .secondary
-        case .behind: return .secondary
-        case .conflicts: return .orange
-        case .merged: return .green
-        }
-    }
-
-    private var prIcon: String? {
-        guard !isMain, let status = appState.prStatuses[worktree.id] else { return nil }
+        guard let status = appState.prStatuses[worktree.id] else { return nil }
         switch status.state {
-        case .open, .changesRequested: return "git-pull-request"
-        case .mergeable:               return "git-pull-request"
-        case .merged:                  return "git-merge"
-        case .closed:                  return "git-pull-request-closed"
+        case .open, .changesRequested, .mergeable: return "git-pull-request"
+        case .merged:                              return "git-merge"
+        case .closed:                              return "git-pull-request-closed"
         }
     }
 
-    private var prIconColor: Color {
-        guard !isMain, let status = appState.prStatuses[worktree.id] else { return .secondary }
+    private var worktreeIconColor: Color {
+        guard !isMain else { return .secondary }
+        if worktree.hasConflicts {
+            return .orange
+        }
+        guard let status = appState.prStatuses[worktree.id] else { return .secondary }
         switch status.state {
         case .open:             return .secondary
         case .changesRequested: return .red
@@ -93,18 +81,13 @@ struct WorktreeRowView: View {
                     .fill(color)
                     .frame(width: 8, height: 8)
             }
-            if let icon = gitStatusIcon {
-                Image(systemName: icon)
-                    .font(.caption2)
-                    .foregroundStyle(gitStatusColor)
-            }
-            if let icon = prIcon, let nsImage = loadOcticon(icon) {
+            if let icon = worktreeIcon, let nsImage = loadIcon(icon) {
                 Image(nsImage: nsImage)
                     .renderingMode(.template)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 12, height: 12)
-                    .foregroundStyle(prIconColor)
+                    .foregroundStyle(worktreeIconColor)
             }
             if isEditing {
                 TextField("Name", text: $editText)
@@ -186,7 +169,7 @@ struct WorktreeRowView: View {
         isEditing = false
     }
 
-    private func loadOcticon(_ name: String) -> NSImage? {
+    private func loadIcon(_ name: String) -> NSImage? {
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
               let image = NSImage(contentsOf: url) else { return nil }
         image.isTemplate = true
