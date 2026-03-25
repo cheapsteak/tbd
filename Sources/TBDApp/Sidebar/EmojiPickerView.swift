@@ -44,7 +44,8 @@ struct EmojiPickerView: View {
                 }
             }
             .padding(6)
-            .frame(width: 240)
+            .frame(width: 240, alignment: .topLeading)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
