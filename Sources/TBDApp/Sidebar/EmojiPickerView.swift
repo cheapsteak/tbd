@@ -71,7 +71,8 @@ struct EmojiFrecency: Sendable {
     private static let key = "emojiPicker.frecency"
     private static let maxEntries = 21
 
-    /// Gitmoji defaults — curated for git worktree naming context.
+    /// Gitmoji — curated for git worktree naming context.
+    /// These get a baseline frecency boost so they surface in search results.
     static let gitmoji: [String] = [
         "✨", "🐛", "🚀", "🔥", "♻️", "🎨", "📝",
         "✅", "🚧", "⚡️", "💄", "🎉", "🔒️", "🩹",
@@ -120,18 +121,26 @@ struct EmojiFrecency: Sendable {
         return Array((sorted + fallbacks).prefix(Self.maxEntries))
     }
 
-    /// Search with frecency boost — frequently used matches sort first.
+    /// Search with frecency boost — frequently used and gitmoji matches sort first.
     func search(_ query: String, limit: Int = 21) -> [EmojiData.Entry] {
         let matches = EmojiData.search(query, limit: limit * 2) // overfetch to re-rank
         guard !matches.isEmpty else { return [] }
+        let gitmojiSet = Set(Self.gitmoji)
         let sorted = matches.sorted { a, b in
-            let scoreA = usage[a.emoji].map { frecencyScore($0) } ?? 0
-            let scoreB = usage[b.emoji].map { frecencyScore($0) } ?? 0
+            let scoreA = scoreFor(a.emoji, gitmojiSet: gitmojiSet)
+            let scoreB = scoreFor(b.emoji, gitmojiSet: gitmojiSet)
             if scoreA != scoreB { return scoreA > scoreB }
-            // Tie-break: preserve original search relevance order
             return false
         }
         return Array(sorted.prefix(limit))
+    }
+
+    private func scoreFor(_ emoji: String, gitmojiSet: Set<String>) -> Double {
+        if let record = usage[emoji] {
+            return frecencyScore(record)
+        }
+        // Gitmoji get a baseline score of 1 so they float above unknowns
+        return gitmojiSet.contains(emoji) ? 1.0 : 0.0
     }
 
     private func frecencyScore(_ record: UsageRecord) -> Double {
