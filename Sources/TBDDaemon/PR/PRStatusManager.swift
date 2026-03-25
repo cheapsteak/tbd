@@ -32,10 +32,20 @@ public actor PRStatusManager {
             return
         }
 
-        // Build branch → PRNode lookup
+        // Build branch → PRNode lookup, preferring the most relevant PR
+        // when multiple PRs exist for the same branch (e.g., one closed, one open).
+        // Priority: OPEN > MERGED > CLOSED. Within the same state, newer (earlier
+        // in the DESC-ordered list) wins because it's inserted first.
         var byBranch: [String: PRNode] = [:]
         for node in nodes {
-            byBranch[node.headRefName] = node
+            if let existing = byBranch[node.headRefName] {
+                // Only replace if the new node has higher priority
+                if Self.prPriority(node.state) > Self.prPriority(existing.state) {
+                    byBranch[node.headRefName] = node
+                }
+            } else {
+                byBranch[node.headRefName] = node
+            }
         }
 
         // Update cache — clear entries for worktrees with no matching PR
@@ -89,6 +99,17 @@ public actor PRStatusManager {
         default:
             if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
             return mergeStateStatus == "CLEAN" ? .mergeable : .open
+        }
+    }
+
+    /// Priority for choosing between multiple PRs on the same branch.
+    /// Higher value = preferred.
+    private static func prPriority(_ ghState: String) -> Int {
+        switch ghState {
+        case "OPEN": return 3
+        case "MERGED": return 2
+        case "CLOSED": return 1
+        default: return 0
         }
     }
 
