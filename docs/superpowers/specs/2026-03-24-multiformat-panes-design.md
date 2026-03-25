@@ -10,7 +10,7 @@ TBD currently supports only terminal panes. The layout system (`LayoutNode`) is 
 
 ### PaneContent enum
 
-Replaces the terminal-only leaf with a discriminated union of pane types:
+Single type used in both the layout tree and the tab system (no separate `TabContent` — one type serves both purposes):
 
 ```swift
 enum PaneContent: Codable, Equatable, Sendable {
@@ -20,7 +20,7 @@ enum PaneContent: Codable, Equatable, Sendable {
 }
 ```
 
-Each variant carries its own `id: UUID` so the layout tree can address any pane uniformly.
+Each variant carries its own `id: UUID` so the layout tree can address any pane uniformly. A `PaneContent` has a computed `paneID: UUID` that returns the relevant ID regardless of variant.
 
 ### LayoutNode changes
 
@@ -31,33 +31,34 @@ indirect enum LayoutNode: Equatable, Sendable {
 }
 ```
 
-Tree helpers renamed: `splitTerminal` → `splitPane`, `removeTerminal` → `removePane`, `allTerminalIDs` → `allPaneIDs`. Logic is identical — only the leaf type changes.
+Tree helpers renamed: `splitTerminal` → `splitPane`, `removeTerminal` → `removePane`, `allTerminalIDs` → `allPaneIDs`. `splitPane` takes a `PaneContent` (not just a UUID) so it can insert any pane type. Logic is otherwise identical — only the leaf type changes.
 
 ### Codable migration
 
-The manual `Codable` conformance on `LayoutNode` currently encodes a `NodeType` discriminator (`terminal`, `split`). Add new `NodeType` cases (`webview`, `codeViewer`). The existing `terminal` case decodes to `.pane(.terminal(...))`, so persisted layouts migrate without data changes.
+The manual `Codable` conformance on `LayoutNode` currently encodes a `NodeType` discriminator (`terminal`, `split`) and type-specific keys (`terminalID`). After the change:
+
+- `NodeType` gains new cases: `webview`, `codeViewer`
+- The `terminal` decoder is rewritten to produce `.pane(.terminal(terminalID:))` instead of `.terminal(terminalID:)` — same on-disk format, different in-memory representation
+- New pane types add their own coding keys (`url` for webview, `path` for code viewer)
+- **No data file migration needed** — persisted layouts with `NodeType.terminal` decode correctly through the updated decoder. New pane types simply use new `NodeType` values that old versions won't encounter.
 
 ## Tab System
 
 ### Single source of truth
 
-Introduce a `Tab` model:
+Introduce a `Tab` model that reuses `PaneContent` (no separate `TabContent` type):
 
 ```swift
 struct Tab: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
-    var content: TabContent
+    var content: PaneContent  // same type used in LayoutNode leaves
     var label: String?
-}
-
-enum TabContent: Codable, Equatable, Sendable {
-    case terminal(terminalID: UUID)
-    case webview(id: UUID, url: URL)
-    case codeViewer(id: UUID, path: String)
 }
 ```
 
 `appState.tabs: [UUID: [Tab]]` (keyed by worktree ID) is the single source of truth for tab ordering and existence. `appState.terminals: [UUID: [Terminal]]` becomes a passive lookup table for tmux connection info only.
+
+The "+" button creates a new terminal tab only. There is no generic UI for creating webview or code viewer tabs — those are created exclusively through the contextual flows described in "Creation Flows" below (PR link, Cmd+Click, FileViewerPanel click).
 
 ### Tab bar
 
@@ -81,7 +82,9 @@ On first launch after update, if `tabs[worktreeID]` is nil, generate it from `te
 
 ### Layouts
 
-`appState.layouts: [UUID: LayoutNode]` continues to be keyed by the tab's root pane ID. For terminal tabs that's `terminal.id`, for webview/code viewer tabs it's their respective UUID.
+`appState.layouts: [UUID: LayoutNode]` is keyed by `Tab.id`. Each tab has exactly one layout tree. The default layout for a new tab is `.pane(tab.content)` — a single leaf matching the tab's content type. When the user splits a pane, the layout grows into a `.split(...)` tree. A tab's layout can contain mixed pane types (e.g., a terminal tab with a code viewer split alongside it).
+
+This is a change from the current scheme where layouts are keyed by `terminal.id`. Migration: on first launch, for each terminal, create a `Tab` with `id == terminal.id` so existing layout keys remain valid.
 
 ## WebviewPaneView
 
@@ -162,9 +165,9 @@ Universal leaf wrapper replacing `TerminalPanelPlaceholder`:
 - Subsequent file clicks replace the displayed file in the same code viewer tab.
 - Cmd+Click adds files to a multi-file selection, shown stacked in the code viewer.
 
-### CLI
+### CLI (future scope)
 
-`tbd open path/to/file.swift` — programmatic access for opening files in the code viewer.
+`tbd open path/to/file.swift` — programmatic access for opening files in the code viewer. This requires a new RPC method and daemon-to-app communication channel. Deferred to a follow-up; not part of this implementation.
 
 ## Files Changed
 
@@ -183,5 +186,5 @@ Universal leaf wrapper replacing `TerminalPanelPlaceholder`:
 - `Sources/TBDApp/AppState.swift` — add `tabs: [UUID: [Tab]]`, daemon reconciliation updates
 - `Sources/TBDApp/ContentView.swift` — PR link in toolbar
 - `Sources/TBDApp/FileViewer/FileViewerPanel.swift` — click handler to open code viewer tab
-- `Sources/TBDShared/Models.swift` — `Tab`, `TabContent` models (if shared with daemon, otherwise app-only)
+- `Sources/TBDShared/Models.swift` — `Tab`, `PaneContent` models (if shared with daemon, otherwise app-only)
 - `Package.swift` — add Highlightr dependency
