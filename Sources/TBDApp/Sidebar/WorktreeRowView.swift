@@ -10,6 +10,7 @@ struct WorktreeRowView: View {
     @FocusState private var isTextFieldFocused: Bool
     @State private var emojiQuery: String?
     @State private var emojiSelectedIndex = 0
+    @State private var isInsertingEmoji = false
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -141,24 +142,23 @@ struct WorktreeRowView: View {
                         updateEmojiQuery(newValue)
                     }
                     .onChange(of: isTextFieldFocused) { _, focused in
-                        if !focused {
+                        if !focused && !isInsertingEmoji {
                             emojiQuery = nil
                             commitRename()
                         }
                     }
-                    .overlay(alignment: .topLeading) {
-                        if emojiQuery != nil {
-                            EmojiPickerView(
-                                query: emojiQuery ?? "",
-                                selectedIndex: $emojiSelectedIndex,
-                                onSelect: { emoji in replaceColonQuery(with: emoji) }
-                            )
-                            .background(.ultraThinMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
-                            .offset(y: 24)
-                            .zIndex(100)
-                        }
+                    .popover(
+                        isPresented: Binding(
+                            get: { emojiQuery != nil },
+                            set: { if !$0 { emojiQuery = nil } }
+                        ),
+                        arrowEdge: .bottom
+                    ) {
+                        EmojiPickerView(
+                            query: emojiQuery ?? "",
+                            selectedIndex: $emojiSelectedIndex,
+                            onSelect: { emoji in replaceColonQuery(with: emoji) }
+                        )
                     }
             } else {
                 VStack(alignment: .leading, spacing: 2) {
@@ -253,10 +253,24 @@ struct WorktreeRowView: View {
 
     private func replaceColonQuery(with emoji: String) {
         guard let range = activeColonRange else { return }
+        // Calculate cursor position: right after the inserted emoji
+        let cursorOffset = editText.distance(from: editText.startIndex, to: range.lowerBound) + emoji.utf16.count
+        isInsertingEmoji = true
         editText.replaceSubrange(range, with: emoji)
         emojiQuery = nil
         var frecency = EmojiFrecency.load()
         frecency.record(emoji)
+        // Refocus after popover dismissal, then place cursor
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            isTextFieldFocused = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                if let window = NSApp.keyWindow,
+                   let fieldEditor = window.fieldEditor(false, for: nil) {
+                    fieldEditor.selectedRange = NSRange(location: cursorOffset, length: 0)
+                }
+                isInsertingEmoji = false
+            }
+        }
     }
 
     private func selectedEmoji() -> String? {
