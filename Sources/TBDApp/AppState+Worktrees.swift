@@ -8,16 +8,38 @@ extension AppState {
     // MARK: - Worktree Actions
 
     /// Create a new worktree in a repo.
-    /// The daemon returns a worktree with `status = .creating` immediately.
-    /// The 2-second polling will pick up the status change to `.active` when creation completes.
+    /// Shows an optimistic placeholder immediately, then replaces it with the
+    /// real worktree once the daemon responds.
     func createWorktree(repoID: UUID) {
+        // Optimistic placeholder so the row appears instantly
+        let placeholderName = NameGenerator.generate()
+        let placeholder = Worktree(
+            repoID: repoID,
+            name: placeholderName,
+            displayName: placeholderName,
+            branch: "tbd/\(placeholderName)",
+            path: "",
+            status: .creating,
+            tmuxServer: ""
+        )
+        pendingWorktreeIDs.insert(placeholder.id)
+        worktrees[repoID, default: []].append(placeholder)
+        selectedWorktreeIDs = [placeholder.id]
+        editingWorktreeID = placeholder.id
+
         Task {
+            defer { pendingWorktreeIDs.remove(placeholder.id) }
             do {
                 let wt = try await daemonClient.createWorktree(repoID: repoID)
-                worktrees[repoID, default: []].append(wt)
+                // Replace the placeholder with the real worktree
+                if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholder.id }) {
+                    worktrees[repoID]?[idx] = wt
+                }
                 selectedWorktreeIDs = [wt.id]
                 editingWorktreeID = wt.id
             } catch {
+                // Remove the placeholder on failure
+                worktrees[repoID]?.removeAll { $0.id == placeholder.id }
                 logger.error("Failed to create worktree: \(error)")
                 handleConnectionError(error)
             }

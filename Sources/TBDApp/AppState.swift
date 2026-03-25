@@ -191,14 +191,22 @@ final class AppState: ObservableObject {
             let creatingWts = try await daemonClient.listWorktrees(repoID: repoID, status: .creating)
             let fetched = mainWts + activeWts + creatingWts
             if let repoID {
-                let existing = worktrees[repoID] ?? []
-                if fetched != existing {
-                    worktrees[repoID] = fetched
+                // Preserve optimistic placeholders the daemon doesn't know about yet
+                let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }
+                let merged = fetched + placeholders
+                if merged != worktrees[repoID] ?? [] {
+                    worktrees[repoID] = merged
                 }
             } else {
                 var grouped: [UUID: [Worktree]] = [:]
                 for wt in fetched {
                     grouped[wt.repoID, default: []].append(wt)
+                }
+                // Preserve optimistic placeholders the daemon doesn't know about yet
+                for (rid, wts) in worktrees {
+                    for wt in wts where pendingWorktreeIDs.contains(wt.id) {
+                        grouped[rid, default: []].append(wt)
+                    }
                 }
                 if grouped != worktrees {
                     worktrees = grouped
