@@ -249,8 +249,8 @@ struct WorktreeRowView: View {
         emojiQuery = nil
         var frecency = EmojiFrecency.load()
         frecency.record(emoji)
-        // Refocus after popover dismissal
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        // Refocus immediately on next run loop
+        DispatchQueue.main.async {
             isTextFieldFocused = true
             isInsertingEmoji = false
         }
