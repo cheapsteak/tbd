@@ -98,7 +98,7 @@ struct WorktreeRowView: View {
                     .font(.caption2)
                     .foregroundStyle(gitStatusColor)
             }
-            if let icon = prIcon, let nsImage = loadOcticon(icon) {
+            if let icon = prIcon, let nsImage = loadIcon(icon) {
                 Image(nsImage: nsImage)
                     .renderingMode(.template)
                     .resizable()
@@ -186,7 +186,7 @@ struct WorktreeRowView: View {
         isEditing = false
     }
 
-    private func loadOcticon(_ name: String) -> NSImage? {
+    private func loadIcon(_ name: String) -> NSImage? {
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
               let image = NSImage(contentsOf: url) else { return nil }
         image.isTemplate = true
