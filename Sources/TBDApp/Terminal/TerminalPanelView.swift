@@ -25,6 +25,8 @@ struct TerminalPanelView: NSViewRepresentable {
     let tmuxServer: String
     let tmuxWindowID: String
     let tmuxBridge: TmuxBridge
+    var worktreePath: String = ""
+    var onFilePathClicked: ((String) -> Void)?
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -39,6 +41,10 @@ struct TerminalPanelView: NSViewRepresentable {
         // Disable mouse reporting so click-drag selects text locally
         // instead of forwarding mouse events to tmux
         tv.allowMouseReporting = false
+
+        // Wire up Cmd+Click file path detection
+        tv.worktreePath = worktreePath
+        tv.onFilePathClicked = onFilePathClicked
 
         // Set delegate for terminal events
         tv.terminalDelegate = context.coordinator
@@ -86,6 +92,7 @@ struct TerminalPanelView: NSViewRepresentable {
         var initialFrame: NSRect = .zero
         private var localProcess: LocalProcess?
         private var scrollMonitor: Any?
+        private var clickMonitor: Any?
 
         func startTmuxClient(
             terminalView: TerminalView,
@@ -170,6 +177,26 @@ struct TerminalPanelView: NSViewRepresentable {
                 }
                 return consumed ? nil : event
             }
+
+            // Intercept Cmd+Click to detect file paths in the terminal buffer.
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+                guard event.modifierFlags.contains(.command) else { return event }
+
+                // Capture event properties before entering the MainActor closure
+                let location = event.locationInWindow
+                let consumed = MainActor.assumeIsolated { () -> Bool in
+                    guard let tv = ref.view as? TBDTerminalView else { return false }
+                    let point = tv.convert(location, from: nil)
+                    guard tv.bounds.contains(point) else { return false }
+
+                    if let filePath = tv.extractFilePath(atWindowLocation: location) {
+                        tv.onFilePathClicked?(filePath)
+                        return true
+                    }
+                    return false
+                }
+                return consumed ? nil : event
+            }
         }
 
         func cleanup() {
@@ -178,12 +205,19 @@ struct TerminalPanelView: NSViewRepresentable {
                 NSEvent.removeMonitor(monitor)
                 scrollMonitor = nil
             }
+            if let monitor = clickMonitor {
+                NSEvent.removeMonitor(monitor)
+                clickMonitor = nil
+            }
             tmuxBridge?.cleanupSession(panelID: panelID, server: tmuxServer)
         }
 
         deinit {
             debugLog("PANEL: deinit for \(panelID.uuidString.prefix(8))")
             if let monitor = scrollMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            if let monitor = clickMonitor {
                 NSEvent.removeMonitor(monitor)
             }
         }
