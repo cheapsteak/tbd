@@ -1,17 +1,18 @@
 import SwiftUI
-import TBDShared
 
-// MARK: - TerminalTabBar
+// MARK: - TabBar
 
-struct TerminalTabBar: View {
-    let terminals: [Terminal]
+/// Generic tab bar that renders Tab items with type-appropriate icons and labels.
+/// Replaces the former TerminalTabBar.
+struct TabBar: View {
+    let tabs: [Tab]
     @Binding var activeTabIndex: Int
     var onAddTab: () -> Void
     var onCloseTab: (Int) -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(Array(terminals.enumerated()), id: \.element.id) { index, terminal in
+            ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
                 if index > 0 {
                     // Subtle vertical divider between tabs (iTerm2-style)
                     Rectangle()
@@ -19,8 +20,8 @@ struct TerminalTabBar: View {
                         .frame(width: 1, height: 18)
                 }
 
-                TerminalTabItem(
-                    terminal: terminal,
+                TabBarItem(
+                    tab: tab,
                     index: index,
                     isSelected: index == activeTabIndex,
                     onSelect: { activeTabIndex = index },
@@ -51,10 +52,10 @@ struct TerminalTabBar: View {
     }
 }
 
-// MARK: - TerminalTabItem
+// MARK: - TabBarItem
 
-private struct TerminalTabItem: View {
-    let terminal: Terminal
+private struct TabBarItem: View {
+    let tab: Tab
     let index: Int
     let isSelected: Bool
     let onSelect: () -> Void
@@ -87,6 +88,13 @@ private struct TerminalTabItem: View {
             .opacity(showClose ? 1 : 0)
             .animation(.easeInOut(duration: 0.12), value: showClose)
 
+            // Type icon
+            Image(systemName: tabIcon)
+                .font(.system(size: 10))
+                .foregroundStyle(isSelected ? .primary : .tertiary)
+                .frame(width: 14)
+                .padding(.trailing, 3)
+
             Text(tabLabel)
                 .font(.system(size: 11))
                 .lineLimit(1)
@@ -115,10 +123,25 @@ private struct TerminalTabItem: View {
         .contentShape(Rectangle())
     }
 
+    private var tabIcon: String {
+        switch tab.content {
+        case .terminal: return "terminal"
+        case .webview: return "globe"
+        case .codeViewer: return "doc.text"
+        }
+    }
+
     private var tabLabel: String {
-        if let label = terminal.label, !label.isEmpty {
+        if let label = tab.label, !label.isEmpty {
             return label
         }
-        return "Terminal \(index + 1)"
+        switch tab.content {
+        case .terminal:
+            return "Terminal \(index + 1)"
+        case .webview(_, let url):
+            return url.host ?? "Web"
+        case .codeViewer(_, let path):
+            return URL(fileURLWithPath: path).lastPathComponent
+        }
     }
 }

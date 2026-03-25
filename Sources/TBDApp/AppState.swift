@@ -14,6 +14,7 @@ final class AppState: ObservableObject {
     @Published var selectedWorktreeIDs: Set<UUID> = []
     @Published var isConnected: Bool = false
     @Published var layouts: [UUID: LayoutNode] = [:]
+    @Published var tabs: [UUID: [Tab]] = [:]
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
     @Published var editingWorktreeID: UUID? = nil
@@ -205,11 +206,33 @@ final class AppState: ObservableObject {
             let existing = terminals[worktreeID] ?? []
             if fetched != existing {
                 terminals[worktreeID] = fetched
+                reconcileTabs(worktreeID: worktreeID, terminals: fetched)
             }
         } catch {
             logger.error("Failed to list terminals for worktree \(worktreeID): \(error)")
             handleConnectionError(error)
         }
+    }
+
+    /// Reconcile tabs with the current terminal list for a worktree.
+    /// Removes tabs for terminals that no longer exist, adds tabs for new terminals.
+    private func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
+        var currentTabs = tabs[worktreeID] ?? []
+        let terminalIDs = Set(terminals.map(\.id))
+        let existingTerminalTabIDs = Set(currentTabs.compactMap { tab -> UUID? in
+            if case .terminal(let id) = tab.content { return id }
+            return nil
+        })
+        // Remove tabs for terminals that no longer exist
+        currentTabs.removeAll { tab in
+            if case .terminal(let id) = tab.content { return !terminalIDs.contains(id) }
+            return false
+        }
+        // Add tabs for new terminals
+        for terminal in terminals where !existingTerminalTabIDs.contains(terminal.id) {
+            currentTabs.append(Tab(id: terminal.id, content: .terminal(terminalID: terminal.id)))
+        }
+        tabs[worktreeID] = currentTabs
     }
 
     /// Poll all cached PR statuses from the daemon (background, every ~30s).
