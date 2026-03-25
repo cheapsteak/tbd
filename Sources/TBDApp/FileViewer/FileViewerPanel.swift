@@ -135,21 +135,25 @@ struct FileViewerPanel: View {
     private func handleFileClick(_ relativePath: String, cmdClick: Bool) {
         let fullPath = URL(fileURLWithPath: worktree.path).appendingPathComponent(relativePath).path
         var tabs = appState.tabs[worktree.id, default: []]
+        let fileName = URL(fileURLWithPath: relativePath).lastPathComponent
 
         if !cmdClick, let existingIndex = tabs.firstIndex(where: {
             if case .codeViewer = $0.content { return true }
             return false
         }) {
-            // Replace existing code viewer tab content
+            // Replace existing code viewer tab content and clear stale layout
             let newID = UUID()
+            appState.layouts.removeValue(forKey: tabs[existingIndex].id)
             tabs[existingIndex].content = .codeViewer(id: newID, path: fullPath)
-            tabs[existingIndex].label = URL(fileURLWithPath: relativePath).lastPathComponent
+            tabs[existingIndex].label = fileName
             appState.tabs[worktree.id] = tabs
+            appState.activeTabIndices[worktree.id] = existingIndex
         } else {
             // Create new code viewer tab
             let newID = UUID()
-            let tab = Tab(id: UUID(), content: .codeViewer(id: newID, path: fullPath), label: URL(fileURLWithPath: relativePath).lastPathComponent)
+            let tab = Tab(id: UUID(), content: .codeViewer(id: newID, path: fullPath), label: fileName)
             appState.tabs[worktree.id, default: []].append(tab)
+            appState.activeTabIndices[worktree.id] = (appState.tabs[worktree.id]?.count ?? 1) - 1
         }
     }
 

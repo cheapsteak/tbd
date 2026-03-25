@@ -31,7 +31,11 @@ struct TerminalContainerView: View {
 private struct SingleWorktreeView: View {
     let worktreeID: UUID
     @EnvironmentObject var appState: AppState
-    @State private var activeTabIndex: Int = 0
+
+    private var activeTabIndex: Int {
+        get { appState.activeTabIndices[worktreeID] ?? 0 }
+        nonmutating set { appState.activeTabIndices[worktreeID] = newValue }
+    }
 
     private var worktree: Worktree? {
         for wts in appState.worktrees.values {
@@ -53,7 +57,10 @@ private struct SingleWorktreeView: View {
                 if !worktreeTabs.isEmpty {
                     TabBar(
                         tabs: worktreeTabs,
-                        activeTabIndex: $activeTabIndex,
+                        activeTabIndex: Binding(
+                            get: { activeTabIndex },
+                            set: { activeTabIndex = $0 }
+                        ),
                         onAddTab: {
                             Task {
                                 await appState.createTerminal(worktreeID: worktreeID)
