@@ -22,6 +22,8 @@ final class AppState: ObservableObject {
     @Published var pendingWorktreeIDs: Set<UUID> = []
     @Published var editingWorktreeID: UUID? = nil
     @Published var prStatuses: [UUID: PRStatus] = [:]
+    /// Remembers selected tab index per worktree so switching back restores the tab.
+    var selectedTabIndex: [UUID: Int] = [:]
 
     // Alert state for user feedback
     @Published var alertMessage: String? = nil
