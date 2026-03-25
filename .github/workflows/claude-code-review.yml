@@ -60,10 +60,6 @@ jobs:
 
             Additional review instructions:
 
-            First, check for existing Claude PR comments using `gh pr view --json comments`. Do NOT use `gh pr view --comments` (it triggers a GraphQL permissions error). If Claude has already reviewed this PR:
-            - Review the entire PR for context and holistic understanding
-            - Update the summary comment to reflect both the previous review findings and the new changes
-
             Do not comment on formatting/linting/style issues. These are handled by CI.
 
             Do not use `mcp__github_inline_comment__create_inline_comment`. Do not leave inline comments. State file path and line numbers in the primary comment.
@@ -76,7 +72,8 @@ jobs:
 
             Phase 2: Read each piece of feedback individually, and consider if they're valid. If they are not valid, do not include it in the comment to GitHub. For feedback asking for tests, consider if the test would require too much mocking to be useful, and do not suggest adding tests that would mostly test 3rd party libraries or APIs. Avoid being persnickety. Keep a count of invalid or persnickety feedback filtered out.
 
-            Phase 3: Actually post the comment to GitHub.
+            Phase 3: Write your entire review as direct output — this automatically becomes the sticky comment on the PR.
+            Do NOT use `gh pr comment` — it creates comments outside the sticky comment and they won't be updated on re-review.
 
             Format:
             - The verdict (e.g. "✅ Approve", or "🧌 Reject" with changes requested) should be up at the very top. Do not approve PRs with unaddressed Medium or High severity issues.
@@ -102,7 +99,7 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           claude_args: |
-            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),WebSearch,Read,Write,Glob,Grep,Task"
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),WebSearch,Read,Write,Glob,Grep,Task"
 
       - name: Check review verdict
         if: always() && steps.claude-review.outcome == 'success'
