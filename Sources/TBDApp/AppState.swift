@@ -240,7 +240,19 @@ final class AppState: ObservableObject {
         var currentTabs = tabs[worktreeID] ?? []
         let terminalIDs = Set(terminals.map(\.id))
 
-        // Collect all terminal IDs that are already in a layout tree
+        // 1. Remove tabs whose root terminal no longer exists,
+        //    and clean up their persisted layouts.
+        currentTabs.removeAll { tab in
+            if case .terminal(let id) = tab.content, !terminalIDs.contains(id) {
+                layouts.removeValue(forKey: tab.id)
+                return true
+            }
+            return false
+        }
+
+        // 2. Now collect terminal IDs from surviving tabs' layouts.
+        //    This must happen AFTER pruning so that dead tabs' children
+        //    don't mask still-alive terminals that need new tabs.
         var terminalIDsInLayouts = Set<UUID>()
         for tab in currentTabs {
             if let layout = layouts[tab.id] {
@@ -248,20 +260,13 @@ final class AppState: ObservableObject {
                     terminalIDsInLayouts.insert(id)
                 }
             } else {
-                // No layout stored — the tab's root content is the only pane
                 if case .terminal(let id) = tab.content {
                     terminalIDsInLayouts.insert(id)
                 }
             }
         }
 
-        // Remove tabs whose root terminal no longer exists
-        currentTabs.removeAll { tab in
-            if case .terminal(let id) = tab.content { return !terminalIDs.contains(id) }
-            return false
-        }
-
-        // Add tabs only for terminals not already in any layout
+        // 3. Add tabs for terminals not already in any surviving layout.
         for terminal in terminals where !terminalIDsInLayouts.contains(terminal.id) {
             currentTabs.append(Tab(id: terminal.id, content: .terminal(terminalID: terminal.id)))
         }
