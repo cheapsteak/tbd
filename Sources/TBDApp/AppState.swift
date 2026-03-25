@@ -13,7 +13,9 @@ final class AppState: ObservableObject {
     @Published var notifications: [UUID: NotificationType?] = [:]
     @Published var selectedWorktreeIDs: Set<UUID> = []
     @Published var isConnected: Bool = false
-    @Published var layouts: [UUID: LayoutNode] = [:]
+    @Published var layouts: [UUID: LayoutNode] = [:] {
+        didSet { persistLayouts() }
+    }
     @Published var tabs: [UUID: [Tab]] = [:]
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
@@ -29,11 +31,27 @@ final class AppState: ObservableObject {
     private var pollTimer: Timer?
     private var pollCycle = 0
 
+    private static let layoutsKey = "com.tbd.app.layouts"
+
     init() {
+        restoreLayouts()
         Task {
             await connectAndLoadInitialState()
             startPolling()
         }
+    }
+
+    // MARK: - Layout Persistence
+
+    private func persistLayouts() {
+        guard let data = try? JSONEncoder().encode(layouts) else { return }
+        UserDefaults.standard.set(data, forKey: Self.layoutsKey)
+    }
+
+    private func restoreLayouts() {
+        guard let data = UserDefaults.standard.data(forKey: Self.layoutsKey),
+              let restored = try? JSONDecoder().decode([UUID: LayoutNode].self, from: data) else { return }
+        layouts = restored
     }
 
     func stopPolling() {
@@ -215,23 +233,39 @@ final class AppState: ObservableObject {
     }
 
     /// Reconcile tabs with the current terminal list for a worktree.
-    /// Removes tabs for terminals that no longer exist, adds tabs for new terminals.
+    /// Removes tabs whose root terminal no longer exists. Adds tabs for
+    /// terminals that aren't already represented (either as a tab root or
+    /// embedded in another tab's split layout).
     private func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
         var currentTabs = tabs[worktreeID] ?? []
         let terminalIDs = Set(terminals.map(\.id))
-        let existingTerminalTabIDs = Set(currentTabs.compactMap { tab -> UUID? in
-            if case .terminal(let id) = tab.content { return id }
-            return nil
-        })
-        // Remove tabs for terminals that no longer exist
+
+        // Collect all terminal IDs that are already in a layout tree
+        var terminalIDsInLayouts = Set<UUID>()
+        for tab in currentTabs {
+            if let layout = layouts[tab.id] {
+                for id in layout.allTerminalIDs() {
+                    terminalIDsInLayouts.insert(id)
+                }
+            } else {
+                // No layout stored — the tab's root content is the only pane
+                if case .terminal(let id) = tab.content {
+                    terminalIDsInLayouts.insert(id)
+                }
+            }
+        }
+
+        // Remove tabs whose root terminal no longer exists
         currentTabs.removeAll { tab in
             if case .terminal(let id) = tab.content { return !terminalIDs.contains(id) }
             return false
         }
-        // Add tabs for new terminals
-        for terminal in terminals where !existingTerminalTabIDs.contains(terminal.id) {
+
+        // Add tabs only for terminals not already in any layout
+        for terminal in terminals where !terminalIDsInLayouts.contains(terminal.id) {
             currentTabs.append(Tab(id: terminal.id, content: .terminal(terminalID: terminal.id)))
         }
+
         tabs[worktreeID] = currentTabs
     }
 

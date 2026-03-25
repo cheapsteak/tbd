@@ -131,16 +131,18 @@ private struct SingleWorktreeView: View {
         guard index >= 0, index < tabs.count else { return }
         let tab = tabs[index]
 
+        // Find all terminal IDs in this tab's layout (including splits)
+        let layout = appState.layouts[tab.id] ?? .pane(tab.content)
+        let terminalIDsInTab = Set(layout.allTerminalIDs())
+
         // Remove layout
         appState.layouts.removeValue(forKey: tab.id)
 
         // Remove tab
         appState.tabs[worktreeID]?.remove(at: index)
 
-        // For terminal tabs, also remove from terminals
-        if case .terminal(let terminalID) = tab.content {
-            appState.terminals[worktreeID]?.removeAll { $0.id == terminalID }
-        }
+        // Remove ALL terminals that were in this tab's layout
+        appState.terminals[worktreeID]?.removeAll { terminalIDsInTab.contains($0.id) }
 
         // Adjust active tab index
         let remaining = appState.tabs[worktreeID]?.count ?? 0

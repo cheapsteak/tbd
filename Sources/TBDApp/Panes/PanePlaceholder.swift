@@ -196,10 +196,10 @@ struct PanePlaceholder: View {
     }
 
     /// Creates a real terminal via the daemon, then inserts it as a split pane.
+    /// Uses createTerminalForSplit so no extra tab is created — the terminal
+    /// lives inside this tab's layout tree.
     private func createTerminalSplit(direction: SplitDirection) async {
-        await appState.createTerminal(worktreeID: worktree.id)
-        // The newly created terminal is the last one appended
-        guard let newTerminal = appState.terminals[worktree.id]?.last else { return }
+        guard let newTerminal = await appState.createTerminalForSplit(worktreeID: worktree.id) else { return }
         layout = layout.splitPane(
             id: content.paneID,
             direction: direction,
