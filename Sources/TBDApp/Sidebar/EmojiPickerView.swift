@@ -44,9 +44,15 @@ struct EmojiPickerView: View {
                 }
             }
             .padding(6)
-            .frame(width: 240, alignment: .topLeading)
-            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 240, height: gridHeight(for: items.count), alignment: .topLeading)
         }
+    }
+
+    private func gridHeight(for count: Int) -> CGFloat {
+        let rows = ceil(Double(count) / 7.0)
+        let cellHeight: CGFloat = 32
+        let spacing: CGFloat = 2
+        return rows * cellHeight + max(0, rows - 1) * spacing + 12 // 12 = padding
     }
 
     private func clampedIndex(_ count: Int) -> Int {
