@@ -9,13 +9,13 @@ extension WorktreeLifecycle {
     /// - Parameters:
     ///   - worktreeID: The worktree to archive.
     ///   - force: If true, skip running the archive hook.
-    public func archiveWorktree(worktreeID: UUID, force: Bool = false) async throws {
-        // Get worktree from db
+    /// Phase 1 (fast): Validates, updates DB status, kills tmux windows.
+    /// Returns the worktree and repo for phase 2.
+    public func beginArchiveWorktree(worktreeID: UUID) async throws -> (Worktree, Repo) {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
 
-        // Refuse to archive the main branch worktree
         if worktree.status == .main {
             throw WorktreeLifecycleError.invalidOperation("Cannot archive the main branch worktree")
         }
@@ -24,7 +24,27 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
         }
 
-        // Run archive hook unless force
+        // Update DB status immediately
+        try await db.worktrees.archive(id: worktreeID)
+
+        // Kill all tmux windows for this worktree
+        let terminals = try await db.terminals.list(worktreeID: worktreeID)
+        for terminal in terminals {
+            try? await tmux.killWindow(
+                server: worktree.tmuxServer,
+                windowID: terminal.tmuxWindowID
+            )
+        }
+
+        // Delete terminals from db
+        try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
+
+        return (worktree, repo)
+    }
+
+    /// Phase 2 (slow, fire-and-forget): Runs archive hook and removes git worktree.
+    public func completeArchiveWorktree(worktree: Worktree, repo: Repo, force: Bool = false) async {
+        // Run archive hook
         if !force {
             let archiveHookPath = hooks.resolve(
                 event: .archive,
@@ -32,7 +52,7 @@ extension WorktreeLifecycle {
                 appHookPath: nil
             )
             if let hookPath = archiveHookPath {
-                _ = try await hooks.execute(
+                _ = try? await hooks.execute(
                     hookPath: hookPath,
                     cwd: worktree.path,
                     env: [
@@ -48,30 +68,17 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Kill all tmux windows for this worktree
-        let terminals = try await db.terminals.list(worktreeID: worktreeID)
-        for terminal in terminals {
-            do {
-                try await tmux.killWindow(
-                    server: worktree.tmuxServer,
-                    windowID: terminal.tmuxWindowID
-                )
-            } catch {
-                print("[TBD] archive: failed to kill window \(terminal.tmuxWindowID): \(error)")
-            }
-        }
-
-        // Delete terminals from db
-        try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
-
         // git worktree remove
-        try await git.worktreeRemove(
+        try? await git.worktreeRemove(
             repoPath: repo.path,
             worktreePath: worktree.path
         )
+    }
 
-        // Update worktree status to archived
-        try await db.worktrees.archive(id: worktreeID)
+    /// Legacy all-in-one archive (used by CLI).
+    public func archiveWorktree(worktreeID: UUID, force: Bool = false) async throws {
+        let (worktree, repo) = try await beginArchiveWorktree(worktreeID: worktreeID)
+        await completeArchiveWorktree(worktree: worktree, repo: repo, force: force)
     }
 
     // MARK: - Revive

@@ -43,11 +43,20 @@ extension RPCRouter {
 
     func handleWorktreeArchive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeArchiveParams.self, from: paramsData)
-        try await lifecycle.archiveWorktree(worktreeID: params.worktreeID, force: params.force)
+
+        // Phase 1: Fast — update DB, kill tmux, return immediately
+        let (worktree, repo) = try await lifecycle.beginArchiveWorktree(worktreeID: params.worktreeID)
 
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
             worktreeID: params.worktreeID
         )))
+
+        // Phase 2: Slow — hook + git worktree remove in background
+        let lifecycle = self.lifecycle
+        let force = params.force
+        Task.detached {
+            await lifecycle.completeArchiveWorktree(worktree: worktree, repo: repo, force: force)
+        }
 
         return .ok()
     }
