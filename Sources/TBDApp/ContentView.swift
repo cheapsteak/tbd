@@ -63,16 +63,19 @@ struct ContentView: View {
                        let prStatus = appState.prStatuses[worktreeID],
                        let prURL = URL(string: prStatus.url) {
                         Button {
-                            // Reuse existing PR tab if one exists
                             let existingTabs = appState.tabs[worktreeID] ?? []
-                            let hasPRTab = existingTabs.contains { tab in
-                                if case .webview(_, let url) = tab.content { return url == prURL }
+                            if let existingIndex = existingTabs.firstIndex(where: {
+                                if case .webview(_, let url) = $0.content { return url == prURL }
                                 return false
-                            }
-                            if !hasPRTab {
+                            }) {
+                                // Focus existing PR tab
+                                appState.activeTabIndices[worktreeID] = existingIndex
+                            } else {
+                                // Create and focus new PR tab
                                 let webviewID = UUID()
                                 let tab = Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
                                 appState.tabs[worktreeID, default: []].append(tab)
+                                appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
                             }
                         } label: {
                             HStack(spacing: 3) {
