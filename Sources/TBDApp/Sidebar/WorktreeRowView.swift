@@ -8,6 +8,8 @@ struct WorktreeRowView: View {
     @State private var isEditing = false
     @State private var editText = ""
     @FocusState private var isTextFieldFocused: Bool
+    @State private var emojiQuery: String?
+    @State private var emojiSelectedIndex = 0
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -101,10 +103,45 @@ struct WorktreeRowView: View {
                 TextField("Name", text: $editText)
                     .textFieldStyle(.plain)
                     .focused($isTextFieldFocused)
-                    .onSubmit { commitRename() }
-                    .onExitCommand { cancelRename() }
+                    .onSubmit {
+                        if emojiQuery != nil, let emoji = selectedEmoji() {
+                            replaceColonQuery(with: emoji)
+                        } else {
+                            commitRename()
+                        }
+                    }
+                    .onExitCommand {
+                        if emojiQuery != nil {
+                            emojiQuery = nil
+                        } else {
+                            cancelRename()
+                        }
+                    }
+                    .onKeyPress(.downArrow) {
+                        guard emojiQuery != nil else { return .ignored }
+                        emojiSelectedIndex += 1
+                        return .handled
+                    }
+                    .onKeyPress(.upArrow) {
+                        guard emojiQuery != nil else { return .ignored }
+                        emojiSelectedIndex = max(0, emojiSelectedIndex - 1)
+                        return .handled
+                    }
+                    .onChange(of: editText) { _, newValue in
+                        updateEmojiQuery(newValue)
+                    }
                     .onChange(of: isTextFieldFocused) { _, focused in
-                        if !focused { commitRename() }
+                        if !focused {
+                            emojiQuery = nil
+                            commitRename()
+                        }
+                    }
+                    .popover(isPresented: showEmojiPicker, arrowEdge: .bottom) {
+                        EmojiPickerView(
+                            query: emojiQuery ?? "",
+                            selectedIndex: $emojiSelectedIndex,
+                            onSelect: { emoji in replaceColonQuery(with: emoji) }
+                        )
                     }
             } else {
                 VStack(alignment: .leading, spacing: 2) {
@@ -175,6 +212,47 @@ struct WorktreeRowView: View {
 
     private func cancelRename() {
         isEditing = false
+    }
+
+    // MARK: - Emoji autocomplete
+
+    private var showEmojiPicker: Binding<Bool> {
+        Binding(
+            get: { emojiQuery != nil },
+            set: { if !$0 { emojiQuery = nil } }
+        )
+    }
+
+    /// Find the last unmatched `:` in editText (no space or `:` after it).
+    private var activeColonRange: Range<String.Index>? {
+        guard let colonIndex = editText.lastIndex(of: ":") else { return nil }
+        let afterColon = editText[editText.index(after: colonIndex)...]
+        if afterColon.contains(" ") || afterColon.contains(":") { return nil }
+        return colonIndex..<editText.endIndex
+    }
+
+    private func updateEmojiQuery(_ text: String) {
+        if let range = activeColonRange {
+            let query = String(editText[editText.index(after: range.lowerBound)..<range.upperBound])
+            emojiQuery = query
+            emojiSelectedIndex = 0
+        } else {
+            emojiQuery = nil
+        }
+    }
+
+    private func replaceColonQuery(with emoji: String) {
+        guard let range = activeColonRange else { return }
+        editText.replaceSubrange(range, with: emoji)
+        emojiQuery = nil
+    }
+
+    private func selectedEmoji() -> String? {
+        guard let query = emojiQuery else { return nil }
+        let results = EmojiData.search(query)
+        guard !results.isEmpty else { return nil }
+        let index = min(emojiSelectedIndex, results.count - 1)
+        return results[index].emoji
     }
 
     private func loadIcon(_ name: String) -> NSImage? {
