@@ -31,7 +31,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var branch: String
     public var path: String
     public var status: WorktreeStatus
-    public var hasConflicts: Bool
+    public var hasConflicts: Bool = false
     public var createdAt: Date
     public var archivedAt: Date?
     public var tmuxServer: String
