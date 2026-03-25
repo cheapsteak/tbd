@@ -25,7 +25,6 @@ func detectWorktreeName() -> String? {
 func generateAppIcon(worktreeName: String?) -> NSImage {
     let sizes: [CGFloat] = [16, 32, 128, 256, 512]
     let icon = NSImage(size: NSSize(width: 512, height: 512))
-
     for size in sizes {
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
@@ -47,7 +46,6 @@ func generateAppIcon(worktreeName: String?) -> NSImage {
         NSGraphicsContext.restoreGraphicsState()
         icon.addRepresentation(rep)
     }
-
     return icon
 }
 
@@ -58,8 +56,7 @@ private func drawIcon(size: CGFloat, worktreeName: String?) {
     let bounds = CGRect(origin: .zero, size: CGSize(width: size, height: size))
     ctx.clear(bounds)
 
-    drawSquircleBackground(ctx: ctx, size: size)
-    drawBranchLines(ctx: ctx, size: size)
+    drawBackground(ctx: ctx, size: size)
     drawTBDText(ctx: ctx, size: size)
 
     if let name = worktreeName {
@@ -69,74 +66,99 @@ private func drawIcon(size: CGFloat, worktreeName: String?) {
 
 // MARK: - Background
 
-private func drawSquircleBackground(ctx: CGContext, size: CGFloat) {
+private func drawBackground(ctx: CGContext, size: CGFloat) {
     let inset = size * 0.02
     let rect = CGRect(x: inset, y: inset, width: size - 2 * inset, height: size - 2 * inset)
-    let cornerRadius = size * 0.2237
+    let squirclePath = CGPath(roundedRect: rect, cornerWidth: size * 0.2237, cornerHeight: size * 0.2237, transform: nil)
 
-    let path = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
-    ctx.addPath(path)
-    ctx.clip()
+    let cs = CGColorSpaceCreateDeviceRGB()
 
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
-    let colors: [CGColor] = [
-        CGColor(red: 0.09, green: 0.11, blue: 0.27, alpha: 1.0),  // deep navy
-        CGColor(red: 0.29, green: 0.15, blue: 0.50, alpha: 1.0),  // mid purple
-        CGColor(red: 0.44, green: 0.22, blue: 0.65, alpha: 1.0),  // rich purple
+    // Three-panel background with curved boundaries.
+    // Each panel represents a parallel worktree.
+    let panelColors: [(top: [CGFloat], bottom: [CGFloat])] = [
+        (top: [0.10, 0.08, 0.30], bottom: [0.14, 0.11, 0.35]),   // deep indigo
+        (top: [0.30, 0.15, 0.50], bottom: [0.38, 0.20, 0.55]),   // rich purple
+        (top: [0.55, 0.20, 0.48], bottom: [0.62, 0.28, 0.52]),   // magenta
     ]
-    let locations: [CGFloat] = [0.0, 0.55, 1.0]
 
-    if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors as CFArray, locations: locations) {
-        ctx.drawLinearGradient(
-            gradient,
-            start: CGPoint(x: size / 2, y: 0),
-            end: CGPoint(x: size / 2, y: size),
-            options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
-        )
+    // Boundary 1: bold arc from (0.25, bottom) to (0.40, top)
+    // Boundary 2: S-curve from (0.55, bottom) to (0.72, top)
+
+    for i in 0..<3 {
+        ctx.saveGState()
+        ctx.addPath(squirclePath)
+        ctx.clip()
+
+        let panel = CGMutablePath()
+
+        // Left boundary (bottom to top)
+        if i == 0 {
+            panel.move(to: CGPoint(x: -size * 0.2, y: -size * 0.2))
+            panel.addLine(to: CGPoint(x: -size * 0.2, y: size * 1.2))
+        } else if i == 1 {
+            // Boundary 1: bold single arc
+            panel.move(to: CGPoint(x: size * 0.25, y: -size * 0.2))
+            panel.addLine(to: CGPoint(x: size * 0.25, y: 0))
+            panel.addCurve(
+                to: CGPoint(x: size * 0.40, y: size),
+                control1: CGPoint(x: size * 0.45, y: size * 0.25),
+                control2: CGPoint(x: size * 0.22, y: size * 0.65)
+            )
+            panel.addLine(to: CGPoint(x: size * 0.40, y: size * 1.2))
+        } else {
+            // Boundary 2: S-curve
+            panel.move(to: CGPoint(x: size * 0.55, y: -size * 0.2))
+            panel.addLine(to: CGPoint(x: size * 0.55, y: 0))
+            panel.addCurve(
+                to: CGPoint(x: size * 0.72, y: size),
+                control1: CGPoint(x: size * 0.48, y: size * 0.35),
+                control2: CGPoint(x: size * 0.80, y: size * 0.60)
+            )
+            panel.addLine(to: CGPoint(x: size * 0.72, y: size * 1.2))
+        }
+
+        // Right boundary (top to bottom)
+        if i == 2 {
+            panel.addLine(to: CGPoint(x: size * 1.2, y: size * 1.2))
+            panel.addLine(to: CGPoint(x: size * 1.2, y: -size * 0.2))
+        } else if i == 0 {
+            // Boundary 1 reversed
+            panel.addLine(to: CGPoint(x: size * 0.40, y: size * 1.2))
+            panel.addLine(to: CGPoint(x: size * 0.40, y: size))
+            panel.addCurve(
+                to: CGPoint(x: size * 0.25, y: 0),
+                control1: CGPoint(x: size * 0.22, y: size * 0.65),
+                control2: CGPoint(x: size * 0.45, y: size * 0.25)
+            )
+            panel.addLine(to: CGPoint(x: size * 0.25, y: -size * 0.2))
+        } else {
+            // Boundary 2 reversed
+            panel.addLine(to: CGPoint(x: size * 0.72, y: size * 1.2))
+            panel.addLine(to: CGPoint(x: size * 0.72, y: size))
+            panel.addCurve(
+                to: CGPoint(x: size * 0.55, y: 0),
+                control1: CGPoint(x: size * 0.80, y: size * 0.60),
+                control2: CGPoint(x: size * 0.48, y: size * 0.35)
+            )
+            panel.addLine(to: CGPoint(x: size * 0.55, y: -size * 0.2))
+        }
+
+        panel.closeSubpath()
+        ctx.addPath(panel)
+        ctx.clip()
+
+        let c = panelColors[i]
+        let colors: [CGColor] = [
+            CGColor(red: c.bottom[0], green: c.bottom[1], blue: c.bottom[2], alpha: 1.0),
+            CGColor(red: c.top[0], green: c.top[1], blue: c.top[2], alpha: 1.0),
+        ]
+        if let g = CGGradient(colorsSpace: cs, colors: colors as CFArray, locations: [0.0, 1.0]) {
+            ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: 0), end: CGPoint(x: 0, y: size),
+                                    options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        }
+
+        ctx.restoreGState()
     }
-}
-
-// MARK: - Decorative Branch Lines
-
-private func drawBranchLines(ctx: CGContext, size: CGFloat) {
-    ctx.saveGState()
-    ctx.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.08))
-    ctx.setLineWidth(size * 0.006)
-    ctx.setLineCap(.round)
-
-    // Main trunk
-    let trunkX = size * 0.38
-    ctx.move(to: CGPoint(x: trunkX, y: size * 0.15))
-    ctx.addLine(to: CGPoint(x: trunkX, y: size * 0.85))
-    ctx.strokePath()
-
-    // Branch 1: curves right
-    let b1Start = CGPoint(x: trunkX, y: size * 0.35)
-    let b1End = CGPoint(x: size * 0.65, y: size * 0.50)
-    let b1Cp = CGPoint(x: trunkX + size * 0.05, y: size * 0.42)
-    ctx.move(to: b1Start)
-    ctx.addQuadCurve(to: b1End, control: b1Cp)
-    ctx.strokePath()
-
-    // Branch 2: curves right
-    let b2Start = CGPoint(x: trunkX, y: size * 0.60)
-    let b2End = CGPoint(x: size * 0.58, y: size * 0.75)
-    let b2Cp = CGPoint(x: trunkX + size * 0.04, y: size * 0.67)
-    ctx.move(to: b2Start)
-    ctx.addQuadCurve(to: b2End, control: b2Cp)
-    ctx.strokePath()
-
-    // Commit dots
-    let dotRadius = size * 0.012
-    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.12))
-    for point in [b1Start, b1End, b2Start, b2End] {
-        ctx.fillEllipse(in: CGRect(
-            x: point.x - dotRadius, y: point.y - dotRadius,
-            width: dotRadius * 2, height: dotRadius * 2
-        ))
-    }
-
-    ctx.restoreGState()
 }
 
 // MARK: - TBD Text
@@ -144,25 +166,24 @@ private func drawBranchLines(ctx: CGContext, size: CGFloat) {
 private func drawTBDText(ctx: CGContext, size: CGFloat) {
     ctx.saveGState()
 
-    let fontSize = size * 0.28
-    let font = NSFont.systemFont(ofSize: fontSize, weight: .bold) as CTFont
+    let fontSize = size * 0.46
+    let font = NSFont.systemFont(ofSize: fontSize, weight: .black) as CTFont
 
-    let attributes: [NSAttributedString.Key: Any] = [
+    let attrs: [NSAttributedString.Key: Any] = [
         .font: font,
         .foregroundColor: NSColor.white,
+        .kern: fontSize * -0.015,
     ]
-    let attrString = NSAttributedString(string: "TBD", attributes: attributes)
-    let line = CTLineCreateWithAttributedString(attrString)
-    let textBounds = CTLineGetBoundsWithOptions(line, .useOpticalBounds)
+    let str = NSAttributedString(string: "TBD", attributes: attrs)
+    let line = CTLineCreateWithAttributedString(str)
+    let bounds = CTLineGetBoundsWithOptions(line, .useOpticalBounds)
 
-    let x = (size - textBounds.width) / 2 - textBounds.origin.x
-    let y = (size - textBounds.height) / 2 - textBounds.origin.y - size * 0.02
+    let x = (size - bounds.width) / 2 - bounds.origin.x
+    let y = (size - bounds.height) / 2 - bounds.origin.y
 
-    ctx.setShadow(
-        offset: CGSize(width: 0, height: -size * 0.008),
-        blur: size * 0.02,
-        color: CGColor(red: 0, green: 0, blue: 0, alpha: 0.4)
-    )
+    ctx.setShadow(offset: CGSize(width: 0, height: -size * 0.010),
+                   blur: size * 0.025,
+                   color: CGColor(red: 0, green: 0, blue: 0, alpha: 0.45))
 
     ctx.textPosition = CGPoint(x: x, y: y)
     CTLineDraw(line, ctx)
@@ -179,7 +200,7 @@ private func drawWorktreeRibbon(ctx: CGContext, size: CGFloat, name: String) {
     let ribbonWidth = size * 0.20
 
     // Translate to center of bottom-right corner area, then rotate 45°.
-    // The squircle clip path (set in drawSquircleBackground) trims the edges.
+    // The squircle clip path (set in drawBackground) trims the edges.
     let cx = size * 0.75
     let cy = size * 0.25
     ctx.translateBy(x: cx, y: cy)
