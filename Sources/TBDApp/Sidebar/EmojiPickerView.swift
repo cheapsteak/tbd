@@ -14,7 +14,7 @@ struct EmojiPickerView: View {
         if query.isEmpty {
             return frecency.defaults()
         }
-        return EmojiData.search(query, limit: 21)
+        return frecency.search(query, limit: 21)
     }
 
     var body: some View {
@@ -26,12 +26,6 @@ struct EmojiPickerView: View {
                 .padding(8)
         } else {
             VStack(alignment: .leading, spacing: 4) {
-                if query.isEmpty {
-                    Text("Frequently Used")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 6)
-                }
                 LazyVGrid(columns: Self.columns, spacing: 2) {
                     ForEach(Array(items.enumerated()), id: \.element.name) { index, entry in
                         Text(entry.emoji)
@@ -66,7 +60,6 @@ struct EmojiPickerView: View {
     }
 
     private func select(_ emoji: String) {
-        frecency.record(emoji)
         onSelect(emoji)
     }
 }
@@ -125,6 +118,20 @@ struct EmojiFrecency: Sendable {
             .filter { !frequentEmoji.contains($0) }
             .compactMap { emoji in EmojiData.all.first(where: { $0.emoji == emoji }) }
         return Array((sorted + fallbacks).prefix(Self.maxEntries))
+    }
+
+    /// Search with frecency boost — frequently used matches sort first.
+    func search(_ query: String, limit: Int = 21) -> [EmojiData.Entry] {
+        let matches = EmojiData.search(query, limit: limit * 2) // overfetch to re-rank
+        guard !matches.isEmpty else { return [] }
+        let sorted = matches.sorted { a, b in
+            let scoreA = usage[a.emoji].map { frecencyScore($0) } ?? 0
+            let scoreB = usage[b.emoji].map { frecencyScore($0) } ?? 0
+            if scoreA != scoreB { return scoreA > scoreB }
+            // Tie-break: preserve original search relevance order
+            return false
+        }
+        return Array(sorted.prefix(limit))
     }
 
     private func frecencyScore(_ record: UsageRecord) -> Double {

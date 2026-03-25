@@ -261,9 +261,10 @@ struct WorktreeRowView: View {
 
     private func selectedEmoji() -> String? {
         guard let query = emojiQuery else { return nil }
+        let frecency = EmojiFrecency.load()
         let results = query.isEmpty
-            ? EmojiFrecency.load().defaults()
-            : EmojiData.search(query, limit: 21)
+            ? frecency.defaults()
+            : frecency.search(query, limit: 21)
         guard !results.isEmpty else { return nil }
         let index = min(emojiSelectedIndex, results.count - 1)
         return results[index].emoji
