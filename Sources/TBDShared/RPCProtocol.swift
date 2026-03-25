@@ -183,8 +183,8 @@ public struct TerminalCreateParams: Codable, Sendable {
 }
 
 public struct TerminalListParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+    public let worktreeID: UUID?
+    public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
 }
 
 public struct TerminalSendParams: Codable, Sendable {

@@ -185,11 +185,10 @@ final class AppState: ObservableObject {
     /// Fetches both active and main worktrees.
     func refreshWorktrees(repoID: UUID? = nil) async {
         do {
-            // Fetch active, main, and creating worktrees separately and combine
-            let activeWts = try await daemonClient.listWorktrees(repoID: repoID, status: .active)
-            let mainWts = try await daemonClient.listWorktrees(repoID: repoID, status: .main)
-            let creatingWts = try await daemonClient.listWorktrees(repoID: repoID, status: .creating)
-            let fetched = mainWts + activeWts + creatingWts
+            // Single RPC — fetch all non-archived worktrees, filter client-side
+            let allWts = try await daemonClient.listWorktrees(repoID: repoID)
+            let fetched = allWts.filter { $0.status != .archived }
+
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet
                 let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }
@@ -212,15 +211,18 @@ final class AppState: ObservableObject {
                     worktrees = grouped
                 }
             }
-            // Refresh terminals for visible worktrees
-            let allWorktrees: [Worktree]
-            if let repoID {
-                allWorktrees = worktrees[repoID] ?? []
-            } else {
-                allWorktrees = Array(worktrees.values.joined())
-            }
-            for wt in allWorktrees {
-                await refreshTerminals(worktreeID: wt.id)
+
+            // Single RPC — fetch all terminals, group client-side
+            let allTerminals = try await daemonClient.listTerminals()
+            let terminalsByWorktree = Dictionary(grouping: allTerminals, by: { $0.worktreeID })
+            let visibleWorktreeIDs = Set(fetched.map(\.id))
+            for wtID in visibleWorktreeIDs {
+                let fetched = terminalsByWorktree[wtID] ?? []
+                let existing = terminals[wtID] ?? []
+                if fetched != existing {
+                    terminals[wtID] = fetched
+                    reconcileTabs(worktreeID: wtID, terminals: fetched)
+                }
             }
         } catch {
             logger.error("Failed to list worktrees: \(error)")

@@ -62,13 +62,14 @@ public struct TerminalStore: Sendable {
         return terminal
     }
 
-    /// List terminals for a worktree.
-    public func list(worktreeID: UUID) async throws -> [Terminal] {
+    /// List terminals, optionally filtered by worktree.
+    public func list(worktreeID: UUID? = nil) async throws -> [Terminal] {
         try await writer.read { db in
-            try TerminalRecord
-                .filter(Column("worktreeID") == worktreeID.uuidString)
-                .fetchAll(db)
-                .map { $0.toModel() }
+            var request = TerminalRecord.all()
+            if let worktreeID {
+                request = request.filter(Column("worktreeID") == worktreeID.uuidString)
+            }
+            return try request.fetchAll(db).map { $0.toModel() }
         }
     }
 

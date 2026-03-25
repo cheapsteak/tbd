@@ -48,6 +48,7 @@ extension RPCRouter {
         return try RPCResponse(result: terminals)
     }
 
+
     func handleTerminalDelete(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalDeleteParams.self, from: paramsData)
 

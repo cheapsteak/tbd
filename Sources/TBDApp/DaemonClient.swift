@@ -346,8 +346,8 @@ actor DaemonClient {
         )
     }
 
-    /// List terminals for a worktree.
-    func listTerminals(worktreeID: UUID) throws -> [Terminal] {
+    /// List terminals, optionally filtered by worktree.
+    func listTerminals(worktreeID: UUID? = nil) throws -> [Terminal] {
         return try call(
             method: RPCMethod.terminalList,
             params: TerminalListParams(worktreeID: worktreeID),
