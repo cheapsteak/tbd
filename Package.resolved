@@ -1,5 +1,5 @@
 {
-  "originHash" : "fd32deb23b6bf59c575e70e460abd086f98997de000b62e737dc7e6fbd892f15",
+  "originHash" : "1c178a984ed4e977efebcbf9ac5113e65824841b35ea06ff71820dff5dd68cef",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "36e30a6f1ef10e4194f6af0cff90888526f0c115",
         "version" : "7.10.0"
+      }
+    },
+    {
+      "identity" : "highlightr",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/raspu/Highlightr",
+      "state" : {
+        "revision" : "05e7fcc63b33925cd0c1faaa205cdd5681e7bbef",
+        "version" : "2.3.0"
       }
     },
     {
