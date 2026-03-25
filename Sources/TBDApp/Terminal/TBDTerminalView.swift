@@ -14,15 +14,13 @@ class TBDTerminalView: TerminalView {
         let localPoint = convert(windowPoint, from: nil)
         let terminal = getTerminal()
 
-        // Calculate column and row from point
-        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        let charWidth = ("M" as NSString).size(withAttributes: [.font: font]).width
-        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        // Derive cell dimensions from the terminal's actual grid size and view bounds
+        let charWidth = bounds.width / CGFloat(terminal.cols)
+        let lineHeight = bounds.height / CGFloat(terminal.rows)
 
         let col = Int(localPoint.x / charWidth)
         // Terminal rows are numbered from top, but NSView y is from bottom
-        let viewHeight = bounds.height
-        let row = Int((viewHeight - localPoint.y) / lineHeight)
+        let row = Int((frame.height - localPoint.y) / lineHeight)
 
         guard row >= 0 && row < terminal.rows && col >= 0 && col < terminal.cols else {
             return nil

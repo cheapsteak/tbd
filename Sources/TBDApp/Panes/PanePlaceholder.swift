@@ -160,20 +160,26 @@ struct PanePlaceholder: View {
     // MARK: - Split Actions
 
     private func splitRight() {
-        let newID = UUID()
-        layout = layout.splitPane(
-            id: content.paneID,
-            direction: .horizontal,
-            newContent: .terminal(terminalID: newID)
-        )
+        Task {
+            await createTerminalSplit(direction: .horizontal)
+        }
     }
 
     private func splitDown() {
-        let newID = UUID()
+        Task {
+            await createTerminalSplit(direction: .vertical)
+        }
+    }
+
+    /// Creates a real terminal via the daemon, then inserts it as a split pane.
+    private func createTerminalSplit(direction: SplitDirection) async {
+        await appState.createTerminal(worktreeID: worktree.id)
+        // The newly created terminal is the last one appended
+        guard let newTerminal = appState.terminals[worktree.id]?.last else { return }
         layout = layout.splitPane(
             id: content.paneID,
-            direction: .vertical,
-            newContent: .terminal(terminalID: newID)
+            direction: direction,
+            newContent: .terminal(terminalID: newTerminal.id)
         )
     }
 }

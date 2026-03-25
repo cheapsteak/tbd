@@ -101,6 +101,13 @@ private struct HighlightedCodeView: View {
     }
 
     private func loadAndHighlight() async {
+        // Guard against large files (>1MB) to prevent memory pressure
+        let fm = FileManager.default
+        if let attrs = try? fm.attributesOfItem(atPath: filePath),
+           let size = attrs[.size] as? UInt64, size > 1_048_576 {
+            loadError = "File too large to preview (\(size / 1024)KB)"
+            return
+        }
         do {
             let content = try String(contentsOfFile: filePath, encoding: .utf8)
             let highlighted = highlightCode(content, filename: filePath)
@@ -113,12 +120,16 @@ private struct HighlightedCodeView: View {
 
 // MARK: - Syntax Highlighting
 
-nonisolated(unsafe) let sharedHighlightr: Highlightr? = {
+/// Shared Highlightr instance — accessed only from @MainActor context
+/// to avoid thread-safety issues (Highlightr is not thread-safe).
+@MainActor
+private let sharedHighlightr: Highlightr? = {
     let h = Highlightr()
     h?.setTheme(to: "atom-one-dark")
     return h
 }()
 
+@MainActor
 private func highlightCode(_ code: String, filename: String) -> NSAttributedString {
     let lang = languageForFilename(filename)
     let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
