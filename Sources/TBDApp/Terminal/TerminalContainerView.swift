@@ -258,8 +258,8 @@ private struct MultiWorktreeCell: View {
                         appState.layouts[worktreeID] = newLayout
                     }
                 )
-                TerminalPanelPlaceholder(
-                    terminalID: terminal.id,
+                PanePlaceholder(
+                    content: .terminal(terminalID: terminal.id),
                     worktree: worktree,
                     layout: layoutBinding
                 )

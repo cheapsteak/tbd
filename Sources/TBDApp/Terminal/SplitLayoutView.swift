@@ -11,8 +11,8 @@ struct SplitLayoutView: View {
     var body: some View {
         switch node {
         case .pane(let content):
-            TerminalPanelPlaceholder(
-                terminalID: content.paneID,
+            PanePlaceholder(
+                content: content,
                 worktree: worktree,
                 layout: $layout
             )
@@ -224,130 +224,5 @@ private extension View {
                 NSCursor.pop()
             }
         }
-    }
-}
-
-// MARK: - TerminalPanelPlaceholder
-
-/// Terminal panel with split buttons toolbar and real SwiftTerm terminal view.
-/// Looks up the Terminal object from AppState to get tmux server and pane ID.
-struct TerminalPanelPlaceholder: View {
-    let terminalID: UUID
-    let worktree: Worktree
-    @Binding var layout: LayoutNode
-    @EnvironmentObject var appState: AppState
-
-    /// Find the Terminal model matching this terminalID across all worktree terminals.
-    private var terminal: Terminal? {
-        for (_, terms) in appState.terminals {
-            if let t = terms.first(where: { $0.id == terminalID }) {
-                return t
-            }
-        }
-        return nil
-    }
-
-    var body: some View {
-        let _ = debugLogPlaceholder()
-        VStack(spacing: 0) {
-            // Mini toolbar with split buttons
-            HStack(spacing: 8) {
-                Text("Terminal: \(terminalID.uuidString.prefix(8))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                Spacer()
-
-                Button(action: splitRight) {
-                    HStack(spacing: 2) {
-                        Image(systemName: "rectangle.split.1x2")
-                            .rotationEffect(.degrees(90))
-                        Text("Split Right")
-                    }
-                    .font(.caption)
-                }
-                .buttonStyle(.borderless)
-
-                Button(action: splitDown) {
-                    HStack(spacing: 2) {
-                        Image(systemName: "rectangle.split.1x2")
-                        Text("Split Down")
-                    }
-                    .font(.caption)
-                }
-                .buttonStyle(.borderless)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color(nsColor: .controlBackgroundColor))
-
-            Divider()
-
-            // Real terminal view or fallback placeholder
-            if let terminal = terminal {
-                TerminalPanelView(
-                    terminalID: terminalID,
-                    tmuxServer: worktree.tmuxServer,
-                    tmuxWindowID: terminal.tmuxWindowID,
-                    tmuxBridge: appState.tmuxBridge
-                )
-                .id(terminalID) // Force SwiftUI to create a unique view per terminal
-            } else {
-                // Fallback when terminal data hasn't loaded yet
-                ZStack {
-                    Color(nsColor: .black)
-
-                    VStack(spacing: 8) {
-                        Image(systemName: "terminal")
-                            .font(.largeTitle)
-                            .foregroundStyle(.secondary)
-                        Text(worktree.displayName)
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                        Text(worktree.branch)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-            }
-        }
-    }
-
-    // Throttle: only log once per terminal ID
-    private static var loggedTerminals: Set<String> = []
-    private func debugLogPlaceholder() {
-        let key = "\(terminalID.uuidString.prefix(8))-\(terminal != nil)"
-        guard !Self.loggedTerminals.contains(key) else { return }
-        Self.loggedTerminals.insert(key)
-        let allTermIDs = appState.terminals.values.flatMap { $0.map { $0.id.uuidString.prefix(8) } }
-        let msg = "PLACEHOLDER: terminalID=\(terminalID.uuidString.prefix(8)) found=\(terminal != nil) allTermIDs=\(allTermIDs) wtID=\(worktree.id.uuidString.prefix(8))"
-        if let data = "[\(ISO8601DateFormatter().string(from: Date()))] \(msg)\n".data(using: .utf8) {
-            if let fh = FileHandle(forWritingAtPath: "/tmp/tbd-bridge.log") {
-                fh.seekToEndOfFile()
-                fh.write(data)
-                fh.closeFile()
-            } else {
-                FileManager.default.createFile(atPath: "/tmp/tbd-bridge.log", contents: data)
-            }
-        }
-    }
-
-    private func splitRight() {
-        let newID = UUID()
-        layout = layout.splitPane(
-            id: terminalID,
-            direction: .horizontal,
-            newContent: .terminal(terminalID: newID)
-        )
-    }
-
-    private func splitDown() {
-        let newID = UUID()
-        layout = layout.splitPane(
-            id: terminalID,
-            direction: .vertical,
-            newContent: .terminal(terminalID: newID)
-        )
     }
 }
