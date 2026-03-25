@@ -56,8 +56,6 @@ struct TerminalPanelView: NSViewRepresentable {
         // Delay process start to let SwiftUI lay out the view first
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak tv] in
             guard let tv else { return }
-            // Capture frame on main thread before calling startTmuxClient
-            context.coordinator.initialFrame = tv.frame
             context.coordinator.startTmuxClient(
                 terminalView: tv,
                 bridge: tmuxBridge,
@@ -89,7 +87,6 @@ struct TerminalPanelView: NSViewRepresentable {
         var tmuxBridge: TmuxBridge?
         var tmuxServer: String = ""
         var panelID: UUID = UUID()
-        var initialFrame: NSRect = .zero
         private var localProcess: LocalProcess?
         private var scrollMonitor: Any?
         private var clickMonitor: Any?
@@ -133,12 +130,16 @@ struct TerminalPanelView: NSViewRepresentable {
                 execName: nil
             )
 
-            // Send correct initial size based on view frame
-            if initialFrame.width > 0 && initialFrame.height > 0 && process.childfd >= 0 {
-                let (cols, rows) = Self.colsRows(from: initialFrame)
-                var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
-                _ = ioctl(process.childfd, TIOCSWINSZ, &size)
-                debugLog("PANEL: initial resize \(cols)x\(rows) from frame \(initialFrame.width)x\(initialFrame.height)")
+            // Send correct initial size from SwiftTerm's own computed dimensions
+            // (accounts for scroller width and actual cell metrics)
+            MainActor.assumeIsolated {
+                let cols = terminalView.terminal.cols
+                let rows = terminalView.terminal.rows
+                if cols > 0 && rows > 0 && process.childfd >= 0 {
+                    var size = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+                    _ = ioctl(process.childfd, TIOCSWINSZ, &size)
+                    debugLog("PANEL: initial resize \(cols)x\(rows)")
+                }
             }
 
             // Focus
@@ -238,22 +239,18 @@ struct TerminalPanelView: NSViewRepresentable {
         }
 
         func getWindowSize() -> winsize {
-            if initialFrame.width > 0 {
-                let (cols, rows) = Self.colsRows(from: initialFrame)
-                debugLog("PANEL: getWindowSize \(cols)x\(rows)")
-                return winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+            // Use SwiftTerm's own dimensions — they account for scroller width
+            // and actual cell metrics computed from the font
+            return MainActor.assumeIsolated {
+                if let tv = terminalView, tv.terminal.cols > 0 && tv.terminal.rows > 0 {
+                    let cols = tv.terminal.cols
+                    let rows = tv.terminal.rows
+                    debugLog("PANEL: getWindowSize \(cols)x\(rows)")
+                    return winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+                }
+                debugLog("PANEL: getWindowSize fallback 80x24")
+                return winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
             }
-            debugLog("PANEL: getWindowSize fallback 80x24")
-            return winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
-        }
-
-        static func colsRows(from frame: NSRect) -> (Int, Int) {
-            let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-            let charWidth = ("M" as NSString).size(withAttributes: [.font: font]).width
-            let lineHeight = ceil(font.ascender - font.descender + font.leading)
-            let cols = max(Int(frame.width / charWidth), 20)
-            let rows = max(Int(frame.height / lineHeight), 5)
-            return (cols, rows)
         }
 
         // MARK: - TerminalViewDelegate
