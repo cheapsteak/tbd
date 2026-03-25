@@ -219,28 +219,32 @@ private struct GitFileRow: View {
     @State private var isHovered = false
 
     var body: some View {
-        Button {
+        HStack(spacing: 6) {
+            Text(String(statusChar))
+                .font(.system(.caption2, design: .monospaced))
+                .fontWeight(.bold)
+                .foregroundStyle(statusColor(for: statusChar))
+                .frame(width: 12, alignment: .center)
+            Text(file.path)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.head)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 3)
+        .background(isHovered ? Color(nsColor: .controlAccentColor).opacity(0.15) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            // Double-click: open in default app (Finder/external editor)
+            let url = URL(fileURLWithPath: worktreePath).appendingPathComponent(file.path)
+            NSWorkspace.shared.open(url)
+        }
+        .onTapGesture(count: 1) {
+            // Single-click: open in code viewer pane
             let cmdClick = NSEvent.modifierFlags.contains(.command)
             onFileClick(file.path, cmdClick)
-        } label: {
-            HStack(spacing: 6) {
-                Text(String(statusChar))
-                    .font(.system(.caption2, design: .monospaced))
-                    .fontWeight(.bold)
-                    .foregroundStyle(statusColor(for: statusChar))
-                    .frame(width: 12, alignment: .center)
-                Text(file.path)
-                    .font(.system(.caption, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.head)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 3)
-            .background(isHovered ? Color(nsColor: .controlAccentColor).opacity(0.15) : Color.clear)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
         .onHover { isHovered = $0 }
     }
 }
