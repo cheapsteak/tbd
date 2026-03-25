@@ -11,8 +11,8 @@ struct InlineTextField: NSViewRepresentable {
     var onCancel: () -> Void
     var onKeyDown: ((_ key: UInt16) -> Bool)?
 
-    func makeNSView(context: Context) -> FocusStableTextField {
-        let field = FocusStableTextField()
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
         field.delegate = context.coordinator
         field.stringValue = text
         field.isBordered = false
@@ -25,21 +25,23 @@ struct InlineTextField: NSViewRepresentable {
         return field
     }
 
-    func updateNSView(_ nsView: FocusStableTextField, context: Context) {
-        // Only update text if it changed externally (not from user typing)
-        if nsView.stringValue != text {
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        let textChanged = nsView.stringValue != text
+        if textChanged {
             nsView.stringValue = text
         }
-        nsView.onKeyDown = onKeyDown
-        nsView.desiredCursorPosition = cursorPosition
 
         if isFocused.wrappedValue {
             DispatchQueue.main.async {
-                if nsView.window?.firstResponder != nsView.currentEditor() {
-                    // Close any popover instantly before refocusing
-                    NSAnimationContext.runAnimationGroup { ctx in
-                        ctx.duration = 0
-                        nsView.window?.makeFirstResponder(nsView)
+                let needsFocus = nsView.window?.firstResponder != nsView.currentEditor()
+                if needsFocus {
+                    nsView.window?.makeFirstResponder(nsView)
+                }
+                // Set cursor position after focus is established and text is updated
+                if needsFocus || textChanged {
+                    if let editor = nsView.currentEditor() {
+                        let pos = min(cursorPosition, editor.string.count)
+                        editor.selectedRange = NSRange(location: pos, length: 0)
                     }
                 }
             }
@@ -78,7 +80,6 @@ struct InlineTextField: NSViewRepresentable {
                 parent.onCancel()
                 return true
             }
-            // Arrow keys for emoji picker navigation
             if let onKeyDown = parent.onKeyDown {
                 let keyMap: [Selector: UInt16] = [
                     #selector(NSResponder.moveUp(_:)): 126,
@@ -88,42 +89,11 @@ struct InlineTextField: NSViewRepresentable {
                 ]
                 if let keyCode = keyMap[commandSelector] {
                     if onKeyDown(keyCode) {
-                        return true // consumed by emoji picker
+                        return true
                     }
                 }
             }
             return false
         }
-    }
-}
-
-/// NSTextField subclass that preserves cursor position on refocus
-/// instead of selecting all text.
-final class FocusStableTextField: NSTextField {
-    var onKeyDown: ((_ key: UInt16) -> Bool)?
-    var desiredCursorPosition: Int?
-    private var savedSelection: NSRange?
-
-    override func becomeFirstResponder() -> Bool {
-        let result = super.becomeFirstResponder()
-        if result {
-            let target = desiredCursorPosition ?? savedSelection?.location
-            if let pos = target {
-                DispatchQueue.main.async { [weak self] in
-                    if let editor = self?.currentEditor() {
-                        let clamped = min(pos, editor.string.count)
-                        editor.selectedRange = NSRange(location: clamped, length: 0)
-                    }
-                }
-            }
-        }
-        return result
-    }
-
-    override func textDidEndEditing(_ notification: Notification) {
-        if let editor = currentEditor() {
-            savedSelection = editor.selectedRange
-        }
-        super.textDidEndEditing(notification)
     }
 }
