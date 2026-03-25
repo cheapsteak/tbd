@@ -7,6 +7,7 @@ struct WorktreeRowView: View {
     @EnvironmentObject var appState: AppState
     @State private var isEditing = false
     @State private var editText = ""
+    @State private var cursorPosition = 0
     @State private var isTextFieldFocused = false
     @State private var emojiQuery: String?
     @State private var emojiSelectedIndex = 0
@@ -103,6 +104,7 @@ struct WorktreeRowView: View {
             if isEditing {
                 InlineTextField(
                     text: $editText,
+                    cursorPosition: $cursorPosition,
                     isFocused: $isTextFieldFocused,
                     onSubmit: {
                         if emojiQuery != nil, let emoji = selectedEmoji() {
@@ -224,12 +226,19 @@ struct WorktreeRowView: View {
 
     // MARK: - Emoji autocomplete
 
-    /// Find the last unmatched `:` in editText (no space or `:` after it).
+    /// Find the `:` before the cursor with no space between it and the cursor.
     private var activeColonRange: Range<String.Index>? {
-        guard let colonIndex = editText.lastIndex(of: ":") else { return nil }
-        let afterColon = editText[editText.index(after: colonIndex)...]
-        if afterColon.contains(" ") || afterColon.contains(":") { return nil }
-        return colonIndex..<editText.endIndex
+        let text = editText
+        // Clamp cursor to valid UTF-16 range, convert to String.Index
+        let utf16Pos = min(cursorPosition, text.utf16.count)
+        let cursorIndex = String.Index(utf16Offset: utf16Pos, in: text)
+        // Search backwards from cursor for `:`
+        let beforeCursor = text[text.startIndex..<cursorIndex]
+        guard let colonIndex = beforeCursor.lastIndex(of: ":") else { return nil }
+        // Check no space between colon and cursor
+        let between = text[text.index(after: colonIndex)..<cursorIndex]
+        if between.contains(" ") || between.contains(":") { return nil }
+        return colonIndex..<cursorIndex
     }
 
     private func updateEmojiQuery(_ text: String) {

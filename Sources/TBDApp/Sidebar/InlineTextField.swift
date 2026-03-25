@@ -5,6 +5,7 @@ import SwiftUI
 /// instead of selecting all text (SwiftUI's default behavior).
 struct InlineTextField: NSViewRepresentable {
     @Binding var text: String
+    @Binding var cursorPosition: Int
     var isFocused: Binding<Bool>
     var onSubmit: () -> Void
     var onCancel: () -> Void
@@ -54,6 +55,9 @@ struct InlineTextField: NSViewRepresentable {
         func controlTextDidChange(_ obj: Notification) {
             guard let field = obj.object as? NSTextField else { return }
             parent.text = field.stringValue
+            if let editor = field.currentEditor() {
+                parent.cursorPosition = editor.selectedRange.location
+            }
         }
 
         func controlTextDidEndEditing(_ obj: Notification) {
