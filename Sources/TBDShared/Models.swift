@@ -23,13 +23,6 @@ public enum WorktreeStatus: String, Codable, Sendable {
     case active, archived, main, creating
 }
 
-public enum GitStatus: String, Codable, Sendable {
-    case current     // branch is ahead of or equal to main — no action needed
-    case behind      // main has commits not on this branch
-    case conflicts   // would conflict if merged into main
-    case merged      // squash-merged into main (set by TBD's merge flow)
-}
-
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var repoID: UUID
@@ -38,14 +31,14 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var branch: String
     public var path: String
     public var status: WorktreeStatus
-    public var gitStatus: GitStatus
+    public var hasConflicts: Bool
     public var createdAt: Date
     public var archivedAt: Date?
     public var tmuxServer: String
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
-                gitStatus: GitStatus = .current,
+                hasConflicts: Bool = false,
                 createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String) {
         self.id = id
         self.repoID = repoID
@@ -54,7 +47,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.branch = branch
         self.path = path
         self.status = status
-        self.gitStatus = gitStatus
+        self.hasConflicts = hasConflicts
         self.createdAt = createdAt
         self.archivedAt = archivedAt
         self.tmuxServer = tmuxServer

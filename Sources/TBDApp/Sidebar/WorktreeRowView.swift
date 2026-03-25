@@ -39,22 +39,12 @@ struct WorktreeRowView: View {
     }
 
     private var gitStatusIcon: String? {
-        guard !isMain else { return nil }
-        switch worktree.gitStatus {
-        case .current: return nil
-        case .behind: return "arrow.down"
-        case .conflicts: return "exclamationmark.triangle"
-        case .merged: return "checkmark.circle"
-        }
+        guard !isMain, worktree.hasConflicts else { return nil }
+        return "exclamationmark.triangle"
     }
 
     private var gitStatusColor: Color {
-        switch worktree.gitStatus {
-        case .current: return .secondary
-        case .behind: return .secondary
-        case .conflicts: return .orange
-        case .merged: return .green
-        }
+        worktree.hasConflicts ? .orange : .secondary
     }
 
     private var prIcon: String? {
