@@ -10,6 +10,7 @@ struct WorktreeRowView: View {
     @FocusState private var isTextFieldFocused: Bool
     @State private var emojiQuery: String?
     @State private var emojiSelectedIndex = 0
+    @State private var isInsertingEmoji = false
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -141,7 +142,8 @@ struct WorktreeRowView: View {
                         updateEmojiQuery(newValue)
                     }
                     .onChange(of: isTextFieldFocused) { _, focused in
-                        if !focused && emojiQuery == nil {
+                        if !focused && !isInsertingEmoji {
+                            emojiQuery = nil
                             commitRename()
                         }
                     }
@@ -252,13 +254,15 @@ struct WorktreeRowView: View {
 
     private func replaceColonQuery(with emoji: String) {
         guard let range = activeColonRange else { return }
+        isInsertingEmoji = true
         editText.replaceSubrange(range, with: emoji)
         emojiQuery = nil
         var frecency = EmojiFrecency.load()
         frecency.record(emoji)
-        // Re-focus the text field after popover dismissal
-        DispatchQueue.main.async {
+        // Re-focus after popover dismissal animation completes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             isTextFieldFocused = true
+            isInsertingEmoji = false
         }
     }
 
