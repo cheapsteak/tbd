@@ -63,25 +63,22 @@ struct ContentView: View {
                        let prStatus = appState.prStatuses[worktreeID],
                        let prURL = URL(string: prStatus.url) {
                         Button {
-                            // Reuse existing PR tab if one exists
                             let existingTabs = appState.tabs[worktreeID] ?? []
-                            let hasPRTab = existingTabs.contains { tab in
-                                if case .webview(_, let url) = tab.content { return url == prURL }
+                            if let existingIndex = existingTabs.firstIndex(where: {
+                                if case .webview(_, let url) = $0.content { return url == prURL }
                                 return false
-                            }
-                            if !hasPRTab {
+                            }) {
+                                // Focus existing PR tab
+                                appState.activeTabIndices[worktreeID] = existingIndex
+                            } else {
+                                // Create and focus new PR tab
                                 let webviewID = UUID()
                                 let tab = Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
                                 appState.tabs[worktreeID, default: []].append(tab)
+                                appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
                             }
                         } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: "arrow.triangle.pull")
-                                    .font(.caption)
-                                Text("#\(prStatus.number)")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                            }
+                            PRButtonLabel(prStatus: prStatus)
                         }
                         .help("Open PR in browser pane")
                     }
@@ -195,6 +192,53 @@ struct ContentView: View {
                 await appState.markNotificationsRead(worktreeID: worktreeID)
             }
         }
+    }
+}
+
+// MARK: - PRButtonLabel
+
+private struct PRButtonLabel: View {
+    let prStatus: PRStatus
+
+    private var iconName: String {
+        switch prStatus.state {
+        case .open, .changesRequested, .mergeable: return "git-pull-request"
+        case .merged:                              return "git-merge"
+        case .closed:                              return "git-pull-request-closed"
+        }
+    }
+
+    private var iconColor: Color {
+        switch prStatus.state {
+        case .open:             return .secondary
+        case .changesRequested: return .red
+        case .mergeable:        return .green
+        case .merged:           return .purple
+        case .closed:           return .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            if let nsImage = loadIcon(iconName) {
+                Image(nsImage: nsImage)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 12, height: 12)
+                    .foregroundStyle(iconColor)
+            }
+            Text("#\(prStatus.number)")
+                .font(.caption)
+                .fontWeight(.medium)
+        }
+    }
+
+    private func loadIcon(_ name: String) -> NSImage? {
+        guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.isTemplate = true
+        return image
     }
 }
 
