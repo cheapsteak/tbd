@@ -78,13 +78,7 @@ struct ContentView: View {
                                 appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
                             }
                         } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: "arrow.triangle.pull")
-                                    .font(.caption)
-                                Text("#\(prStatus.number)")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                            }
+                            PRButtonLabel(prStatus: prStatus)
                         }
                         .help("Open PR in browser pane")
                     }
@@ -198,6 +192,53 @@ struct ContentView: View {
                 await appState.markNotificationsRead(worktreeID: worktreeID)
             }
         }
+    }
+}
+
+// MARK: - PRButtonLabel
+
+private struct PRButtonLabel: View {
+    let prStatus: PRStatus
+
+    private var iconName: String {
+        switch prStatus.state {
+        case .open, .changesRequested, .mergeable: return "git-pull-request"
+        case .merged:                              return "git-merge"
+        case .closed:                              return "git-pull-request-closed"
+        }
+    }
+
+    private var iconColor: Color {
+        switch prStatus.state {
+        case .open:             return .secondary
+        case .changesRequested: return .red
+        case .mergeable:        return .green
+        case .merged:           return .purple
+        case .closed:           return .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            if let nsImage = loadIcon(iconName) {
+                Image(nsImage: nsImage)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 12, height: 12)
+                    .foregroundStyle(iconColor)
+            }
+            Text("#\(prStatus.number)")
+                .font(.caption)
+                .fontWeight(.medium)
+        }
+    }
+
+    private func loadIcon(_ name: String) -> NSImage? {
+        guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.isTemplate = true
+        return image
     }
 }
 

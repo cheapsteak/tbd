@@ -40,30 +40,38 @@ struct WorktreeRowView: View {
 
     private var worktreeIcon: String? {
         guard !isMain else { return nil }
+        let prState = appState.prStatuses[worktree.id]?.state
+        // PR state takes priority over local conflict detection —
+        // a merged PR means the branch is done regardless of local git status.
+        if let prState {
+            switch prState {
+            case .open, .changesRequested, .mergeable: return "git-pull-request"
+            case .merged:                              return "git-merge"
+            case .closed:                              return "git-pull-request-closed"
+            }
+        }
         if worktree.hasConflicts {
             return "git-merge-conflict"
         }
-        guard let status = appState.prStatuses[worktree.id] else { return nil }
-        switch status.state {
-        case .open, .changesRequested, .mergeable: return "git-pull-request"
-        case .merged:                              return "git-merge"
-        case .closed:                              return "git-pull-request-closed"
-        }
+        return nil
     }
 
     private var worktreeIconColor: Color {
         guard !isMain else { return .secondary }
+        let prState = appState.prStatuses[worktree.id]?.state
+        if let prState {
+            switch prState {
+            case .open:             return .secondary
+            case .changesRequested: return .red
+            case .mergeable:        return .green
+            case .merged:           return .purple
+            case .closed:           return .secondary
+            }
+        }
         if worktree.hasConflicts {
             return .orange
         }
-        guard let status = appState.prStatuses[worktree.id] else { return .secondary }
-        switch status.state {
-        case .open:             return .secondary
-        case .changesRequested: return .red
-        case .mergeable:        return .green
-        case .merged:           return .purple
-        case .closed:           return .secondary
-        }
+        return .secondary
     }
 
     var body: some View {
