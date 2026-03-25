@@ -148,8 +148,12 @@ private struct SingleWorktreeView: View {
         // Remove tab
         appState.tabs[worktreeID]?.remove(at: index)
 
-        // Remove ALL terminals that were in this tab's layout
-        appState.terminals[worktreeID]?.removeAll { terminalIDsInTab.contains($0.id) }
+        // Delete ALL terminals in this tab's layout from daemon (kills tmux windows + removes DB records + local state)
+        for terminalID in terminalIDsInTab {
+            Task {
+                await appState.deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
+            }
+        }
 
         // Adjust active tab index
         let remaining = appState.tabs[worktreeID]?.count ?? 0

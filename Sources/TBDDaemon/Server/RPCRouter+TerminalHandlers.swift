@@ -48,6 +48,28 @@ extension RPCRouter {
         return try RPCResponse(result: terminals)
     }
 
+    func handleTerminalDelete(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalDeleteParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+
+        // Kill the tmux window
+        if let worktree = try await db.worktrees.get(id: terminal.worktreeID) {
+            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+        }
+
+        // Delete from DB
+        try await db.terminals.delete(id: params.terminalID)
+
+        subscriptions.broadcast(delta: .terminalRemoved(TerminalIDDelta(
+            terminalID: terminal.id
+        )))
+
+        return .ok()
+    }
+
     func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSendParams.self, from: paramsData)
 

@@ -355,6 +355,14 @@ actor DaemonClient {
         )
     }
 
+    /// Delete a terminal (kills tmux window and removes DB record).
+    func deleteTerminal(terminalID: UUID) throws {
+        try callVoid(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminalID)
+        )
+    }
+
     /// Send text to a terminal.
     func sendToTerminal(terminalID: UUID, text: String) throws {
         try callVoid(

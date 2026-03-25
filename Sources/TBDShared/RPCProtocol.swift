@@ -87,6 +87,7 @@ public enum RPCMethod {
     public static let terminalCreate = "terminal.create"
     public static let terminalList = "terminal.list"
     public static let terminalSend = "terminal.send"
+    public static let terminalDelete = "terminal.delete"
     public static let notify = "notify"
     public static let daemonStatus = "daemon.status"
     public static let stateSubscribe = "state.subscribe"
@@ -192,6 +193,11 @@ public struct TerminalSendParams: Codable, Sendable {
     public init(terminalID: UUID, text: String) {
         self.terminalID = terminalID; self.text = text
     }
+}
+
+public struct TerminalDeleteParams: Codable, Sendable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
 }
 
 public struct NotifyParams: Codable, Sendable {

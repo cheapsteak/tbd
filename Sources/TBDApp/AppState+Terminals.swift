@@ -35,6 +35,17 @@ extension AppState {
         }
     }
 
+    /// Delete a terminal (kills tmux window and removes from daemon DB).
+    func deleteTerminal(terminalID: UUID, worktreeID: UUID) async {
+        do {
+            try await daemonClient.deleteTerminal(terminalID: terminalID)
+            terminals[worktreeID]?.removeAll { $0.id == terminalID }
+        } catch {
+            logger.error("Failed to delete terminal: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
     /// Send text to a terminal.
     func sendToTerminal(terminalID: UUID, text: String) async {
         do {

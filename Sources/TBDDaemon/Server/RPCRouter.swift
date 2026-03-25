@@ -70,6 +70,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:
                 return try await handleTerminalSend(request.paramsData)
+            case RPCMethod.terminalDelete:
+                return try await handleTerminalDelete(request.paramsData)
             case RPCMethod.notify:
                 return try await handleNotify(request.paramsData)
             case RPCMethod.daemonStatus:
