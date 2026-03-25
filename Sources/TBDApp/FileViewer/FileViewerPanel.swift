@@ -71,6 +71,7 @@ private func parseGitStatus(_ output: String) -> [GitFileStatus] {
 
 struct FileViewerPanel: View {
     let worktree: Worktree
+    @EnvironmentObject var appState: AppState
 
     @State private var staged: [GitFileStatus] = []
     @State private var unstaged: [GitFileStatus] = []
@@ -118,16 +119,37 @@ struct FileViewerPanel: View {
                         .padding(.vertical, 20)
                 }
                 if !staged.isEmpty {
-                    FileStatusSection(title: "Staged", files: staged, useIndexStatus: true, worktreePath: worktree.path)
+                    FileStatusSection(title: "Staged", files: staged, useIndexStatus: true, worktreePath: worktree.path, onFileClick: handleFileClick)
                 }
                 if !unstaged.isEmpty {
-                    FileStatusSection(title: "Changes", files: unstaged, useIndexStatus: false, worktreePath: worktree.path)
+                    FileStatusSection(title: "Changes", files: unstaged, useIndexStatus: false, worktreePath: worktree.path, onFileClick: handleFileClick)
                 }
                 if !untracked.isEmpty {
-                    FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.path)
+                    FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.path, onFileClick: handleFileClick)
                 }
             }
             .padding(.vertical, 4)
+        }
+    }
+
+    private func handleFileClick(_ relativePath: String, cmdClick: Bool) {
+        let fullPath = URL(fileURLWithPath: worktree.path).appendingPathComponent(relativePath).path
+        var tabs = appState.tabs[worktree.id, default: []]
+
+        if !cmdClick, let existingIndex = tabs.firstIndex(where: {
+            if case .codeViewer = $0.content { return true }
+            return false
+        }) {
+            // Replace existing code viewer tab content
+            let newID = UUID()
+            tabs[existingIndex].content = .codeViewer(id: newID, path: fullPath)
+            tabs[existingIndex].label = URL(fileURLWithPath: relativePath).lastPathComponent
+            appState.tabs[worktree.id] = tabs
+        } else {
+            // Create new code viewer tab
+            let newID = UUID()
+            let tab = Tab(id: UUID(), content: .codeViewer(id: newID, path: fullPath), label: URL(fileURLWithPath: relativePath).lastPathComponent)
+            appState.tabs[worktree.id, default: []].append(tab)
         }
     }
 
@@ -150,6 +172,7 @@ private struct FileStatusSection: View {
     /// Staged section uses index; Changes/Untracked sections use working tree.
     let useIndexStatus: Bool
     let worktreePath: String
+    var onFileClick: (String, Bool) -> Void = { _, _ in }
     @State private var isExpanded = true
 
     var body: some View {
@@ -179,7 +202,7 @@ private struct FileStatusSection: View {
             if isExpanded {
                 ForEach(files) { file in
                     let statusChar = useIndexStatus ? file.indexStatus : file.workingStatus
-                    GitFileRow(file: file, statusChar: statusChar, worktreePath: worktreePath)
+                    GitFileRow(file: file, statusChar: statusChar, worktreePath: worktreePath, onFileClick: onFileClick)
                 }
             }
         }
@@ -192,12 +215,13 @@ private struct GitFileRow: View {
     let file: GitFileStatus
     let statusChar: Character
     let worktreePath: String
+    var onFileClick: (String, Bool) -> Void = { _, _ in }
     @State private var isHovered = false
 
     var body: some View {
         Button {
-            let url = URL(fileURLWithPath: worktreePath).appendingPathComponent(file.path)
-            NSWorkspace.shared.open(url)
+            let cmdClick = NSEvent.modifierFlags.contains(.command)
+            onFileClick(file.path, cmdClick)
         } label: {
             HStack(spacing: 6) {
                 Text(String(statusChar))
