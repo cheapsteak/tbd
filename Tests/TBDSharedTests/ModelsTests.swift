@@ -80,6 +80,33 @@ import Testing
     #expect(decoded.read == false)
 }
 
+// MARK: - Backwards Compatibility (decode with missing fields)
+
+/// Verifies that Worktree can decode from JSON that predates newer fields.
+/// Every non-optional field added after v1 MUST have a property-level default
+/// so old JSON (from DB, RPC, or disk) still decodes. If this test fails,
+/// you added a field without a default — see CLAUDE.md "Database migrations".
+@Test func testWorktreeDecodesWithoutOptionalFields() throws {
+    // Minimal JSON: only the fields present since v1
+    let json = """
+    {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "repoID": "22222222-2222-2222-2222-222222222222",
+        "name": "old-worktree",
+        "displayName": "old-worktree",
+        "branch": "tbd/old-worktree",
+        "path": "/tmp/repo/.tbd/worktrees/old-worktree",
+        "status": "active",
+        "createdAt": 0,
+        "tmuxServer": "tbd-test"
+    }
+    """.data(using: .utf8)!
+    let decoded = try JSONDecoder().decode(Worktree.self, from: json)
+    #expect(decoded.name == "old-worktree")
+    #expect(decoded.hasConflicts == false)
+    #expect(decoded.archivedAt == nil)
+}
+
 // MARK: - NotificationType Severity Ordering
 
 @Test func testNotificationTypeSeverityOrdering() {

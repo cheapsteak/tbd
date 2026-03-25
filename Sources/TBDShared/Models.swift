@@ -52,6 +52,21 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.archivedAt = archivedAt
         self.tmuxServer = tmuxServer
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        repoID = try c.decode(UUID.self, forKey: .repoID)
+        name = try c.decode(String.self, forKey: .name)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        branch = try c.decode(String.self, forKey: .branch)
+        path = try c.decode(String.self, forKey: .path)
+        status = try c.decode(WorktreeStatus.self, forKey: .status)
+        hasConflicts = try c.decodeIfPresent(Bool.self, forKey: .hasConflicts) ?? false
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
+        tmuxServer = try c.decode(String.self, forKey: .tmuxServer)
+    }
 }
 
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
