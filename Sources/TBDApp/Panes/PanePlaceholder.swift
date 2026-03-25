@@ -46,6 +46,15 @@ struct PanePlaceholder: View {
             Spacer()
 
             toolbarActions
+
+            Button(action: closePane) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16, height: 16)
+            }
+            .buttonStyle(.borderless)
+            .help("Close pane")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
@@ -153,6 +162,21 @@ struct PanePlaceholder: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
+            }
+        }
+    }
+
+    // MARK: - Close
+
+    private func closePane() {
+        if let newLayout = layout.removePane(id: content.paneID) {
+            layout = newLayout
+        } else {
+            // Last pane in this tab — remove the entire tab
+            let worktreeID = worktree.id
+            if let tabIndex = appState.tabs[worktreeID]?.firstIndex(where: { $0.id == content.paneID || $0.content.paneID == content.paneID }) {
+                appState.tabs[worktreeID]?.remove(at: tabIndex)
+                appState.layouts.removeValue(forKey: content.paneID)
             }
         }
     }

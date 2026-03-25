@@ -31,7 +31,7 @@ struct CodeViewerPaneView: View {
                             if selectedFiles.count > 1 {
                                 fileHeader(filePath)
                             }
-                            HighlightedCodeView(filePath: filePath)
+                            FilePreviewView(filePath: filePath)
                         }
                     }
                 }
@@ -68,6 +68,99 @@ struct CodeViewerPaneView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+}
+
+// MARK: - File Type Detection
+
+private let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "heic", "heif", "ico", "svg"]
+
+private func isImageFile(_ path: String) -> Bool {
+    let ext = (path as NSString).pathExtension.lowercased()
+    return imageExtensions.contains(ext)
+}
+
+private func isTextFile(_ path: String) -> Bool {
+    // Try reading a small chunk as UTF-8 to detect binary
+    guard let fh = FileHandle(forReadingAtPath: path) else { return false }
+    defer { fh.closeFile() }
+    let sample = fh.readData(ofLength: 8192)
+    return String(data: sample, encoding: .utf8) != nil
+}
+
+// MARK: - FilePreviewView
+
+/// Routes to the appropriate preview based on file type:
+/// images → native NSImage, text → syntax-highlighted code, binary → "Open in Finder" fallback.
+private struct FilePreviewView: View {
+    let filePath: String
+
+    var body: some View {
+        if isImageFile(filePath) {
+            ImagePreviewView(filePath: filePath)
+        } else if isTextFile(filePath) {
+            HighlightedCodeView(filePath: filePath)
+        } else {
+            BinaryFallbackView(filePath: filePath)
+        }
+    }
+}
+
+// MARK: - ImagePreviewView
+
+private struct ImagePreviewView: View {
+    let filePath: String
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(12)
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "photo")
+                        .font(.system(size: 40))
+                        .foregroundStyle(.tertiary)
+                    Text("Could not load image")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .task(id: filePath) {
+            image = NSImage(contentsOfFile: filePath)
+        }
+    }
+}
+
+// MARK: - BinaryFallbackView
+
+private struct BinaryFallbackView: View {
+    let filePath: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "doc.questionmark")
+                .font(.system(size: 40))
+                .foregroundStyle(.tertiary)
+            Text("Cannot preview binary file")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Text(URL(fileURLWithPath: filePath).lastPathComponent)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Button("Open in Finder") {
+                NSWorkspace.shared.open(URL(fileURLWithPath: filePath))
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
