@@ -112,9 +112,10 @@ final class ExpandingRowPanel {
             )
             p.isOpaque = false
             p.backgroundColor = .clear
-            p.level = .floating
+            p.level = .normal
             p.hasShadow = false
             p.ignoresMouseEvents = true
+            p.hidesOnDeactivate = false
             self.panel = p
             return p
         }()
