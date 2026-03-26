@@ -11,6 +11,7 @@ struct WorktreeRowView: View {
     @State private var isTextFieldFocused = false
     @State private var emojiQuery: String?
     @State private var emojiSelectedIndex = 0
+    @State private var isHovered = false
     @State private var frecency = EmojiFrecency.load()
 
     private var isPending: Bool {
@@ -157,7 +158,15 @@ struct WorktreeRowView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(worktree.displayName)
                         .fontWeight(hasBoldNotification ? .bold : .regular)
-                        .lineLimit(1)
+                        .lineLimit(isHovered ? nil : 1)
+                        .fixedSize(horizontal: isHovered, vertical: false)
+                        .padding(.trailing, isHovered ? 4 : 0)
+                        .background(
+                            isHovered
+                                ? RoundedRectangle(cornerRadius: 3)
+                                    .fill(.background)
+                                : nil
+                        )
                     if isPending {
                         Text("Creating worktree…")
                             .font(.caption)
@@ -167,6 +176,8 @@ struct WorktreeRowView: View {
             }
         }
         .contentShape(Rectangle())
+        .onHover { hovering in isHovered = hovering }
+        .zIndex(isHovered ? 1 : 0)
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
                 if appState.selectedWorktreeIDs.contains(worktree.id) {
