@@ -6,9 +6,10 @@ import SwiftUI
 /// positioned exactly over the original row, escaping sidebar clipping.
 struct ExpandingRowModifier<Expanded: View>: ViewModifier {
     let isTruncated: Bool
-    @ViewBuilder let expandedContent: () -> Expanded
+    @ViewBuilder let expandedContent: (Bool) -> Expanded
 
     @State private var anchor = ExpandingRowAnchor()
+    @State private var isHovered = false
 
     func body(content: Content) -> some View {
         content
@@ -17,10 +18,11 @@ struct ExpandingRowModifier<Expanded: View>: ViewModifier {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             )
             .onHover { hovering in
+                isHovered = hovering
                 if hovering && isTruncated {
                     guard let screenFrame = anchor.screenFrame else { return }
                     ExpandingRowPanel.show(
-                        content: expandedContent(),
+                        content: expandedContent(true),
                         screenFrame: screenFrame,
                         parentWindow: anchor.view?.window
                     )
@@ -32,9 +34,11 @@ struct ExpandingRowModifier<Expanded: View>: ViewModifier {
 }
 
 extension View {
+    /// - Parameter expanded: Closure receiving `isHovered` bool so the expanded
+    ///   content can match the row's hover highlight.
     func expandingRow<Expanded: View>(
         isTruncated: Bool,
-        @ViewBuilder expanded: @escaping () -> Expanded
+        @ViewBuilder expanded: @escaping (Bool) -> Expanded
     ) -> some View {
         modifier(ExpandingRowModifier(isTruncated: isTruncated, expandedContent: expanded))
     }
@@ -100,11 +104,9 @@ final class ExpandingRowPanel {
         let wrapped = AnyView(
             content
                 .padding(.trailing, 6)
+                .frame(maxHeight: .infinity)
         )
-
-        // Wrap in a clear background so NSHostingView doesn't draw its own
-        let clearWrapped = AnyView(wrapped.background(Color.clear))
-        let hosting = NSHostingView(rootView: clearWrapped)
+        let hosting = NSHostingView(rootView: wrapped)
         let fittingSize = hosting.fittingSize
 
         // Only show if content is wider than the row

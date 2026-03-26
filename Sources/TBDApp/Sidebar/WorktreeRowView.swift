@@ -185,7 +185,7 @@ struct WorktreeRowView: View {
         }
         .padding(.vertical, 2)
         .padding(.horizontal, 4)
-        .expandingRow(isTruncated: isNameTruncated && !isEditing) {
+        .expandingRow(isTruncated: isNameTruncated && !isEditing) { isHovered in
             HStack(spacing: 6) {
                 if isMain {
                     Image(systemName: "arrow.triangle.branch")
