@@ -177,7 +177,7 @@ struct WorktreeRowView: View {
                 } else {
                     appState.selectedWorktreeIDs.insert(worktree.id)
                 }
-            } else if !isMain && appState.selectedWorktreeIDs.contains(worktree.id) && !isEditing {
+            } else if !isMain && appState.selectedWorktreeIDs == [worktree.id] && !isEditing {
                 startRename()
             } else {
                 appState.selectedWorktreeIDs = [worktree.id]
@@ -188,7 +188,7 @@ struct WorktreeRowView: View {
         .expandingRow(
             isTruncated: isNameTruncated && !isEditing,
             onClick: {
-                if !isMain && appState.selectedWorktreeIDs.contains(worktree.id) {
+                if !isMain && appState.selectedWorktreeIDs == [worktree.id] {
                     startRename()
                 }
             }
