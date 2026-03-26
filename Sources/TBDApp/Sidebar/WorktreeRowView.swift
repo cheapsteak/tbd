@@ -155,9 +155,10 @@ struct WorktreeRowView: View {
                 )
             } else {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(worktree.displayName)
-                        .fontWeight(hasBoldNotification ? .bold : .regular)
-                        .lineLimit(1)
+                    ExpandingTextField(
+                        text: worktree.displayName,
+                        font: .systemFont(ofSize: NSFont.systemFontSize, weight: hasBoldNotification ? .bold : .regular)
+                    )
                     if isPending {
                         Text("Creating worktree…")
                             .font(.caption)
