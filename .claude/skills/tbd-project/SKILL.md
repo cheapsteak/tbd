@@ -78,3 +78,14 @@ scripts/restart.sh --quick  # skip build
 
 ### Debug terminal rendering
 Check `/tmp/tbd-bridge.log` for tmux bridge diagnostics.
+
+### Debug SwiftUI layout / positioning
+Add colored borders at each layer of the modifier chain to visualize what occupies what space:
+```swift
+.border(Color.red, width: 1)   // inner content
+.padding(.vertical, 2)
+.border(Color.green, width: 1) // after padding
+.background(...)
+.border(Color.blue, width: 1)  // outermost
+```
+Useful for diagnosing misalignment with NSPanel overlays — SwiftUI's `List` adds its own row insets and cell spacing outside the view hierarchy. Walk up the AppKit view hierarchy (`superview` chain) to find the `NSTableRowView` if you need the actual cell bounds.
