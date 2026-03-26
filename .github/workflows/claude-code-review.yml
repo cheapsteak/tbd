@@ -2,7 +2,7 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened, labeled]
+    types: [opened, synchronize, ready_for_review, reopened]
 
 concurrency:
   group: claude-review-pr-${{ github.event.pull_request.number }}
@@ -12,7 +12,7 @@ jobs:
   claude-review:
     if: >-
       github.event.pull_request.draft != true &&
-      contains(github.event.pull_request.labels.*.name, 'agent-review')
+      github.event.pull_request.head.repo.full_name == github.repository
 
     runs-on: ubuntu-latest
     permissions:
