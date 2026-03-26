@@ -7,7 +7,11 @@ struct WorktreeRowView: View {
     @EnvironmentObject var appState: AppState
     @State private var isEditing = false
     @State private var editText = ""
-    @FocusState private var isTextFieldFocused: Bool
+    @State private var cursorPosition = 0
+    @State private var isTextFieldFocused = false
+    @State private var emojiQuery: String?
+    @State private var emojiSelectedIndex = 0
+    @State private var frecency = EmojiFrecency.load()
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -98,14 +102,57 @@ struct WorktreeRowView: View {
                     .foregroundStyle(worktreeIconColor)
             }
             if isEditing {
-                TextField("Name", text: $editText)
-                    .textFieldStyle(.plain)
-                    .focused($isTextFieldFocused)
-                    .onSubmit { commitRename() }
-                    .onExitCommand { cancelRename() }
-                    .onChange(of: isTextFieldFocused) { _, focused in
-                        if !focused { commitRename() }
+                InlineTextField(
+                    text: $editText,
+                    cursorPosition: $cursorPosition,
+                    isFocused: $isTextFieldFocused,
+                    onSubmit: {
+                        if emojiQuery != nil, let emoji = selectedEmoji() {
+                            replaceColonQuery(with: emoji)
+                        } else {
+                            commitRename()
+                        }
+                    },
+                    onCancel: {
+                        if emojiQuery != nil {
+                            emojiQuery = nil
+                        } else {
+                            cancelRename()
+                        }
+                    },
+                    onKeyDown: { keyCode in
+                        guard emojiQuery != nil else { return false }
+                        switch keyCode {
+                        case 125: emojiSelectedIndex += 7; return true  // down
+                        case 126: emojiSelectedIndex = max(0, emojiSelectedIndex - 7); return true // up
+                        case 124: emojiSelectedIndex += 1; return true  // right
+                        case 123: emojiSelectedIndex = max(0, emojiSelectedIndex - 1); return true // left
+                        default: return false
+                        }
+                    },
+                    onSpecialKey: { key in
+                        guard emojiQuery != nil, let emoji = selectedEmoji() else { return false }
+                        replaceColonQuery(with: emoji)
+                        return true
                     }
+                )
+                .onChange(of: editText) { _, newValue in
+                    updateEmojiQuery(newValue)
+                }
+                .onChange(of: isTextFieldFocused) { _, focused in
+                    if !focused {
+                        emojiQuery = nil
+                        commitRename()
+                    }
+                }
+                .background(
+                    EmojiPanelAnchor(
+                        isPresented: emojiQuery != nil,
+                        query: emojiQuery ?? "",
+                        selectedIndex: $emojiSelectedIndex,
+                        onSelect: { emoji in replaceColonQuery(with: emoji) }
+                    )
+                )
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(worktree.displayName)
@@ -175,6 +222,52 @@ struct WorktreeRowView: View {
 
     private func cancelRename() {
         isEditing = false
+    }
+
+    // MARK: - Emoji autocomplete
+
+    /// Find the `:` before the cursor with no space between it and the cursor.
+    private var activeColonRange: Range<String.Index>? {
+        let text = editText
+        // Clamp cursor to valid UTF-16 range, convert to String.Index
+        let utf16Pos = min(cursorPosition, text.utf16.count)
+        let cursorIndex = String.Index(utf16Offset: utf16Pos, in: text)
+        // Search backwards from cursor for `:`
+        let beforeCursor = text[text.startIndex..<cursorIndex]
+        guard let colonIndex = beforeCursor.lastIndex(of: ":") else { return nil }
+        // Check no space between colon and cursor
+        let between = text[text.index(after: colonIndex)..<cursorIndex]
+        if between.contains(" ") || between.contains(":") { return nil }
+        return colonIndex..<cursorIndex
+    }
+
+    private func updateEmojiQuery(_ text: String) {
+        if let range = activeColonRange {
+            let query = String(editText[editText.index(after: range.lowerBound)..<range.upperBound])
+            emojiQuery = query
+            emojiSelectedIndex = 0
+        } else {
+            emojiQuery = nil
+        }
+    }
+
+    private func replaceColonQuery(with emoji: String) {
+        guard let range = activeColonRange else { return }
+        let newCursorUTF16 = editText[editText.startIndex..<range.lowerBound].utf16.count + emoji.utf16.count
+        editText.replaceSubrange(range, with: emoji)
+        cursorPosition = newCursorUTF16
+        emojiQuery = nil
+        frecency.record(emoji)
+    }
+
+    private func selectedEmoji() -> String? {
+        guard let query = emojiQuery else { return nil }
+        let results = query.isEmpty
+            ? frecency.defaults()
+            : frecency.search(query, limit: 21)
+        guard !results.isEmpty else { return nil }
+        let index = min(emojiSelectedIndex, results.count - 1)
+        return results[index].emoji
     }
 
     private func loadIcon(_ name: String) -> NSImage? {
