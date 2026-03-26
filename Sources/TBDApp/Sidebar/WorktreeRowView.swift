@@ -210,8 +210,6 @@ struct WorktreeRowView: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
-            .padding(.vertical, 2)
-            .padding(.horizontal, 4)
         }
         .background(
             RoundedRectangle(cornerRadius: 4)
