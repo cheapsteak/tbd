@@ -66,13 +66,13 @@ jobs:
 
             Do not read or review changes in generated files like graphql codegen output.
 
-            IMPORTANT: You are to execute in three phases:
+            IMPORTANT: You are to execute in three phases. Do not write the review content to your text response during Phases 1 and 2 — save that for Phase 3. Tool calls and brief phase transitions are fine.
 
             Phase 1: Write out your feedback and comments on the changes in a local txt file in the current working directory (not to GitHub). Use the Write tool to create the file, not shell redirection. Do not write to /tmp/.
 
             Phase 2: Read each piece of feedback individually, and consider if they're valid. If they are not valid, do not include it in the comment to GitHub. For feedback asking for tests, consider if the test would require too much mocking to be useful, and do not suggest adding tests that would mostly test 3rd party libraries or APIs. Avoid being persnickety. Keep a count of invalid or persnickety feedback filtered out.
 
-            Phase 3: Write your entire review as direct output — this automatically becomes the sticky comment on the PR.
+            Phase 3: Read your filtered notes from the file, then write the formatted review as your text response. This IS how the comment gets posted — the action captures your text output and posts it directly as the sticky comment. If you produce no text output in this phase, no comment will appear on the PR. Output only the review content with no phase narration or process commentary.
             Do NOT use `gh pr comment` — it creates comments outside the sticky comment and they won't be updated on re-review.
 
             Format:
