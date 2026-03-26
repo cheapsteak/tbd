@@ -115,12 +115,6 @@ struct EmojiPickerView: View {
         return min(selectedIndex, count - 1)
     }
 
-    func selectedEmoji() -> String? {
-        let items = results
-        guard !items.isEmpty else { return nil }
-        return items[clampedIndex(items.count)].emoji
-    }
-
     private func select(_ emoji: String) {
         onSelect(emoji)
     }

@@ -1943,7 +1943,7 @@ public enum EmojiData: Sendable {
             } else if entry.name.contains(q) || entry.keywords.contains(where: { $0.hasPrefix(q) }) {
                 containsResults.append(entry)
             }
-            if results.count >= limit { break }
+            if results.count + containsResults.count >= limit * 2 { break }
         }
         if results.count < limit {
             results.append(contentsOf: containsResults.prefix(limit - results.count))

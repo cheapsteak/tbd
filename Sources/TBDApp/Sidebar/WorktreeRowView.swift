@@ -11,6 +11,7 @@ struct WorktreeRowView: View {
     @State private var isTextFieldFocused = false
     @State private var emojiQuery: String?
     @State private var emojiSelectedIndex = 0
+    @State private var frecency = EmojiFrecency.load()
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -251,13 +252,11 @@ struct WorktreeRowView: View {
         editText.replaceSubrange(range, with: emoji)
         cursorPosition = newCursorUTF16
         emojiQuery = nil
-        var frecency = EmojiFrecency.load()
         frecency.record(emoji)
     }
 
     private func selectedEmoji() -> String? {
         guard let query = emojiQuery else { return nil }
-        let frecency = EmojiFrecency.load()
         let results = query.isEmpty
             ? frecency.defaults()
             : frecency.search(query, limit: 21)
