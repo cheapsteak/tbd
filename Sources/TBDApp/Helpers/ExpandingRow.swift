@@ -8,36 +8,26 @@ struct ExpandingRowModifier<Expanded: View>: ViewModifier {
     let isTruncated: Bool
     @ViewBuilder let expandedContent: () -> Expanded
 
-    @State private var isHovered = false
-    @State private var rowFrame: CGRect = .zero
+    @State private var anchor = ExpandingRowAnchor()
 
     func body(content: Content) -> some View {
         content
             .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .preference(key: RowFrameKey.self, value: geo.frame(in: .global))
-                }
+                ExpandingRowAnchorView(anchor: anchor)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             )
-            .onPreferenceChange(RowFrameKey.self) { rowFrame = $0 }
             .onHover { hovering in
-                isHovered = hovering
                 if hovering && isTruncated {
+                    guard let screenFrame = anchor.screenFrame else { return }
                     ExpandingRowPanel.show(
                         content: expandedContent(),
-                        rowFrame: rowFrame
+                        screenFrame: screenFrame,
+                        parentWindow: anchor.view?.window
                     )
                 } else {
                     ExpandingRowPanel.hide()
                 }
             }
-    }
-
-    private struct RowFrameKey: PreferenceKey {
-        static var defaultValue: CGRect { .zero }
-        static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-            value = nextValue()
-        }
     }
 }
 
@@ -50,16 +40,46 @@ extension View {
     }
 }
 
+// MARK: - Anchor NSView (for reliable screen coordinate conversion)
+
+/// Holds a reference to an invisible NSView embedded in the row.
+/// We use this to get the real screen coordinates via AppKit,
+/// avoiding SwiftUI coordinate space issues with toolbars.
+@MainActor
+final class ExpandingRowAnchor {
+    var view: NSView?
+
+    var screenFrame: NSRect? {
+        guard let view, let window = view.window else { return nil }
+        let frameInWindow = view.convert(view.bounds, to: nil)
+        let screenOrigin = window.convertPoint(toScreen: frameInWindow.origin)
+        return NSRect(origin: screenOrigin, size: frameInWindow.size)
+    }
+}
+
+struct ExpandingRowAnchorView: NSViewRepresentable {
+    let anchor: ExpandingRowAnchor
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        anchor.view = v
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        anchor.view = nsView
+    }
+}
+
 // MARK: - Panel
 
 /// Singleton NSPanel that shows expanded row content over the sidebar.
 @MainActor
 final class ExpandingRowPanel {
     private static var panel: NSPanel?
-    private static var hostingView: NSHostingView<AnyView>?
 
-    static func show<V: View>(content: V, rowFrame: CGRect) {
-        guard let mainWindow = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+    static func show<V: View>(content: V, screenFrame: NSRect, parentWindow: NSWindow?) {
+        guard let parentWindow else { return }
 
         let panel = self.panel ?? {
             let p = NSPanel(
@@ -77,7 +97,6 @@ final class ExpandingRowPanel {
             return p
         }()
 
-        // Wrap content with background matching the sidebar
         let wrapped = AnyView(
             content
                 .padding(.trailing, 6)
@@ -88,30 +107,24 @@ final class ExpandingRowPanel {
         let fittingSize = hosting.fittingSize
 
         // Only show if content is wider than the row
-        guard fittingSize.width > rowFrame.width + 2 else {
+        guard fittingSize.width > screenFrame.width + 2 else {
             hide()
             return
         }
 
-        // Convert SwiftUI global coords (top-left origin) to screen coords (bottom-left origin)
-        let contentRect = mainWindow.contentView?.frame ?? mainWindow.frame
-        let screenX = mainWindow.frame.origin.x + rowFrame.minX
-        let screenY = mainWindow.frame.origin.y + contentRect.height - rowFrame.maxY
-
         let panelFrame = NSRect(
-            x: screenX,
-            y: screenY,
+            x: screenFrame.origin.x,
+            y: screenFrame.origin.y,
             width: fittingSize.width,
-            height: rowFrame.height
+            height: screenFrame.height
         )
 
         hosting.frame = NSRect(origin: .zero, size: panelFrame.size)
         panel.contentView = hosting
         panel.setFrame(panelFrame, display: true)
-        self.hostingView = hosting
 
         if panel.parent == nil {
-            mainWindow.addChildWindow(panel, ordered: .above)
+            parentWindow.addChildWindow(panel, ordered: .above)
         }
         panel.orderFront(nil)
     }
