@@ -115,6 +115,7 @@ final class ExpandingRowPanel {
             return
         }
 
+        // Panel covers the full row + overflow, positioned exactly over the original
         let panelFrame = NSRect(
             x: screenFrame.origin.x,
             y: screenFrame.origin.y,
@@ -122,12 +123,12 @@ final class ExpandingRowPanel {
             height: screenFrame.height
         )
 
-        // Use NSVisualEffectView with sidebar material to match the sidebar's
-        // translucent appearance
+        // Sidebar-material background for the entire panel
         let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: panelFrame.size))
         container.material = .sidebar
         container.blendingMode = .behindWindow
         container.state = .active
+        container.isEmphasized = true
 
         hosting.frame = container.bounds
         container.addSubview(hosting)

@@ -212,6 +212,10 @@ struct WorktreeRowView: View {
             }
             .padding(.vertical, 2)
             .padding(.horizontal, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.04))
+            )
         }
         .background(
             RoundedRectangle(cornerRadius: 4)
