@@ -168,6 +168,34 @@ struct WorktreeRowView: View {
             }
         }
         .contentShape(Rectangle())
+        .expandingRow(isTruncated: !isEditing && !isPending) {
+            HStack(spacing: 6) {
+                if isMain {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let color = badgeColor {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 8, height: 8)
+                }
+                if let icon = worktreeIcon, let nsImage = loadIcon(icon) {
+                    Image(nsImage: nsImage)
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 12, height: 12)
+                        .foregroundStyle(worktreeIconColor)
+                }
+                Text(worktree.displayName)
+                    .fontWeight(hasBoldNotification ? .bold : .regular)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .padding(.vertical, 2)
+            .padding(.horizontal, 4)
+        }
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
                 if appState.selectedWorktreeIDs.contains(worktree.id) {
