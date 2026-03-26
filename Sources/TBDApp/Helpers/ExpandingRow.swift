@@ -57,9 +57,7 @@ final class ExpandingRowAnchor {
     private var rowView: NSView? {
         var current = view
         while let v = current {
-            if v is NSTableRowView {
-                return v
-            }
+            if v is NSTableRowView { return v }
             current = v.superview
         }
         return view
@@ -93,22 +91,14 @@ struct ExpandingRowAnchorView: NSViewRepresentable {
     }
 }
 
-// MARK: - Clickable NSView for the panel content
-
-/// An NSView that detects clicks and forwards them via a callback.
-final class ClickableView: NSView {
-    var onClick: (() -> Void)?
-
-    override func mouseDown(with event: NSEvent) {
-        onClick?()
-    }
-}
-
 // MARK: - Panel
 
 @MainActor
 final class ExpandingRowPanel {
     private static var panel: NSPanel?
+    private static var clickMonitor: Any?
+    private static var currentOnClick: (() -> Void)?
+    private static var currentPanelFrame: NSRect = .zero
 
     static func show<V: View>(
         content: V,
@@ -131,8 +121,9 @@ final class ExpandingRowPanel {
             p.level = .normal
             p.hasShadow = false
             p.hidesOnDeactivate = false
-            // Don't ignore mouse events — we handle clicks ourselves
-            p.ignoresMouseEvents = false
+            // Must ignore mouse events so onHover on the SwiftUI view
+            // doesn't flicker (panel appearing would steal the hover)
+            p.ignoresMouseEvents = true
             self.panel = p
             return p
         }()
@@ -143,7 +134,6 @@ final class ExpandingRowPanel {
                 .frame(maxHeight: .infinity)
         ))
         let fittingSize = hosting.fittingSize
-
         let totalWidth = contentInset.x + fittingSize.width
 
         guard totalWidth > screenFrame.width + 2 else {
@@ -158,7 +148,6 @@ final class ExpandingRowPanel {
             height: screenFrame.height
         )
 
-        // Sidebar-material background
         let bg = NSVisualEffectView(frame: NSRect(origin: .zero, size: panelFrame.size))
         bg.material = .sidebar
         bg.blendingMode = .behindWindow
@@ -174,28 +163,43 @@ final class ExpandingRowPanel {
             height: panelFrame.height
         )
 
-        // Clickable container that forwards clicks
-        let container = ClickableView(frame: NSRect(origin: .zero, size: panelFrame.size))
-        container.onClick = {
-            hide()
-            // Dispatch after hide so the SwiftUI view is visible when the callback fires
-            DispatchQueue.main.async {
-                onClick?()
-            }
-        }
+        let container = NSView(frame: NSRect(origin: .zero, size: panelFrame.size))
         container.addSubview(bg)
         container.addSubview(hosting)
 
         panel.contentView = container
         panel.setFrame(panelFrame, display: true)
+        currentPanelFrame = panelFrame
+        currentOnClick = onClick
 
         if panel.parent == nil {
             parentWindow.addChildWindow(panel, ordered: .above)
         }
         panel.orderFront(nil)
+
+        // Local event monitor intercepts clicks in the panel's screen area.
+        // The panel ignores mouse events (for hover), but we catch clicks
+        // at the app level and check if they land within the panel's frame.
+        if clickMonitor == nil {
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+                let clickScreen = NSEvent.mouseLocation
+                if currentPanelFrame.contains(clickScreen) {
+                    hide()
+                    DispatchQueue.main.async { currentOnClick?() }
+                    return nil // consume the click
+                }
+                hide()
+                return event // pass through clicks outside panel
+            }
+        }
     }
 
     static func hide() {
+        if let monitor = clickMonitor {
+            NSEvent.removeMonitor(monitor)
+            clickMonitor = nil
+        }
+        currentOnClick = nil
         guard let panel = panel else { return }
         panel.parent?.removeChildWindow(panel)
         panel.orderOut(nil)
