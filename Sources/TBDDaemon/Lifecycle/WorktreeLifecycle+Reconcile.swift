@@ -137,20 +137,22 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Clean up orphaned tmux windows — windows not tracked by any active terminal
+        // Clean up orphaned tmux windows — windows not tracked by any terminal (active or main)
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         let activeWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
-        if activeWorktrees.isEmpty {
-            // No active worktrees — kill the entire tmux server
+        let mainWorktreesForCleanup = try await db.worktrees.list(repoID: repoID, status: .main)
+        let allLiveWorktreesForCleanup = activeWorktrees + mainWorktreesForCleanup
+        if allLiveWorktreesForCleanup.isEmpty {
+            // No live worktrees — kill the entire tmux server
             do {
                 try await tmux.killServer(server: tmuxServer)
             } catch {
                 print("[TBD] reconcile: failed to kill tmux server \(tmuxServer): \(error)")
             }
         } else {
-            // Collect all tracked window IDs
+            // Collect all tracked window IDs (active + main worktrees)
             var trackedWindowIDs: Set<String> = []
-            for wt in activeWorktrees {
+            for wt in allLiveWorktreesForCleanup {
                 let terminals = try await db.terminals.list(worktreeID: wt.id)
                 for t in terminals {
                     trackedWindowIDs.insert(t.tmuxWindowID)
