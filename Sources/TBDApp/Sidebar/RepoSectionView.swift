@@ -63,6 +63,7 @@ struct RepoSectionView: View {
             .buttonStyle(HoverPressButtonStyle())
             .help("New worktree")
         }
+        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
 
         if isExpanded {
             if let main = mainWorktree {
