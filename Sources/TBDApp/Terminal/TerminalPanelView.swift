@@ -272,7 +272,32 @@ struct TerminalPanelView: NSViewRepresentable {
         func scrolled(source: TerminalView, position: Double) {}
 
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+            MainActor.assumeIsolated {
+                // Check if this is a file path (relative or absolute) that we can open in a split pane
+                if let tv = source as? TBDTerminalView, !tv.worktreePath.isEmpty {
+                    let resolvedPath: String
+                    if link.hasPrefix("/") {
+                        resolvedPath = link
+                    } else if link.hasPrefix("file://") {
+                        resolvedPath = URL(string: link)?.path ?? link
+                    } else if !link.contains("://") {
+                        // Relative path — resolve against worktree
+                        resolvedPath = URL(fileURLWithPath: tv.worktreePath).appendingPathComponent(link).path
+                    } else {
+                        // Regular URL — open externally
+                        if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+                        return
+                    }
+
+                    if FileManager.default.fileExists(atPath: resolvedPath) {
+                        tv.onFilePathClicked?(resolvedPath)
+                        return
+                    }
+                }
+
+                // Fallback: open as URL
+                if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+            }
         }
 
         func bell(source: TerminalView) { NSSound.beep() }
