@@ -100,7 +100,7 @@ final class ExpandingRowPanel {
         let wrapped = AnyView(
             content
                 .padding(.trailing, 6)
-                .background(Color(nsColor: .controlBackgroundColor))
+                .background(Color(nsColor: .windowBackgroundColor))
         )
 
         let hosting = NSHostingView(rootView: wrapped)

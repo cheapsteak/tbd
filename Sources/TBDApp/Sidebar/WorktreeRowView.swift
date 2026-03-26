@@ -168,6 +168,21 @@ struct WorktreeRowView: View {
             }
         }
         .contentShape(Rectangle())
+        .onTapGesture {
+            if NSEvent.modifierFlags.contains(.command) {
+                if appState.selectedWorktreeIDs.contains(worktree.id) {
+                    appState.selectedWorktreeIDs.remove(worktree.id)
+                } else {
+                    appState.selectedWorktreeIDs.insert(worktree.id)
+                }
+            } else if !isMain && appState.selectedWorktreeIDs.contains(worktree.id) && !isEditing {
+                startRename()
+            } else {
+                appState.selectedWorktreeIDs = [worktree.id]
+            }
+        }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 4)
         .expandingRow(isTruncated: !isEditing && !isPending) {
             HStack(spacing: 6) {
                 if isMain {
@@ -196,21 +211,6 @@ struct WorktreeRowView: View {
             .padding(.vertical, 2)
             .padding(.horizontal, 4)
         }
-        .onTapGesture {
-            if NSEvent.modifierFlags.contains(.command) {
-                if appState.selectedWorktreeIDs.contains(worktree.id) {
-                    appState.selectedWorktreeIDs.remove(worktree.id)
-                } else {
-                    appState.selectedWorktreeIDs.insert(worktree.id)
-                }
-            } else if !isMain && appState.selectedWorktreeIDs.contains(worktree.id) && !isEditing {
-                startRename()
-            } else {
-                appState.selectedWorktreeIDs = [worktree.id]
-            }
-        }
-        .padding(.vertical, 2)
-        .padding(.horizontal, 4)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
