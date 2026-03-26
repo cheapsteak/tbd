@@ -10,6 +10,12 @@ struct InlineTextField: NSViewRepresentable {
     var onSubmit: () -> Void
     var onCancel: () -> Void
     var onKeyDown: ((_ key: UInt16) -> Bool)?
+    /// Called when Tab or Space is pressed. Return true to consume the event.
+    var onSpecialKey: ((_ key: SpecialKey) -> Bool)?
+
+    enum SpecialKey {
+        case tab, space
+    }
 
     func makeNSView(context: Context) -> NSTextField {
         let field = NSTextField()
@@ -67,6 +73,16 @@ struct InlineTextField: NSViewRepresentable {
             }
         }
 
+        func control(_ control: NSControl, textView: NSTextView, textShouldBeginEditing fieldEditor: NSText) -> Bool { true }
+
+        // Intercept space key before it's inserted
+        func control(_ control: NSControl, textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
+            if text == " ", let onSpecialKey = parent.onSpecialKey, onSpecialKey(.space) {
+                return false // consumed
+            }
+            return true
+        }
+
         func controlTextDidEndEditing(_ obj: Notification) {
             parent.isFocused.wrappedValue = false
         }
@@ -79,6 +95,11 @@ struct InlineTextField: NSViewRepresentable {
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
                 parent.onCancel()
                 return true
+            }
+            if commandSelector == #selector(NSResponder.insertTab(_:)) {
+                if let onSpecialKey = parent.onSpecialKey, onSpecialKey(.tab) {
+                    return true
+                }
             }
             if let onKeyDown = parent.onKeyDown {
                 let keyMap: [Selector: UInt16] = [

@@ -129,6 +129,11 @@ struct WorktreeRowView: View {
                         case 123: emojiSelectedIndex = max(0, emojiSelectedIndex - 1); return true // left
                         default: return false
                         }
+                    },
+                    onSpecialKey: { key in
+                        guard emojiQuery != nil, let emoji = selectedEmoji() else { return false }
+                        replaceColonQuery(with: emoji)
+                        return true
                     }
                 )
                 .onChange(of: editText) { _, newValue in
