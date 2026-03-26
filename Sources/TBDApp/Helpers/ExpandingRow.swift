@@ -69,7 +69,8 @@ final class ExpandingRowAnchor {
     var contentInset: CGPoint {
         guard let anchor = view, let row = rowView, row !== anchor else { return .zero }
         let anchorInRow = anchor.convert(anchor.bounds.origin, to: row)
-        return CGPoint(x: round(anchorInRow.x), y: round(anchorInRow.y))
+        // Use floor to avoid sub-pixel shifts on Retina displays
+        return CGPoint(x: floor(anchorInRow.x), y: floor(anchorInRow.y))
     }
 
     var screenFrame: NSRect? {
@@ -99,6 +100,7 @@ struct ExpandingRowAnchorView: NSViewRepresentable {
 @MainActor
 final class ExpandingRowPanel {
     private static var panel: NSPanel?
+    private static var clickMonitor: Any?
 
     static func show<V: View>(content: V, screenFrame: NSRect, contentInset: CGPoint, parentWindow: NSWindow?) {
         guard let parentWindow else { return }
@@ -171,9 +173,21 @@ final class ExpandingRowPanel {
             parentWindow.addChildWindow(panel, ordered: .above)
         }
         panel.orderFront(nil)
+
+        // Hide panel on any mouse click so the click reaches the actual SwiftUI view
+        if clickMonitor == nil {
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+                hide()
+                return event
+            }
+        }
     }
 
     static func hide() {
+        if let monitor = clickMonitor {
+            NSEvent.removeMonitor(monitor)
+            clickMonitor = nil
+        }
         guard let panel = panel else { return }
         panel.parent?.removeChildWindow(panel)
         panel.orderOut(nil)
