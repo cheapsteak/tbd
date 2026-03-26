@@ -28,10 +28,23 @@ struct InlineTextField: NSViewRepresentable {
         field.cell?.isScrollable = true
         field.cell?.wraps = false
         field.cell?.lineBreakMode = .byClipping
+        // Monitor key events to intercept Tab/Space before AppKit handles them
+        context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak field] event in
+            guard let field, field.currentEditor() != nil else { return event }
+            // Tab (keyCode 48) or Space (keyCode 49)
+            if event.keyCode == 48 || event.keyCode == 49 {
+                let key: SpecialKey = event.keyCode == 48 ? .tab : .space
+                if let onSpecialKey = context.coordinator.parent.onSpecialKey, onSpecialKey(key) {
+                    return nil // consumed
+                }
+            }
+            return event
+        }
         return field
     }
 
     func updateNSView(_ nsView: NSTextField, context: Context) {
+        context.coordinator.parent = self
         let textChanged = nsView.stringValue != text
         if textChanged {
             nsView.stringValue = text
@@ -58,8 +71,16 @@ struct InlineTextField: NSViewRepresentable {
         Coordinator(self)
     }
 
+    static func dismantleNSView(_ nsView: NSTextField, coordinator: Coordinator) {
+        if let monitor = coordinator.monitor {
+            NSEvent.removeMonitor(monitor)
+            coordinator.monitor = nil
+        }
+    }
+
     final class Coordinator: NSObject, NSTextFieldDelegate {
-        let parent: InlineTextField
+        var parent: InlineTextField
+        var monitor: Any?
 
         init(_ parent: InlineTextField) {
             self.parent = parent
@@ -71,16 +92,6 @@ struct InlineTextField: NSViewRepresentable {
             if let editor = field.currentEditor() {
                 parent.cursorPosition = editor.selectedRange.location
             }
-        }
-
-        func control(_ control: NSControl, textView: NSTextView, textShouldBeginEditing fieldEditor: NSText) -> Bool { true }
-
-        // Intercept space key before it's inserted
-        func control(_ control: NSControl, textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
-            if text == " ", let onSpecialKey = parent.onSpecialKey, onSpecialKey(.space) {
-                return false // consumed
-            }
-            return true
         }
 
         func controlTextDidEndEditing(_ obj: Notification) {
@@ -95,11 +106,6 @@ struct InlineTextField: NSViewRepresentable {
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
                 parent.onCancel()
                 return true
-            }
-            if commandSelector == #selector(NSResponder.insertTab(_:)) {
-                if let onSpecialKey = parent.onSpecialKey, onSpecialKey(.tab) {
-                    return true
-                }
             }
             if let onKeyDown = parent.onKeyDown {
                 let keyMap: [Selector: UInt16] = [
