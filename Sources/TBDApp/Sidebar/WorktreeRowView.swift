@@ -158,15 +158,19 @@ struct WorktreeRowView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(worktree.displayName)
                         .fontWeight(hasBoldNotification ? .bold : .regular)
-                        .lineLimit(isHovered ? nil : 1)
-                        .fixedSize(horizontal: isHovered, vertical: false)
-                        .padding(.trailing, isHovered ? 4 : 0)
-                        .background(
-                            isHovered
-                                ? RoundedRectangle(cornerRadius: 3)
-                                    .fill(.background)
-                                : nil
-                        )
+                        .lineLimit(1)
+                        .overlay(alignment: .leading) {
+                            if isHovered {
+                                Text(worktree.displayName)
+                                    .fontWeight(hasBoldNotification ? .bold : .regular)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .padding(.trailing, 4)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 3)
+                                            .fill(.background)
+                                    )
+                            }
+                        }
                     if isPending {
                         Text("Creating worktree…")
                             .font(.caption)
