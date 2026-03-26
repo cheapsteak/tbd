@@ -12,7 +12,7 @@ Key source files and what they do.
 - `NameGenerator.swift` — YYYYMMDD-adjective-animal name generation
 - `Adjectives.swift` — ~1,179 curated adjectives (from unique-names-generator)
 - `Animals.swift` — ~353 curated animals
-- `GitVersion.swift` — auto-generated commit hash/message (from scripts/generate-version.sh)
+- `EmojiData.swift` — emoji dataset for Slack-style autocomplete in worktree names
 
 ## Sources/TBDDaemon/ (TBDDaemonLib target)
 
@@ -33,7 +33,7 @@ Key source files and what they do.
 - `SSHAgentResolver.swift` — finds live SSH agent socket, maintains ~/.ssh/tbd-agent.sock symlink
 
 ### Tmux/
-- `TmuxManager.swift` — tmux server lifecycle, window CRUD, dryRun mode for tests
+- `TmuxManager.swift` — tmux server lifecycle, window CRUD, windowExists check, dryRun mode for tests
 
 ### Lifecycle/
 - `WorktreeLifecycle.swift` — base struct, error enum, init (coordinates db/git/tmux/hooks/subscriptions)
@@ -87,6 +87,9 @@ Key source files and what they do.
 - `Sidebar/RepoSectionView.swift` — collapsible repo section with + button, shows active + creating worktrees
 - `Sidebar/WorktreeRowView.swift` — worktree item with badge, PR status icon, inline rename, selection handling
 - `Sidebar/SidebarContextMenu.swift` — right-click menu (rename, archive, etc.)
+- `Sidebar/EmojiPickerView.swift` — Slack-style emoji autocomplete popup for worktree names
+- `Sidebar/FloatingPanel.swift` — NSPanel wrapper for positioning popups near sidebar rows
+- `Sidebar/InlineTextField.swift` — inline text field for renaming worktrees in sidebar
 - `Panes/CodeViewerPaneView.swift` — syntax-highlighted code viewer (Highlightr) with file sidebar
 - `Panes/PanePlaceholder.swift` — empty state placeholder for panes
 - `Panes/WebviewPaneView.swift` — WKWebView pane with shared cookie store
@@ -98,8 +101,10 @@ Key source files and what they do.
 - `Terminal/SplitLayoutView.swift` — recursive split renderer with draggable dividers
 - `Terminal/LayoutNode.swift` — recursive layout tree using .pane(PaneContent), Codable with backward compat
 - `Settings/SettingsView.swift` — preferences (notifications, claude flags, per-repo)
-- `Helpers/StatusBarView.swift` — bottom status bar
+- `Helpers/StatusBarView.swift` — bottom status bar (version string)
 - `Helpers/KeyboardShortcuts.swift` — Cmd-N, Cmd-D, Cmd-1..9, etc.
+- `Helpers/ExpandingRow.swift` — auto-expanding row helper for sidebar
+- `Helpers/ExpandingTextField.swift` — text field that expands to fit content
 
 ## Tests
 - `Tests/TBDSharedTests/ModelsTests.swift` — model encoding/decoding tests
@@ -119,8 +124,7 @@ Key source files and what they do.
 - `Tests/TBDDaemonTests/PlaceholderTests.swift` — placeholder
 
 ## Scripts
-- `scripts/restart.sh` — rebuild + restart daemon + app (~2s)
-- `scripts/generate-version.sh` — writes GitVersion.swift with current commit hash
+- `scripts/restart.sh` — rebuild + restart daemon + app (<1s when no code changes)
 
 ## Docs
 - `docs/tmux-integration.md` — tmux learnings, grouped sessions vs control mode

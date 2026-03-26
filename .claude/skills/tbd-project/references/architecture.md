@@ -99,7 +99,7 @@ Validate archived status → create parent dir → git worktree add (existing br
 Concurrent per-repo scan of all active worktrees. Uses merge-tree conflict detection against main branch. Updates `hasConflicts` bool on worktree. Broadcasts `worktreeConflictsChanged` deltas.
 
 ### Reconcile (on daemon startup)
-Compare `git worktree list` against DB. Missing on disk → mark archived + kill tmux windows. Unknown on disk (inside `.tbd/worktrees/`) → add with default name. Fixes stale tmux server names. Cleans up orphaned tmux windows not tracked by any terminal record.
+Compare `git worktree list` against DB. Missing on disk → mark archived + kill tmux windows. Unknown on disk (inside `.tbd/worktrees/`) → add with default name. Fixes stale tmux server names. Validates terminal records for all live worktrees (active + main) against tmux — deletes records pointing to dead windows. Cleans up orphaned tmux windows not tracked by any terminal record.
 
 ## SSH Agent Resolver
 
@@ -126,4 +126,4 @@ Environment variables: `TBD_REPO_PATH`, `TBD_WORKTREE_PATH`, `TBD_WORKTREE_NAME`
 
 JSON-RPC style over Unix socket (newline-delimited) and HTTP POST `/rpc`.
 
-Methods: `repo.add`, `repo.remove`, `repo.list`, `worktree.create`, `worktree.list`, `worktree.archive`, `worktree.revive`, `worktree.rename`, `terminal.create`, `terminal.list`, `terminal.send`, `terminal.delete`, `notify`, `daemon.status`, `state.subscribe`, `resolve.path`, `notifications.list`, `notifications.markRead`, `pr.refresh`, `cleanup`
+Methods: `repo.add`, `repo.remove`, `repo.list`, `worktree.create`, `worktree.list`, `worktree.archive`, `worktree.revive`, `worktree.rename`, `terminal.create`, `terminal.list`, `terminal.send`, `terminal.delete`, `notify`, `daemon.status`, `state.subscribe`, `resolve.path`, `notifications.list`, `notifications.markRead`, `pr.list`, `pr.refresh`, `cleanup`
