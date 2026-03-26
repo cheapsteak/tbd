@@ -59,7 +59,8 @@ struct InlineTextField: NSViewRepresentable {
                 // Set cursor position after focus is established and text is updated
                 if needsFocus || textChanged {
                     if let editor = nsView.currentEditor() {
-                        let pos = min(cursorPosition, editor.string.count)
+                        let utf16Count = (editor.string as NSString).length
+                        let pos = min(cursorPosition, utf16Count)
                         editor.selectedRange = NSRange(location: pos, length: 0)
                     }
                 }
