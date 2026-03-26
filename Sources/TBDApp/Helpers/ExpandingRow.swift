@@ -6,6 +6,7 @@ import SwiftUI
 /// sidebar background (no selection highlight) — like Xcode's expansion tooltip.
 struct ExpandingRowModifier<Expanded: View>: ViewModifier {
     let isTruncated: Bool
+    let onClick: (() -> Void)?
     @ViewBuilder let expandedContent: () -> Expanded
 
     @State private var anchor = ExpandingRowAnchor()
@@ -24,7 +25,8 @@ struct ExpandingRowModifier<Expanded: View>: ViewModifier {
                         content: expandedContent(),
                         screenFrame: screenFrame,
                         contentInset: inset,
-                        parentWindow: anchor.view?.window
+                        parentWindow: anchor.view?.window,
+                        onClick: onClick
                     )
                 } else {
                     ExpandingRowPanel.hide()
@@ -39,20 +41,19 @@ struct ExpandingRowModifier<Expanded: View>: ViewModifier {
 extension View {
     func expandingRow<Expanded: View>(
         isTruncated: Bool,
+        onClick: (() -> Void)? = nil,
         @ViewBuilder expanded: @escaping () -> Expanded
     ) -> some View {
-        modifier(ExpandingRowModifier(isTruncated: isTruncated, expandedContent: expanded))
+        modifier(ExpandingRowModifier(isTruncated: isTruncated, onClick: onClick, expandedContent: expanded))
     }
 }
 
 // MARK: - Anchor NSView
 
-/// Invisible NSView embedded in the row for reliable screen coordinate conversion.
 @MainActor
 final class ExpandingRowAnchor {
     var view: NSView?
 
-    /// Walk up to find the NSTableRowView (the List cell) for accurate positioning.
     private var rowView: NSView? {
         var current = view
         while let v = current {
@@ -64,12 +65,9 @@ final class ExpandingRowAnchor {
         return view
     }
 
-    /// The offset from the row view's origin to our anchor view's origin.
-    /// This tells us exactly how much inset the List adds.
     var contentInset: CGPoint {
         guard let anchor = view, let row = rowView, row !== anchor else { return .zero }
         let anchorInRow = anchor.convert(anchor.bounds.origin, to: row)
-        // Use floor to avoid sub-pixel shifts on Retina displays
         return CGPoint(x: floor(anchorInRow.x), y: floor(anchorInRow.y))
     }
 
@@ -95,14 +93,30 @@ struct ExpandingRowAnchorView: NSViewRepresentable {
     }
 }
 
+// MARK: - Clickable NSView for the panel content
+
+/// An NSView that detects clicks and forwards them via a callback.
+final class ClickableView: NSView {
+    var onClick: (() -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+}
+
 // MARK: - Panel
 
 @MainActor
 final class ExpandingRowPanel {
     private static var panel: NSPanel?
-    private static var clickMonitor: Any?
 
-    static func show<V: View>(content: V, screenFrame: NSRect, contentInset: CGPoint, parentWindow: NSWindow?) {
+    static func show<V: View>(
+        content: V,
+        screenFrame: NSRect,
+        contentInset: CGPoint,
+        parentWindow: NSWindow?,
+        onClick: (() -> Void)?
+    ) {
         guard let parentWindow else { return }
 
         let panel = self.panel ?? {
@@ -116,8 +130,9 @@ final class ExpandingRowPanel {
             p.backgroundColor = .clear
             p.level = .normal
             p.hasShadow = false
-            p.ignoresMouseEvents = true
             p.hidesOnDeactivate = false
+            // Don't ignore mouse events — we handle clicks ourselves
+            p.ignoresMouseEvents = false
             self.panel = p
             return p
         }()
@@ -129,10 +144,8 @@ final class ExpandingRowPanel {
         ))
         let fittingSize = hosting.fittingSize
 
-        // Total width: content inset + expanded content + trailing padding
         let totalWidth = contentInset.x + fittingSize.width
 
-        // Only show if content is wider than the row
         guard totalWidth > screenFrame.width + 2 else {
             hide()
             return
@@ -145,7 +158,7 @@ final class ExpandingRowPanel {
             height: screenFrame.height
         )
 
-        // Sidebar-material background, no selection highlight
+        // Sidebar-material background
         let bg = NSVisualEffectView(frame: NSRect(origin: .zero, size: panelFrame.size))
         bg.material = .sidebar
         bg.blendingMode = .behindWindow
@@ -154,7 +167,6 @@ final class ExpandingRowPanel {
         bg.layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
         bg.layer?.cornerRadius = 5
 
-        // Position content at the measured inset from the row's left edge
         hosting.frame = NSRect(
             x: contentInset.x,
             y: 0,
@@ -162,7 +174,15 @@ final class ExpandingRowPanel {
             height: panelFrame.height
         )
 
-        let container = NSView(frame: NSRect(origin: .zero, size: panelFrame.size))
+        // Clickable container that forwards clicks
+        let container = ClickableView(frame: NSRect(origin: .zero, size: panelFrame.size))
+        container.onClick = {
+            hide()
+            // Dispatch after hide so the SwiftUI view is visible when the callback fires
+            DispatchQueue.main.async {
+                onClick?()
+            }
+        }
         container.addSubview(bg)
         container.addSubview(hosting)
 
@@ -173,21 +193,9 @@ final class ExpandingRowPanel {
             parentWindow.addChildWindow(panel, ordered: .above)
         }
         panel.orderFront(nil)
-
-        // Hide panel on any mouse click so the click reaches the actual SwiftUI view
-        if clickMonitor == nil {
-            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
-                hide()
-                return event
-            }
-        }
     }
 
     static func hide() {
-        if let monitor = clickMonitor {
-            NSEvent.removeMonitor(monitor)
-            clickMonitor = nil
-        }
         guard let panel = panel else { return }
         panel.parent?.removeChildWindow(panel)
         panel.orderOut(nil)
