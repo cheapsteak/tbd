@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import SwiftUIIntrospect
 import TBDShared
 
 struct SidebarView: View {
@@ -19,6 +20,9 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .introspect(.list(style: .sidebar), on: .macOS(.v14, .v15)) { tableView in
+            tableView.allowsExpansionToolTips = true
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button(action: addRepo) {
