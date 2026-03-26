@@ -51,13 +51,11 @@ final class ExpandingRowAnchor {
     private var rowView: NSView? {
         var current = view
         while let v = current {
-            if String(describing: type(of: v)).contains("RowView") ||
-               v is NSTableRowView {
+            if v is NSTableRowView {
                 return v
             }
             current = v.superview
         }
-        // Fallback to our own view
         return view
     }
 
