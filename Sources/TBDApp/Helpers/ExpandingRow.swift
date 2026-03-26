@@ -66,22 +66,11 @@ final class ExpandingRowAnchor {
     var contentInset: CGPoint {
         guard let anchor = view, let row = rowView, row !== anchor else { return .zero }
         let anchorInRow = anchor.convert(anchor.bounds.origin, to: row)
-        print("[ExpandingRow] contentInset = \(anchorInRow)")
         return anchorInRow
     }
 
     var screenFrame: NSRect? {
         guard let target = rowView, let window = target.window else { return nil }
-        // DEBUG: show what we're anchoring to
-        target.wantsLayer = true
-        target.layer?.borderColor = NSColor.red.cgColor
-        target.layer?.borderWidth = 2
-        // Also show our own view's frame
-        if let v = view {
-            v.wantsLayer = true
-            v.layer?.borderColor = NSColor.green.cgColor
-            v.layer?.borderWidth = 2
-        }
         let frameInWindow = target.convert(target.bounds, to: nil)
         let screenOrigin = window.convertPoint(toScreen: frameInWindow.origin)
         return NSRect(origin: screenOrigin, size: frameInWindow.size)
@@ -155,6 +144,9 @@ final class ExpandingRowPanel {
         bg.material = .sidebar
         bg.blendingMode = .behindWindow
         bg.state = .active
+        bg.wantsLayer = true
+        bg.layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
+        bg.layer?.cornerRadius = 5
 
         // Position content at the measured inset from the row's left edge
         hosting.frame = NSRect(
