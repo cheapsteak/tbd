@@ -11,7 +11,7 @@ struct StatusBarView: View {
                 .frame(width: 8, height: 8)
             Text(appState.isConnected ? "tbdd connected" : "tbdd disconnected")
             Spacer()
-            Text("\(GitVersion.commitHash) \(GitVersion.commitMessage)")
+            Text("\(GitVersion.info.hash) \(GitVersion.info.message)")
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
