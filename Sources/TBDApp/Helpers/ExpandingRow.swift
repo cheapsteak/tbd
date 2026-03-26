@@ -30,6 +30,9 @@ struct ExpandingRowModifier<Expanded: View>: ViewModifier {
                     ExpandingRowPanel.hide()
                 }
             }
+            .onChange(of: isTruncated) { _, truncated in
+                if !truncated { ExpandingRowPanel.hide() }
+            }
     }
 }
 
@@ -66,7 +69,7 @@ final class ExpandingRowAnchor {
     var contentInset: CGPoint {
         guard let anchor = view, let row = rowView, row !== anchor else { return .zero }
         let anchorInRow = anchor.convert(anchor.bounds.origin, to: row)
-        return anchorInRow
+        return CGPoint(x: round(anchorInRow.x), y: round(anchorInRow.y))
     }
 
     var screenFrame: NSRect? {
