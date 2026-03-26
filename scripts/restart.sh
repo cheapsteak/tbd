@@ -66,7 +66,7 @@ if [ "$daemon_only" = false ]; then
     pkill -f "$BUILD_DIR/TBDApp" 2>/dev/null && sleep 0.3 || true
 
     echo "Starting app..."
-    "$BUILD_DIR/TBDApp" &
+    "$BUILD_DIR/TBDApp" > /dev/null 2>&1 &
     echo "  App launched (PID $!)"
 fi
 
