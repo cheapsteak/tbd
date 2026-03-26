@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>TBD Icon Curve Tuner</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; height: 100vh; }
+  #preview { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; padding: 40px; }
+  canvas { border-radius: 12px; }
+  .controls-panel { flex: 0 0 auto; padding: 24px; overflow-y: auto; width: 320px; }
+  .controls-panel.right { border-left: 1px solid #333; }
+  h1 { font-size: 18px; margin-bottom: 16px; color: #fff; }
+  .panel-title { font-size: 14px; margin-bottom: 16px; color: #fff; }
+  .group { margin-bottom: 20px; border: 1px solid #333; border-radius: 8px; padding: 14px; }
+  .group h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 10px; }
+  .slider-row { margin-bottom: 8px; }
+  .slider-row label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
+  .slider-row label span { color: #aaa; }
+  .slider-row label .val { color: #fff; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #7c3aed; }
+  .right input[type=range] { accent-color: #ec4899; }
+  #output { margin-top: 16px; }
+  #output pre {
+    background: #111; border: 1px solid #333; border-radius: 6px; padding: 10px;
+    font-size: 11px; color: #a5f3fc; white-space: pre-wrap; word-break: break-all;
+    cursor: pointer; position: relative;
+  }
+  #output pre:hover::after {
+    content: 'click to copy'; position: absolute; top: 4px; right: 8px;
+    font-size: 10px; color: #666;
+  }
+  #output pre.copied::after { content: 'copied!'; color: #4ade80; }
+  .size-row { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; }
+  .size-row label { font-size: 12px; }
+  .size-btn { background: #333; border: 1px solid #555; color: #fff; padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .size-btn.active { background: #7c3aed; border-color: #7c3aed; }
+  .offset-note { font-size: 11px; color: #666; margin-bottom: 12px; font-style: italic; }
+  #area-display { display: flex; gap: 6px; margin-bottom: 14px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .area-chip { padding: 4px 8px; border-radius: 4px; color: #fff; font-weight: 600; }
+  .color-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+  .color-row label { color: #aaa; min-width: 60px; }
+  .color-row input[type=color] { width: 36px; height: 24px; border: 1px solid #555; border-radius: 4px; background: none; cursor: pointer; padding: 0; }
+  .color-pair { display: flex; gap: 12px; align-items: center; }
+</style>
+</head>
+<body>
+<div class="controls-panel">
+  <h1>TBD Icon Curve Tuner</h1>
+
+  <div class="size-row">
+    <label>Preview:</label>
+    <button class="size-btn" data-size="32">32</button>
+    <button class="size-btn" data-size="128">128</button>
+    <button class="size-btn active" data-size="512">512</button>
+  </div>
+
+  <div id="area-display">
+    <span class="area-chip" id="area-0">--</span>
+    <span class="area-chip" id="area-1">--</span>
+    <span class="area-chip" id="area-2">--</span>
+  </div>
+
+  <div class="group">
+    <h2>Color Palette</h2>
+    <div class="color-row">
+      <label>Left</label>
+      <div class="color-pair">
+        <input type="color" id="c0top" value="#19144d" title="Top">
+        <input type="color" id="c0bot" value="#231c59" title="Bottom">
+      </div>
+    </div>
+    <div class="color-row">
+      <label>Center</label>
+      <div class="color-pair">
+        <input type="color" id="c1top" value="#4d2680" title="Top">
+        <input type="color" id="c1bot" value="#61338c" title="Bottom">
+      </div>
+    </div>
+    <div class="color-row">
+      <label>Right</label>
+      <div class="color-pair">
+        <input type="color" id="c2top" value="#8c337a" title="Top">
+        <input type="color" id="c2bot" value="#9e4785" title="Bottom">
+      </div>
+    </div>
+    <div style="font-size:10px;color:#555;margin-top:6px;">Left = top gradient · Right = bottom gradient</div>
+  </div>
+
+  <div class="panel-title">Both Curves</div>
+
+  <div class="group">
+    <h2>Sine Wave Shape</h2>
+    <div class="slider-row">
+      <label><span>Amplitude</span><span class="val" id="v-amp"></span></label>
+      <input type="range" id="amplitude" min="0" max="0.30" step="0.005" value="0.12">
+    </div>
+    <div class="slider-row">
+      <label><span>Frequency (cycles)</span><span class="val" id="v-freq"></span></label>
+      <input type="range" id="frequency" min="0.25" max="3.0" step="0.05" value="0.75">
+    </div>
+    <div class="slider-row">
+      <label><span>Phase (wave shift)</span><span class="val" id="v-phase"></span></label>
+      <input type="range" id="phase" min="0" max="6.28" step="0.05" value="0">
+    </div>
+  </div>
+
+  <div class="group">
+    <h2>Slant &amp; Position</h2>
+    <div class="slider-row">
+      <label><span>Slant</span><span class="val" id="v-slant"></span></label>
+      <input type="range" id="slant" min="-0.6" max="0.6" step="0.01" value="0.15">
+    </div>
+    <div class="slider-row">
+      <label><span>Boundary 1 center X</span><span class="val" id="v-b1"></span></label>
+      <input type="range" id="b1center" min="0.10" max="0.50" step="0.01" value="0.33">
+    </div>
+    <div class="slider-row">
+      <label><span>Boundary 2 center X</span><span class="val" id="v-b2"></span></label>
+      <input type="range" id="b2center" min="0.50" max="0.90" step="0.01" value="0.66">
+    </div>
+  </div>
+
+  <div id="output">
+    <h2 style="font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#888;margin-bottom:6px;">Swift Values</h2>
+    <pre id="swift-values" onclick="copyValues()"></pre>
+  </div>
+</div>
+
+<div id="preview">
+  <canvas id="icon" width="512" height="512"></canvas>
+</div>
+
+<div class="controls-panel right">
+  <div class="panel-title">Right Curve Offsets</div>
+  <p class="offset-note">Offset the right boundary relative to the shared values.</p>
+
+  <div class="group">
+    <h2>Shape Offset</h2>
+    <div class="slider-row">
+      <label><span>Amplitude offset</span><span class="val" id="v-r-amp"></span></label>
+      <input type="range" id="r-amplitude" min="-0.15" max="0.15" step="0.005" value="0">
+    </div>
+    <div class="slider-row">
+      <label><span>Frequency offset</span><span class="val" id="v-r-freq"></span></label>
+      <input type="range" id="r-frequency" min="-1.0" max="1.0" step="0.05" value="0">
+    </div>
+    <div class="slider-row">
+      <label><span>Phase offset</span><span class="val" id="v-r-phase"></span></label>
+      <input type="range" id="r-phase" min="-3.14" max="3.14" step="0.05" value="0">
+    </div>
+  </div>
+
+  <div class="group">
+    <h2>Position Offset</h2>
+    <div class="slider-row">
+      <label><span>Slant offset</span><span class="val" id="v-r-slant"></span></label>
+      <input type="range" id="r-slant" min="-0.3" max="0.3" step="0.01" value="0">
+    </div>
+    <div class="slider-row">
+      <label><span>Center X offset</span><span class="val" id="v-r-cx"></span></label>
+      <input type="range" id="r-cx" min="-0.15" max="0.15" step="0.01" value="0">
+    </div>
+  </div>
+
+  <div class="group" style="border-color:#555;">
+    <h2>Effective Right Values</h2>
+    <div style="font-size:12px;font-variant-numeric:tabular-nums;line-height:1.8;" id="effective-right"></div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('icon');
+const ctx = canvas.getContext('2d');
+let previewSize = 512;
+
+document.querySelectorAll('.size-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    previewSize = parseInt(btn.dataset.size);
+    canvas.width = previewSize;
+    canvas.height = previewSize;
+    canvas.style.width = '512px';
+    canvas.style.height = '512px';
+    draw();
+  });
+});
+
+const colorIds = ['c0top','c0bot','c1top','c1bot','c2top','c2bot'];
+
+function hexToRgb01(hex) {
+  const r = parseInt(hex.slice(1,3), 16) / 255;
+  const g = parseInt(hex.slice(3,5), 16) / 255;
+  const b = parseInt(hex.slice(5,7), 16) / 255;
+  return [r, g, b];
+}
+
+function rgb01ToHex(rgb) {
+  const to2 = v => Math.round(v * 255).toString(16).padStart(2, '0');
+  return '#' + to2(rgb[0]) + to2(rgb[1]) + to2(rgb[2]);
+}
+
+function getPanelColors() {
+  return [
+    { top: hexToRgb01(document.getElementById('c0top').value), bottom: hexToRgb01(document.getElementById('c0bot').value) },
+    { top: hexToRgb01(document.getElementById('c1top').value), bottom: hexToRgb01(document.getElementById('c1bot').value) },
+    { top: hexToRgb01(document.getElementById('c2top').value), bottom: hexToRgb01(document.getElementById('c2bot').value) },
+  ];
+}
+
+function getParams() {
+  const amp = parseFloat(document.getElementById('amplitude').value);
+  const freq = parseFloat(document.getElementById('frequency').value);
+  const phase = parseFloat(document.getElementById('phase').value);
+  const slant = parseFloat(document.getElementById('slant').value);
+  const b1 = parseFloat(document.getElementById('b1center').value);
+  const b2 = parseFloat(document.getElementById('b2center').value);
+
+  const rAmp = parseFloat(document.getElementById('r-amplitude').value);
+  const rFreq = parseFloat(document.getElementById('r-frequency').value);
+  const rPhase = parseFloat(document.getElementById('r-phase').value);
+  const rSlant = parseFloat(document.getElementById('r-slant').value);
+  const rCx = parseFloat(document.getElementById('r-cx').value);
+
+  return {
+    b1: { amp, freq, phase, slant, cx: b1 },
+    b2: { amp: amp + rAmp, freq: freq + rFreq, phase: phase + rPhase, slant: slant + rSlant, cx: b2 + rCx },
+    raw: { amp, freq, phase, slant, b1, b2, rAmp, rFreq, rPhase, rSlant, rCx },
+  };
+}
+
+// Compute x position of a sine-wave boundary at a given t (0=top, 1=bottom in canvas)
+// x(t) = centerX + slant*(0.5 - t) + amplitude * sin(2π * freq * t + phase)
+function sineX(b, t) {
+  return b.cx + b.slant * (0.5 - t) + b.amp * Math.sin(2 * Math.PI * b.freq * t + b.phase);
+}
+
+const SEGMENTS = 80;
+
+function squirclePath(ctx, size) {
+  const inset = size * 0.02;
+  const r = size * 0.2237;
+  const x = inset, y = inset, w = size - 2 * inset, h = size - 2 * inset;
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// Draw sine boundary top-to-bottom (canvas coords)
+function drawBoundaryForward(ctx, b, size) {
+  const topX = sineX(b, 0) * size;
+  ctx.moveTo(topX, -size * 0.2);
+  ctx.lineTo(topX, 0);
+  for (let s = 1; s <= SEGMENTS; s++) {
+    const t = s / SEGMENTS;
+    ctx.lineTo(sineX(b, t) * size, t * size);
+  }
+  const bottomX = sineX(b, 1) * size;
+  ctx.lineTo(bottomX, size * 1.2);
+}
+
+// Draw sine boundary bottom-to-top (canvas coords, for closing the panel)
+function drawBoundaryReverse(ctx, b, size) {
+  const bottomX = sineX(b, 1) * size;
+  ctx.lineTo(bottomX, size * 1.2);
+  ctx.lineTo(bottomX, size);
+  for (let s = SEGMENTS - 1; s >= 0; s--) {
+    const t = s / SEGMENTS;
+    ctx.lineTo(sineX(b, t) * size, t * size);
+  }
+  const topX = sineX(b, 0) * size;
+  ctx.lineTo(topX, -size * 0.2);
+}
+
+function draw() {
+  const p = getParams();
+  const size = previewSize;
+  const boundaries = [p.b1, p.b2];
+  const panelColors = getPanelColors();
+
+  ctx.clearRect(0, 0, size, size);
+
+  for (let i = 0; i < 3; i++) {
+    ctx.save();
+    ctx.beginPath();
+    squirclePath(ctx, size);
+    ctx.clip();
+
+    ctx.beginPath();
+
+    // Left boundary
+    if (i === 0) {
+      ctx.moveTo(-size * 0.2, -size * 0.2);
+      ctx.lineTo(-size * 0.2, size * 1.2);
+    } else {
+      drawBoundaryForward(ctx, boundaries[i - 1], size);
+    }
+
+    // Right boundary
+    if (i === 2) {
+      ctx.lineTo(size * 1.2, size * 1.2);
+      ctx.lineTo(size * 1.2, -size * 0.2);
+    } else {
+      drawBoundaryReverse(ctx, boundaries[i], size);
+    }
+
+    ctx.closePath();
+    ctx.clip();
+
+    const c = panelColors[i];
+    const grad = ctx.createLinearGradient(0, 0, 0, size);
+    grad.addColorStop(0, `rgb(${c.top[0]*255},${c.top[1]*255},${c.top[2]*255})`);
+    grad.addColorStop(1, `rgb(${c.bottom[0]*255},${c.bottom[1]*255},${c.bottom[2]*255})`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(-size * 0.2, -size * 0.2, size * 1.4, size * 1.4);
+
+    ctx.restore();
+  }
+
+  // TBD text
+  const fontSize = size * 0.46;
+  ctx.save();
+  ctx.font = `900 ${fontSize}px -apple-system, system-ui, "SF Pro Display", sans-serif`;
+  ctx.fillStyle = 'white';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowOffsetY = size * 0.010;
+  ctx.shadowBlur = size * 0.025;
+  ctx.letterSpacing = `${fontSize * -0.015}px`;
+  ctx.fillText('TBD', size / 2, size / 2);
+  ctx.restore();
+
+  // Count panel areas: draw panels as flat ID colors on an offscreen canvas
+  const offscreen = document.createElement('canvas');
+  offscreen.width = size;
+  offscreen.height = size;
+  const octx = offscreen.getContext('2d');
+  const idColors = ['rgb(255,0,0)', 'rgb(0,255,0)', 'rgb(0,0,255)'];
+
+  for (let i = 0; i < 3; i++) {
+    octx.save();
+    octx.beginPath();
+    squirclePath(octx, size);
+    octx.clip();
+    octx.beginPath();
+    if (i === 0) {
+      octx.moveTo(-size * 0.2, -size * 0.2);
+      octx.lineTo(-size * 0.2, size * 1.2);
+    } else {
+      drawBoundaryForward(octx, boundaries[i - 1], size);
+    }
+    if (i === 2) {
+      octx.lineTo(size * 1.2, size * 1.2);
+      octx.lineTo(size * 1.2, -size * 0.2);
+    } else {
+      drawBoundaryReverse(octx, boundaries[i], size);
+    }
+    octx.closePath();
+    octx.clip();
+    octx.fillStyle = idColors[i];
+    octx.fillRect(-size * 0.2, -size * 0.2, size * 1.4, size * 1.4);
+    octx.restore();
+  }
+
+  const id = octx.getImageData(0, 0, size, size).data;
+  let counts = [0, 0, 0];
+  for (let px = 0; px < id.length; px += 4) {
+    if (id[px + 3] < 128) continue;
+    if (id[px] > 128) counts[0]++;
+    else if (id[px + 1] > 128) counts[1]++;
+    else if (id[px + 2] > 128) counts[2]++;
+  }
+  const countTotal = counts[0] + counts[1] + counts[2];
+  if (countTotal > 0) {
+    for (let j = 0; j < 3; j++) {
+      const chip = document.getElementById('area-' + j);
+      chip.textContent = (100 * counts[j] / countTotal).toFixed(1) + '%';
+      const mc = panelColors[j].top;
+      chip.style.background = `rgb(${mc[0]*255},${mc[1]*255},${mc[2]*255})`;
+    }
+  }
+
+  updateValues(p);
+}
+
+function updateValues(p) {
+  const r = p.raw;
+  document.getElementById('v-amp').textContent = r.amp.toFixed(3);
+  document.getElementById('v-freq').textContent = r.freq.toFixed(2);
+  document.getElementById('v-phase').textContent = r.phase.toFixed(2);
+  document.getElementById('v-slant').textContent = r.slant.toFixed(2);
+  document.getElementById('v-b1').textContent = r.b1.toFixed(2);
+  document.getElementById('v-b2').textContent = r.b2.toFixed(2);
+
+  const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(3);
+  const fmt2 = (v) => (v >= 0 ? '+' : '') + v.toFixed(2);
+  document.getElementById('v-r-amp').textContent = fmt(r.rAmp);
+  document.getElementById('v-r-freq').textContent = fmt2(r.rFreq);
+  document.getElementById('v-r-phase').textContent = fmt2(r.rPhase);
+  document.getElementById('v-r-slant').textContent = fmt2(r.rSlant);
+  document.getElementById('v-r-cx').textContent = fmt2(r.rCx);
+
+  document.getElementById('effective-right').innerHTML =
+    `Amplitude: <b>${p.b2.amp.toFixed(3)}</b><br>` +
+    `Frequency: <b>${p.b2.freq.toFixed(2)}</b><br>` +
+    `Phase: <b>${p.b2.phase.toFixed(2)}</b><br>` +
+    `Slant: <b>${p.b2.slant.toFixed(2)}</b><br>` +
+    `Center X: <b>${p.b2.cx.toFixed(2)}</b>`;
+
+  // Swift output — in CoreGraphics y=0 is bottom, so t=0 is bottom, t=1 is top
+  // Canvas t=0 is top, t=1 is bottom
+  // So CG formula: x(t) = cx + slant*(t - 0.5) + amp * sin(2π*freq*(1-t) + phase)
+  // Which simplifies to the same sine with negated freq or shifted phase.
+  // Easiest: just output the sample points or the parametric formula.
+
+  const pc = getPanelColors();
+  const fmtC = rgb => `[${rgb.map(v => v.toFixed(2)).join(', ')}]`;
+
+  // Output raw tuner values. Swift SineBoundary.x() handles CG y-flip via (1-t).
+  const swift = `// Sine wave boundaries (paste directly into SineBoundary inits)
+// Swift applies (1-t) internally to handle CG y-flip
+
+// Boundary 1:
+//   cx: ${p.b1.cx.toFixed(2)}  amp: ${p.b1.amp.toFixed(3)}  freq: ${p.b1.freq.toFixed(2)}  phase: ${p.b1.phase.toFixed(2)}  slant: ${p.b1.slant.toFixed(2)}
+
+// Boundary 2:
+//   cx: ${p.b2.cx.toFixed(2)}  amp: ${p.b2.amp.toFixed(3)}  freq: ${p.b2.freq.toFixed(2)}  phase: ${p.b2.phase.toFixed(2)}  slant: ${p.b2.slant.toFixed(2)}
+
+// Colors (top, bottom):
+//   Panel 0: ${fmtC(pc[0].top)}, ${fmtC(pc[0].bottom)}
+//   Panel 1: ${fmtC(pc[1].top)}, ${fmtC(pc[1].bottom)}
+//   Panel 2: ${fmtC(pc[2].top)}, ${fmtC(pc[2].bottom)}
+
+// Right offsets: amp=${r.rAmp} freq=${r.rFreq} phase=${r.rPhase} slant=${r.rSlant} cx=${r.rCx}`;
+
+  document.getElementById('swift-values').textContent = swift;
+}
+
+function copyValues() {
+  const el = document.getElementById('swift-values');
+  navigator.clipboard.writeText(el.textContent);
+  el.classList.add('copied');
+  setTimeout(() => el.classList.remove('copied'), 1500);
+}
+
+// --- Query param persistence ---
+
+const sliderIds = [
+  'amplitude', 'frequency', 'phase', 'slant', 'b1center', 'b2center',
+  'r-amplitude', 'r-frequency', 'r-phase', 'r-slant', 'r-cx'
+];
+
+// Short param names for compact URLs
+const paramNames = {
+  'amplitude': 'a', 'frequency': 'f', 'phase': 'p', 'slant': 's',
+  'b1center': 'b1', 'b2center': 'b2',
+  'r-amplitude': 'ra', 'r-frequency': 'rf', 'r-phase': 'rp',
+  'r-slant': 'rs', 'r-cx': 'rx'
+};
+const paramToId = Object.fromEntries(Object.entries(paramNames).map(([k,v]) => [v,k]));
+
+const colorDefaults = {
+  'c0top': '#19144d', 'c0bot': '#231c59',
+  'c1top': '#4d2680', 'c1bot': '#61338c',
+  'c2top': '#8c337a', 'c2bot': '#9e4785',
+};
+
+function loadFromParams() {
+  const params = new URLSearchParams(window.location.search);
+  for (const [shortName, value] of params) {
+    const id = paramToId[shortName];
+    if (id) {
+      const el = document.getElementById(id);
+      if (el) el.value = value;
+    }
+  }
+  // Load colors
+  for (const cid of colorIds) {
+    const val = params.get(cid);
+    if (val) document.getElementById(cid).value = '#' + val;
+  }
+}
+
+function saveToParams() {
+  const params = new URLSearchParams();
+  for (const id of sliderIds) {
+    const el = document.getElementById(id);
+    const defaultVal = el.defaultValue;
+    if (el.value !== defaultVal) {
+      params.set(paramNames[id], el.value);
+    }
+  }
+  for (const cid of colorIds) {
+    const val = document.getElementById(cid).value;
+    if (val !== colorDefaults[cid]) {
+      params.set(cid, val.slice(1)); // strip #
+    }
+  }
+  const qs = params.toString();
+  const newUrl = window.location.pathname + (qs ? '?' + qs : '');
+  history.replaceState(null, '', newUrl);
+}
+
+// Load params on startup, then bind all inputs
+loadFromParams();
+document.querySelectorAll('input[type=range]').forEach(s => {
+  s.addEventListener('input', () => { draw(); saveToParams(); });
+});
+document.querySelectorAll('input[type=color]').forEach(s => {
+  s.addEventListener('input', () => { draw(); saveToParams(); });
+});
+draw();
+</script>
+</body>
+</html>

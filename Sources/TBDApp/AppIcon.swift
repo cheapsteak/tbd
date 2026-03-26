@@ -49,6 +49,32 @@ func generateAppIcon(worktreeName: String?) -> NSImage {
     return icon
 }
 
+// MARK: - Sine Wave Boundary
+
+private struct SineBoundary {
+    let cx: CGFloat
+    let amp: CGFloat
+    let freq: CGFloat
+    let phase: CGFloat
+    let slant: CGFloat
+
+    /// Returns the x position at parameter t (0 = bottom, 1 = top in CG coords).
+    /// Values come from the canvas tuner where t=0 is top, so we flip with (1-t).
+    func x(at t: CGFloat, size: CGFloat) -> CGFloat {
+        let ct = 1 - t  // canvas t: 0=top, 1=bottom
+        let baseX = cx + slant * (0.5 - ct)
+        let wave = amp * sin(2 * .pi * freq * ct + phase)
+        return (baseX + wave) * size
+    }
+}
+
+// Raw tuner values (canvas coords — the x() function handles the CG flip)
+// Tune interactively with tools/icon-tuner.html
+private let boundary1 = SineBoundary(cx: 0.36, amp: 0.115, freq: 0.65, phase: 3.95, slant: 0.6)
+private let boundary2 = SineBoundary(cx: 0.70, amp: 0.060, freq: 0.80, phase: 1.31, slant: 0.46)
+
+private let segments = 80
+
 // MARK: - Core Drawing
 
 private func drawIcon(size: CGFloat, worktreeName: String?) {
@@ -73,16 +99,15 @@ private func drawBackground(ctx: CGContext, size: CGFloat) {
 
     let cs = CGColorSpaceCreateDeviceRGB()
 
-    // Three-panel background with curved boundaries.
+    // Three-panel background with sine-wave boundaries.
     // Each panel represents a parallel worktree.
     let panelColors: [(top: [CGFloat], bottom: [CGFloat])] = [
-        (top: [0.10, 0.08, 0.30], bottom: [0.14, 0.11, 0.35]),   // deep indigo
-        (top: [0.30, 0.15, 0.50], bottom: [0.38, 0.20, 0.55]),   // rich purple
-        (top: [0.55, 0.20, 0.48], bottom: [0.62, 0.28, 0.52]),   // magenta
+        (top: [0.98, 0.52, 0.29], bottom: [0.78, 0.42, 0.24]),   // orange #f9844a
+        (top: [0.98, 0.78, 0.31], bottom: [0.78, 0.62, 0.25]),   // yellow #f9c74f
+        (top: [0.56, 0.75, 0.43], bottom: [0.45, 0.60, 0.34]),   // green #90be6d
     ]
 
-    // Boundary 1: bold arc from (0.25, bottom) to (0.40, top)
-    // Boundary 2: S-curve from (0.55, bottom) to (0.72, top)
+    let boundaries = [boundary1, boundary2]
 
     for i in 0..<3 {
         ctx.saveGState()
@@ -91,56 +116,39 @@ private func drawBackground(ctx: CGContext, size: CGFloat) {
 
         let panel = CGMutablePath()
 
-        // Left boundary (bottom to top)
+        // Left boundary (bottom to top in CG)
         if i == 0 {
             panel.move(to: CGPoint(x: -size * 0.2, y: -size * 0.2))
             panel.addLine(to: CGPoint(x: -size * 0.2, y: size * 1.2))
-        } else if i == 1 {
-            // Boundary 1: bold single arc
-            panel.move(to: CGPoint(x: size * 0.25, y: -size * 0.2))
-            panel.addLine(to: CGPoint(x: size * 0.25, y: 0))
-            panel.addCurve(
-                to: CGPoint(x: size * 0.40, y: size),
-                control1: CGPoint(x: size * 0.45, y: size * 0.25),
-                control2: CGPoint(x: size * 0.22, y: size * 0.65)
-            )
-            panel.addLine(to: CGPoint(x: size * 0.40, y: size * 1.2))
         } else {
-            // Boundary 2: S-curve
-            panel.move(to: CGPoint(x: size * 0.55, y: -size * 0.2))
-            panel.addLine(to: CGPoint(x: size * 0.55, y: 0))
-            panel.addCurve(
-                to: CGPoint(x: size * 0.72, y: size),
-                control1: CGPoint(x: size * 0.48, y: size * 0.35),
-                control2: CGPoint(x: size * 0.80, y: size * 0.60)
-            )
-            panel.addLine(to: CGPoint(x: size * 0.72, y: size * 1.2))
+            let b = boundaries[i - 1]
+            let overlap = size * 0.004  // slight overlap to avoid anti-aliasing seams
+            let bottomX = b.x(at: 0, size: size) - overlap
+            panel.move(to: CGPoint(x: bottomX, y: -size * 0.2))
+            panel.addLine(to: CGPoint(x: bottomX, y: 0))
+            for s in 1...segments {
+                let t = CGFloat(s) / CGFloat(segments)
+                panel.addLine(to: CGPoint(x: b.x(at: t, size: size) - overlap, y: t * size))
+            }
+            let topX = b.x(at: 1, size: size) - overlap
+            panel.addLine(to: CGPoint(x: topX, y: size * 1.2))
         }
 
-        // Right boundary (top to bottom)
+        // Right boundary (top to bottom in CG)
         if i == 2 {
             panel.addLine(to: CGPoint(x: size * 1.2, y: size * 1.2))
             panel.addLine(to: CGPoint(x: size * 1.2, y: -size * 0.2))
-        } else if i == 0 {
-            // Boundary 1 reversed
-            panel.addLine(to: CGPoint(x: size * 0.40, y: size * 1.2))
-            panel.addLine(to: CGPoint(x: size * 0.40, y: size))
-            panel.addCurve(
-                to: CGPoint(x: size * 0.25, y: 0),
-                control1: CGPoint(x: size * 0.22, y: size * 0.65),
-                control2: CGPoint(x: size * 0.45, y: size * 0.25)
-            )
-            panel.addLine(to: CGPoint(x: size * 0.25, y: -size * 0.2))
         } else {
-            // Boundary 2 reversed
-            panel.addLine(to: CGPoint(x: size * 0.72, y: size * 1.2))
-            panel.addLine(to: CGPoint(x: size * 0.72, y: size))
-            panel.addCurve(
-                to: CGPoint(x: size * 0.55, y: 0),
-                control1: CGPoint(x: size * 0.80, y: size * 0.60),
-                control2: CGPoint(x: size * 0.48, y: size * 0.35)
-            )
-            panel.addLine(to: CGPoint(x: size * 0.55, y: -size * 0.2))
+            let b = boundaries[i]
+            let topX = b.x(at: 1, size: size)
+            panel.addLine(to: CGPoint(x: topX, y: size * 1.2))
+            panel.addLine(to: CGPoint(x: topX, y: size))
+            for s in stride(from: segments - 1, through: 0, by: -1) {
+                let t = CGFloat(s) / CGFloat(segments)
+                panel.addLine(to: CGPoint(x: b.x(at: t, size: size), y: t * size))
+            }
+            let bottomX = b.x(at: 0, size: size)
+            panel.addLine(to: CGPoint(x: bottomX, y: -size * 0.2))
         }
 
         panel.closeSubpath()
@@ -199,8 +207,6 @@ private func drawWorktreeRibbon(ctx: CGContext, size: CGFloat, name: String) {
     let ribbonColor = colorForWorktreeName(name)
     let ribbonWidth = size * 0.20
 
-    // Translate to center of bottom-right corner area, then rotate 45°.
-    // The squircle clip path (set in drawBackground) trims the edges.
     let cx = size * 0.75
     let cy = size * 0.25
     ctx.translateBy(x: cx, y: cy)
@@ -216,7 +222,6 @@ private func drawWorktreeRibbon(ctx: CGContext, size: CGFloat, name: String) {
     ctx.setFillColor(ribbonColor)
     ctx.fill(ribbonRect)
 
-    // Ribbon text — drawn in the rotated frame, centered at origin
     let abbreviatedName = abbreviateWorktreeName(name)
     let ribbonFontSize = size * 0.065
     let ribbonFont = NSFont.systemFont(ofSize: ribbonFontSize, weight: .semibold) as CTFont
