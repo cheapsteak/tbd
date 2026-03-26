@@ -12,6 +12,7 @@ struct WorktreeRowView: View {
     @State private var emojiQuery: String?
     @State private var emojiSelectedIndex = 0
     @State private var frecency = EmojiFrecency.load()
+    @State private var isNameTruncated = false
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -157,7 +158,8 @@ struct WorktreeRowView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     ExpandingTextField(
                         text: worktree.displayName,
-                        font: .systemFont(ofSize: NSFont.systemFontSize, weight: hasBoldNotification ? .bold : .regular)
+                        font: .systemFont(ofSize: NSFont.systemFontSize, weight: hasBoldNotification ? .bold : .regular),
+                        isTruncated: $isNameTruncated
                     )
                     if isPending {
                         Text("Creating worktree…")
@@ -183,7 +185,7 @@ struct WorktreeRowView: View {
         }
         .padding(.vertical, 2)
         .padding(.horizontal, 4)
-        .expandingRow(isTruncated: !isEditing && !isPending) {
+        .expandingRow(isTruncated: isNameTruncated && !isEditing) {
             HStack(spacing: 6) {
                 if isMain {
                     Image(systemName: "arrow.triangle.branch")
