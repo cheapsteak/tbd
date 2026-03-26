@@ -21,6 +21,7 @@ final class AppState: ObservableObject {
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
     @Published var editingWorktreeID: UUID? = nil
+    @Published var isRenamingWorktree = false
     @Published var prStatuses: [UUID: PRStatus] = [:]
     /// Remembers selected tab index per worktree so switching back restores the tab.
     @Published var selectedTabIndex: [UUID: Int] = [:]

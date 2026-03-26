@@ -240,11 +240,17 @@ struct WorktreeRowView: View {
         editText = worktree.displayName
         isEditing = true
         isTextFieldFocused = true
+        appState.isRenamingWorktree = true
+        // Re-assert focus after a delay to win any focus race with terminal views
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            isTextFieldFocused = true
+        }
     }
 
     private func commitRename() {
         let trimmed = editText.trimmingCharacters(in: .whitespaces)
         isEditing = false
+        appState.isRenamingWorktree = false
         guard !trimmed.isEmpty, trimmed != worktree.displayName else { return }
         // Update local model immediately so the UI reflects the new name
         for repoID in appState.worktrees.keys {
@@ -260,6 +266,7 @@ struct WorktreeRowView: View {
 
     private func cancelRename() {
         isEditing = false
+        appState.isRenamingWorktree = false
     }
 
     // MARK: - Emoji autocomplete
