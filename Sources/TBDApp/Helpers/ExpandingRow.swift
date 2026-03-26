@@ -47,9 +47,23 @@ extension View {
 final class ExpandingRowAnchor {
     var view: NSView?
 
+    /// Walk up to find the NSTableRowView (the List cell) for accurate positioning.
+    private var rowView: NSView? {
+        var current = view
+        while let v = current {
+            if String(describing: type(of: v)).contains("RowView") ||
+               v is NSTableRowView {
+                return v
+            }
+            current = v.superview
+        }
+        // Fallback to our own view
+        return view
+    }
+
     var screenFrame: NSRect? {
-        guard let view, let window = view.window else { return nil }
-        let frameInWindow = view.convert(view.bounds, to: nil)
+        guard let target = rowView, let window = target.window else { return nil }
+        let frameInWindow = target.convert(target.bounds, to: nil)
         let screenOrigin = window.convertPoint(toScreen: frameInWindow.origin)
         return NSRect(origin: screenOrigin, size: frameInWindow.size)
     }
