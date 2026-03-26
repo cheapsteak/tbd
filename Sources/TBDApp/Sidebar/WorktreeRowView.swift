@@ -79,29 +79,34 @@ struct WorktreeRowView: View {
         return .secondary
     }
 
+    @ViewBuilder
+    private func rowIcons() -> some View {
+        if isMain {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if isPending && !isEditing {
+            ProgressView()
+                .controlSize(.small)
+        } else if let color = badgeColor {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+        }
+        if let icon = worktreeIcon, let nsImage = loadIcon(icon) {
+            Image(nsImage: nsImage)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 12, height: 12)
+                .foregroundStyle(worktreeIconColor)
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            if isMain {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if isPending && !isEditing {
-                ProgressView()
-                    .controlSize(.small)
-            } else if let color = badgeColor {
-                Circle()
-                    .fill(color)
-                    .frame(width: 8, height: 8)
-            }
-            if let icon = worktreeIcon, let nsImage = loadIcon(icon) {
-                Image(nsImage: nsImage)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 12, height: 12)
-                    .foregroundStyle(worktreeIconColor)
-            }
+            rowIcons()
             if isEditing {
                 InlineTextField(
                     text: $editText,
@@ -194,24 +199,7 @@ struct WorktreeRowView: View {
             }
         ) {
             HStack(spacing: 6) {
-                if isMain {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                if let color = badgeColor {
-                    Circle()
-                        .fill(color)
-                        .frame(width: 8, height: 8)
-                }
-                if let icon = worktreeIcon, let nsImage = loadIcon(icon) {
-                    Image(nsImage: nsImage)
-                        .renderingMode(.template)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 12, height: 12)
-                        .foregroundStyle(worktreeIconColor)
-                }
+                rowIcons()
                 Text(worktree.displayName)
                     .fontWeight(hasBoldNotification ? .bold : .regular)
                     .lineLimit(1)

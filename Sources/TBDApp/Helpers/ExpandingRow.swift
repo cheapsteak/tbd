@@ -1,5 +1,8 @@
 import AppKit
+import os
 import SwiftUI
+
+private let logger = Logger(subsystem: "com.tbd.app", category: "ExpandingRow")
 
 /// View modifier that shows an NSPanel with expanded content when the row is
 /// hovered and text is truncated. The panel covers the full row with a plain
@@ -60,13 +63,15 @@ final class ExpandingRowAnchor {
             if v is NSTableRowView { return v }
             current = v.superview
         }
+        logger.warning("NSTableRowView not found in view hierarchy — expansion panel may be mispositioned")
         return view
     }
 
     var contentInset: CGPoint {
         guard let anchor = view, let row = rowView, row !== anchor else { return .zero }
         let anchorInRow = anchor.convert(anchor.bounds.origin, to: row)
-        return CGPoint(x: floor(anchorInRow.x), y: floor(anchorInRow.y))
+        // Snap to half-points (Retina 2x pixel grid) to prevent sub-pixel shifts
+        return CGPoint(x: round(anchorInRow.x * 2) / 2, y: round(anchorInRow.y * 2) / 2)
     }
 
     var screenFrame: NSRect? {
