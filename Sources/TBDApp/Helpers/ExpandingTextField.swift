@@ -43,4 +43,7 @@ final class TruncationDetectingTextField: NSTextField {
         super.layout()
         onTruncationChanged?(intrinsicContentSize.width > bounds.width + 1)
     }
+
+    // Pass all mouse events through to SwiftUI so onTapGesture works
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
