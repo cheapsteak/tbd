@@ -122,6 +122,21 @@ extension WorktreeLifecycle {
             )
         }
 
+        // Clean up terminal records pointing to dead tmux windows (especially main worktrees)
+        let allLiveWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
+            + (try await db.worktrees.list(repoID: repoID, status: .main))
+        for wt in allLiveWorktrees {
+            let terminals = try await db.terminals.list(worktreeID: wt.id)
+            for terminal in terminals {
+                let alive = await tmux.windowExists(
+                    server: wt.tmuxServer, windowID: terminal.tmuxWindowID
+                )
+                if !alive {
+                    try? await db.terminals.delete(id: terminal.id)
+                }
+            }
+        }
+
         // Clean up orphaned tmux windows — windows not tracked by any active terminal
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         let activeWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)

@@ -144,6 +144,18 @@ public struct TmuxManager: Sendable {
             }
     }
 
+    /// Check whether a tmux window exists by querying list-panes.
+    public func windowExists(server: String, windowID: String) async -> Bool {
+        if dryRun { return true }
+        do {
+            let args = ["-L", server, "list-panes", "-t", windowID]
+            _ = try await runTmux(args)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // MARK: - Private
 
     /// Resolves the path to the tmux binary, checking common locations.
