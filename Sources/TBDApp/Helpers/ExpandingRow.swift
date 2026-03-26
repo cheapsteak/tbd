@@ -100,10 +100,11 @@ final class ExpandingRowPanel {
         let wrapped = AnyView(
             content
                 .padding(.trailing, 6)
-                .background(Color(nsColor: .windowBackgroundColor))
         )
 
-        let hosting = NSHostingView(rootView: wrapped)
+        // Wrap in a clear background so NSHostingView doesn't draw its own
+        let clearWrapped = AnyView(wrapped.background(Color.clear))
+        let hosting = NSHostingView(rootView: clearWrapped)
         let fittingSize = hosting.fittingSize
 
         // Only show if content is wider than the row
@@ -119,8 +120,17 @@ final class ExpandingRowPanel {
             height: screenFrame.height
         )
 
-        hosting.frame = NSRect(origin: .zero, size: panelFrame.size)
-        panel.contentView = hosting
+        // Use NSVisualEffectView with sidebar material to match the sidebar's
+        // translucent appearance
+        let container = NSVisualEffectView(frame: NSRect(origin: .zero, size: panelFrame.size))
+        container.material = .sidebar
+        container.blendingMode = .behindWindow
+        container.state = .active
+
+        hosting.frame = container.bounds
+        container.addSubview(hosting)
+
+        panel.contentView = container
         panel.setFrame(panelFrame, display: true)
 
         if panel.parent == nil {
