@@ -183,14 +183,16 @@ final class ExpandingRowPanel {
         if clickMonitor == nil {
             clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
                 let clickScreen = NSEvent.mouseLocation
-                if currentPanelFrame.contains(clickScreen) {
-                    let callback = currentOnClick // capture before hide() nils it
+                let isInPanel = currentPanelFrame.contains(clickScreen)
+                if isInPanel {
+                    let callback = currentOnClick
                     hide()
+                    // Fire callback AND let the click through to the List
+                    // so selection state stays in sync
                     DispatchQueue.main.async { callback?() }
-                    return nil // consume the click
                 }
-                hide()
-                return event // pass through clicks outside panel
+                // Always pass the event through
+                return event
             }
         }
     }

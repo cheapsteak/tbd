@@ -190,8 +190,6 @@ struct WorktreeRowView: View {
             onClick: {
                 if !isMain && appState.selectedWorktreeIDs.contains(worktree.id) {
                     startRename()
-                } else {
-                    appState.selectedWorktreeIDs = [worktree.id]
                 }
             }
         ) {
