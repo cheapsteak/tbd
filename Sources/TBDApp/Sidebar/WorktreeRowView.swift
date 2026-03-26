@@ -159,18 +159,22 @@ struct WorktreeRowView: View {
                     Text(worktree.displayName)
                         .fontWeight(hasBoldNotification ? .bold : .regular)
                         .lineLimit(1)
-                        .overlay(alignment: .leading) {
-                            if isHovered {
-                                Text(worktree.displayName)
-                                    .fontWeight(hasBoldNotification ? .bold : .regular)
-                                    .fixedSize(horizontal: true, vertical: false)
-                                    .padding(.trailing, 4)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 3)
-                                            .fill(.background)
-                                    )
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.onChange(of: isHovered) { _, hovering in
+                                    if hovering {
+                                        let frame = geo.frame(in: .global)
+                                        HoverLabelWindow.show(
+                                            text: worktree.displayName,
+                                            font: .systemFont(ofSize: NSFont.systemFontSize, weight: hasBoldNotification ? .bold : .regular),
+                                            origin: frame
+                                        )
+                                    } else {
+                                        HoverLabelWindow.hide()
+                                    }
+                                }
                             }
-                        }
+                        )
                     if isPending {
                         Text("Creating worktree…")
                             .font(.caption)
@@ -181,7 +185,6 @@ struct WorktreeRowView: View {
         }
         .contentShape(Rectangle())
         .onHover { hovering in isHovered = hovering }
-        .zIndex(isHovered ? 1 : 0)
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
                 if appState.selectedWorktreeIDs.contains(worktree.id) {
