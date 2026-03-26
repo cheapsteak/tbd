@@ -210,11 +210,6 @@ struct WorktreeRowView: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
-            // Match the real row's combined insets:
-            // listRowInsets(leading: 4) + our .padding(.horizontal, 4) = 8 leading
-            .padding(.vertical, 2)
-            .padding(.leading, 8)
-            .padding(.trailing, 4)
         }
         .background(
             RoundedRectangle(cornerRadius: 4)
