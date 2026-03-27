@@ -56,6 +56,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           show_full_output: true
           use_sticky_comment: true
+          track_progress: true
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: |
@@ -75,7 +76,7 @@ jobs:
 
             Phase 2: Read each piece of feedback individually, and consider if they're valid. If they are not valid, do not include it in the comment to GitHub. For feedback asking for tests, consider if the test would require too much mocking to be useful, and do not suggest adding tests that would mostly test 3rd party libraries or APIs. Avoid being persnickety. Keep a count of invalid or persnickety feedback filtered out.
 
-            Phase 3: Read your filtered notes from the file, then write the formatted review as your text response. This IS how the comment gets posted — the action captures your text output and posts it directly as the sticky comment. If you produce no text output in this phase, no comment will appear on the PR. Output only the review content with no phase narration or process commentary.
+            Phase 3: Read your filtered notes from the file, then post the formatted review using `mcp__github_comment__update_claude_comment`. This tool updates the sticky comment on the PR. Output only the review content with no phase narration or process commentary.
             Do NOT use `gh pr comment` — it creates comments outside the sticky comment and they won't be updated on re-review.
 
             Format:
@@ -92,9 +93,9 @@ jobs:
             </details>
 
             VERDICT: After completing your review, you MUST submit a formal GitHub review using `gh pr review`.
-            Do NOT put review text in the -b body — your findings are already in the sticky comment. Use an empty body:
-            - If no unaddressed medium or high priority issues remain: `gh pr review ${{ github.event.pull_request.number }} --approve -b ""`
-            - If unaddressed medium or high priority issues remain: `gh pr review ${{ github.event.pull_request.number }} --request-changes -b ""`
+            Do NOT put review text in the -b body — your findings are already in the sticky comment. Use a short body:
+            - If no unaddressed medium or high priority issues remain: `gh pr review ${{ github.event.pull_request.number }} --approve -b "See sticky comment for details."`
+            - If unaddressed medium or high priority issues remain: `gh pr review ${{ github.event.pull_request.number }} --request-changes -b "See sticky comment for details."`
             Only use --request-changes for meaningful issues (bugs, security, correctness, significant performance problems). Not for style preferences or minor nitpicks.
             An issue counts as "addressed" if the author has commented explaining why no code change is needed — you don't need to agree, just acknowledge it was considered.
             Note to PR authors: if you disagree with a request-changes verdict, you can dismiss the review via GitHub's review dismissal feature and re-trigger the workflow.
@@ -102,7 +103,7 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           claude_args: |
-            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),WebSearch,Read,Write,Glob,Grep,Task"
+            --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),WebSearch,Read,Write,Glob,Grep,Task"
 
       - name: Check review verdict
         if: always() && steps.claude-review.outcome == 'success'
