@@ -94,37 +94,8 @@ jobs:
             List any tool calls that failed or were denied (e.g. "Write to /tmp/ blocked", "gh api denied"). If none failed, say so. This helps us tune the workflow permissions and allowedTools over time.
             </details>
 
-            VERDICT: After completing your review, you MUST submit a formal GitHub review using `gh pr review`.
-            Do NOT put review text in the -b body — your findings are already in the sticky comment. Use a short body:
-            - If no unaddressed medium or high priority issues remain: `gh pr review ${{ github.event.pull_request.number }} --approve -b "See sticky comment for details."`
-            - If ANY unaddressed Medium or High severity issues remain: `gh pr review ${{ github.event.pull_request.number }} --request-changes -b "See sticky comment for details."`
-            Rule: If you labeled any issue as Medium or High severity in your review, you MUST use --request-changes unless the author has already addressed it. Do not second-guess your own severity labels at verdict time — if the issue wasn't important enough to block, it should have been labeled Minor.
-            Only use --request-changes for meaningful issues (bugs, security, correctness, significant performance problems). Not for style preferences or minor nitpicks.
-            An issue counts as "addressed" if the author has commented explaining why no code change is needed — you don't need to agree, just acknowledge it was considered.
-            Note to PR authors: if you disagree with a request-changes verdict, you can dismiss the review via GitHub's review dismissal feature and re-trigger the workflow.
-            This verdict determines whether the CI check passes or fails, so be judicious.
+            Do NOT submit a formal GitHub review (no `gh pr review`). Your only output is the sticky comment via `mcp__github_comment__update_claude_comment`.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           claude_args: |
-            --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(cat:*),WebSearch,Read,Write,Glob,Grep,Task"
-
-      - name: Check review verdict
-        if: always() && steps.claude-review.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          REVIEW_STATE=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" \
-            | jq -r --arg sha "${{ github.event.pull_request.head.sha }}" \
-              '[.[] | select(.user.login == "claude[bot]" and .commit_id == $sha)] | last | .state // empty')
-
-          echo "Review verdict: ${REVIEW_STATE:-none}"
-
-          if [ "$REVIEW_STATE" = "CHANGES_REQUESTED" ]; then
-            echo "::error::Claude requested changes on this PR"
-            exit 1
-          elif [ "$REVIEW_STATE" = "APPROVED" ]; then
-            echo "Claude approved this PR"
-          else
-            echo "::error::Claude did not submit a review verdict for commit ${{ github.event.pull_request.head.sha }}"
-            exit 1
-          fi
+            --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(cat:*),WebSearch,Read,Write,Glob,Grep,Task"
