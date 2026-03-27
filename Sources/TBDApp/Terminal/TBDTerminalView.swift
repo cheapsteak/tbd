@@ -9,6 +9,100 @@ class TBDTerminalView: TerminalView {
     var onFilePathClicked: ((String) -> Void)?
     var worktreePath: String = ""
 
+    // MARK: - Mouse click pass-through
+    // Track mouseDown position to distinguish clicks from drags.
+    // Single clicks are forwarded to tmux for pane switching;
+    // click-drags are handled locally by SwiftTerm for text selection.
+    //
+    // Because SwiftTerm's TerminalView declares its mouse overrides as
+    // `public` (not `open`), we cannot override them from another module.
+    // Instead we install a local event monitor that observes mouseDown /
+    // mouseDragged / mouseUp and forwards clicks after SwiftTerm has
+    // already processed them.
+    private var mouseDownLocation: CGPoint = .zero
+    private var didDrag: Bool = false
+    private static let dragThreshold: CGFloat = 3.0
+    nonisolated(unsafe) private var mouseMonitor: Any?
+
+    private func installMouseMonitor() {
+        guard mouseMonitor == nil else { return }
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            guard let self = self else { return event }
+            // Only handle events that target this view
+            guard let eventWindow = event.window, eventWindow == self.window else { return event }
+            let locationInSelf = self.convert(event.locationInWindow, from: nil)
+            guard self.bounds.contains(locationInSelf) else { return event }
+
+            switch event.type {
+            case .leftMouseDown:
+                self.mouseDownLocation = locationInSelf
+                self.didDrag = false
+            case .leftMouseDragged:
+                let dx = locationInSelf.x - self.mouseDownLocation.x
+                let dy = locationInSelf.y - self.mouseDownLocation.y
+                if sqrt(dx * dx + dy * dy) > Self.dragThreshold {
+                    self.didDrag = true
+                }
+            case .leftMouseUp:
+                self.handleClickPassthrough(at: locationInSelf)
+            default:
+                break
+            }
+            return event  // always pass the event through
+        }
+    }
+
+    private func removeMouseMonitor() {
+        if let monitor = mouseMonitor {
+            NSEvent.removeMonitor(monitor)
+            mouseMonitor = nil
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            installMouseMonitor()
+        } else {
+            removeMouseMonitor()
+        }
+    }
+
+    deinit {
+        if let monitor = mouseMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+
+    private func handleClickPassthrough(at point: CGPoint) {
+        // If this was a click (not a drag) and tmux has mouse mode enabled,
+        // forward the click to tmux so it can handle pane switching.
+        //
+        // This won't produce duplicate events: allowMouseReporting is set to
+        // false in TerminalPanelView, so SwiftTerm's mouseDown/mouseUp only
+        // handle local text selection — they never forward to the pty.
+        // We are the sole path that sends mouse events to tmux.
+        let term = getTerminal()
+        guard !didDrag && term.mouseMode != .off else { return }
+
+        let charWidth = bounds.width / CGFloat(term.cols)
+        let lineHeight = bounds.height / CGFloat(term.rows)
+        let col = Int(point.x / charWidth)
+        let row = Int((bounds.height - point.y) / lineHeight)
+
+        let pressFlags = term.encodeButton(
+            button: 0, release: false,
+            shift: false, meta: false, control: false
+        )
+        term.sendEvent(buttonFlags: pressFlags, x: col, y: row)
+
+        let releaseFlags = term.encodeButton(
+            button: 0, release: true,
+            shift: false, meta: false, control: false
+        )
+        term.sendEvent(buttonFlags: releaseFlags, x: col, y: row)
+    }
+
     /// Extracts a file path from the terminal buffer at the given window-coordinate point.
     func extractFilePath(atWindowLocation windowPoint: CGPoint) -> String? {
         let localPoint = convert(windowPoint, from: nil)
