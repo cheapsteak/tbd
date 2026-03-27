@@ -196,6 +196,12 @@ struct TerminalPanelView: NSViewRepresentable {
                         tv.onFilePathClicked?(filePath)
                         return true
                     }
+                    // Fall back to OSC 8 hyperlink — open URLs in the browser
+                    if let urlString = tv.extractHyperlinkURL(atWindowLocation: location),
+                       let url = URL(string: urlString) {
+                        NSWorkspace.shared.open(url)
+                        return true
+                    }
                     return false
                 }
                 return consumed ? nil : event

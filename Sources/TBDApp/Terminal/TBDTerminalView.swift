@@ -167,6 +167,34 @@ class TBDTerminalView: TerminalView {
         return resolvedPath
     }
 
+    /// Extracts an OSC 8 hyperlink URL from the terminal buffer at the given window-coordinate point.
+    func extractHyperlinkURL(atWindowLocation windowPoint: CGPoint) -> String? {
+        let localPoint = convert(windowPoint, from: nil)
+        let terminal = getTerminal()
+
+        let charWidth = bounds.width / CGFloat(terminal.cols)
+        let lineHeight = bounds.height / CGFloat(terminal.rows)
+
+        let col = Int(localPoint.x / charWidth)
+        let row = Int((frame.height - localPoint.y) / lineHeight)
+
+        guard row >= 0 && row < terminal.rows && col >= 0 && col < terminal.cols else {
+            return nil
+        }
+
+        guard let line = terminal.getLine(row: row) else { return nil }
+        guard col < line.count else { return nil }
+
+        let cell = line[col]
+        guard let payload = cell.getPayload() as? String else { return nil }
+
+        // Parse OSC 8 payload format: "params;URL"
+        let parts = payload.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count > 1 else { return nil }
+        let url = String(parts[1])
+        return url.isEmpty ? nil : url
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if naturalTextEditing, event.type == .keyDown, handleNaturalTextEditing(event) {
             return true
