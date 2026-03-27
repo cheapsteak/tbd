@@ -162,18 +162,19 @@ struct TerminalPanelView: NSViewRepresentable {
                 guard deltaY != 0 else { return event }
 
                 let consumed = MainActor.assumeIsolated {
-                    guard let tv = ref.view else { return false }
+                    guard let tv = ref.view as? TBDTerminalView else { return false }
                     let point = tv.convert(location, from: nil)
                     guard tv.bounds.contains(point) else { return false }
                     guard tv.terminal.mouseMode != .off else { return false }
+
+                    // Use actual scroll position so tmux routes to the correct pane
+                    guard let (col, row) = tv.gridPosition(atWindowLocation: location) else { return false }
 
                     let isUp = deltaY > 0
                     let buttonFlags = tv.terminal.encodeButton(
                         button: isUp ? 4 : 5,
                         release: false, shift: false, meta: false, control: false
                     )
-                    let col = tv.terminal.cols / 2
-                    let row = tv.terminal.rows / 2
                     let lines = max(1, Int(abs(deltaY)))
                     for _ in 0..<lines {
                         tv.terminal.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
