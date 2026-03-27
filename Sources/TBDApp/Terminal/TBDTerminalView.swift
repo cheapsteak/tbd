@@ -39,7 +39,7 @@ class TBDTerminalView: TerminalView {
         let cell = cellDimensions()
 
         let col = Int(localPoint.x / cell.width)
-        let row = Int((frame.height - localPoint.y) / cell.height)
+        let row = Int((bounds.height - localPoint.y) / cell.height)
 
         guard row >= 0 && row < terminal.rows && col >= 0 && col < terminal.cols else {
             return nil
@@ -239,7 +239,14 @@ class TBDTerminalView: TerminalView {
     }
 
     /// Extracts the GitHub repo URL (e.g. "https://github.com/owner/repo") from the worktree's git remote.
+    /// Cached after first call to avoid repeated subprocess spawns on the main thread.
+    private var cachedGitHubRepoURL: String?
+    private var gitHubRepoURLResolved = false
+
     private func gitHubRepoURL() -> String? {
+        if gitHubRepoURLResolved { return cachedGitHubRepoURL }
+        gitHubRepoURLResolved = true
+
         guard !worktreePath.isEmpty else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -262,6 +269,7 @@ class TBDTerminalView: TerminalView {
         if remote.hasPrefix("git@github.com:") {
             remote = "https://github.com/" + remote.dropFirst("git@github.com:".count)
         }
+        cachedGitHubRepoURL = remote
         return remote
     }
 
