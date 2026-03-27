@@ -8,6 +8,7 @@ class TBDTerminalView: TerminalView {
     var naturalTextEditing: Bool = true
     var onFilePathClicked: ((String) -> Void)?
     var worktreePath: String = ""
+    var onNotification: ((String, String) -> Void)?
 
     // MARK: - Mouse click pass-through
     // Track mouseDown position to distinguish clicks from drags.
@@ -215,6 +216,15 @@ class TBDTerminalView: TerminalView {
         }
 
         return false
+    }
+
+    func notify(source: Terminal, title: String, body: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // Only notify when this terminal is not focused
+            guard self.window?.isKeyWindow != true else { return }
+            self.onNotification?(title, body)
+        }
     }
 
 }
