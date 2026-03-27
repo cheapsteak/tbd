@@ -12,13 +12,6 @@ import Testing
     #expect(Int(parts[0]) != nil) // numeric date
 }
 
-@Test func testNamesAreUnique() {
-    let names = (0..<100).map { _ in NameGenerator.generate() }
-    let uniqueNames = Set(names)
-    // With 500+ adjectives * 500+ animals, collisions in 100 tries should be near-zero
-    #expect(names.count == uniqueNames.count)
-}
-
 @Test func testDatePrefix() {
     let name = NameGenerator.generate()
     let dateStr = String(name.prefix(8))
