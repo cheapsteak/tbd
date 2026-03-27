@@ -77,6 +77,11 @@ class TBDTerminalView: TerminalView {
     private func handleClickPassthrough(at point: CGPoint) {
         // If this was a click (not a drag) and tmux has mouse mode enabled,
         // forward the click to tmux so it can handle pane switching.
+        //
+        // This won't produce duplicate events: allowMouseReporting is set to
+        // false in TerminalPanelView, so SwiftTerm's mouseDown/mouseUp only
+        // handle local text selection — they never forward to the pty.
+        // We are the sole path that sends mouse events to tmux.
         let term = getTerminal()
         guard !didDrag && term.mouseMode != .off else { return }
 
