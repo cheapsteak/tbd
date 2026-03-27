@@ -8,6 +8,7 @@ class TBDTerminalView: TerminalView {
     var naturalTextEditing: Bool = true
     var onFilePathClicked: ((String) -> Void)?
     var worktreePath: String = ""
+    var remoteURL: String?
     var onNotification: ((String, String) -> Void)?
 
     // MARK: - Cell dimension calculation
@@ -15,21 +16,17 @@ class TBDTerminalView: TerminalView {
     /// Computes cell dimensions from font metrics, matching SwiftTerm's internal calculation.
     /// SwiftTerm uses `cellDimension` (internal) derived from CTFont metrics, not bounds/cols.
     /// Using bounds/cols gives wrong results because of scroller width and rounding.
-    private var cachedCellWidth: CGFloat?
-    private var cachedCellHeight: CGFloat?
+    private var cachedCellDimensions: (width: CGFloat, height: CGFloat)?
 
     func cellDimensions() -> (width: CGFloat, height: CGFloat) {
-        if let w = cachedCellWidth, let h = cachedCellHeight {
-            return (w, h)
-        }
+        if let cached = cachedCellDimensions { return cached }
         let font = self.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        let ctFont = font as CTFont
-        let glyph = (font as NSFont).glyph(withName: "W")
-        let cellWidth = (font as NSFont).advancement(forGlyph: glyph).width
-        let cellHeight = ceil(CTFontGetAscent(ctFont) + CTFontGetDescent(ctFont) + CTFontGetLeading(ctFont))
-        cachedCellWidth = cellWidth
-        cachedCellHeight = cellHeight
-        return (cellWidth, cellHeight)
+        let glyph = font.glyph(withName: "W")
+        let cellWidth = font.advancement(forGlyph: glyph).width
+        let cellHeight = ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font))
+        let dims = (cellWidth, cellHeight)
+        cachedCellDimensions = dims
+        return dims
     }
 
     /// Converts a window-coordinate point to terminal grid (col, row).
@@ -223,53 +220,26 @@ class TBDTerminalView: TerminalView {
         }
 
         // Look for "PR #123" pattern anywhere on the line.
-        // Wide/emoji chars (e.g. ▶▶) make positional matching unreliable —
-        // a click on visually-correct text lands on a different buffer column.
-        // Since there's only one PR per status bar, match anywhere on the row.
-        let prPattern = try? NSRegularExpression(pattern: "PR\\s+#(\\d+)")
-        if let match = prPattern?.firstMatch(in: visibleText, range: NSRange(visibleText.startIndex..., in: visibleText)),
-           let numRange = Range(match.range(at: 1), in: visibleText) {
-            let prNumber = String(visibleText[numRange])
-            if let repoURL = gitHubRepoURL() {
-                return "\(repoURL)/pull/\(prNumber)"
-            }
+        // Wide/emoji chars (e.g. ▶▶) make positional matching unreliable,
+        // so match anywhere on the row rather than checking click position.
+        if let match = Self.prPattern.firstMatch(in: visibleText, range: NSRange(visibleText.startIndex..., in: visibleText)),
+           let numRange = Range(match.range(at: 1), in: visibleText),
+           let repoURL = gitHubBrowserURL() {
+            return "\(repoURL)/pull/\(String(visibleText[numRange]))"
         }
 
         return nil
     }
 
-    /// Extracts the GitHub repo URL (e.g. "https://github.com/owner/repo") from the worktree's git remote.
-    /// Cached after first call to avoid repeated subprocess spawns on the main thread.
-    private var cachedGitHubRepoURL: String?
-    private var gitHubRepoURLResolved = false
+    private static let prPattern = try! NSRegularExpression(pattern: "PR\\s+#(\\d+)")
 
-    private func gitHubRepoURL() -> String? {
-        if gitHubRepoURLResolved { return cachedGitHubRepoURL }
-        gitHubRepoURLResolved = true
-
-        guard !worktreePath.isEmpty else { return nil }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["-C", worktreePath, "remote", "get-url", "origin"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch { return nil }
-        guard let data = try? pipe.fileHandleForReading.readDataToEndOfFile(),
-              var remote = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !remote.isEmpty else { return nil }
-
-        // Convert SSH or HTTPS remote to browser URL
-        // git@github.com:owner/repo.git → https://github.com/owner/repo
-        // https://github.com/owner/repo.git → https://github.com/owner/repo
+    /// Converts the repo's remote URL to a GitHub browser URL.
+    private func gitHubBrowserURL() -> String? {
+        guard var remote = remoteURL, !remote.isEmpty else { return nil }
         if remote.hasSuffix(".git") { remote = String(remote.dropLast(4)) }
         if remote.hasPrefix("git@github.com:") {
             remote = "https://github.com/" + remote.dropFirst("git@github.com:".count)
         }
-        cachedGitHubRepoURL = remote
         return remote
     }
 

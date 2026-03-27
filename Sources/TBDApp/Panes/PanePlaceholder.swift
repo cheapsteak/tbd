@@ -140,6 +140,7 @@ struct PanePlaceholder: View {
                 tmuxWindowID: terminal.tmuxWindowID,
                 tmuxBridge: appState.tmuxBridge,
                 worktreePath: worktree.path,
+                remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
                 onFilePathClicked: { path in
                     let newContent = PaneContent.codeViewer(id: UUID(), path: path)
                     layout = layout.splitPane(id: terminalID, direction: .horizontal, newContent: newContent)

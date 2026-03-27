@@ -26,6 +26,7 @@ struct TerminalPanelView: NSViewRepresentable {
     let tmuxWindowID: String
     let tmuxBridge: TmuxBridge
     var worktreePath: String = ""
+    var remoteURL: String?
     var onFilePathClicked: ((String) -> Void)?
     var onTerminalNotification: ((String, String) -> Void)?
 
@@ -45,6 +46,7 @@ struct TerminalPanelView: NSViewRepresentable {
 
         // Wire up Cmd+Click file path detection
         tv.worktreePath = worktreePath
+        tv.remoteURL = remoteURL
         tv.onFilePathClicked = onFilePathClicked
         tv.onNotification = onTerminalNotification
 
