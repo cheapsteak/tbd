@@ -13,6 +13,7 @@ struct WorktreeRowView: View {
     @State private var emojiSelectedIndex = 0
     @State private var frecency = EmojiFrecency.load()
     @State private var isNameTruncated = false
+    @State private var isHovering = false
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -80,6 +81,29 @@ struct WorktreeRowView: View {
     }
 
     @ViewBuilder
+    private func pinIcon() -> some View {
+        if worktree.pinnedAt != nil {
+            Image(systemName: "pin.fill")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: 10)
+                .onTapGesture {
+                    Task { await appState.setWorktreePin(id: worktree.id, pinned: false) }
+                }
+        } else if isHovering {
+            Image(systemName: "pin")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .frame(width: 10)
+                .onTapGesture {
+                    Task { await appState.setWorktreePin(id: worktree.id, pinned: true) }
+                }
+        } else {
+            Color.clear.frame(width: 10)
+        }
+    }
+
+    @ViewBuilder
     private func rowIcons() -> some View {
         if isMain {
             Image(systemName: "arrow.triangle.branch")
@@ -106,6 +130,7 @@ struct WorktreeRowView: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            pinIcon()
             rowIcons()
             if isEditing {
                 InlineTextField(
@@ -175,6 +200,9 @@ struct WorktreeRowView: View {
             }
         }
         .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovering = hovering
+        }
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
                 if appState.selectedWorktreeIDs.contains(worktree.id) {
@@ -202,6 +230,7 @@ struct WorktreeRowView: View {
             }
         ) {
             HStack(spacing: 6) {
+                pinIcon()
                 rowIcons()
                 Text(worktree.displayName)
                     .fontWeight(hasBoldNotification ? .bold : .regular)
