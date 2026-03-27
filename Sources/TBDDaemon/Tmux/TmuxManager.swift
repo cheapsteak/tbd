@@ -95,6 +95,9 @@ public struct TmuxManager: Sendable {
             try? await runTmux(["-L", server, "set", "-g", "mouse", "on"])
             // Enable extended key sequences so Shift+Arrow etc. pass through to applications
             try? await runTmux(["-L", server, "set", "-g", "xterm-keys", "on"])
+            // Enable Kitty keyboard protocol so apps can distinguish Shift+Enter from Enter
+            try? await runTmux(["-L", server, "set", "-g", "extended-keys", "on"])
+            try? await runTmux(["-L", server, "set", "-g", "extended-keys-format", "kitty"])
             // Set SSH_AUTH_SOCK to stable symlink so shells get a resilient path
             try? await runTmux(["-L", server, "setenv", "-g", "SSH_AUTH_SOCK", SSHAgentResolver.defaultSymlinkPath])
             return output.trimmingCharacters(in: .whitespacesAndNewlines)

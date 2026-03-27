@@ -27,6 +27,7 @@ struct TerminalPanelView: NSViewRepresentable {
     let tmuxBridge: TmuxBridge
     var worktreePath: String = ""
     var onFilePathClicked: ((String) -> Void)?
+    var onTerminalNotification: ((String, String) -> Void)?
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -45,6 +46,7 @@ struct TerminalPanelView: NSViewRepresentable {
         // Wire up Cmd+Click file path detection
         tv.worktreePath = worktreePath
         tv.onFilePathClicked = onFilePathClicked
+        tv.onNotification = onTerminalNotification
 
         // Set delegate for terminal events
         tv.terminalDelegate = context.coordinator
