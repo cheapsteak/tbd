@@ -79,15 +79,18 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var tmuxPaneID: String
     public var label: String?
     public var createdAt: Date
+    public var pinnedAt: Date?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
-                tmuxPaneID: String, label: String? = nil, createdAt: Date = Date()) {
+                tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
+                pinnedAt: Date? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
         self.tmuxPaneID = tmuxPaneID
         self.label = label
         self.createdAt = createdAt
+        self.pinnedAt = pinnedAt
     }
 }
 

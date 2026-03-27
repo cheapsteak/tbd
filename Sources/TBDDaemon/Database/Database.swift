@@ -108,6 +108,12 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v5") { db in
+            try db.alter(table: "terminal") { t in
+                t.add(column: "pinnedAt", .datetime)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }
