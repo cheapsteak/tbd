@@ -62,6 +62,8 @@ jobs:
           prompt: |
             /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
 
+            IMPORTANT: The repository is checked out locally. Use Read, Glob, and Grep tools to inspect source files — do NOT use gh api to fetch file contents. The runner is ubuntu-latest so you cannot build or run this macOS Swift project; focus on static code review only.
+
             Additional review instructions:
 
             Do not comment on formatting/linting/style issues. These are handled by CI.
@@ -103,7 +105,7 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           claude_args: |
-            --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),WebSearch,Read,Write,Glob,Grep,Task"
+            --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*),Bash(cat:*),WebSearch,Read,Write,Glob,Grep,Task"
 
       - name: Check review verdict
         if: always() && steps.claude-review.outcome == 'success'
