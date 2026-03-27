@@ -345,6 +345,14 @@ actor DaemonClient {
         )
     }
 
+    /// Set or clear the pin on a terminal.
+    func setTerminalPin(id: UUID, pinned: Bool) throws {
+        try callVoid(
+            method: RPCMethod.terminalSetPin,
+            params: TerminalSetPinParams(terminalID: id, pinned: pinned)
+        )
+    }
+
     /// Create a terminal in a worktree.
     func createTerminal(worktreeID: UUID, cmd: String? = nil) throws -> Terminal {
         return try call(

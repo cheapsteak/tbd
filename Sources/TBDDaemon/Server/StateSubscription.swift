@@ -16,6 +16,7 @@ public enum StateDelta: Codable, Sendable {
     case terminalRemoved(TerminalIDDelta)
     case worktreeConflictsChanged(WorktreeConflictDelta)
     case worktreePinChanged(WorktreePinDelta)
+    case terminalPinChanged(TerminalPinDelta)
 }
 
 /// Delta payload for worktree creation/revival.
@@ -104,6 +105,15 @@ public struct WorktreePinDelta: Codable, Sendable {
     public let pinnedAt: Date?
     public init(worktreeID: UUID, pinnedAt: Date?) {
         self.worktreeID = worktreeID; self.pinnedAt = pinnedAt
+    }
+}
+
+/// Delta payload for terminal pin state change.
+public struct TerminalPinDelta: Codable, Sendable {
+    public let terminalID: UUID
+    public let pinnedAt: Date?
+    public init(terminalID: UUID, pinnedAt: Date?) {
+        self.terminalID = terminalID; self.pinnedAt = pinnedAt
     }
 }
 

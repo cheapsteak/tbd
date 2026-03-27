@@ -71,6 +71,16 @@ extension RPCRouter {
         return .ok()
     }
 
+    func handleTerminalSetPin(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSetPinParams.self, from: paramsData)
+        try await db.terminals.setPin(id: params.terminalID, pinned: params.pinned)
+        let terminal = try await db.terminals.get(id: params.terminalID)
+        subscriptions.broadcast(delta: .terminalPinChanged(TerminalPinDelta(
+            terminalID: params.terminalID, pinnedAt: terminal?.pinnedAt
+        )))
+        return .ok()
+    }
+
     func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSendParams.self, from: paramsData)
 
