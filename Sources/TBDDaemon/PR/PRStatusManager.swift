@@ -50,7 +50,10 @@ public actor PRStatusManager {
             }
         }
 
-        // Update cache — clear entries for worktrees with no matching PR
+        // Update cache for worktrees found in the batch.
+        // Do NOT clear entries for missing worktrees — the batch query is
+        // limited to 100 PRs across all repos, so older PRs may not appear.
+        // Those entries may have been populated by a targeted `refresh` call.
         for wt in worktrees {
             if let node = byBranch[wt.branch] {
                 cache[wt.id] = PRStatus(
@@ -58,8 +61,6 @@ public actor PRStatusManager {
                     url: node.url,
                     state: Self.mapState(ghState: node.state, mergeStateStatus: node.mergeStateStatus, reviewDecision: node.reviewDecision)
                 )
-            } else {
-                cache.removeValue(forKey: wt.id)
             }
         }
     }
