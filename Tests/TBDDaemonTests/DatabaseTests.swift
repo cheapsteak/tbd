@@ -248,6 +248,62 @@ struct DatabaseTests {
         #expect(terminals.isEmpty)
     }
 
+    // MARK: - Terminal Pin Tests
+
+    @Test func terminalSetPinAndUnpin() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test-term-pin", displayName: "Test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
+            path: "/tmp/test-term-pin/.tbd/worktrees/test-wt", tmuxServer: "test"
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1"
+        )
+
+        // Initially not pinned
+        let initial = try await db.terminals.get(id: terminal.id)
+        #expect(initial?.pinnedAt == nil)
+
+        // Pin it
+        try await db.terminals.setPin(id: terminal.id, pinned: true)
+        let pinned = try await db.terminals.get(id: terminal.id)
+        #expect(pinned?.pinnedAt != nil)
+
+        // Unpin it
+        try await db.terminals.setPin(id: terminal.id, pinned: false)
+        let unpinned = try await db.terminals.get(id: terminal.id)
+        #expect(unpinned?.pinnedAt == nil)
+    }
+
+    @Test func pinnedTerminalsOrderByPinnedAt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test-term-pin-order", displayName: "Test2", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt-1", branch: "tbd/wt-1",
+            path: "/tmp/test-term-pin-order/.tbd/worktrees/wt-1", tmuxServer: "test"
+        )
+        let t1 = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1"
+        )
+        let t2 = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2"
+        )
+
+        // Pin t2 first, then t1
+        try await db.terminals.setPin(id: t2.id, pinned: true)
+        try await Task.sleep(for: .milliseconds(10))
+        try await db.terminals.setPin(id: t1.id, pinned: true)
+
+        let all = try await db.terminals.list(worktreeID: wt.id)
+        let pinned = all.filter { $0.pinnedAt != nil }
+        let sorted = pinned.sorted { ($0.pinnedAt ?? Date.distantPast) < ($1.pinnedAt ?? Date.distantPast) }
+
+        #expect(sorted.count == 2)
+        #expect(sorted[0].id == t2.id)
+        #expect(sorted[1].id == t1.id)
+    }
+
     // MARK: - Notification Tests
 
     @Test func createAndReadNotifications() async throws {
