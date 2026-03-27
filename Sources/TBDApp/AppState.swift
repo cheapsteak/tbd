@@ -24,6 +24,17 @@ final class AppState: ObservableObject {
     /// Tracks the order of selected worktrees for split view rendering.
     /// Pinned worktrees come first (sorted by pinnedAt), then cmd+clicked ones in click order.
     @Published var selectionOrder: [UUID] = []
+
+    /// All pinned terminals across all worktrees, sorted by pinnedAt.
+    var pinnedTerminals: [Terminal] {
+        terminals.values.flatMap { $0 }
+            .filter { $0.pinnedAt != nil }
+            .sorted { ($0.pinnedAt ?? .distantPast) < ($1.pinnedAt ?? .distantPast) }
+    }
+
+    @Published var dockRatio: CGFloat = 0.3 {
+        didSet { UserDefaults.standard.set(Double(dockRatio), forKey: Self.dockRatioKey) }
+    }
     @Published var isConnected: Bool = false
     @Published var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
@@ -48,9 +59,13 @@ final class AppState: ObservableObject {
     private var pollCycle = 0
 
     private static let layoutsKey = "com.tbd.app.layouts"
+    private static let dockRatioKey = "com.tbd.app.dockRatio"
 
     init() {
         restoreLayouts()
+        if let saved = UserDefaults.standard.object(forKey: Self.dockRatioKey) as? Double {
+            dockRatio = CGFloat(saved)
+        }
         Task {
             await connectAndLoadInitialState()
             startPolling()
