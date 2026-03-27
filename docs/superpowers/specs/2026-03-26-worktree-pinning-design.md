@@ -6,7 +6,9 @@ Multi-selected worktrees in split view render in arbitrary order because selecti
 
 ## Solution
 
-Add worktree pinning (persistent, ordered) and change the selection model from `Set<UUID>` to `[UUID]` so split view respects pin/click order.
+Add worktree pinning (persistent, ordered) and add a `selectionOrder: [UUID]` array alongside the existing `selectedWorktreeIDs: Set<UUID>` so split view respects pin/click order.
+
+**Design constraint:** SwiftUI's `List(selection:)` requires `Binding<Set<UUID>>` for multi-select, so `selectedWorktreeIDs` must remain a `Set<UUID>`. A parallel `selectionOrder: [UUID]` array tracks insertion order for split view rendering.
 
 ## Data Model
 
@@ -20,10 +22,10 @@ Add `pinnedAt: Date?` to the `Worktree` model in `Models.swift`. Optional field,
 
 ### AppState
 
-Change `selectedWorktreeIDs: Set<UUID>` to `selectedWorktreeIDs: [UUID]`. Call sites update accordingly:
-- `.contains()` stays the same (Array has contains)
-- `.insert()` becomes `append()` with a guard against duplicates
-- `.remove()` becomes `.removeAll(where:)`
+Keep `selectedWorktreeIDs: Set<UUID>` (required by SwiftUI List binding). Add `selectionOrder: [UUID]` to track the order in which worktrees were selected/pinned. Both must stay in sync:
+- When inserting: add to both Set and Array
+- When removing: remove from both
+- `selectionOrder` determines split view pane order
 
 ## Selection Behavior
 
