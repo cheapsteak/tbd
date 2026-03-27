@@ -26,6 +26,7 @@ struct TerminalPanelView: NSViewRepresentable {
     let tmuxWindowID: String
     let tmuxBridge: TmuxBridge
     var worktreePath: String = ""
+    var remoteURL: String?
     var onFilePathClicked: ((String) -> Void)?
     var onTerminalNotification: ((String, String) -> Void)?
 
@@ -45,6 +46,7 @@ struct TerminalPanelView: NSViewRepresentable {
 
         // Wire up Cmd+Click file path detection
         tv.worktreePath = worktreePath
+        tv.remoteURL = remoteURL
         tv.onFilePathClicked = onFilePathClicked
         tv.onNotification = onTerminalNotification
 
@@ -194,6 +196,12 @@ struct TerminalPanelView: NSViewRepresentable {
 
                     if let filePath = tv.extractFilePath(atWindowLocation: location) {
                         tv.onFilePathClicked?(filePath)
+                        return true
+                    }
+                    // Fall back to hyperlink detection (OSC 8 or pattern matching)
+                    if let urlString = tv.extractHyperlinkURL(atWindowLocation: location),
+                       let url = URL(string: urlString) {
+                        NSWorkspace.shared.open(url)
                         return true
                     }
                     return false

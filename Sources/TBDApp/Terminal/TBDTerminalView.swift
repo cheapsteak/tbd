@@ -8,7 +8,41 @@ class TBDTerminalView: TerminalView {
     var naturalTextEditing: Bool = true
     var onFilePathClicked: ((String) -> Void)?
     var worktreePath: String = ""
+    var remoteURL: String?
     var onNotification: ((String, String) -> Void)?
+
+    // MARK: - Cell dimension calculation
+
+    /// Computes cell dimensions from font metrics, matching SwiftTerm's internal calculation.
+    /// SwiftTerm uses `cellDimension` (internal) derived from CTFont metrics, not bounds/cols.
+    /// Using bounds/cols gives wrong results because of scroller width and rounding.
+    private var cachedCellDimensions: (width: CGFloat, height: CGFloat)?
+
+    func cellDimensions() -> (width: CGFloat, height: CGFloat) {
+        if let cached = cachedCellDimensions { return cached }
+        let font = self.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let glyph = font.glyph(withName: "W")
+        let cellWidth = font.advancement(forGlyph: glyph).width
+        let cellHeight = ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font))
+        let dims = (cellWidth, cellHeight)
+        cachedCellDimensions = dims
+        return dims
+    }
+
+    /// Converts a window-coordinate point to terminal grid (col, row).
+    func gridPosition(atWindowLocation windowPoint: CGPoint) -> (col: Int, row: Int)? {
+        let localPoint = convert(windowPoint, from: nil)
+        let terminal = getTerminal()
+        let cell = cellDimensions()
+
+        let col = Int(localPoint.x / cell.width)
+        let row = Int((bounds.height - localPoint.y) / cell.height)
+
+        guard row >= 0 && row < terminal.rows && col >= 0 && col < terminal.cols else {
+            return nil
+        }
+        return (col, row)
+    }
 
     // MARK: - Mouse click pass-through
     // Track mouseDown position to distinguish clicks from drags.
@@ -86,10 +120,9 @@ class TBDTerminalView: TerminalView {
         let term = getTerminal()
         guard !didDrag && term.mouseMode != .off else { return }
 
-        let charWidth = bounds.width / CGFloat(term.cols)
-        let lineHeight = bounds.height / CGFloat(term.rows)
-        let col = Int(point.x / charWidth)
-        let row = Int((bounds.height - point.y) / lineHeight)
+        let cell = cellDimensions()
+        let col = Int(point.x / cell.width)
+        let row = Int((bounds.height - point.y) / cell.height)
 
         let pressFlags = term.encodeButton(
             button: 0, release: false,
@@ -106,20 +139,10 @@ class TBDTerminalView: TerminalView {
 
     /// Extracts a file path from the terminal buffer at the given window-coordinate point.
     func extractFilePath(atWindowLocation windowPoint: CGPoint) -> String? {
-        let localPoint = convert(windowPoint, from: nil)
+        guard let pos = gridPosition(atWindowLocation: windowPoint) else { return nil }
+        let col = pos.col
+        let row = pos.row
         let terminal = getTerminal()
-
-        // Derive cell dimensions from the terminal's actual grid size and view bounds
-        let charWidth = bounds.width / CGFloat(terminal.cols)
-        let lineHeight = bounds.height / CGFloat(terminal.rows)
-
-        let col = Int(localPoint.x / charWidth)
-        // Terminal rows are numbered from top, but NSView y is from bottom
-        let row = Int((frame.height - localPoint.y) / lineHeight)
-
-        guard row >= 0 && row < terminal.rows && col >= 0 && col < terminal.cols else {
-            return nil
-        }
 
         guard let bufferLine = terminal.getLine(row: row) else { return nil }
         let lineText = bufferLine.translateToString()
@@ -161,10 +184,63 @@ class TBDTerminalView: TerminalView {
             resolvedPath = URL(fileURLWithPath: worktreePath).appendingPathComponent(candidate).path
         }
 
-        // Validate file exists
-        guard FileManager.default.fileExists(atPath: resolvedPath) else { return nil }
+        // Validate it's a regular file (not a directory)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resolvedPath, isDirectory: &isDir), !isDir.boolValue else { return nil }
 
         return resolvedPath
+    }
+
+    /// Extracts a clickable URL from the terminal buffer at the given window-coordinate point.
+    /// Checks for OSC 8 hyperlink payloads first, then falls back to pattern matching
+    /// for common link patterns like "PR #123".
+    func extractHyperlinkURL(atWindowLocation windowPoint: CGPoint) -> String? {
+        guard let pos = gridPosition(atWindowLocation: windowPoint) else { return nil }
+        let col = pos.col
+        let row = pos.row
+        let terminal = getTerminal()
+
+        guard let line = terminal.getLine(row: row) else { return nil }
+        guard col < line.count else { return nil }
+
+        // Check for OSC 8 payload first
+        if let payload = line[col].getPayload() as? String {
+            let parts = payload.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+            if parts.count > 1 {
+                let url = String(parts[1])
+                if !url.isEmpty { return url }
+            }
+        }
+
+        // Build visible text from line (translateToString may return empty for status bar lines)
+        var visibleText = ""
+        for c in 0..<line.count {
+            let val = line[c].getCharacter().unicodeScalars.first?.value ?? 0
+            visibleText.append(val > 0 ? line[c].getCharacter() : " ")
+        }
+
+        // Look for "PR #123" pattern anywhere on the line.
+        // Wide/emoji chars (e.g. ▶▶) make positional matching unreliable,
+        // so match anywhere on the row rather than checking click position.
+        if let match = Self.prPattern.firstMatch(in: visibleText, range: NSRange(visibleText.startIndex..., in: visibleText)),
+           let numRange = Range(match.range(at: 1), in: visibleText),
+           let repoURL = gitHubBrowserURL() {
+            return "\(repoURL)/pull/\(String(visibleText[numRange]))"
+        }
+
+        return nil
+    }
+
+    private static let prPattern = try! NSRegularExpression(pattern: "PR\\s+#(\\d+)")
+
+    /// Converts the repo's remote URL to a GitHub browser URL.
+    private func gitHubBrowserURL() -> String? {
+        guard var remote = remoteURL, !remote.isEmpty else { return nil }
+        if remote.hasSuffix(".git") { remote = String(remote.dropLast(4)) }
+        if remote.hasPrefix("git@github.com:") {
+            remote = "https://github.com/" + remote.dropFirst("git@github.com:".count)
+        }
+        return remote
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
