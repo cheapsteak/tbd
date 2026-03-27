@@ -163,6 +163,7 @@ public struct WorktreeStore: Sendable {
             }
             record.status = WorktreeStatus.archived.rawValue
             record.archivedAt = Date()
+            record.pinnedAt = nil
             try record.update(db)
         }
     }
@@ -234,12 +235,12 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Set or clear the pinned timestamp for a worktree.
-    public func setPin(id: UUID, pinned: Bool) async throws {
+    public func setPin(id: UUID, pinned: Bool, at date: Date = Date()) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Worktree not found")
             }
-            record.pinnedAt = pinned ? Date() : nil
+            record.pinnedAt = pinned ? date : nil
             try record.update(db)
         }
     }
