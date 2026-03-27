@@ -168,9 +168,7 @@ struct TerminalPanelView: NSViewRepresentable {
                     guard tv.terminal.mouseMode != .off else { return false }
 
                     // Use actual scroll position so tmux routes to the correct pane
-                    let cell = tv.cellDimensions()
-                    let col = Int(point.x / cell.width)
-                    let row = Int((tv.bounds.height - point.y) / cell.height)
+                    guard let (col, row) = tv.gridPosition(atWindowLocation: location) else { return false }
 
                     let isUp = deltaY > 0
                     let buttonFlags = tv.terminal.encodeButton(
