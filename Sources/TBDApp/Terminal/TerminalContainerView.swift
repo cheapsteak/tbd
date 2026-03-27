@@ -13,14 +13,31 @@ struct TerminalContainerView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        if appState.selectedWorktreeIDs.count == 1,
-           let worktreeID = appState.selectedWorktreeIDs.first {
-            SingleWorktreeView(worktreeID: worktreeID)
-        } else if appState.selectedWorktreeIDs.count > 1 {
-            MultiWorktreeView(worktreeIDs: appState.selectionOrder)
+        let visibleWorktreeIDs = appState.selectedWorktreeIDs
+        let dockTerminals = appState.pinnedTerminals.filter { terminal in
+            !visibleWorktreeIDs.contains(terminal.worktreeID)
+        }
+
+        let mainContent = Group {
+            if appState.selectedWorktreeIDs.count == 1,
+               let worktreeID = appState.selectedWorktreeIDs.first {
+                SingleWorktreeView(worktreeID: worktreeID)
+            } else if appState.selectedWorktreeIDs.count > 1 {
+                MultiWorktreeView(worktreeIDs: appState.selectionOrder)
+            } else {
+                Text("Select a worktree or click + to create one")
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if dockTerminals.isEmpty {
+            mainContent
         } else {
-            Text("Select a worktree or click + to create one")
-                .foregroundStyle(.secondary)
+            DockSplitView(
+                dockRatio: $appState.dockRatio,
+                mainContent: { mainContent },
+                dockContent: { PinnedTerminalDock(terminals: dockTerminals) }
+            )
         }
     }
 }
@@ -277,6 +294,63 @@ private struct MultiWorktreeCell: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+            }
+        }
+    }
+}
+
+// MARK: - DockSplitView
+
+/// A horizontal split between main content (left) and pinned terminal dock (right).
+/// The divider is draggable to resize the dock.
+private struct DockSplitView<Main: View, Dock: View>: View {
+    @Binding var dockRatio: CGFloat
+    @ViewBuilder let mainContent: () -> Main
+    @ViewBuilder let dockContent: () -> Dock
+
+    @State private var dragStartRatio: CGFloat?
+
+    var body: some View {
+        GeometryReader { geometry in
+            let totalWidth = geometry.size.width
+            let dividerWidth: CGFloat = 4
+            let available = totalWidth - dividerWidth
+            let dockWidth = available * dockRatio
+            let mainWidth = available - dockWidth
+
+            HStack(spacing: 0) {
+                mainContent()
+                    .frame(width: mainWidth)
+
+                Rectangle()
+                    .fill(Color.gray.opacity(0.3))
+                    .frame(width: dividerWidth)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        if hovering {
+                            NSCursor.resizeLeftRight.push()
+                        } else {
+                            NSCursor.pop()
+                        }
+                    }
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                if dragStartRatio == nil {
+                                    dragStartRatio = dockRatio
+                                }
+                                guard let startRatio = dragStartRatio, available > 0 else { return }
+                                let delta = -value.translation.width / available
+                                let newRatio = max(0.1, min(0.6, startRatio + delta))
+                                dockRatio = newRatio
+                            }
+                            .onEnded { _ in
+                                dragStartRatio = nil
+                            }
+                    )
+
+                dockContent()
+                    .frame(width: dockWidth)
             }
         }
     }
