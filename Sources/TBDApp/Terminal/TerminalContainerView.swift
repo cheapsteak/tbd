@@ -17,7 +17,7 @@ struct TerminalContainerView: View {
            let worktreeID = appState.selectedWorktreeIDs.first {
             SingleWorktreeView(worktreeID: worktreeID)
         } else if appState.selectedWorktreeIDs.count > 1 {
-            MultiWorktreeView(worktreeIDs: Array(appState.selectedWorktreeIDs))
+            MultiWorktreeView(worktreeIDs: appState.selectionOrder)
         } else {
             Text("Select a worktree or click + to create one")
                 .foregroundStyle(.secondary)

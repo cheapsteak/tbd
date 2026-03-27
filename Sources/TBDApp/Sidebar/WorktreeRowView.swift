@@ -178,7 +178,10 @@ struct WorktreeRowView: View {
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
                 if appState.selectedWorktreeIDs.contains(worktree.id) {
-                    appState.selectedWorktreeIDs.remove(worktree.id)
+                    // Don't allow cmd+click removal of pinned worktrees
+                    if worktree.pinnedAt == nil {
+                        appState.selectedWorktreeIDs.remove(worktree.id)
+                    }
                 } else {
                     appState.selectedWorktreeIDs.insert(worktree.id)
                 }

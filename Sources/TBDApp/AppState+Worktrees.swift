@@ -99,6 +99,61 @@ extension AppState {
         }
     }
 
+    /// Toggle pin state for a worktree.
+    func setWorktreePin(id: UUID, pinned: Bool) async {
+        // Optimistic local update
+        for repoID in worktrees.keys {
+            if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == id }) {
+                worktrees[repoID]?[idx].pinnedAt = pinned ? Date() : nil
+            }
+        }
+
+        if pinned {
+            // Add to selection if not already there
+            if !selectedWorktreeIDs.contains(id) {
+                selectedWorktreeIDs.insert(id)
+            }
+        }
+        // Rebuild order: pinned first (by pinnedAt), then unpinned in existing order
+        rebuildSelectionOrder()
+
+        do {
+            try await daemonClient.setWorktreePin(id: id, pinned: pinned)
+        } catch {
+            logger.error("Failed to set pin: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
+    /// Rebuild selectionOrder from selectedWorktreeIDs, putting pinned items first (by pinnedAt).
+    func rebuildSelectionOrder() {
+        let allWts = worktrees.values.flatMap { $0 }
+        let wtMap = Dictionary(uniqueKeysWithValues: allWts.map { ($0.id, $0) })
+
+        let selected = selectedWorktreeIDs
+        var pinned: [(UUID, Date)] = []
+        var unpinned: [UUID] = []
+
+        for id in selectionOrder where selected.contains(id) {
+            if let wt = wtMap[id], let pinnedAt = wt.pinnedAt {
+                pinned.append((id, pinnedAt))
+            } else {
+                unpinned.append(id)
+            }
+        }
+        // Add any selected IDs not yet in selectionOrder
+        for id in selected where !selectionOrder.contains(id) {
+            if let wt = wtMap[id], let pinnedAt = wt.pinnedAt {
+                pinned.append((id, pinnedAt))
+            } else {
+                unpinned.append(id)
+            }
+        }
+
+        pinned.sort { $0.1 < $1.1 }
+        selectionOrder = pinned.map(\.0) + unpinned
+    }
+
     // MARK: - Keyboard Shortcut Actions
 
     /// All worktrees in sidebar order (sorted by repo, then by creation date).

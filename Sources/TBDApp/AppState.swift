@@ -11,7 +11,19 @@ final class AppState: ObservableObject {
     @Published var worktrees: [UUID: [Worktree]] = [:]
     @Published var terminals: [UUID: [Terminal]] = [:]
     @Published var notifications: [UUID: NotificationType?] = [:]
-    @Published var selectedWorktreeIDs: Set<UUID> = []
+    @Published var selectedWorktreeIDs: Set<UUID> = [] {
+        didSet {
+            // Remove deselected items from order
+            selectionOrder.removeAll { !selectedWorktreeIDs.contains($0) }
+            // Append newly selected items (maintains insertion order for cmd+click)
+            for id in selectedWorktreeIDs where !selectionOrder.contains(id) {
+                selectionOrder.append(id)
+            }
+        }
+    }
+    /// Tracks the order of selected worktrees for split view rendering.
+    /// Pinned worktrees come first (sorted by pinnedAt), then cmd+clicked ones in click order.
+    @Published var selectionOrder: [UUID] = []
     @Published var isConnected: Bool = false
     @Published var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
@@ -96,6 +108,14 @@ final class AppState: ObservableObject {
         isConnected = didConnect
         if didConnect {
             await refreshAll()
+            // Auto-select pinned worktrees on launch
+            let pinnedWts = worktrees.values.flatMap { $0 }
+                .filter { $0.pinnedAt != nil }
+                .sorted { ($0.pinnedAt ?? .distantPast) < ($1.pinnedAt ?? .distantPast) }
+            if !pinnedWts.isEmpty {
+                selectedWorktreeIDs = Set(pinnedWts.map(\.id))
+                selectionOrder = pinnedWts.map(\.id)
+            }
             await refreshPRStatuses()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
