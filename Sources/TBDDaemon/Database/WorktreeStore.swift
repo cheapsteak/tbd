@@ -16,6 +16,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hasConflicts: Bool
     var createdAt: Date
     var archivedAt: Date?
+    var pinnedAt: Date?
     var tmuxServer: String
 
     init(from wt: Worktree) {
@@ -29,6 +30,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.hasConflicts = wt.hasConflicts
         self.createdAt = wt.createdAt
         self.archivedAt = wt.archivedAt
+        self.pinnedAt = wt.pinnedAt
         self.tmuxServer = wt.tmuxServer
     }
 
@@ -44,6 +46,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             hasConflicts: hasConflicts,
             createdAt: createdAt,
             archivedAt: archivedAt,
+            pinnedAt: pinnedAt,
             tmuxServer: tmuxServer
         )
     }
@@ -160,6 +163,7 @@ public struct WorktreeStore: Sendable {
             }
             record.status = WorktreeStatus.archived.rawValue
             record.archivedAt = Date()
+            record.pinnedAt = nil
             try record.update(db)
         }
     }
@@ -227,6 +231,17 @@ public struct WorktreeStore: Sendable {
                 .filter(Column("path") == path)
                 .fetchOne(db)?
                 .toModel()
+        }
+    }
+
+    /// Set or clear the pinned timestamp for a worktree.
+    public func setPin(id: UUID, pinned: Bool, at date: Date = Date()) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.pinnedAt = pinned ? date : nil
+            try record.update(db)
         }
     }
 

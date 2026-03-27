@@ -84,10 +84,12 @@ public enum RPCMethod {
     public static let worktreeArchive = "worktree.archive"
     public static let worktreeRevive = "worktree.revive"
     public static let worktreeRename = "worktree.rename"
+    public static let worktreeSetPin = "worktree.setPin"
     public static let terminalCreate = "terminal.create"
     public static let terminalList = "terminal.list"
     public static let terminalSend = "terminal.send"
     public static let terminalDelete = "terminal.delete"
+    public static let terminalSetPin = "terminal.setPin"
     public static let notify = "notify"
     public static let daemonStatus = "daemon.status"
     public static let stateSubscribe = "state.subscribe"
@@ -174,6 +176,14 @@ public struct WorktreeRenameParams: Codable, Sendable {
     }
 }
 
+public struct WorktreeSetPinParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let pinned: Bool
+    public init(worktreeID: UUID, pinned: Bool) {
+        self.worktreeID = worktreeID; self.pinned = pinned
+    }
+}
+
 public struct TerminalCreateParams: Codable, Sendable {
     public let worktreeID: UUID
     public let cmd: String?
@@ -198,6 +208,14 @@ public struct TerminalSendParams: Codable, Sendable {
 public struct TerminalDeleteParams: Codable, Sendable {
     public let terminalID: UUID
     public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+public struct TerminalSetPinParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let pinned: Bool
+    public init(terminalID: UUID, pinned: Bool) {
+        self.terminalID = terminalID; self.pinned = pinned
+    }
 }
 
 public struct NotifyParams: Codable, Sendable {

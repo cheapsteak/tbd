@@ -12,6 +12,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var tmuxPaneID: String
     var label: String?
     var createdAt: Date
+    var pinnedAt: Date?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -20,6 +21,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.tmuxPaneID = terminal.tmuxPaneID
         self.label = terminal.label
         self.createdAt = terminal.createdAt
+        self.pinnedAt = terminal.pinnedAt
     }
 
     func toModel() -> Terminal {
@@ -29,7 +31,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             tmuxWindowID: tmuxWindowID,
             tmuxPaneID: tmuxPaneID,
             label: label,
-            createdAt: createdAt
+            createdAt: createdAt,
+            pinnedAt: pinnedAt
         )
     }
 }
@@ -93,6 +96,17 @@ public struct TerminalStore: Sendable {
             try TerminalRecord
                 .filter(Column("worktreeID") == worktreeID.uuidString)
                 .deleteAll(db)
+        }
+    }
+
+    /// Set or clear the pinned timestamp for a terminal.
+    public func setPin(id: UUID, pinned: Bool, at date: Date = Date()) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.pinnedAt = pinned ? date : nil
+            try record.update(db)
         }
     }
 }

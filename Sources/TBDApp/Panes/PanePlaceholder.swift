@@ -10,6 +10,7 @@ struct PanePlaceholder: View {
     let worktree: Worktree
     @Binding var layout: LayoutNode
     @EnvironmentObject var appState: AppState
+    @State private var isHeaderHovering = false
 
     /// Find the Terminal model matching a terminal ID across all worktree terminals.
     private func terminal(for id: UUID) -> Terminal? {
@@ -59,13 +60,36 @@ struct PanePlaceholder: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Color(nsColor: .controlBackgroundColor))
+        .onHover { hovering in
+            isHeaderHovering = hovering
+        }
     }
 
     @ViewBuilder
     private var paneLabel: some View {
         switch content {
         case .terminal(let terminalID):
-            Text("Terminal: \(terminalID.uuidString.prefix(8))")
+            let term = terminal(for: terminalID)
+            let isPinned = term?.pinnedAt != nil
+            HStack(spacing: 4) {
+                if isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                        .onTapGesture {
+                            Task { await appState.setTerminalPin(id: terminalID, pinned: false) }
+                        }
+                } else if isHeaderHovering {
+                    Image(systemName: "pin")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                        .onTapGesture {
+                            Task { await appState.setTerminalPin(id: terminalID, pinned: true) }
+                        }
+                }
+            }
         case .webview(_, let url):
             Text(url.host ?? url.absoluteString)
         case .codeViewer(_, let path):

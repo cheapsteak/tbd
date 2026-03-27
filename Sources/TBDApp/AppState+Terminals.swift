@@ -55,4 +55,21 @@ extension AppState {
             handleConnectionError(error)
         }
     }
+
+    /// Toggle pin state for a terminal.
+    func setTerminalPin(id: UUID, pinned: Bool) async {
+        // Optimistic local update
+        for worktreeID in terminals.keys {
+            if let idx = terminals[worktreeID]?.firstIndex(where: { $0.id == id }) {
+                terminals[worktreeID]?[idx].pinnedAt = pinned ? Date() : nil
+            }
+        }
+
+        do {
+            try await daemonClient.setTerminalPin(id: id, pinned: pinned)
+        } catch {
+            logger.error("Failed to set terminal pin: \(error)")
+            handleConnectionError(error)
+        }
+    }
 }

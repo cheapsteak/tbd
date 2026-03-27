@@ -102,6 +102,18 @@ public final class TBDDatabase: Sendable {
             try db.execute(sql: "UPDATE worktree SET hasConflicts = (gitStatus = 'conflicts')")
         }
 
+        migrator.registerMigration("v4") { db in
+            try db.alter(table: "worktree") { t in
+                t.add(column: "pinnedAt", .datetime)
+            }
+        }
+
+        migrator.registerMigration("v5") { db in
+            try db.alter(table: "terminal") { t in
+                t.add(column: "pinnedAt", .datetime)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

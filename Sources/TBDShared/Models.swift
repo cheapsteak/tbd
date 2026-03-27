@@ -34,12 +34,13 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var hasConflicts: Bool = false
     public var createdAt: Date
     public var archivedAt: Date?
+    public var pinnedAt: Date?
     public var tmuxServer: String
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
                 hasConflicts: Bool = false,
-                createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String) {
+                createdAt: Date = Date(), archivedAt: Date? = nil, pinnedAt: Date? = nil, tmuxServer: String) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -50,6 +51,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.hasConflicts = hasConflicts
         self.createdAt = createdAt
         self.archivedAt = archivedAt
+        self.pinnedAt = pinnedAt
         self.tmuxServer = tmuxServer
     }
 
@@ -65,6 +67,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         hasConflicts = try c.decodeIfPresent(Bool.self, forKey: .hasConflicts) ?? false
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
+        pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
         tmuxServer = try c.decode(String.self, forKey: .tmuxServer)
     }
 }
@@ -76,15 +79,18 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var tmuxPaneID: String
     public var label: String?
     public var createdAt: Date
+    public var pinnedAt: Date?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
-                tmuxPaneID: String, label: String? = nil, createdAt: Date = Date()) {
+                tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
+                pinnedAt: Date? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
         self.tmuxPaneID = tmuxPaneID
         self.label = label
         self.createdAt = createdAt
+        self.pinnedAt = pinnedAt
     }
 }
 
