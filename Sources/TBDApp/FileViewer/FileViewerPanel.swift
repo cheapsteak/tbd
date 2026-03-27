@@ -67,6 +67,70 @@ private func parseGitStatus(_ output: String) -> [GitFileStatus] {
     }
 }
 
+// MARK: - Branch Diff Loader
+
+struct BranchFileChange: Identifiable {
+    let id = UUID()
+    let path: String
+    let status: Character // A, M, D, R, C
+
+    var displayName: String { URL(fileURLWithPath: path).lastPathComponent }
+}
+
+func loadBranchDiff(at worktreePath: String, defaultBranch: String) async -> [BranchFileChange] {
+    guard !worktreePath.isEmpty else { return [] }
+    return await withCheckedContinuation { continuation in
+        DispatchQueue.global(qos: .utility).async {
+            // Get merge-base between HEAD and the default branch
+            let mergeBaseProc = Process()
+            mergeBaseProc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            mergeBaseProc.arguments = ["-C", worktreePath, "merge-base", "HEAD", defaultBranch]
+            let mergeBasePipe = Pipe()
+            mergeBaseProc.standardOutput = mergeBasePipe
+            mergeBaseProc.standardError = Pipe()
+            do {
+                try mergeBaseProc.run()
+                let data = mergeBasePipe.fileHandleForReading.readDataToEndOfFile()
+                mergeBaseProc.waitUntilExit()
+                let mergeBase = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !mergeBase.isEmpty, mergeBaseProc.terminationStatus == 0 else {
+                    continuation.resume(returning: [])
+                    return
+                }
+
+                // Get diff from merge-base to HEAD
+                let diffProc = Process()
+                diffProc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                diffProc.arguments = ["-C", worktreePath, "diff", "--name-status", mergeBase, "HEAD"]
+                let diffPipe = Pipe()
+                diffProc.standardOutput = diffPipe
+                diffProc.standardError = Pipe()
+                try diffProc.run()
+                let diffData = diffPipe.fileHandleForReading.readDataToEndOfFile()
+                diffProc.waitUntilExit()
+                let output = String(data: diffData, encoding: .utf8) ?? ""
+                continuation.resume(returning: parseBranchDiff(output))
+            } catch {
+                continuation.resume(returning: [])
+            }
+        }
+    }
+}
+
+private func parseBranchDiff(_ output: String) -> [BranchFileChange] {
+    output.components(separatedBy: "\n").compactMap { line in
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let statusChar = trimmed.first else { return nil }
+        // Format: "M\tpath" or "R100\told\tnew"
+        let parts = trimmed.split(separator: "\t", maxSplits: 2)
+        guard parts.count >= 2 else { return nil }
+        let path = parts.count > 2 ? String(parts[2]) : String(parts[1])
+        // Normalize rename status (R100 → R)
+        let normalizedStatus: Character = statusChar == "R" || (statusChar == "R" && parts[0].count > 1) ? "R" : statusChar
+        return BranchFileChange(path: path, status: normalizedStatus)
+    }
+}
+
 // MARK: - FileViewerPanel
 
 struct FileViewerPanel: View {
@@ -76,6 +140,7 @@ struct FileViewerPanel: View {
     @State private var staged: [GitFileStatus] = []
     @State private var unstaged: [GitFileStatus] = []
     @State private var untracked: [GitFileStatus] = []
+    @State private var branchChanges: [BranchFileChange] = []
     @State private var isLoading = false
 
     var body: some View {
@@ -111,7 +176,7 @@ struct FileViewerPanel: View {
     private var fileList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if staged.isEmpty && unstaged.isEmpty && untracked.isEmpty && !isLoading {
+                if staged.isEmpty && unstaged.isEmpty && untracked.isEmpty && branchChanges.isEmpty && !isLoading {
                     Text("No changes")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -126,6 +191,9 @@ struct FileViewerPanel: View {
                 }
                 if !untracked.isEmpty {
                     FileStatusSection(title: "Untracked", files: untracked, useIndexStatus: false, worktreePath: worktree.path, onFileClick: handleFileClick)
+                }
+                if !branchChanges.isEmpty {
+                    BranchChangeSection(title: "Branch", files: branchChanges, worktreePath: worktree.path, onFileClick: handleFileClick)
                 }
             }
             .padding(.vertical, 4)
@@ -157,12 +225,21 @@ struct FileViewerPanel: View {
         }
     }
 
+    private var defaultBranch: String {
+        appState.repos.first { $0.id == worktree.repoID }?.defaultBranch ?? "main"
+    }
+
     private func refresh() async {
         isLoading = true
-        let statuses = await loadGitStatus(at: worktree.path)
+        async let statusTask = loadGitStatus(at: worktree.path)
+        async let branchTask = worktree.status == .main
+            ? [BranchFileChange]()
+            : loadBranchDiff(at: worktree.path, defaultBranch: defaultBranch)
+        let statuses = await statusTask
         staged = statuses.filter(\.isStaged)
         unstaged = statuses.filter(\.isUnstaged)
         untracked = statuses.filter(\.isUntracked)
+        branchChanges = await branchTask
         isLoading = false
     }
 }
@@ -246,6 +323,85 @@ private struct GitFileRow: View {
         }
         .onTapGesture(count: 1) {
             // Single-click: open in code viewer pane
+            let cmdClick = NSEvent.modifierFlags.contains(.command)
+            onFileClick(file.path, cmdClick)
+        }
+        .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - BranchChangeSection
+
+private struct BranchChangeSection: View {
+    let title: String
+    let files: [BranchFileChange]
+    let worktreePath: String
+    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    @State private var isExpanded = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(title.uppercased())
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.secondary)
+                    Text("(\(files.count))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                ForEach(files) { file in
+                    BranchFileRow(file: file, worktreePath: worktreePath, onFileClick: onFileClick)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - BranchFileRow
+
+private struct BranchFileRow: View {
+    let file: BranchFileChange
+    let worktreePath: String
+    var onFileClick: (String, Bool) -> Void = { _, _ in }
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(String(file.status))
+                .font(.system(.caption2, design: .monospaced))
+                .fontWeight(.bold)
+                .foregroundStyle(statusColor(for: file.status))
+                .frame(width: 12, alignment: .center)
+            Text(file.path)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.head)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 3)
+        .background(isHovered ? Color(nsColor: .controlAccentColor).opacity(0.15) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            let url = URL(fileURLWithPath: worktreePath).appendingPathComponent(file.path)
+            NSWorkspace.shared.open(url)
+        }
+        .onTapGesture(count: 1) {
             let cmdClick = NSEvent.modifierFlags.contains(.command)
             onFileClick(file.path, cmdClick)
         }
