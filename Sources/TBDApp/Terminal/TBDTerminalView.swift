@@ -24,7 +24,7 @@ class TBDTerminalView: TerminalView {
     private static let dragThreshold: CGFloat = 3.0
     nonisolated(unsafe) private var mouseMonitor: Any?
 
-    func installMouseMonitor() {
+    private func installMouseMonitor() {
         guard mouseMonitor == nil else { return }
         mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
             guard let self = self else { return event }
@@ -52,7 +52,7 @@ class TBDTerminalView: TerminalView {
         }
     }
 
-    func removeMouseMonitor() {
+    private func removeMouseMonitor() {
         if let monitor = mouseMonitor {
             NSEvent.removeMonitor(monitor)
             mouseMonitor = nil
