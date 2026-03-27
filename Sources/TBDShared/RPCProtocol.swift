@@ -84,6 +84,7 @@ public enum RPCMethod {
     public static let worktreeArchive = "worktree.archive"
     public static let worktreeRevive = "worktree.revive"
     public static let worktreeRename = "worktree.rename"
+    public static let worktreeSetPin = "worktree.setPin"
     public static let terminalCreate = "terminal.create"
     public static let terminalList = "terminal.list"
     public static let terminalSend = "terminal.send"
@@ -171,6 +172,14 @@ public struct WorktreeRenameParams: Codable, Sendable {
     public let displayName: String
     public init(worktreeID: UUID, displayName: String) {
         self.worktreeID = worktreeID; self.displayName = displayName
+    }
+}
+
+public struct WorktreeSetPinParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let pinned: Bool
+    public init(worktreeID: UUID, pinned: Bool) {
+        self.worktreeID = worktreeID; self.pinned = pinned
     }
 }
 
