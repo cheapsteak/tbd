@@ -81,10 +81,11 @@ func loadBranchDiff(at worktreePath: String, defaultBranch: String) async -> [Br
     guard !worktreePath.isEmpty else { return [] }
     return await withCheckedContinuation { continuation in
         DispatchQueue.global(qos: .utility).async {
-            // Get merge-base between HEAD and the default branch
+            // Get merge-base between HEAD and origin's default branch.
+            // Use origin/<branch> since the local branch may be stale.
             let mergeBaseProc = Process()
             mergeBaseProc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            mergeBaseProc.arguments = ["-C", worktreePath, "merge-base", "HEAD", defaultBranch]
+            mergeBaseProc.arguments = ["-C", worktreePath, "merge-base", "HEAD", "origin/\(defaultBranch)"]
             let mergeBasePipe = Pipe()
             mergeBaseProc.standardOutput = mergeBasePipe
             mergeBaseProc.standardError = Pipe()
