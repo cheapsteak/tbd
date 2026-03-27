@@ -64,7 +64,7 @@ final class AppState: ObservableObject {
     init() {
         restoreLayouts()
         if let saved = UserDefaults.standard.object(forKey: Self.dockRatioKey) as? Double {
-            dockRatio = CGFloat(saved)
+            dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
         Task {
             await connectAndLoadInitialState()

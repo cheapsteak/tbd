@@ -88,9 +88,9 @@ extension RPCRouter {
         let params = try decoder.decode(WorktreeSetPinParams.self, from: paramsData)
         try await db.worktrees.setPin(id: params.worktreeID, pinned: params.pinned)
 
-        let wt = try await db.worktrees.get(id: params.worktreeID)
+        let pinnedAt: Date? = params.pinned ? Date() : nil
         subscriptions.broadcast(delta: .worktreePinChanged(WorktreePinDelta(
-            worktreeID: params.worktreeID, pinnedAt: wt?.pinnedAt
+            worktreeID: params.worktreeID, pinnedAt: pinnedAt
         )))
 
         return .ok()
