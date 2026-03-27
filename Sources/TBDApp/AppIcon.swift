@@ -189,10 +189,18 @@ private func drawTBDText(ctx: CGContext, size: CGFloat) {
     let x = (size - bounds.width) / 2 - bounds.origin.x
     let y = (size - bounds.height) / 2 - bounds.origin.y
 
-    ctx.setShadow(offset: CGSize(width: 0, height: -size * 0.010),
-                   blur: size * 0.025,
-                   color: CGColor(red: 0, green: 0, blue: 0, alpha: 0.45))
+    // Soft glow: draw text multiple times with zero-offset shadow (= glow)
+    for _ in 0..<3 {
+        ctx.saveGState()
+        ctx.setShadow(offset: .zero,
+                       blur: size * 0.095,
+                       color: CGColor(red: 0.35, green: 0.12, blue: 0.06, alpha: 0.04))
+        ctx.textPosition = CGPoint(x: x, y: y)
+        CTLineDraw(line, ctx)
+        ctx.restoreGState()
+    }
 
+    // Crisp white text on top
     ctx.textPosition = CGPoint(x: x, y: y)
     CTLineDraw(line, ctx)
 
