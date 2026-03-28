@@ -21,8 +21,7 @@ final class AppState: ObservableObject {
             }
         }
     }
-    /// Tracks the order of selected worktrees for split view rendering.
-    /// Pinned worktrees come first (sorted by pinnedAt), then cmd+clicked ones in click order.
+    /// Tracks the order of selected worktrees for split view rendering (cmd+click order).
     @Published var selectionOrder: [UUID] = []
 
     /// All pinned terminals across all worktrees, sorted by pinnedAt.
@@ -123,14 +122,6 @@ final class AppState: ObservableObject {
         isConnected = didConnect
         if didConnect {
             await refreshAll()
-            // Auto-select pinned worktrees on launch
-            let pinnedWts = worktrees.values.flatMap { $0 }
-                .filter { $0.pinnedAt != nil }
-                .sorted { ($0.pinnedAt ?? .distantPast) < ($1.pinnedAt ?? .distantPast) }
-            if !pinnedWts.isEmpty {
-                selectedWorktreeIDs = Set(pinnedWts.map(\.id))
-                selectionOrder = pinnedWts.map(\.id)
-            }
             await refreshPRStatuses()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")

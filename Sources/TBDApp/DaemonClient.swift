@@ -337,14 +337,6 @@ actor DaemonClient {
         )
     }
 
-    /// Set or clear the pin on a worktree.
-    func setWorktreePin(id: UUID, pinned: Bool) throws {
-        try callVoid(
-            method: RPCMethod.worktreeSetPin,
-            params: WorktreeSetPinParams(worktreeID: id, pinned: pinned)
-        )
-    }
-
     /// Set or clear the pin on a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) throws {
         try callVoid(

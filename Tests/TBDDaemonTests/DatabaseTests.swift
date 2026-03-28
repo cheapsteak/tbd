@@ -149,58 +149,6 @@ struct DatabaseTests {
         #expect(archived.count == 1)
     }
 
-    // MARK: - Pin Tests
-
-    @Test func worktreeSetPinAndUnpin() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let repo = try await db.repos.create(path: "/tmp/test-pin-repo", displayName: "Test", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
-            path: "/tmp/test-pin-repo/.tbd/worktrees/test-wt", tmuxServer: "test"
-        )
-
-        // Initially not pinned
-        let initial = try await db.worktrees.get(id: wt.id)
-        #expect(initial?.pinnedAt == nil)
-
-        // Pin it
-        try await db.worktrees.setPin(id: wt.id, pinned: true)
-        let pinned = try await db.worktrees.get(id: wt.id)
-        #expect(pinned?.pinnedAt != nil)
-
-        // Unpin it
-        try await db.worktrees.setPin(id: wt.id, pinned: false)
-        let unpinned = try await db.worktrees.get(id: wt.id)
-        #expect(unpinned?.pinnedAt == nil)
-    }
-
-    @Test func pinnedWorktreesOrderByPinnedAt() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let repo = try await db.repos.create(path: "/tmp/test-pin-order", displayName: "Test2", defaultBranch: "main")
-
-        let wt1 = try await db.worktrees.create(
-            repoID: repo.id, name: "wt-1", branch: "tbd/wt-1",
-            path: "/tmp/test-pin-order/.tbd/worktrees/wt-1", tmuxServer: "test"
-        )
-        let wt2 = try await db.worktrees.create(
-            repoID: repo.id, name: "wt-2", branch: "tbd/wt-2",
-            path: "/tmp/test-pin-order/.tbd/worktrees/wt-2", tmuxServer: "test"
-        )
-
-        // Pin wt2 first, then wt1
-        try await db.worktrees.setPin(id: wt2.id, pinned: true)
-        try await Task.sleep(for: .milliseconds(10))
-        try await db.worktrees.setPin(id: wt1.id, pinned: true)
-
-        let all = try await db.worktrees.list(repoID: repo.id)
-        let pinned = all.filter { $0.pinnedAt != nil }
-        let sorted = pinned.sorted { ($0.pinnedAt ?? Date.distantPast) < ($1.pinnedAt ?? Date.distantPast) }
-
-        #expect(sorted.count == 2)
-        #expect(sorted[0].id == wt2.id) // pinned first
-        #expect(sorted[1].id == wt1.id) // pinned second
-    }
-
     // MARK: - Terminal Tests
 
     @Test func createAndListTerminals() async throws {

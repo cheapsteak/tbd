@@ -11,16 +11,6 @@ struct SidebarContextMenu: View {
         Group {
             if worktree.status == .main || worktree.status == .creating {
                 // Main / creating worktree: only Finder and Copy Path (no rename/archive)
-                Button(worktree.pinnedAt != nil ? "Unpin" : "Pin") {
-                    let wtID = worktree.id
-                    let shouldPin = worktree.pinnedAt == nil
-                    Task {
-                        await appState.setWorktreePin(id: wtID, pinned: shouldPin)
-                    }
-                }
-
-                Divider()
-
                 if !worktree.path.isEmpty {
                     Button("Open in Finder") {
                         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.path)
@@ -34,14 +24,6 @@ struct SidebarContextMenu: View {
             } else {
                 Button("Rename...") {
                     onRename()
-                }
-
-                Button(worktree.pinnedAt != nil ? "Unpin" : "Pin") {
-                    let wtID = worktree.id
-                    let shouldPin = worktree.pinnedAt == nil
-                    Task {
-                        await appState.setWorktreePin(id: wtID, pinned: shouldPin)
-                    }
                 }
 
                 Button("Archive", role: .destructive) {
