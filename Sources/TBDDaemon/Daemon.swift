@@ -13,6 +13,7 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var subscriptions: StateSubscriptionManager?
     public nonisolated(unsafe) var sshRefreshTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
+    public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public let pidFile: PIDFile
     public let startTime: Date
 
@@ -134,11 +135,15 @@ public final class Daemon: Sendable {
 
         print("[Daemon] Started successfully (PID \(ProcessInfo.processInfo.processIdentifier))")
 
-        // 13. Refresh git statuses for all repos in background (cold recovery)
-        Task {
-            let allRepos = (try? await database.repos.list()) ?? []
-            for repo in allRepos {
-                await lifecycle.refreshGitStatuses(repoID: repo.id)
+        // 13. Periodic git status refresh (branch sync, conflict detection)
+        self.gitStatusTask = Task {
+            // Run once immediately (cold recovery), then every 10s
+            while !Task.isCancelled {
+                let allRepos = (try? await database.repos.list()) ?? []
+                for repo in allRepos {
+                    await lifecycle.refreshGitStatuses(repoID: repo.id)
+                }
+                try? await Task.sleep(for: .seconds(10))
             }
         }
     }
@@ -150,6 +155,7 @@ public final class Daemon: Sendable {
         // Cancel background tasks
         sshRefreshTask?.cancel()
         gitFetchTask?.cancel()
+        gitStatusTask?.cancel()
 
         // Stop servers
         if let sock = socketServer {
