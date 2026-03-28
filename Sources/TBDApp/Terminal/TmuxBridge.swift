@@ -52,43 +52,26 @@ final class TmuxBridge: @unchecked Sendable {
     func prepareSession(panelID: UUID, server: String, windowID: String) -> [String]? {
         let sessionName = "tbd-view-\(panelID.uuidString.prefix(8).lowercased())"
 
-        // Create a grouped session linked to "main"
-        let createResult = runTmux(server: server, args: [
-            "new-session", "-d", "-t", "main", "-s", sessionName
+        // Single tmux invocation: create grouped session + select the target window.
+        // Global options (status, borders, etc.) are set once by the daemon at server creation.
+        let result = runTmux(server: server, args: [
+            "new-session", "-d", "-t", "main", "-s", sessionName, ";",
+            "select-window", "-t", "\(sessionName):\(windowID)"
         ])
 
-        // Hide ALL tmux chrome — our app provides its own UI
-        // Set globally so it applies to main session and all grouped sessions
-        let _ = runTmux(server: server, args: ["set", "-g", "status", "off"])
-        let _ = runTmux(server: server, args: ["set", "-g", "pane-border-style", "fg=black"])
-        let _ = runTmux(server: server, args: ["set", "-g", "pane-border-indicators", "off"])
-        // Also set default-terminal for proper color support
-        let _ = runTmux(server: server, args: ["set", "-g", "default-terminal", "xterm-256color"])
-
-        if !createResult.success {
-            // Session might already exist, try to use it
-            debugLog("PREPARE: new-session failed (may already exist): \(createResult.output)")
-        }
-
-        // Verify the window still exists before selecting it
-        let checkResult = runTmux(server: server, args: [
-            "list-panes", "-t", windowID
-        ])
-
-        if checkResult.success {
-            // Window exists — select it in the grouped session
+        if !result.success {
+            // Either the session couldn't be created or the window is dead.
+            // Try to distinguish: attempt select-window alone in case the session
+            // already existed but the chained command failed on new-session.
             let selectResult = runTmux(server: server, args: [
                 "select-window", "-t", "\(sessionName):\(windowID)"
             ])
             if !selectResult.success {
-                debugLog("PREPARE: select-window failed: \(selectResult.output)")
+                debugLog("PREPARE: window \(windowID) is dead on server \(server)")
+                // Clean up in case the session was partially created
+                let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
+                return nil
             }
-        } else {
-            // Window is dead — return nil so the caller can recreate the terminal
-            debugLog("PREPARE: window \(windowID) is dead on server \(server)")
-            // Clean up the grouped session we just created
-            let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
-            return nil
         }
 
         lock.lock()

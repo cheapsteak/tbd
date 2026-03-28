@@ -146,8 +146,8 @@ struct TerminalPanelView: NSViewRepresentable {
                 }
             }
 
-            // Focus
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            // Focus on next run loop iteration (needs main actor for window access)
+            DispatchQueue.main.async {
                 terminalView.window?.makeFirstResponder(terminalView)
             }
 
