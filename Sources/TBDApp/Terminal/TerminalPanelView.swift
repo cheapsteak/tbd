@@ -57,8 +57,8 @@ struct TerminalPanelView: NSViewRepresentable {
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
 
-        // Delay process start to let SwiftUI lay out the view first
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak tv] in
+        // Start tmux client as soon as the view has real dimensions from layout
+        tv.onReady = { [weak tv] in
             guard let tv else { return }
             context.coordinator.startTmuxClient(
                 terminalView: tv,

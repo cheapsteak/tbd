@@ -11,6 +11,20 @@ class TBDTerminalView: TerminalView {
     var remoteURL: String?
     var onNotification: ((String, String) -> Void)?
 
+    /// Called once when the view has been laid out with non-zero bounds.
+    /// Used to start the tmux client as soon as the terminal has real dimensions.
+    var onReady: (() -> Void)?
+    private var didFireReady = false
+
+    override func layout() {
+        super.layout()
+        if !didFireReady && bounds.width > 0 && bounds.height > 0 {
+            didFireReady = true
+            onReady?()
+            onReady = nil
+        }
+    }
+
     // MARK: - Cell dimension calculation
 
     /// Computes cell dimensions from font metrics, matching SwiftTerm's internal calculation.
