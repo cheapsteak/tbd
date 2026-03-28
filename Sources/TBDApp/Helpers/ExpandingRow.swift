@@ -21,18 +21,23 @@ struct ExpandingRowModifier<Expanded: View>: ViewModifier {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             )
             .onHover { hovering in
-                if hovering && isTruncated {
-                    guard let screenFrame = anchor.screenFrame else { return }
-                    let inset = anchor.contentInset
-                    ExpandingRowPanel.show(
-                        content: expandedContent(),
-                        screenFrame: screenFrame,
-                        contentInset: inset,
-                        parentWindow: anchor.view?.window,
-                        onClick: onClick
-                    )
-                } else {
-                    ExpandingRowPanel.hide()
+                // Defer to next run loop — showing the panel during a layout
+                // pass crashes (NSHostingView triggers setNeedsUpdateConstraints
+                // on the child window while the parent is mid-layout).
+                DispatchQueue.main.async {
+                    if hovering && isTruncated {
+                        guard let screenFrame = anchor.screenFrame else { return }
+                        let inset = anchor.contentInset
+                        ExpandingRowPanel.show(
+                            content: expandedContent(),
+                            screenFrame: screenFrame,
+                            contentInset: inset,
+                            parentWindow: anchor.view?.window,
+                            onClick: onClick
+                        )
+                    } else {
+                        ExpandingRowPanel.hide()
+                    }
                 }
             }
             .onChange(of: isTruncated) { _, truncated in
