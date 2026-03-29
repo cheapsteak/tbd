@@ -8,6 +8,8 @@ Claude Code processes consume 500MB–1GB+ of memory each. With multiple worktre
 
 Automatically exit idle Claude Code instances when the user switches away from a worktree, and resume them (with full conversation context) when switching back. Pinned terminals are never suspended.
 
+**v1 scope**: Only daemon-created Claude terminals (where `label` starts with `"claude"`). User-spawned Claude instances are not suspended. This eliminates runtime process inspection at suspend time and avoids dependency on undocumented PID files for the suspend path.
+
 ## Data model
 
 ### New terminal fields
@@ -16,11 +18,10 @@ Add to the `Terminal` model and database:
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `claudeSessionID` | `String?` | Claude Code session UUID. Set at launch for TBD-created terminals (via `--session-id`), or lazily captured at suspend time for user-spawned instances. Mutable — updated after each resume cycle (see Session ID lifecycle). |
+| `claudeSessionID` | `String?` | Claude Code session UUID. Set at launch via `--session-id`. Mutable — updated after each resume cycle since `--resume` generates a new ID. |
 | `suspendedAt` | `Date?` | Timestamp when daemon auto-suspended this terminal. `nil` = not suspended. |
-| `skipPermissions` | `Bool` | Whether this terminal was launched with `--dangerously-skip-permissions`. Set at creation time, read at resume time. Defaults to `false`. |
 
-**Migration**: New migration `v6` adds all three columns to the `terminal` table with nil/false defaults. `Models.swift` gets matching fields (optional for `claudeSessionID` and `suspendedAt`, defaulted for `skipPermissions`).
+**Migration**: New migration `v6` adds both columns to the `terminal` table with nil defaults. In `Models.swift`, both fields must use `decodeIfPresent` (synthesized `Codable` does not use property default values for missing keys — a `let foo: String? = nil` still throws `keyNotFound` if the key is absent in JSON). Update `TerminalRecord` in `TerminalStore.swift` with matching GRDB columns.
 
 ### Session ID lifecycle
 
@@ -28,20 +29,9 @@ Add to the `Terminal` model and database:
 
 **Important**: Do NOT use `claude --continue` as an alternative. It resumes the most recent session per cwd, but the user regularly runs multiple Claude sessions in the same worktree directory. `--continue` would resume the wrong session.
 
-Two paths for obtaining the session ID:
+**At terminal creation**: The daemon generates a UUID, passes `--session-id <uuid>` in the launch command, and stores it as `claudeSessionID`. This is the reliable, race-free path for the first suspend cycle.
 
-**Path A — TBD-created terminals**: When the daemon creates a Claude terminal, it generates a UUID and passes `--session-id <uuid>` in the launch command. The UUID is stored as `claudeSessionID` immediately at creation time. This is the reliable, race-free path for the first suspend cycle.
-
-**Path B — User-spawned terminals**: When a user manually runs `claude` in a shell tab, there's no `--session-id`. The session ID is captured lazily at suspend time via PID file lookup:
-
-1. `tmux list-panes -t <paneID> -F "#{pane_pid}"` → shell PID
-2. `pgrep -P <shellPID> -x claude` → Claude process PID (must filter for `claude` specifically — the shell may also have MCP server children, `caffeinate`, etc.). If multiple matches, skip (ambiguous — don't suspend).
-3. Read `~/.claude/sessions/<claudePID>.json` → parse `sessionId` (treat JSON decode errors as nil — file may be partially written)
-4. Cache the result as `claudeSessionID` on the terminal record
-
-If lazy capture fails (process already exited, file missing, no `claude` child found, multiple matches), the terminal is skipped for suspension — conservative by default.
-
-**Session ID refresh after resume**: After every resume (both Path A and Path B), the daemon must re-capture the session ID via PID file lookup once the new Claude process has started. This is done as part of the resume flow (see Resume flow step 7). `claudeSessionID` is mutable throughout the terminal's lifetime.
+**After each resume**: The daemon re-captures the session ID via PID file lookup once the new Claude process has started (see Resume flow step 7). This is the only point where `~/.claude/sessions/<pid>.json` is read. `claudeSessionID` is mutable throughout the terminal's lifetime.
 
 **Note**: `~/.claude/sessions/<pid>.json` is an implementation detail of Claude Code, not a documented API. Files are deleted when Claude exits (verified: 59/59 session files on disk belong to live processes, zero orphans). The session ID is stable for the lifetime of the process.
 
@@ -51,13 +41,13 @@ If lazy capture fails (process already exited, file missing, no `claude` child f
 
 New file: `Sources/TBDDaemon/Tmux/ClaudeStateDetector.swift`
 
-Takes a `TmuxManager` dependency. `TmuxManager` needs new public methods: `capturePaneOutput(server:paneID:)` (wraps `capture-pane -p`), `paneProcessID(server:paneID:)` (wraps `list-panes -F "#{pane_pid}"`), and `paneCurrentCommand(server:paneID:)` (wraps `list-panes -F "#{pane_current_command}"`).
+Takes a `TmuxManager` dependency. `TmuxManager` needs new public methods: `capturePaneOutput(server:paneID:)` (wraps `capture-pane -p`) and `paneCurrentCommand(server:paneID:)` (wraps `list-panes -F "#{pane_current_command}"`).
 
 #### `isIdle(server:paneID:) async -> Bool`
 
 Determines whether a Claude Code instance is idle and safe to suspend.
 
-1. **Guard**: check `pane_current_command` — if it's `zsh`, `bash`, or doesn't look like a Claude version string, return `false` (Claude isn't the foreground process)
+1. **Guard**: check `pane_current_command` — Claude appears as a semver-like string (e.g. `2.1.86`). If the value is `zsh`, `bash`, or doesn't match `\d+\.\d+\.\d+`, return `false`.
 2. Run `tmux capture-pane -p -t <paneID>`
 3. Take the last 5 lines of output
 4. Check for **both** conditions:
@@ -68,7 +58,8 @@ Determines whether a Claude Code instance is idle and safe to suspend.
 **Pattern constants** (centralized, since these are Claude Code UI details with no stability contract):
 
 ```swift
-static let promptPattern = "^❯[\\s\\u{00a0}]*$"  // ❯ followed by only whitespace/nbsp
+static let claudeProcessPattern = #"^\d+\.\d+\.\d+"#  // e.g. "2.1.86"
+static let promptPattern = "^❯[\\s\\u{00a0}]*$"        // ❯ followed by only whitespace/nbsp
 static let statusIndicators = ["⏵⏵", "bypass", "auto mode", "? for shortcuts"]
 ```
 
@@ -86,32 +77,33 @@ The 1s debounce is conservative. False positives are benign: if Claude starts a 
 
 #### `captureSessionID(server:paneID:) async -> String?`
 
-Extracts the Claude Code session UUID for a running instance.
+Extracts the Claude Code session UUID for a running instance. Used only for post-resume session ID refresh.
 
-1. Get shell PID via `paneProcessID(server:paneID:)`
-2. Run `pgrep -P <shellPID> -x claude` to find the Claude child process (not MCP servers or other children). If multiple matches, return `nil`.
+1. Get shell PID via `tmux list-panes -t <paneID> -F "#{pane_pid}"`
+2. Run `pgrep -P <shellPID> -x claude` to find the Claude child process. If multiple matches, return `nil`.
 3. Read `~/.claude/sessions/<claudePID>.json`
-4. Parse JSON and return `sessionId`. Treat decode errors as `nil` (file may be partially written).
+4. Parse JSON and return `sessionId`. Treat decode errors as `nil`.
 5. Return `nil` at any step if the lookup fails
 
 ## Suspend flow
 
-Triggered when the user switches away from a worktree. Requires a new RPC method (see Integration section). Orchestrated by the `SuspendResumeCoordinator` actor (see Concurrency section).
+Triggered when the user switches away from a worktree. Orchestrated by the `SuspendResumeCoordinator` actor (see Concurrency section).
 
 For each terminal in the **departing** worktree:
 
-1. **Skip if pinned**: `pinnedAt != nil` → skip
-2. **Skip if already suspended**: `suspendedAt != nil` → skip
-3. **Skip if not Claude**: check `pane_current_command` — if it doesn't look like Claude, skip. (Covers both TBD-created terminals where `label == "claude"` and user-spawned Claude instances.)
-4. **Check idle state**: call `isIdleConfirmed(server:paneID:)` → skip if `false` (includes 1s debounce)
-5. **Ensure session ID**: if `claudeSessionID` is nil, call `captureSessionID(server:paneID:)` and store it. If still nil → skip (can't resume without it)
+1. **Skip if not daemon-created Claude**: `label` does not start with `"claude"` → skip (v1 scope)
+2. **Skip if pinned**: `pinnedAt != nil` → skip
+3. **Skip if already suspended**: `suspendedAt != nil` → skip
+4. **Skip if no session ID**: `claudeSessionID == nil` → skip (can't resume without it)
+5. **Check idle state**: call `isIdleConfirmed(server:paneID:)` → skip if `false` (includes 1s debounce)
 6. **Exit Claude**: `tmux send-keys -t <paneID> "/exit" Enter`
 7. **Verify exit**: poll `pane_current_command` every 200ms for up to 3 seconds. If Claude is still running after timeout, log a warning and skip — don't mark as suspended.
-8. **Show suspend message**: after exit confirmed, send `echo '[Session suspended — will resume when you switch back]'` to the pane via `tmux send-keys`. This gives the user a visible indicator if they peek at the terminal.
-9. **Update database**: set `suspendedAt = Date()`
-10. **Broadcast state delta**
+8. **Update database**: set `suspendedAt = Date()`
+9. **Broadcast state delta**
 
 Each step that skips leaves the terminal running — conservative by default.
+
+**No suspend message for v1**: TBD-created panes use `zsh -ic <command>` — the pane dies when Claude exits, so there's no shell to echo into. The user sees the terminal resume when they switch back, which is sufficient feedback.
 
 **Race condition note**: Claude could start working between `isIdleConfirmed()` and the `/exit` send. This is benign — Claude Code queues `/exit` and processes it after the current turn completes. The session ID remains valid.
 
@@ -121,13 +113,13 @@ Triggered when a worktree is selected. Orchestrated by the `SuspendResumeCoordin
 
 For each terminal in the **arriving** worktree where `suspendedAt != nil`:
 
-1. **Check if Claude is already running**: `pane_current_command` shows Claude → clear `suspendedAt`, re-capture session ID via PID lookup, done (user manually restarted it)
-2. **Check pane is alive**: verify the tmux pane/window still exists. If dead → create a new tmux window (the `zsh -ic` wrapper means the pane dies when Claude exits)
-3. **Build resume command**: `claude --resume <claudeSessionID>` + append ` --dangerously-skip-permissions` if `skipPermissions == true` on the terminal record
-4. **If pane alive** (shell prompt visible): `tmux send-keys -t <paneID> "<command>" Enter`
-5. **If pane dead**: create new window via `TmuxManager.createWindow(server:session:cwd:shellCommand:)` with the resume command. Update the terminal record's `tmuxWindowID` and `tmuxPaneID` to the new values.
+1. **Check if Claude is already running**: `pane_current_command` matches Claude → clear `suspendedAt`, re-capture session ID, done (user manually restarted it)
+2. **Check pane is alive**: verify the tmux pane/window still exists via `TmuxManager.windowExists()`. The pane will almost always be dead (TBD-created panes use `zsh -ic` — the shell exits when Claude exits).
+3. **Build resume command**: `claude --resume <claudeSessionID> --dangerously-skip-permissions` (daemon always launches managed Claude with this flag today)
+4. **Create new tmux window**: call `TmuxManager.createWindow(server:session:cwd:shellCommand:)` with the resume command. Update the terminal record's `tmuxWindowID` and `tmuxPaneID` to the new values.
+5. **Force app UI reconnection**: the state delta broadcast must cause the app to recreate the `TerminalPanelView` for this terminal. Since `TerminalPanelView` binds tmux in `makeNSView` (which only runs once) and `updateNSView` is a no-op, a changed `tmuxWindowID` won't rebind the view. **Fix**: include `tmuxWindowID` in the view's `.id()` modifier (e.g. `.id("\(terminalID)-\(tmuxWindowID)")`), so SwiftUI destroys and recreates the view when the window ID changes.
 6. **Clear state**: set `suspendedAt = nil`
-7. **Re-capture session ID**: wait ~5s for Claude to start, then call `captureSessionID(server:paneID:)` to get the new session UUID (since `--resume` generates a new ID). Update `claudeSessionID` in the DB. If capture fails, log a warning — the terminal is usable but won't be suspendable next time until the ID is captured.
+7. **Re-capture session ID**: wait ~5s for Claude to start, then call `captureSessionID(server:paneID:)` to get the new session UUID. Update `claudeSessionID` in the DB. If capture fails, log a warning — the terminal is usable but won't be suspendable next time until the ID is captured.
 8. **Broadcast state delta**
 
 **Stale session handling**: if `claude --resume <id>` fails (session file deleted, corrupted), Claude will show an error. This is acceptable — the user sees the error and can start a new session manually.
@@ -156,10 +148,14 @@ When a resume arrives for a terminal with an in-flight suspend, the coordinator 
 The app's worktree selection is local to `AppState.selectedWorktreeIDs`. State deltas only flow daemon→app, not the reverse. A new RPC method is needed:
 
 **Method**: `worktreeSelectionChanged`
-**Params**: `{ selectedWorktreeIDs: [UUID], previousWorktreeIDs: [UUID] }`
+**Params**: `{ selectedWorktreeIDs: [UUID] }` (idempotent — daemon diffs against its own last-known selection)
 **Result**: `{ success: Bool }`
 
 The app calls this from its `onChange(of: appState.selectedWorktreeIDs)` handler in `ContentView.swift`. The daemon computes departing/arriving sets and runs suspend/resume flows via the `SuspendResumeCoordinator`.
+
+### Reconcile changes
+
+The existing reconcile flow (`WorktreeLifecycle+Reconcile.swift`) deletes terminal records whose tmux window is dead. Auto-suspended terminals have dead panes by design. **Reconcile must skip terminals where `suspendedAt != nil`** — they will be recreated on resume.
 
 ### Daemon startup reconciliation
 
@@ -167,55 +163,71 @@ On daemon startup, sweep all terminals with `suspendedAt != nil`:
 - Check if the tmux pane is alive and Claude is running → clear `suspendedAt` (user or system restarted it)
 - Check if the pane is dead → leave `suspendedAt` set (will be resumed when worktree is next selected)
 
+This runs BEFORE the normal reconcile, so suspended terminals are already flagged and reconcile will skip them.
+
+### App UI reconnection
+
+`TerminalPanelView` binds to tmux once in `makeNSView` and never rebinds (`updateNSView` is a no-op). When resume creates a new tmux window, the old view is stale. **Fix**: change the view identity in `PanePlaceholder.swift` to include the tmux window ID:
+
+```swift
+// Before:
+.id(terminalID)
+
+// After:
+.id("\(terminal.id)-\(terminal.tmuxWindowID)")
+```
+
+This forces SwiftUI to destroy and recreate the `TerminalPanelView` when the window ID changes, triggering a fresh `makeNSView` that binds to the new tmux session.
+
 ## Terminal creation changes
 
 When the daemon creates a Claude terminal (in `WorktreeLifecycle+Create.swift`):
 1. Generate a UUID for the session: `UUID().uuidString`
 2. Store it as `claudeSessionID` on the terminal record
-3. Store `skipPermissions` based on the user's current setting
-4. Append `--session-id <uuid>` to the Claude launch command (and `--dangerously-skip-permissions` if applicable, as it already does)
-
-This ensures TBD-created terminals always have a known session ID from the start, independent of PID file availability.
+3. Append `--session-id <uuid>` to the Claude launch command (the daemon already appends `--dangerously-skip-permissions`)
 
 ## Scope boundaries
 
-### In scope
-- Auto-suspend idle Claude terminals on worktree switch
+### In scope (v1)
+- Auto-suspend idle daemon-created Claude terminals on worktree switch
 - Auto-resume with correct session on worktree switch back
 - Session ID re-capture after resume (handles `--resume` generating new IDs)
 - Respect pinned terminals (never suspend)
 - Deterministic `--session-id` for TBD-created terminals
-- Lazy session ID capture for user-spawned Claude instances
 - 1s idle detection debounce
-- Terminal buffer message on suspend
 - `SuspendResumeCoordinator` actor for concurrency and rapid-switch handling
-- New DB migration for `claudeSessionID`, `suspendedAt`, `skipPermissions`
-- New `worktreeSelectionChanged` RPC method
-- `ClaudeStateDetector` for idle detection and session ID capture
-- Pane recreation on resume when original pane is dead
+- New DB migration for `claudeSessionID` and `suspendedAt`
+- New `worktreeSelectionChanged` RPC method (idempotent)
+- `ClaudeStateDetector` for idle detection and post-resume session ID capture
+- Pane recreation on resume (new tmux window)
+- App UI reconnection via composite view identity
+- Reconcile fix (preserve suspended terminals)
 - Daemon startup reconciliation
 
-### Out of scope
-- UI indicator for suspended state beyond the terminal buffer message (future enhancement)
-- User setting to enable/disable auto-suspend (always on for v1; add setting if users want it)
+### Out of scope (v2+)
+- Suspending user-spawned Claude instances (requires lazy PID file capture at suspend time)
+- UI indicator for suspended state (future enhancement)
+- User setting to enable/disable auto-suspend
 - Suspending non-Claude terminals
-- Suspending terminals in the currently selected worktree
 - Timer-based suspension (only on worktree switch)
+- Per-terminal `skipPermissions` toggle (daemon always uses `--dangerously-skip-permissions` today)
 
 ## Known limitations
 
-- `~/.claude/sessions/<pid>.json` is an undocumented implementation detail. If Claude Code changes this format, lazy capture and post-resume refresh will fail silently (terminals won't be suspendable until the code is updated, but nothing breaks).
+- `~/.claude/sessions/<pid>.json` is an undocumented implementation detail, used only for post-resume session ID refresh. If Claude Code changes this format, the first suspend/resume cycle works (uses the creation-time `--session-id`), but subsequent cycles won't until the code is updated.
 - `claude --resume` ignores `CLAUDE_CONFIG_DIR` environment variable (GitHub issue #16103). Users with custom config dirs may see resume failures.
 - Idle detection patterns (`❯` prompt, status bar strings) are Claude Code UI details with no stability contract. Changes to Claude's TUI would cause false negatives (failing to detect idle), not false positives (incorrectly suspending). Patterns are centralized as constants for easy updates.
 
 ## Testing
 
-- **ClaudeStateDetector**: unit tests with mocked tmux output covering all states (idle, idle+input, busy, popup, picker menu, non-Claude foreground process)
-- **Idle debounce**: test that `isIdleConfirmed` returns false when first check passes but second doesn't (simulating inter-turn prompt flash)
-- **Session ID capture**: test `pgrep` filtering (must find `claude` not MCP servers), test multiple matches returns nil, test missing/corrupt session file returns nil
+- **ClaudeStateDetector**: unit tests with mocked tmux output covering all states (idle, idle+input, busy, popup, picker menu, non-Claude foreground process). Test `claudeProcessPattern` regex against real version strings.
+- **Idle debounce**: test that `isIdleConfirmed` returns false when first check passes but second doesn't
+- **Session ID capture**: test missing/corrupt session file returns nil, test multiple `pgrep` matches returns nil
 - **Session ID refresh**: test that `claudeSessionID` is updated after resume via PID lookup
-- **Suspend flow**: verify skip conditions (pinned, non-claude, already suspended, not idle, no session ID). Verify exit verification with timeout and rollback. Verify echo message after exit.
-- **Resume flow**: verify command construction with and without `--dangerously-skip-permissions`. Test pane-alive vs pane-dead paths. Test "Claude already running" detection.
+- **Suspend flow**: verify skip conditions (not-claude-label, pinned, already suspended, no session ID, not idle). Verify exit verification with timeout and skip-on-failure.
+- **Resume flow**: verify command includes `--dangerously-skip-permissions`. Test new window creation and terminal record update. Test "Claude already running" detection.
+- **App UI reconnection**: verify that changing `tmuxWindowID` on a terminal triggers view recreation
+- **Reconcile**: verify terminals with `suspendedAt != nil` are preserved (not deleted as dead windows)
 - **Coordinator**: verify suspend cancellation when resume arrives for same terminal. Verify skip when suspend arrives during resume.
-- **DB migration**: verify new columns exist with nil/false defaults, existing rows still decode
-- **Terminal creation**: verify `--session-id` is passed in launch command and stored on record. Verify `skipPermissions` stored.
+- **DB migration**: verify new columns exist with nil defaults, existing rows decode with `decodeIfPresent`
+- **Terminal creation**: verify `--session-id` is passed in launch command and stored on record
