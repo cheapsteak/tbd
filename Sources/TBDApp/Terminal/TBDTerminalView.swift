@@ -206,6 +206,32 @@ class TBDTerminalView: TerminalView {
         return resolvedPath
     }
 
+    /// Resolves a string as a file path — handles absolute paths, file:// URLs, and relative paths.
+    /// Returns the resolved path if the file exists, nil otherwise.
+    func resolveAsFilePath(_ link: String) -> String? {
+        let candidate: String
+        if link.hasPrefix("file://") {
+            guard let path = URL(string: link)?.path, !path.isEmpty else { return nil }
+            candidate = path
+        } else if link.hasPrefix("/") {
+            candidate = link
+        } else if !link.contains("://"), !worktreePath.isEmpty {
+            candidate = URL(fileURLWithPath: worktreePath).appendingPathComponent(link).path
+        } else {
+            return nil
+        }
+        // Strip trailing :line:col suffix for existence check
+        let pathOnly: String
+        if let range = candidate.range(of: ":\\d+(:\\d+)?$", options: .regularExpression) {
+            pathOnly = String(candidate[..<range.lowerBound])
+        } else {
+            pathOnly = candidate
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: pathOnly, isDirectory: &isDir), !isDir.boolValue else { return nil }
+        return pathOnly
+    }
+
     /// Extracts a clickable URL from the terminal buffer at the given window-coordinate point.
     /// Checks for OSC 8 hyperlink payloads first, then falls back to pattern matching
     /// for common link patterns like "PR #123".
