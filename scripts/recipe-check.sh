@@ -74,8 +74,11 @@ if [ -n "$last_audit" ]; then
     elif date -d "$last_audit" "+%s" >/dev/null 2>&1; then
         audit_epoch=$(date -d "$last_audit" "+%s")
     else
-        audit_epoch=0
+        echo "  WARNING: Could not parse last-audit date '$last_audit' — neither BSD nor GNU date worked"
+        ERRORS=$((ERRORS + 1))
+        audit_epoch=""
     fi
+    if [ -n "$audit_epoch" ]; then
     now_epoch=$(date "+%s")
     days_ago=$(( (now_epoch - audit_epoch) / 86400 ))
     if [ "$days_ago" -gt 14 ]; then
@@ -83,6 +86,7 @@ if [ -n "$last_audit" ]; then
         ERRORS=$((ERRORS + 1))
     else
         echo "  Audit is fresh ($days_ago days ago)"
+    fi
     fi
 else
     echo "  WARNING: No last-audit timestamp found in recipe.md"
