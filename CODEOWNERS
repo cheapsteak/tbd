@@ -1,0 +1,3 @@
+# Recipe files require review from someone who understands architectural intent.
+# Recipes have more leverage than code — they guide all future generation.
+/recipe/ @cheapsteak

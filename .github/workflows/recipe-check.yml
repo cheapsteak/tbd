@@ -1,0 +1,21 @@
+name: Recipe Check
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'recipe/**'
+      - 'scripts/recipe-check.sh'
+
+concurrency:
+  group: recipe-check-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Recipe mechanical checks
+        run: scripts/recipe-check.sh
