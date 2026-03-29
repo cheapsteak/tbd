@@ -353,6 +353,9 @@ struct CodeViewerSidebar: View {
             loadTopLevel()
             revealFile()
         }
+        .onChange(of: revealPath) {
+            revealFile()
+        }
     }
 
     private func loadTopLevel() {
