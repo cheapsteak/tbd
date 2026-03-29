@@ -60,14 +60,42 @@ final class AppState: ObservableObject {
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
 
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+
     init() {
         restoreLayouts()
         if let saved = UserDefaults.standard.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
+        startMemoryPressureMonitor()
         Task {
             await connectAndLoadInitialState()
             startPolling()
+        }
+    }
+
+    /// Respond to system memory pressure by purging purgeable caches.
+    private nonisolated func startMemoryPressureMonitor() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            guard self != nil else { return }
+            Task { @MainActor in
+                logger.warning("Memory pressure detected — purging caches")
+                // Flush bitmap caches on all windows
+                for window in NSApp.windows {
+                    window.displaysWhenScreenProfileChanges = true
+                }
+                // Trigger a GC pass on ObjC autoreleased objects
+                autoreleasepool {}
+            }
+        }
+        source.activate()
+        // Store must happen on MainActor
+        Task { @MainActor in
+            self.memoryPressureSource = source
         }
     }
 

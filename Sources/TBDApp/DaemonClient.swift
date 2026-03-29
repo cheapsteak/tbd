@@ -155,88 +155,93 @@ actor DaemonClient {
     // MARK: - Low-level socket communication
 
     /// Send an RPCRequest over a fresh POSIX Unix socket and return the RPCResponse.
+    /// Wrapped in autoreleasepool to ensure ObjC-bridged objects (from JSON coding,
+    /// FileManager, etc.) are freed immediately — prevents accumulation across
+    /// the 2-second polling cycle.
     private func sendRaw(_ request: RPCRequest) throws -> RPCResponse {
-        guard FileManager.default.fileExists(atPath: socketPath) else {
-            throw DaemonClientError.daemonNotRunning
-        }
+        try autoreleasepool {
+            guard FileManager.default.fileExists(atPath: socketPath) else {
+                throw DaemonClientError.daemonNotRunning
+            }
 
-        // Create socket
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw DaemonClientError.connectionFailed("Could not create socket")
-        }
-        defer { close(fd) }
+            // Create socket
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard fd >= 0 else {
+                throw DaemonClientError.connectionFailed("Could not create socket")
+            }
+            defer { close(fd) }
 
-        // Connect
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = socketPath.utf8CString
-        guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
-            throw DaemonClientError.connectionFailed("Socket path too long")
-        }
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
-                for i in 0..<pathBytes.count {
-                    dest[i] = pathBytes[i]
+            // Connect
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            let pathBytes = socketPath.utf8CString
+            guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+                throw DaemonClientError.connectionFailed("Socket path too long")
+            }
+            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+                ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
+                    for i in 0..<pathBytes.count {
+                        dest[i] = pathBytes[i]
+                    }
                 }
             }
-        }
 
-        let connectResult = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            let connectResult = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                    Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
             }
-        }
 
-        guard connectResult == 0 else {
-            throw DaemonClientError.daemonNotRunning
-        }
-
-        // Encode request as JSON + newline
-        let encoder = JSONEncoder()
-        let requestData = try encoder.encode(request)
-        var message = requestData
-        message.append(contentsOf: [0x0A]) // newline delimiter
-
-        // Send
-        let sent = message.withUnsafeBytes { buffer in
-            Darwin.send(fd, buffer.baseAddress!, buffer.count, 0)
-        }
-        guard sent == message.count else {
-            throw DaemonClientError.sendFailed("Sent \(sent) of \(message.count) bytes")
-        }
-
-        // Read response until newline or connection closes
-        var responseData = Data()
-        let bufferSize = 65536
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-        defer { buffer.deallocate() }
-
-        while true {
-            let bytesRead = recv(fd, buffer, bufferSize, 0)
-            if bytesRead < 0 {
-                throw DaemonClientError.receiveFailed("recv failed with errno \(errno)")
+            guard connectResult == 0 else {
+                throw DaemonClientError.daemonNotRunning
             }
-            if bytesRead == 0 {
-                break
+
+            // Encode request as JSON + newline
+            let encoder = JSONEncoder()
+            let requestData = try encoder.encode(request)
+            var message = requestData
+            message.append(contentsOf: [0x0A]) // newline delimiter
+
+            // Send
+            let sent = message.withUnsafeBytes { buffer in
+                Darwin.send(fd, buffer.baseAddress!, buffer.count, 0)
             }
-            responseData.append(buffer, count: bytesRead)
-            if responseData.contains(0x0A) {
-                break
+            guard sent == message.count else {
+                throw DaemonClientError.sendFailed("Sent \(sent) of \(message.count) bytes")
             }
-        }
 
-        // Trim trailing newline
-        if let newlineIndex = responseData.firstIndex(of: 0x0A) {
-            responseData = responseData[responseData.startIndex..<newlineIndex]
-        }
+            // Read response until newline or connection closes
+            var responseData = Data()
+            let bufferSize = 65536
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+            defer { buffer.deallocate() }
 
-        guard !responseData.isEmpty else {
-            throw DaemonClientError.invalidResponse
-        }
+            while true {
+                let bytesRead = recv(fd, buffer, bufferSize, 0)
+                if bytesRead < 0 {
+                    throw DaemonClientError.receiveFailed("recv failed with errno \(errno)")
+                }
+                if bytesRead == 0 {
+                    break
+                }
+                responseData.append(buffer, count: bytesRead)
+                if responseData.contains(0x0A) {
+                    break
+                }
+            }
 
-        let decoder = JSONDecoder()
-        return try decoder.decode(RPCResponse.self, from: responseData)
+            // Trim trailing newline
+            if let newlineIndex = responseData.firstIndex(of: 0x0A) {
+                responseData = responseData[responseData.startIndex..<newlineIndex]
+            }
+
+            guard !responseData.isEmpty else {
+                throw DaemonClientError.invalidResponse
+            }
+
+            let decoder = JSONDecoder()
+            return try decoder.decode(RPCResponse.self, from: responseData)
+        }
     }
 
     /// Send an RPC request with typed params and decode a typed result.
