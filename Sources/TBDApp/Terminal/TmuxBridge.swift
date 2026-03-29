@@ -54,21 +54,24 @@ final class TmuxBridge: @unchecked Sendable {
 
         // Single tmux invocation: create grouped session + select the target window.
         // Global options (status, borders, etc.) are set once by the daemon at server creation.
+        // tmux returns the exit code of the last chained command, so if new-session
+        // fails (session exists) but select-window succeeds, result.success is true.
         let result = runTmux(server: server, args: [
             "new-session", "-d", "-t", "main", "-s", sessionName, ";",
             "select-window", "-t", "\(sessionName):\(windowID)"
         ])
 
         if !result.success {
-            // Either the session couldn't be created or the window is dead.
-            // Try to distinguish: attempt select-window alone in case the session
-            // already existed but the chained command failed on new-session.
+            // Two failure modes:
+            //  (a) session already existed → new-session failed, select-window may still work
+            //  (b) new-session succeeded, select-window failed (window dead)
+            // Retry select-window alone to distinguish. Kill-session is safe in both
+            // cases since session names are UUID-based (no collision risk).
             let selectResult = runTmux(server: server, args: [
                 "select-window", "-t", "\(sessionName):\(windowID)"
             ])
             if !selectResult.success {
                 debugLog("PREPARE: window \(windowID) is dead on server \(server)")
-                // Clean up in case the session was partially created
                 let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
                 return nil
             }
