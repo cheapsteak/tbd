@@ -20,8 +20,9 @@ class TBDTerminalView: TerminalView {
         super.layout()
         if !didFireReady && bounds.width > 0 && bounds.height > 0 {
             didFireReady = true
-            onReady?()
+            let callback = onReady
             onReady = nil
+            DispatchQueue.main.async { callback?() }
         }
     }
 
