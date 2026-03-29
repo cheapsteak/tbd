@@ -144,6 +144,7 @@ public final class Daemon: Sendable {
                     await lifecycle.refreshGitStatuses(repoID: repo.id)
                 }
                 try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled else { break }
             }
         }
     }
