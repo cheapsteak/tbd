@@ -313,6 +313,7 @@ struct CodeViewerSidebar: View {
     var revealPath: String = ""
     @State private var expandedDirs: Set<String> = []
     @State private var entries: [FileEntry] = []
+    @State private var scrollRevision: Int = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -343,8 +344,10 @@ struct CodeViewerSidebar: View {
                         }
                     }
                 }
-                .onChange(of: entries.count) {
-                    scrollToRevealedFile(proxy: proxy)
+                .onChange(of: scrollRevision) {
+                    Task { @MainActor in
+                        scrollToRevealedFile(proxy: proxy)
+                    }
                 }
             }
         }
@@ -383,6 +386,7 @@ struct CodeViewerSidebar: View {
                 }
             }
         }
+        scrollRevision += 1
     }
 
     private func scrollToRevealedFile(proxy: ScrollViewProxy) {
