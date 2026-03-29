@@ -17,10 +17,10 @@ echo ""
 # --- Check 1: Broken internal links ---
 echo "Checking internal links..."
 
-for file in $(find "$RECIPE_DIR" -name '*.md' -type f); do
+while IFS= read -r -d '' file; do
     dir="$(dirname "$file")"
-    # Extract markdown link targets: [text](relative/path.md)
-    targets=$(grep -oE '\]\([^)]+\.md\)' "$file" 2>/dev/null | sed 's/^](\(.*\))$/\1/' || true)
+    # Extract markdown link targets: [text](relative/path.md) — strip #anchor fragments
+    targets=$(grep -oE '\]\([^)]+\.md[^)]*\)' "$file" 2>/dev/null | sed 's/^](\(.*\))$/\1/' | sed 's/#.*//' || true)
     for target in $targets; do
         # Skip external URLs
         case "$target" in http*) continue ;; esac
@@ -31,7 +31,7 @@ for file in $(find "$RECIPE_DIR" -name '*.md' -type f); do
             ERRORS=$((ERRORS + 1))
         fi
     done
-done
+done < <(find "$RECIPE_DIR" -name '*.md' -type f -print0)
 
 # --- Check 2: Orphaned techniques (referenced by zero jobs) ---
 echo "Checking for orphaned techniques..."
@@ -68,7 +68,14 @@ echo "Checking audit freshness..."
 
 last_audit=$(grep -m1 'last-audit:' "$RECIPE_DIR/recipe.md" 2>/dev/null | sed 's/.*last-audit: *//' | tr -d ' ')
 if [ -n "$last_audit" ]; then
-    audit_epoch=$(date -j -f "%Y-%m-%d" "$last_audit" "+%s" 2>/dev/null || echo "0")
+    # Portable date arithmetic — parse YYYY-MM-DD without platform-specific date flags
+    if date -j -f "%Y-%m-%d" "$last_audit" "+%s" >/dev/null 2>&1; then
+        audit_epoch=$(date -j -f "%Y-%m-%d" "$last_audit" "+%s")
+    elif date -d "$last_audit" "+%s" >/dev/null 2>&1; then
+        audit_epoch=$(date -d "$last_audit" "+%s")
+    else
+        audit_epoch=0
+    fi
     now_epoch=$(date "+%s")
     days_ago=$(( (now_epoch - audit_epoch) / 86400 ))
     if [ "$days_ago" -gt 14 ]; then
