@@ -10,7 +10,7 @@ Terminal emulation is complex and the library landscape shifts. Committing to on
 
 ## The technique
 
-Abstract the terminal emulator behind a protocol (`TerminalRenderer`). The app talks to the protocol; the concrete implementation wraps SwiftTerm. The bridge between tmux control mode output and the terminal emulator is the highest-complexity component — the protocol should be designed with this bridging in mind.
+Abstract the terminal emulator behind a protocol (`TerminalRenderer`). The app talks to the protocol; the concrete implementation wraps SwiftTerm. The bridge between tmux terminal output (escape sequences tmux emits to attached sessions) and the terminal emulator is the highest-complexity component — the protocol should be designed with this bridging in mind.
 
 ## Why not alternatives
 

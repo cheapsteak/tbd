@@ -35,3 +35,7 @@ Managing multiple AI coding agents on the same repo requires juggling git worktr
 - [Unix domain socket + HTTP RPC](techniques/unix-socket-rpc.md) (Make)
 - [YYYYMMDD-adjective-animal naming](techniques/adjective-animal-naming.md) (Make)
 - [Stable SSH agent symlink](techniques/ssh-agent-symlink.md) (Make)
+
+## Evolution
+
+- [Reasoning history](evolution.md) — how and why the recipe changed over time

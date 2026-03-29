@@ -20,8 +20,8 @@ echo "Checking internal links..."
 while IFS= read -r -d '' file; do
     dir="$(dirname "$file")"
     # Extract markdown link targets: [text](relative/path.md) — strip #anchor fragments
-    targets=$(grep -oE '\]\([^)]+\.md[^)]*\)' "$file" 2>/dev/null | sed 's/^](\(.*\))$/\1/' | sed 's/#.*//' || true)
-    for target in $targets; do
+    while IFS= read -r target; do
+        [ -z "$target" ] && continue
         # Skip external URLs
         case "$target" in http*) continue ;; esac
         resolved="$(cd "$dir" && realpath "$target" 2>/dev/null || echo "")"
@@ -30,7 +30,7 @@ while IFS= read -r -d '' file; do
             echo "  BROKEN LINK: $rel -> $target"
             ERRORS=$((ERRORS + 1))
         fi
-    done
+    done < <(grep -oE '\]\([^)]+\.md[^)]*\)' "$file" 2>/dev/null | sed 's/^](\(.*\))$/\1/' | sed 's/#.*//' || true)
 done < <(find "$RECIPE_DIR" -name '*.md' -type f -print0)
 
 # --- Check 2: Orphaned techniques (referenced by zero jobs) ---
