@@ -151,6 +151,7 @@ struct SplitContainer: View {
 // MARK: - SplitDivider
 
 /// A draggable divider between split children.
+/// Uses deferred resize: tracks drag offset for an indicator overlay, commits on release.
 struct SplitDivider: View {
     let direction: SplitDirection
     let thickness: CGFloat
@@ -160,6 +161,8 @@ struct SplitDivider: View {
     let onDragEnd: () -> Void
 
     @State private var dragStartRatios: [CGFloat] = []
+    /// Pixel offset from the divider's resting position during drag.
+    @State private var dragOffset: CGFloat = 0
 
     var body: some View {
         Rectangle()
@@ -170,6 +173,21 @@ struct SplitDivider: View {
             )
             .contentShape(Rectangle())
             .cursor(direction == .horizontal ? .resizeLeftRight : .resizeUpDown)
+            .overlay(alignment: direction == .horizontal ? .leading : .top) {
+                if dragOffset != 0 {
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.6))
+                        .frame(
+                            width: direction == .horizontal ? 2 : nil,
+                            height: direction == .vertical ? 2 : nil
+                        )
+                        .offset(
+                            x: direction == .horizontal ? dragOffset : 0,
+                            y: direction == .vertical ? dragOffset : 0
+                        )
+                        .allowsHitTesting(false)
+                }
+            }
             .gesture(
                 DragGesture()
                     .onChanged { value in
@@ -178,34 +196,29 @@ struct SplitDivider: View {
                         }
                         guard availableSpace > 0 else { return }
 
-                        let delta: CGFloat
-                        if direction == .horizontal {
-                            delta = value.translation.width / availableSpace
-                        } else {
-                            delta = value.translation.height / availableSpace
-                        }
+                        let translation: CGFloat = direction == .horizontal
+                            ? value.translation.width
+                            : value.translation.height
 
-                        var newRatios = dragStartRatios
+                        // Clamp the drag offset to respect min ratios
                         let minRatio: CGFloat = 0.1
-
-                        newRatios[index] = dragStartRatios[index] + delta
-                        newRatios[index + 1] = dragStartRatios[index + 1] - delta
-
-                        // Clamp both ratios
-                        if newRatios[index] < minRatio {
-                            let correction = minRatio - newRatios[index]
-                            newRatios[index] = minRatio
-                            newRatios[index + 1] -= correction
-                        }
-                        if newRatios[index + 1] < minRatio {
-                            let correction = minRatio - newRatios[index + 1]
-                            newRatios[index + 1] = minRatio
-                            newRatios[index] -= correction
-                        }
-
-                        ratios = newRatios
+                        let maxForward = (dragStartRatios[index + 1] - minRatio) * availableSpace
+                        let maxBackward = -(dragStartRatios[index] - minRatio) * availableSpace
+                        dragOffset = max(maxBackward, min(maxForward, translation))
                     }
                     .onEnded { _ in
+                        guard availableSpace > 0 else {
+                            dragOffset = 0
+                            dragStartRatios = []
+                            return
+                        }
+                        let delta = dragOffset / availableSpace
+                        var newRatios = dragStartRatios
+                        newRatios[index] = dragStartRatios[index] + delta
+                        newRatios[index + 1] = dragStartRatios[index + 1] - delta
+                        ratios = newRatios
+
+                        dragOffset = 0
                         dragStartRatios = []
                         onDragEnd()
                     }
@@ -215,7 +228,7 @@ struct SplitDivider: View {
 
 // MARK: - Cursor helper
 
-private extension View {
+extension View {
     func cursor(_ cursor: NSCursor) -> some View {
         self.onHover { hovering in
             if hovering {

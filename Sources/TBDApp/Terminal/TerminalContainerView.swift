@@ -12,10 +12,26 @@ import TBDShared
 struct TerminalContainerView: View {
     @EnvironmentObject var appState: AppState
 
+    /// Terminal IDs currently visible in the active tab layouts of selected worktrees.
+    private var visibleTerminalIDs: Set<UUID> {
+        var ids = Set<UUID>()
+        for worktreeID in appState.selectedWorktreeIDs {
+            let tabs = appState.tabs[worktreeID] ?? []
+            guard !tabs.isEmpty else { continue }
+            let activeIndex = appState.activeTabIndices[worktreeID] ?? 0
+            let tab = tabs[min(activeIndex, tabs.count - 1)]
+            let layout = appState.layouts[tab.id] ?? .pane(tab.content)
+            for id in layout.allTerminalIDs() {
+                ids.insert(id)
+            }
+        }
+        return ids
+    }
+
     var body: some View {
-        let visibleWorktreeIDs = appState.selectedWorktreeIDs
+        let visible = visibleTerminalIDs
         let dockTerminals = appState.pinnedTerminals.filter { terminal in
-            !visibleWorktreeIDs.contains(terminal.worktreeID)
+            !visible.contains(terminal.id)
         }
 
         let mainContent = Group {
@@ -240,8 +256,19 @@ private struct MultiWorktreeCell: View {
         return nil
     }
 
+    /// The terminal shown in this cell — derived from the active tab's layout
+    /// so it stays consistent with the dock's visibleTerminalIDs filter.
     private var primaryTerminal: Terminal? {
-        appState.terminals[worktreeID]?.first
+        let tabs = appState.tabs[worktreeID] ?? []
+        guard !tabs.isEmpty else { return appState.terminals[worktreeID]?.first }
+        let activeIndex = appState.activeTabIndices[worktreeID] ?? 0
+        let tab = tabs[min(activeIndex, tabs.count - 1)]
+        let layout = appState.layouts[tab.id] ?? .pane(tab.content)
+        // Use the first terminal in the active tab's layout tree
+        guard let firstID = layout.allTerminalIDs().first else {
+            return appState.terminals[worktreeID]?.first
+        }
+        return appState.terminals[worktreeID]?.first { $0.id == firstID }
     }
 
     var body: some View {
@@ -302,13 +329,15 @@ private struct MultiWorktreeCell: View {
 // MARK: - DockSplitView
 
 /// A horizontal split between main content (left) and pinned terminal dock (right).
-/// The divider is draggable to resize the dock.
+/// Uses deferred resize: shows an indicator line during drag, only commits on release.
 private struct DockSplitView<Main: View, Dock: View>: View {
     @Binding var dockRatio: CGFloat
     @ViewBuilder let mainContent: () -> Main
     @ViewBuilder let dockContent: () -> Dock
 
     @State private var dragStartRatio: CGFloat?
+    /// Preview ratio shown as indicator line during drag; nil when not dragging.
+    @State private var previewRatio: CGFloat?
 
     var body: some View {
         GeometryReader { geometry in
@@ -326,11 +355,15 @@ private struct DockSplitView<Main: View, Dock: View>: View {
                     .fill(Color.gray.opacity(0.3))
                     .frame(width: dividerWidth)
                     .contentShape(Rectangle())
-                    .onHover { hovering in
-                        if hovering {
-                            NSCursor.resizeLeftRight.push()
-                        } else {
-                            NSCursor.pop()
+                    .cursor(.resizeLeftRight)
+                    .overlay {
+                        if let preview = previewRatio {
+                            let offsetX = -(preview - dockRatio) * available
+                            Rectangle()
+                                .fill(Color.accentColor.opacity(0.6))
+                                .frame(width: 2)
+                                .offset(x: offsetX)
+                                .allowsHitTesting(false)
                         }
                     }
                     .gesture(
@@ -341,10 +374,13 @@ private struct DockSplitView<Main: View, Dock: View>: View {
                                 }
                                 guard let startRatio = dragStartRatio, available > 0 else { return }
                                 let delta = -value.translation.width / available
-                                let newRatio = max(0.1, min(0.6, startRatio + delta))
-                                dockRatio = newRatio
+                                previewRatio = max(0.1, min(0.6, startRatio + delta))
                             }
                             .onEnded { _ in
+                                if let preview = previewRatio {
+                                    dockRatio = preview
+                                }
+                                previewRatio = nil
                                 dragStartRatio = nil
                             }
                     )
