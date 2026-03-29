@@ -10,6 +10,8 @@ Automatically exit idle Claude Code instances when the user switches away from a
 
 **v1 scope**: Only daemon-created Claude terminals (where `label` starts with `"claude"`). User-spawned Claude instances are not suspended. This eliminates runtime process inspection at suspend time and avoids dependency on undocumented PID files for the suspend path.
 
+**v1 assumes a single TBDApp UI session controls worktree selection.** Daemon selection state is global, not per-client. Multi-client correctness (multiple app windows) would require per-client selection tracking in a future version.
+
 ## Data model
 
 ### New terminal fields
@@ -96,16 +98,23 @@ For each terminal in the **departing** worktree:
 3. **Skip if already suspended**: `suspendedAt != nil` → skip
 4. **Skip if no session ID**: `claudeSessionID == nil` → skip (can't resume without it)
 5. **Check idle state**: call `isIdleConfirmed(server:paneID:)` → skip if `false` (includes 1s debounce)
-6. **Exit Claude**: `tmux send-keys -t <paneID> "/exit" Enter`
-7. **Verify exit**: poll `pane_current_command` every 200ms for up to 3 seconds. If Claude is still running after timeout, log a warning and skip — don't mark as suspended.
+
+**--- Point of no return below ---**
+
+Steps 1–5 are cancellable (the coordinator can cancel the suspend task during any of them). Once step 6 executes, the suspend is committed — `/exit` has been sent and cannot be retracted.
+
+6. **Exit Claude**: send `/exit` followed by Enter to the pane. Note: `TmuxManager.sendKeys` currently uses `-l` (literal text). A new `sendCommand(server:paneID:command:)` method is needed that sends text + Enter key (either via `send-keys` without `-l`, or two calls: `-l` for the text then `Enter` for the key).
+7. **Verify exit**: poll `pane_current_command` every 200ms for up to 3 seconds.
+   - If Claude exits within timeout → proceed to step 8
+   - If Claude is still running after timeout → it may be finishing a turn before processing `/exit`. Mark as suspended anyway (`suspendedAt = Date()`) — Claude will exit eventually and the session is preserved. The pane will die when it does, and resume will create a new window as usual.
 8. **Update database**: set `suspendedAt = Date()`
 9. **Broadcast state delta**
 
-Each step that skips leaves the terminal running — conservative by default.
+Steps 1–5 that skip leave the terminal running — conservative by default.
 
 **No suspend message for v1**: TBD-created panes use `zsh -ic <command>` — the pane dies when Claude exits, so there's no shell to echo into. The user sees the terminal resume when they switch back, which is sufficient feedback.
 
-**Race condition note**: Claude could start working between `isIdleConfirmed()` and the `/exit` send. This is benign — Claude Code queues `/exit` and processes it after the current turn completes. The session ID remains valid.
+**Race condition note**: Claude could start working between `isIdleConfirmed()` and the `/exit` send. This is benign — Claude Code queues `/exit` and processes it after the current turn completes. The session is preserved. Since `/exit` is past the point of no return, the terminal is always marked as suspended once step 6 executes.
 
 ## Resume flow
 
@@ -139,7 +148,9 @@ actor SuspendResumeCoordinator {
 }
 ```
 
-When a resume arrives for a terminal with an in-flight suspend, the coordinator cancels the suspend task before starting the resume. When a suspend arrives for a terminal with an in-flight resume, it skips. This naturally handles rapid switching (A→B→A) and serves as the debounce mechanism — no separate timer needed.
+**Cancellation semantics**: The suspend flow has a point of no return (sending `/exit`). The coordinator can cancel an in-flight suspend only during the pre-exit phase (steps 1–5). The suspend task must check for cancellation via `Task.isCancelled` before step 6, and must NOT check after. Once `/exit` is sent, the suspend runs to completion — the terminal will be marked as suspended regardless of subsequent selection changes.
+
+When a resume arrives for a terminal that is already marked `suspendedAt != nil` (suspend completed), the coordinator runs the normal resume flow. When a resume arrives while a suspend is still in its cancellable phase (steps 1–5), the coordinator cancels the suspend task. When a suspend arrives for a terminal with an in-flight resume, it skips.
 
 ## Integration
 
@@ -151,7 +162,11 @@ The app's worktree selection is local to `AppState.selectedWorktreeIDs`. State d
 **Params**: `{ selectedWorktreeIDs: [UUID] }` (idempotent — daemon diffs against its own last-known selection)
 **Result**: `{ success: Bool }`
 
-The app calls this from its `onChange(of: appState.selectedWorktreeIDs)` handler in `ContentView.swift`. The daemon computes departing/arriving sets and runs suspend/resume flows via the `SuspendResumeCoordinator`.
+The app calls this from:
+1. `onChange(of: appState.selectedWorktreeIDs)` in `ContentView.swift` — on every selection change
+2. The reconnect/refresh path in `AppState` — after daemon restart or reconnect, the app must re-send its current selection so the daemon has an accurate baseline. Without this, a daemon restart while the user stays on the same worktree leaves the daemon with an empty selection cache and no resume trigger.
+
+The daemon diffs against its last-known selection. **Unknown worktree IDs are silently ignored** — the app uses optimistic placeholder UUIDs during worktree creation (before the daemon assigns the real ID), so the daemon will sometimes see IDs it doesn't recognize. These are not errors.
 
 ### Reconcile changes
 
@@ -217,6 +232,7 @@ When the daemon creates a Claude terminal (in `WorktreeLifecycle+Create.swift`):
 - `~/.claude/sessions/<pid>.json` is an undocumented implementation detail, used only for post-resume session ID refresh. If Claude Code changes this format, the first suspend/resume cycle works (uses the creation-time `--session-id`), but subsequent cycles won't until the code is updated.
 - `claude --resume` ignores `CLAUDE_CONFIG_DIR` environment variable (GitHub issue #16103). Users with custom config dirs may see resume failures.
 - Idle detection patterns (`❯` prompt, status bar strings) are Claude Code UI details with no stability contract. Changes to Claude's TUI would cause false negatives (failing to detect idle), not false positives (incorrectly suspending). Patterns are centralized as constants for easy updates.
+- `pane_current_command` reporting Claude as a semver string (e.g. `2.1.86`) is empirically observed behavior, not documented by tmux or Claude Code. If this changes, the `claudeProcessPattern` regex would need updating. Failure mode is false negatives (Claude not detected as foreground process → not suspended), not false positives.
 
 ## Testing
 
