@@ -122,7 +122,7 @@ Triggered when a worktree is selected. Orchestrated by the `SuspendResumeCoordin
 
 For each terminal in the **arriving** worktree where `suspendedAt != nil`:
 
-1. **Check if Claude is already running**: `pane_current_command` matches Claude → clear `suspendedAt`, re-capture session ID, done (user manually restarted it)
+1. **Check if Claude is already running**: `pane_current_command` matches Claude. This could mean the user manually restarted it, OR a timed-out suspend's `/exit` hasn't been processed yet. **Do not clear `suspendedAt` in this case** — wait for Claude to exit (the queued `/exit` will eventually process). If the terminal is still running after another 5s, then assume the user restarted it intentionally: clear `suspendedAt`, re-capture session ID, done.
 2. **Check pane is alive**: verify the tmux pane/window still exists via `TmuxManager.windowExists()`. The pane will almost always be dead (TBD-created panes use `zsh -ic` — the shell exits when Claude exits).
 3. **Build resume command**: `claude --resume <claudeSessionID> --dangerously-skip-permissions` (daemon always launches managed Claude with this flag today)
 4. **Create new tmux window**: call `TmuxManager.createWindow(server:session:cwd:shellCommand:)` with the resume command. Update the terminal record's `tmuxWindowID` and `tmuxPaneID` to the new values.
@@ -233,6 +233,16 @@ When the daemon creates a Claude terminal (in `WorktreeLifecycle+Create.swift`):
 - `claude --resume` ignores `CLAUDE_CONFIG_DIR` environment variable (GitHub issue #16103). Users with custom config dirs may see resume failures.
 - Idle detection patterns (`❯` prompt, status bar strings) are Claude Code UI details with no stability contract. Changes to Claude's TUI would cause false negatives (failing to detect idle), not false positives (incorrectly suspending). Patterns are centralized as constants for easy updates.
 - `pane_current_command` reporting Claude as a semver string (e.g. `2.1.86`) is empirically observed behavior, not documented by tmux or Claude Code. If this changes, the `claudeProcessPattern` regex would need updating. Failure mode is false negatives (Claude not detected as foreground process → not suspended), not false positives.
+
+## Implementation notes
+
+These are codebase-specific details the implementer should be aware of:
+
+- **Startup ordering**: The daemon currently starts serving RPCs before reconcile runs (`Daemon.swift`). The startup reconciliation sweep (clearing stale `suspendedAt`) must complete before selection RPCs are processed, otherwise a race exists where a selection RPC triggers resume while reconcile is still cleaning up. Either block RPC serving until reconcile finishes, or have the coordinator queue selection changes until reconcile is done.
+- **Reconcile orphan cleanup**: `WorktreeLifecycle+Reconcile.swift` kills tmux windows not present in the DB. Since resume creates new windows, ensure the reconcile snapshot and the resume path don't race (the coordinator serializes this naturally if reconcile uses it).
+- **App state propagation**: The app polls terminals every ~2s (`AppState.swift`). There is no push/subscription path for terminal state deltas. After `worktreeSelectionChanged` RPC returns, the app should trigger an immediate terminal refresh (not wait for the next poll cycle), otherwise the user may briefly see "Terminal session expired" for the old dead window.
+- **Worktree name collision**: `WorktreeLifecycle+Create.swift` may keep stale `name`/`branch`/`path` on retry after name collision. Resume uses the stored worktree cwd. This is a pre-existing bug, not introduced by this feature, but the implementer should be aware it exists.
+- **TmuxManager testability**: `TmuxManager` is a concrete struct with a private `runTmux`. `ClaudeStateDetector` tests need a protocol or injectable command runner to mock tmux output. `TmuxManager` already has `dryRun` mode for command builders; extend this pattern or extract a `TmuxCommandRunner` protocol.
 
 ## Testing
 
