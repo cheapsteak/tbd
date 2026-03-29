@@ -200,10 +200,17 @@ struct TerminalPanelView: NSViewRepresentable {
                         return true
                     }
                     // Fall back to hyperlink detection (OSC 8 or pattern matching)
-                    if let urlString = tv.extractHyperlinkURL(atWindowLocation: location),
-                       let url = URL(string: urlString) {
-                        NSWorkspace.shared.open(url)
-                        return true
+                    if let urlString = tv.extractHyperlinkURL(atWindowLocation: location) {
+                        // Try to resolve as a file path first (OSC 8 payload may be relative or file:// URL)
+                        if let resolved = tv.resolveAsFilePath(urlString) {
+                            tv.onFilePathClicked?(resolved)
+                            return true
+                        }
+                        // Only open as external URL if it has a real scheme
+                        if urlString.contains("://"), let url = URL(string: urlString) {
+                            NSWorkspace.shared.open(url)
+                            return true
+                        }
                     }
                     return false
                 }
@@ -284,30 +291,17 @@ struct TerminalPanelView: NSViewRepresentable {
 
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
             MainActor.assumeIsolated {
-                // Check if this is a file path (relative or absolute) that we can open in a split pane
-                if let tv = source as? TBDTerminalView, !tv.worktreePath.isEmpty {
-                    let resolvedPath: String
-                    if link.hasPrefix("/") {
-                        resolvedPath = link
-                    } else if link.hasPrefix("file://") {
-                        resolvedPath = URL(string: link)?.path ?? link
-                    } else if !link.contains("://") {
-                        // Relative path — resolve against worktree
-                        resolvedPath = URL(fileURLWithPath: tv.worktreePath).appendingPathComponent(link).path
-                    } else {
-                        // Regular URL — open externally
-                        if let url = URL(string: link) { NSWorkspace.shared.open(url) }
-                        return
-                    }
-
-                    if FileManager.default.fileExists(atPath: resolvedPath) {
-                        tv.onFilePathClicked?(resolvedPath)
-                        return
-                    }
+                // Try to resolve as a file path (absolute, file://, or relative to worktree)
+                if let tv = source as? TBDTerminalView,
+                   let resolved = tv.resolveAsFilePath(link) {
+                    tv.onFilePathClicked?(resolved)
+                    return
                 }
 
-                // Fallback: open as URL
-                if let url = URL(string: link) { NSWorkspace.shared.open(url) }
+                // Only open as external URL if it has a real scheme
+                if link.contains("://"), let url = URL(string: link) {
+                    NSWorkspace.shared.open(url)
+                }
             }
         }
 
