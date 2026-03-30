@@ -23,6 +23,7 @@ struct CodeViewerPaneView: View {
                 .transition(.move(edge: .leading))
 
                 Divider()
+                    .transition(.move(edge: .leading))
             }
 
             // Code preview
@@ -314,10 +315,7 @@ struct CodeViewerSidebar: View {
     var revealPath: String = ""
     @State private var expandedDirs: Set<String> = []
     @State private var entries: [FileEntry] = []
-    @State private var scrollPosition = ScrollPosition(edge: .top)
-
-    /// Each row is 11pt font (~16pt line height) + 6pt vertical padding = ~22pt.
-    private static let rowHeight: CGFloat = 22
+    @State private var scrollTargetID: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -343,10 +341,12 @@ struct CodeViewerSidebar: View {
                             onToggleDir: { toggleDir(entry.path) },
                             onSelectFile: { selectFile(entry.path, event: NSApp.currentEvent) }
                         )
+                        .id(entry.path)
                     }
                 }
+                .scrollTargetLayout()
             }
-            .scrollPosition($scrollPosition)
+            .scrollPosition(id: $scrollTargetID, anchor: .center)
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .task(id: worktreePath) {
@@ -364,7 +364,7 @@ struct CodeViewerSidebar: View {
     }
 
     /// Expand all ancestor directories so `revealPath` is visible in the tree,
-    /// then scroll to it by computed offset (works with LazyVStack).
+    /// then scroll to it via `scrollPosition(id:)` binding.
     private func revealFile() {
         guard !revealPath.isEmpty,
               revealPath.hasPrefix(worktreePath + "/") else { return }
@@ -385,12 +385,9 @@ struct CodeViewerSidebar: View {
             }
         }
 
-        // Scroll by offset — works even when LazyVStack hasn't rendered the target row
-        if let index = entries.firstIndex(where: { $0.path == revealPath }) {
-            let offset = CGFloat(index) * Self.rowHeight
-            Task { @MainActor in
-                scrollPosition.scrollTo(y: offset)
-            }
+        // Defer to next run loop so SwiftUI processes the entries mutation first
+        Task { @MainActor in
+            scrollTargetID = revealPath
         }
     }
 
