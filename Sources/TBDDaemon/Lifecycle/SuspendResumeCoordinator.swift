@@ -4,9 +4,22 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "SuspendResume")
 
+/// Thread-safe ISO8601 timestamp formatter for debug logging.
+private final class SuspendLogFormatter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let formatter = ISO8601DateFormatter()
+
+    func timestamp() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return formatter.string(from: Date())
+    }
+}
+
 /// File-based debug log for suspend/resume diagnostics (os_log not reliably captured)
+private let suspendLogFormatter = SuspendLogFormatter()
 private func suspendLog(_ msg: String) {
-    let line = "[SR \(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
+    let line = "[SR \(suspendLogFormatter.timestamp())] \(msg)\n"
     if let data = line.data(using: .utf8) {
         if let fh = FileHandle(forWritingAtPath: "/tmp/tbd-suspend.log") {
             fh.seekToEndOfFile()
@@ -98,6 +111,17 @@ public actor SuspendResumeCoordinator {
             return
         }
 
+        // Capture terminal snapshot with ANSI colors before exit
+        let snapshot: String?
+        do {
+            let captured = try await tmux.capturePaneWithAnsi(server: server, paneID: terminal.tmuxPaneID)
+            snapshot = captured.isEmpty ? nil : captured
+            suspendLog("Captured snapshot for \(terminal.id.uuidString.prefix(8)): \(captured.count) chars")
+        } catch {
+            snapshot = nil
+            suspendLog("Failed to capture snapshot for \(terminal.id.uuidString.prefix(8)): \(error)")
+        }
+
         // POINT OF NO RETURN — send /exit
         suspendLog("SUSPENDING \(terminal.id.uuidString.prefix(8)): sending /exit")
         do {
@@ -118,7 +142,7 @@ public actor SuspendResumeCoordinator {
 
         // Always mark suspended after point of no return
         do {
-            try await db.terminals.setSuspended(id: terminal.id, sessionID: terminal.claudeSessionID!)
+            try await db.terminals.setSuspended(id: terminal.id, sessionID: terminal.claudeSessionID!, snapshot: snapshot)
             worktreeIdleFromHook.remove(terminal.worktreeID)
             logger.info("Suspended terminal \(terminal.id)")
         } catch {
@@ -184,15 +208,38 @@ public actor SuspendResumeCoordinator {
             try await db.terminals.updateTmuxIDs(
                 id: terminal.id, windowID: window.windowID, paneID: window.paneID
             )
-            try await db.terminals.clearSuspended(id: terminal.id)
             logger.info("Resumed terminal \(terminal.id) in window \(window.windowID)")
 
-            // Re-capture session ID after ~5s, and re-seed idle flag
+            // Wait for Claude to start before clearing the snapshot, so the
+            // app's polling loop has time to observe the suspended state and
+            // show SnapshotTerminalView instead of a blank pane.
             let termID = terminal.id
             let worktreeID = terminal.worktreeID
             let paneID = window.paneID
-            Task {
-                try? await Task.sleep(for: .seconds(5))
+            // Track the post-resume task in inFlight so a rapid re-suspend
+            // can cancel it — otherwise stale clearSuspended/updateSessionID
+            // calls could race with the new suspend cycle.
+            inFlight[termID] = Task {
+                // Poll for Claude process to appear (up to 10s)
+                var claudeDetected = false
+                for _ in 0..<50 {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    guard !Task.isCancelled else { return }
+                    if let cmd = try? await self.tmux.paneCurrentCommand(server: server, paneID: paneID),
+                       ClaudeStateDetector.isClaudeProcess(cmd) {
+                        claudeDetected = true
+                        break
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                suspendLog("Clearing suspended for \(termID.uuidString.prefix(8)): claudeDetected=\(claudeDetected)")
+                try? await self.db.terminals.clearSuspended(id: termID)
+
+                // Re-capture session ID after Claude has settled
+                if claudeDetected {
+                    try? await Task.sleep(for: .seconds(3))
+                }
+                guard !Task.isCancelled else { return }
                 if let newID = await self.detector.captureSessionID(server: server, paneID: paneID) {
                     try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
                     suspendLog("Re-captured session ID for \(termID.uuidString.prefix(8)): \(newID)")
@@ -206,12 +253,12 @@ public actor SuspendResumeCoordinator {
                     self.worktreeIdleFromHook.insert(worktreeID)
                     suspendLog("Re-seeded idle hook for worktree \(worktreeID.uuidString.prefix(8)) after resume")
                 }
+                self.inFlight[termID] = nil
             }
         } catch {
             logger.warning("Failed to resume terminal \(terminal.id): \(error)")
+            inFlight[terminal.id] = nil
         }
-
-        inFlight[terminal.id] = nil
     }
 
     // MARK: - Startup Reconciliation

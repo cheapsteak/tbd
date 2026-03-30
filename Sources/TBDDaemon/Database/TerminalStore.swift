@@ -15,6 +15,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var pinnedAt: Date?
     var claudeSessionID: String?
     var suspendedAt: Date?
+    var suspendedSnapshot: String?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -26,6 +27,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.pinnedAt = terminal.pinnedAt
         self.claudeSessionID = terminal.claudeSessionID
         self.suspendedAt = terminal.suspendedAt
+        self.suspendedSnapshot = terminal.suspendedSnapshot
     }
 
     func toModel() -> Terminal {
@@ -38,7 +40,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             createdAt: createdAt,
             pinnedAt: pinnedAt,
             claudeSessionID: claudeSessionID,
-            suspendedAt: suspendedAt
+            suspendedAt: suspendedAt,
+            suspendedSnapshot: suspendedSnapshot
         )
     }
 }
@@ -118,14 +121,15 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Mark a terminal as suspended, recording the session ID and current timestamp.
-    public func setSuspended(id: UUID, sessionID: String, at date: Date = Date()) async throws {
+    /// Mark a terminal as suspended, recording the session ID, snapshot, and current timestamp.
+    public func setSuspended(id: UUID, sessionID: String, snapshot: String? = nil, at date: Date = Date()) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = sessionID
             record.suspendedAt = date
+            record.suspendedSnapshot = snapshot
             try record.update(db)
         }
     }
@@ -137,6 +141,7 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.suspendedAt = nil
+            record.suspendedSnapshot = nil
             try record.update(db)
         }
     }

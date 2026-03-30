@@ -79,11 +79,12 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var pinnedAt: Date?
     public var claudeSessionID: String?
     public var suspendedAt: Date?
+    public var suspendedSnapshot: String?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
                 pinnedAt: Date? = nil, claudeSessionID: String? = nil,
-                suspendedAt: Date? = nil) {
+                suspendedAt: Date? = nil, suspendedSnapshot: String? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -93,6 +94,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.pinnedAt = pinnedAt
         self.claudeSessionID = claudeSessionID
         self.suspendedAt = suspendedAt
+        self.suspendedSnapshot = suspendedSnapshot
     }
 
     public init(from decoder: Decoder) throws {
@@ -106,6 +108,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
         claudeSessionID = try c.decodeIfPresent(String.self, forKey: .claudeSessionID)
         suspendedAt = try c.decodeIfPresent(Date.self, forKey: .suspendedAt)
+        suspendedSnapshot = try c.decodeIfPresent(String.self, forKey: .suspendedSnapshot)
     }
 }
 

@@ -74,6 +74,11 @@ public struct TmuxManager: Sendable {
         ["-L", server, "capture-pane", "-p", "-t", paneID]
     }
 
+    /// Capture pane content with ANSI escape sequences and joined wrapped lines preserved.
+    public static func capturePaneWithAnsiCommand(server: String, paneID: String) -> [String] {
+        ["-L", server, "capture-pane", "-p", "-e", "-J", "-t", paneID]
+    }
+
     public static func paneCurrentCommandQuery(server: String, paneID: String) -> [String] {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_current_command}"]
     }
@@ -158,6 +163,13 @@ public struct TmuxManager: Sendable {
     public func capturePaneOutput(server: String, paneID: String) async throws -> String {
         if dryRun { return "" }
         let args = Self.capturePaneCommand(server: server, paneID: paneID)
+        return try await runTmux(args)
+    }
+
+    /// Capture pane content with ANSI escape sequences preserved for snapshot display.
+    public func capturePaneWithAnsi(server: String, paneID: String) async throws -> String {
+        if dryRun { return "" }
+        let args = Self.capturePaneWithAnsiCommand(server: server, paneID: paneID)
         return try await runTmux(args)
     }
 
