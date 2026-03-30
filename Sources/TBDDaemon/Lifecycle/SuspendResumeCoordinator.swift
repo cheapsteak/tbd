@@ -4,10 +4,22 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "SuspendResume")
 
+/// Thread-safe ISO8601 timestamp formatter for debug logging.
+private final class SuspendLogFormatter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let formatter = ISO8601DateFormatter()
+
+    func timestamp() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return formatter.string(from: Date())
+    }
+}
+
 /// File-based debug log for suspend/resume diagnostics (os_log not reliably captured)
-nonisolated(unsafe) private let suspendLogDateFormatter = ISO8601DateFormatter()
+private let suspendLogFormatter = SuspendLogFormatter()
 private func suspendLog(_ msg: String) {
-    let line = "[SR \(suspendLogDateFormatter.string(from: Date()))] \(msg)\n"
+    let line = "[SR \(suspendLogFormatter.timestamp())] \(msg)\n"
     if let data = line.data(using: .utf8) {
         if let fh = FileHandle(forWritingAtPath: "/tmp/tbd-suspend.log") {
             fh.seekToEndOfFile()
