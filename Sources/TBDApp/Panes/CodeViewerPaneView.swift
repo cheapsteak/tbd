@@ -9,29 +9,68 @@ struct CodeViewerPaneView: View {
     let worktreePath: String
 
     @State private var selectedFiles: [String] = []
+    @State private var showSidebar = false
 
     var body: some View {
         HStack(spacing: 0) {
-            // File sidebar
-            CodeViewerSidebar(
-                worktreePath: worktreePath,
-                selectedFiles: $selectedFiles
-            )
-            .frame(width: 200)
+            if showSidebar {
+                CodeViewerSidebar(
+                    worktreePath: worktreePath,
+                    selectedFiles: $selectedFiles,
+                    revealPath: path
+                )
+                .frame(width: 200)
+                .transition(.move(edge: .leading))
 
-            Divider()
+                Divider()
+                    .transition(.move(edge: .leading))
+            }
 
             // Code preview
-            if selectedFiles.isEmpty {
-                emptyState
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(selectedFiles, id: \.self) { filePath in
-                            if selectedFiles.count > 1 {
-                                fileHeader(filePath)
+            VStack(spacing: 0) {
+                // Tab header bar
+                HStack(spacing: 6) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showSidebar.toggle()
+                        }
+                    } label: {
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 11))
+                            .foregroundStyle(showSidebar ? .primary : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Toggle file tree")
+
+                    if let firstName = selectedFiles.first {
+                        Image(systemName: "doc")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(URL(fileURLWithPath: firstName).lastPathComponent)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color(nsColor: .controlBackgroundColor))
+
+                Divider()
+
+                if selectedFiles.isEmpty {
+                    emptyState
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(selectedFiles, id: \.self) { filePath in
+                                if selectedFiles.count > 1 {
+                                    fileHeader(filePath)
+                                }
+                                FilePreviewView(filePath: filePath)
                             }
-                            FilePreviewView(filePath: filePath)
                         }
                     }
                 }
@@ -273,8 +312,10 @@ private func languageForFilename(_ filename: String) -> String? {
 struct CodeViewerSidebar: View {
     let worktreePath: String
     @Binding var selectedFiles: [String]
+    var revealPath: String = ""
     @State private var expandedDirs: Set<String> = []
     @State private var entries: [FileEntry] = []
+    @State private var scrollTargetID: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -300,19 +341,54 @@ struct CodeViewerSidebar: View {
                             onToggleDir: { toggleDir(entry.path) },
                             onSelectFile: { selectFile(entry.path, event: NSApp.currentEvent) }
                         )
+                        .id(entry.path)
                     }
                 }
+                .scrollTargetLayout()
             }
+            .scrollPosition(id: $scrollTargetID, anchor: .center)
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .task(id: worktreePath) {
             loadTopLevel()
+            revealFile()
+        }
+        .onChange(of: revealPath) {
+            revealFile()
         }
     }
 
     private func loadTopLevel() {
         guard !worktreePath.isEmpty else { return }
         entries = listDirectory(worktreePath, depth: 0)
+    }
+
+    /// Expand all ancestor directories so `revealPath` is visible in the tree,
+    /// then scroll to it via `scrollPosition(id:)` binding.
+    private func revealFile() {
+        guard !revealPath.isEmpty,
+              revealPath.hasPrefix(worktreePath + "/") else { return }
+
+        let relative = revealPath.replacingOccurrences(of: worktreePath + "/", with: "")
+        let components = relative.components(separatedBy: "/")
+        // Expand each ancestor directory (all but the last component which is the file)
+        var currentPath = worktreePath
+        for component in components.dropLast() {
+            currentPath += "/" + component
+            if !expandedDirs.contains(currentPath) {
+                expandedDirs.insert(currentPath)
+                let depth = depthOf(currentPath)
+                let children = listDirectory(currentPath, depth: depth + 1)
+                if let idx = entries.firstIndex(where: { $0.path == currentPath }) {
+                    entries.insert(contentsOf: children, at: idx + 1)
+                }
+            }
+        }
+
+        // Defer to next run loop so SwiftUI processes the entries mutation first
+        Task { @MainActor in
+            scrollTargetID = revealPath
+        }
     }
 
     private func toggleDir(_ path: String) {
