@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "TBD",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v15)
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),

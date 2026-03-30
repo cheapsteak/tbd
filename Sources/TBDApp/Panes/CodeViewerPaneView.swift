@@ -314,7 +314,10 @@ struct CodeViewerSidebar: View {
     var revealPath: String = ""
     @State private var expandedDirs: Set<String> = []
     @State private var entries: [FileEntry] = []
-    @State private var scrollRevision: Int = 0
+    @State private var scrollPosition = ScrollPosition(edge: .top)
+
+    /// Each row is 11pt font (~16pt line height) + 6pt vertical padding = ~22pt.
+    private static let rowHeight: CGFloat = 22
 
     var body: some View {
         VStack(spacing: 0) {
@@ -330,27 +333,20 @@ struct CodeViewerSidebar: View {
 
             Divider()
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(entries, id: \.path) { entry in
-                            FileEntryRow(
-                                entry: entry,
-                                isExpanded: expandedDirs.contains(entry.path),
-                                isSelected: selectedFiles.contains(entry.path),
-                                onToggleDir: { toggleDir(entry.path) },
-                                onSelectFile: { selectFile(entry.path, event: NSApp.currentEvent) }
-                            )
-                            .id(entry.path)
-                        }
-                    }
-                }
-                .onChange(of: scrollRevision) {
-                    Task { @MainActor in
-                        scrollToRevealedFile(proxy: proxy)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(entries, id: \.path) { entry in
+                        FileEntryRow(
+                            entry: entry,
+                            isExpanded: expandedDirs.contains(entry.path),
+                            isSelected: selectedFiles.contains(entry.path),
+                            onToggleDir: { toggleDir(entry.path) },
+                            onSelectFile: { selectFile(entry.path, event: NSApp.currentEvent) }
+                        )
                     }
                 }
             }
+            .scrollPosition($scrollPosition)
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .task(id: worktreePath) {
@@ -367,7 +363,8 @@ struct CodeViewerSidebar: View {
         entries = listDirectory(worktreePath, depth: 0)
     }
 
-    /// Expand all ancestor directories so `revealPath` is visible in the tree.
+    /// Expand all ancestor directories so `revealPath` is visible in the tree,
+    /// then scroll to it by computed offset (works with LazyVStack).
     private func revealFile() {
         guard !revealPath.isEmpty,
               revealPath.hasPrefix(worktreePath + "/") else { return }
@@ -387,12 +384,14 @@ struct CodeViewerSidebar: View {
                 }
             }
         }
-        scrollRevision += 1
-    }
 
-    private func scrollToRevealedFile(proxy: ScrollViewProxy) {
-        guard !revealPath.isEmpty, entries.contains(where: { $0.path == revealPath }) else { return }
-        proxy.scrollTo(revealPath, anchor: .center)
+        // Scroll by offset — works even when LazyVStack hasn't rendered the target row
+        if let index = entries.firstIndex(where: { $0.path == revealPath }) {
+            let offset = CGFloat(index) * Self.rowHeight
+            Task { @MainActor in
+                scrollPosition.scrollTo(y: offset)
+            }
+        }
     }
 
     private func toggleDir(_ path: String) {
