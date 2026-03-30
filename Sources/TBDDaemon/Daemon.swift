@@ -104,6 +104,7 @@ public final class Daemon: Sendable {
         try await http.start()
 
         // 11. Reconcile worktrees for all known repos
+        await rpcRouter.suspendResumeCoordinator.reconcileOnStartup()
         do {
             let repos = try await database.repos.list()
             for repo in repos {

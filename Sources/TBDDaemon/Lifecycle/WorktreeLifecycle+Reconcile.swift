@@ -131,7 +131,7 @@ extension WorktreeLifecycle {
                 let alive = await tmux.windowExists(
                     server: wt.tmuxServer, windowID: terminal.tmuxWindowID
                 )
-                if !alive {
+                if !alive && terminal.suspendedAt == nil {
                     try? await db.terminals.delete(id: terminal.id)
                 }
             }
