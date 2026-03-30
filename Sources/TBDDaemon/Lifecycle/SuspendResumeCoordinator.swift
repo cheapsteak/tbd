@@ -210,9 +210,6 @@ public actor SuspendResumeCoordinator {
             )
             logger.info("Resumed terminal \(terminal.id) in window \(window.windowID)")
 
-            // Wait for Claude to start before clearing the snapshot, so the
-            // app's polling loop has time to observe the suspended state and
-            // show SnapshotTerminalView instead of a blank pane.
             let termID = terminal.id
             let worktreeID = terminal.worktreeID
             let paneID = window.paneID
@@ -220,25 +217,16 @@ public actor SuspendResumeCoordinator {
             // can cancel it — otherwise stale clearSuspended/updateSessionID
             // calls could race with the new suspend cycle.
             inFlight[termID] = Task {
-                // Poll for Claude process to appear (up to 10s)
-                var claudeDetected = false
-                for _ in 0..<50 {
-                    try? await Task.sleep(for: .milliseconds(200))
-                    guard !Task.isCancelled else { return }
-                    if let cmd = try? await self.tmux.paneCurrentCommand(server: server, paneID: paneID),
-                       ClaudeStateDetector.isClaudeProcess(cmd) {
-                        claudeDetected = true
-                        break
-                    }
-                }
+                // Brief delay so the app's 2s polling loop has time to observe
+                // the snapshot before we clear it. Then hand off to the live
+                // terminal — Claude's startup progress is visible there.
+                try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled else { return }
-                suspendLog("Clearing suspended for \(termID.uuidString.prefix(8)): claudeDetected=\(claudeDetected)")
+                suspendLog("Clearing suspended for \(termID.uuidString.prefix(8))")
                 try? await self.db.terminals.clearSuspended(id: termID)
 
-                // Re-capture session ID after Claude has settled
-                if claudeDetected {
-                    try? await Task.sleep(for: .seconds(3))
-                }
+                // Wait for Claude to settle, then re-capture session ID
+                try? await Task.sleep(for: .seconds(5))
                 guard !Task.isCancelled else { return }
                 if let newID = await self.detector.captureSessionID(server: server, paneID: paneID) {
                     try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
