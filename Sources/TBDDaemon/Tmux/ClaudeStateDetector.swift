@@ -54,12 +54,18 @@ public struct ClaudeStateDetector: Sendable {
     public func captureSessionID(server: String, paneID: String) async -> String? {
         do {
             let pidStr = try await tmux.panePID(server: server, paneID: paneID)
-            guard let shellPID = Int(pidStr) else { return nil }
+            guard let panePID = Int(pidStr) else { return nil }
 
+            // With `zsh -ic "claude ..."`, zsh may exec into Claude directly,
+            // so pane_pid IS the Claude process (not a shell parent).
+            // Try the pane PID's session file first.
+            if let id = readSessionID(forPID: panePID) { return id }
+
+            // Fallback: pane_pid is a shell, Claude is a child process.
             let process = Process()
             let pipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-            process.arguments = ["-P", String(shellPID), "-x", "claude"]
+            process.arguments = ["-P", String(panePID), "-x", "claude"]
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
             try process.run()
@@ -70,10 +76,15 @@ public struct ClaudeStateDetector: Sendable {
                 .split(separator: "\n").compactMap { Int($0) }
             guard pids.count == 1, let claudePID = pids.first else { return nil }
 
-            let sessionPath = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".claude/sessions/\(claudePID).json")
-            guard let json = try? String(contentsOf: sessionPath, encoding: .utf8) else { return nil }
-            return Self.parseSessionID(from: json)
+            return readSessionID(forPID: claudePID)
         } catch { return nil }
+    }
+
+    /// Read a Claude session file for a given PID. Returns nil if file doesn't exist or is invalid.
+    private func readSessionID(forPID pid: Int) -> String? {
+        let sessionPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/sessions/\(pid).json")
+        guard let json = try? String(contentsOf: sessionPath, encoding: .utf8) else { return nil }
+        return Self.parseSessionID(from: json)
     }
 }
