@@ -8,7 +8,7 @@ public struct ClaudeStateDetector: Sendable {
     /// When Claude is thinking/working, the status bar contains "esc to interrupt".
     /// This MUST be checked to avoid suspending during the thinking phase where
     /// the bare prompt is visible but Claude is processing server-side.
-    static let busyIndicators = ["esc to interrupt"]
+    static let busyIndicators = ["esc to interrupt", "to stop agents"]
 
     // MARK: - Pure Static Methods
 
