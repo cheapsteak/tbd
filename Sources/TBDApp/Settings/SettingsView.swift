@@ -23,6 +23,7 @@ struct SettingsView: View {
 struct GeneralSettingsTab: View {
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
+    @AppStorage("autoSuspendClaude") private var autoSuspend: Bool = true
 
     var body: some View {
         Form {
@@ -34,6 +35,8 @@ struct GeneralSettingsTab: View {
             Section("Claude") {
                 Toggle("Launch claude with --dangerously-skip-permissions", isOn: $skipPermissions)
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
+                Toggle("Auto-suspend idle Claude when switching worktrees", isOn: $autoSuspend)
+                    .help("Exit idle Claude instances when you switch away and resume them when you switch back, freeing memory")
             }
         }
         .formStyle(.grouped)

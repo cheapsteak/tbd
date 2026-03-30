@@ -6,6 +6,7 @@ struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
+    @AppStorage("autoSuspendClaude") private var autoSuspendClaude: Bool = true
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
@@ -101,15 +102,14 @@ struct ContentView: View {
             for worktreeID in newlySelected {
                 Task { await appState.refreshPRStatus(worktreeID: worktreeID) }
             }
-            Task {
-                try? await appState.daemonClient.worktreeSelectionChanged(
-                    selectedWorktreeIDs: appState.selectedWorktreeIDs
-                )
-                // Immediately refresh terminals for newly-selected worktrees so the
-                // UI picks up any updated tmuxWindowID (e.g. after a resume) rather
-                // than waiting for the ~2s poll cycle.
-                for worktreeID in newSelection {
-                    await appState.refreshTerminals(worktreeID: worktreeID)
+            if autoSuspendClaude {
+                Task {
+                    try? await appState.daemonClient.worktreeSelectionChanged(
+                        selectedWorktreeIDs: appState.selectedWorktreeIDs
+                    )
+                    for worktreeID in newSelection {
+                        await appState.refreshTerminals(worktreeID: worktreeID)
+                    }
                 }
             }
         }

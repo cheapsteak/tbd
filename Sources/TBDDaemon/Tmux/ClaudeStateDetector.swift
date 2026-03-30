@@ -5,6 +5,10 @@ public struct ClaudeStateDetector: Sendable {
     nonisolated(unsafe) static let claudeProcessRegex = try! Regex(#"^\d+\.\d+\.\d+"#)
     nonisolated(unsafe) static let promptRegex = try! Regex(#"^❯[\s\u{00a0}]*$"#)
     static let statusIndicators = ["⏵⏵", "bypass", "auto mode", "? for shortcuts"]
+    /// When Claude is thinking/working, the status bar contains "esc to interrupt".
+    /// This MUST be checked to avoid suspending during the thinking phase where
+    /// the bare prompt is visible but Claude is processing server-side.
+    static let busyIndicators = ["esc to interrupt"]
 
     // MARK: - Pure Static Methods
 
@@ -16,6 +20,9 @@ public struct ClaudeStateDetector: Sendable {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
         let lastLines = lines.suffix(5).map(String.init)
         let text = lastLines.joined(separator: "\n")
+        // Must NOT have busy indicators (thinking/working)
+        let isBusy = busyIndicators.contains { text.contains($0) }
+        guard !isBusy else { return false }
         let hasStatusBar = statusIndicators.contains { text.contains($0) }
         let hasPrompt = lastLines.contains { $0.firstMatch(of: promptRegex) != nil }
         return hasStatusBar && hasPrompt
