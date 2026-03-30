@@ -10,10 +10,10 @@ public actor SuspendResumeCoordinator {
     private let detector: ClaudeStateDetector
     private var inFlight: [UUID: Task<Void, Never>] = [:]
     private var lastKnownSelection: Set<UUID> = []
-    /// Tracks when each worktree last received a response_complete notification.
-    /// Used as a belt-and-suspenders check: suspend requires BOTH this signal
-    /// AND capture-pane confirmation.
-    private var lastResponseComplete: [UUID: Date] = [:]
+    /// Tracks whether each worktree has received a response_complete since last
+    /// suspend or resume. Used as belt-and-suspenders: suspend requires BOTH
+    /// this signal AND capture-pane confirmation.
+    private var worktreeIdleFromHook: Set<UUID> = []
 
     public init(db: TBDDatabase, tmux: TmuxManager) {
         self.db = db
@@ -22,9 +22,10 @@ public actor SuspendResumeCoordinator {
     }
 
     /// Called when the daemon receives a response_complete notification for a worktree.
-    /// This means a Claude instance in that worktree just finished a response.
+    /// This means a Claude instance in that worktree just finished a response and
+    /// is now waiting for user input.
     public func responseCompleted(worktreeID: UUID) {
-        lastResponseComplete[worktreeID] = Date()
+        worktreeIdleFromHook.insert(worktreeID)
     }
 
     public func selectionChanged(to newSelection: Set<UUID>) {
@@ -61,19 +62,11 @@ public actor SuspendResumeCoordinator {
     private func suspendTerminal(_ terminal: Terminal) async {
         guard let server = await worktreeServer(for: terminal.worktreeID) else { return }
 
-        // Belt: require a recent response_complete notification from this worktree.
-        // This confirms Claude finished a response and hasn't started a new turn.
+        // Belt: require that this worktree received a response_complete from Claude's
+        // Stop hook. This confirms Claude finished a response and is waiting for input.
         // Without this, we'd rely solely on capture-pane which can false-positive
-        // during the thinking phase.
-        if let lastComplete = lastResponseComplete[terminal.worktreeID] {
-            let age = Date().timeIntervalSince(lastComplete)
-            if age > 60 {
-                logger.info("Skipping suspend for \(terminal.id): last response_complete was \(Int(age))s ago")
-                return
-            }
-        } else {
-            // No response_complete ever received — don't suspend (Claude may have
-            // been running since before the hook was installed)
+        // during the thinking phase (bare prompt visible while Claude processes).
+        guard worktreeIdleFromHook.contains(terminal.worktreeID) else {
             return
         }
 
@@ -101,6 +94,7 @@ public actor SuspendResumeCoordinator {
         // Always mark suspended after point of no return
         do {
             try await db.terminals.setSuspended(id: terminal.id, sessionID: terminal.claudeSessionID!)
+            worktreeIdleFromHook.remove(terminal.worktreeID)
             logger.info("Suspended terminal \(terminal.id)")
         } catch {
             logger.warning("Failed to mark terminal \(terminal.id) suspended: \(error)")
