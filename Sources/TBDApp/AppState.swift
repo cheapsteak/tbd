@@ -151,6 +151,11 @@ final class AppState: ObservableObject {
         if didConnect {
             await refreshAll()
             await refreshPRStatuses()
+            Task {
+                try? await daemonClient.worktreeSelectionChanged(
+                    selectedWorktreeIDs: selectedWorktreeIDs
+                )
+            }
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }

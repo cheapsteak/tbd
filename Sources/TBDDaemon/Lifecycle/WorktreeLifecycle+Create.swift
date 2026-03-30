@@ -182,10 +182,14 @@ extension WorktreeLifecycle {
 
         // Create terminal 1: claude (or shell if skipClaude)
         let claudeCommand: String
+        let claudeSessionID: String?
         if skipClaude {
             claudeCommand = defaultShell
+            claudeSessionID = nil
         } else {
-            claudeCommand = "claude --dangerously-skip-permissions"
+            let sessionUUID = UUID().uuidString
+            claudeCommand = "claude --dangerously-skip-permissions --session-id \(sessionUUID)"
+            claudeSessionID = sessionUUID
         }
         let window1 = try await tmux.createWindow(
             server: tmuxServer,
@@ -197,7 +201,8 @@ extension WorktreeLifecycle {
             worktreeID: worktreeID,
             tmuxWindowID: window1.windowID,
             tmuxPaneID: window1.paneID,
-            label: skipClaude ? "shell" : "claude"
+            label: skipClaude ? "shell" : "claude",
+            claudeSessionID: claudeSessionID
         )
 
         // Create terminal 2: setup hook

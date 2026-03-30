@@ -101,6 +101,17 @@ struct ContentView: View {
             for worktreeID in newlySelected {
                 Task { await appState.refreshPRStatus(worktreeID: worktreeID) }
             }
+            Task {
+                try? await appState.daemonClient.worktreeSelectionChanged(
+                    selectedWorktreeIDs: appState.selectedWorktreeIDs
+                )
+                // Immediately refresh terminals for newly-selected worktrees so the
+                // UI picks up any updated tmuxWindowID (e.g. after a resume) rather
+                // than waiting for the ~2s poll cycle.
+                for worktreeID in newSelection {
+                    await appState.refreshTerminals(worktreeID: worktreeID)
+                }
+            }
         }
         .alert(
             appState.alertIsError ? "Error" : "Success",

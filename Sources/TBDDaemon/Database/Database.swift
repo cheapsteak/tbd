@@ -114,6 +114,13 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v6") { db in
+            try db.alter(table: "terminal") { t in
+                t.add(column: "claudeSessionID", .text)
+                t.add(column: "suspendedAt", .datetime)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

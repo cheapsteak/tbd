@@ -252,6 +252,61 @@ struct DatabaseTests {
         #expect(sorted[1].id == t1.id)
     }
 
+    // MARK: - Terminal Suspend Tests
+
+    @Test func terminalSuspendFields() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test-repo", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test", branch: "main",
+            path: "/tmp/test-repo/.tbd/worktrees/test", tmuxServer: "tbd-test"
+        )
+
+        // Create terminal with new fields
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id,
+            tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "claude",
+            claudeSessionID: "abc-123"
+        )
+        #expect(terminal.claudeSessionID == "abc-123")
+        #expect(terminal.suspendedAt == nil)
+
+        // Set suspended
+        try await db.terminals.setSuspended(id: terminal.id, sessionID: "abc-123")
+        let updated = try await db.terminals.get(id: terminal.id)
+        #expect(updated?.suspendedAt != nil)
+        #expect(updated?.claudeSessionID == "abc-123")
+
+        // Clear suspended
+        try await db.terminals.clearSuspended(id: terminal.id)
+        let cleared = try await db.terminals.get(id: terminal.id)
+        #expect(cleared?.suspendedAt == nil)
+
+        // Update session ID
+        try await db.terminals.updateSessionID(id: terminal.id, sessionID: "new-456")
+        let refreshed = try await db.terminals.get(id: terminal.id)
+        #expect(refreshed?.claudeSessionID == "new-456")
+    }
+
+    @Test func terminalSuspendedAtPreservesOnReconcile() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test-repo2", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test", branch: "main",
+            path: "/tmp/test-repo2/.tbd/worktrees/test", tmuxServer: "tbd-test"
+        )
+        let t = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "claude", claudeSessionID: "abc"
+        )
+        try await db.terminals.setSuspended(id: t.id, sessionID: "abc")
+
+        let suspended = try await db.terminals.list(worktreeID: wt.id)
+            .filter { $0.suspendedAt != nil }
+        #expect(suspended.count == 1)
+    }
+
     // MARK: - Notification Tests
 
     @Test func createAndReadNotifications() async throws {

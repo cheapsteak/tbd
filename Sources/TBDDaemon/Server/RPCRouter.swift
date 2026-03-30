@@ -11,6 +11,7 @@ public final class RPCRouter: Sendable {
     public let startTime: Date
     public let subscriptions: StateSubscriptionManager
     public let prManager: PRStatusManager
+    public let suspendResumeCoordinator: SuspendResumeCoordinator
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -31,6 +32,7 @@ public final class RPCRouter: Sendable {
         self.startTime = startTime
         self.subscriptions = subscriptions
         self.prManager = prManager
+        self.suspendResumeCoordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -90,6 +92,8 @@ public final class RPCRouter: Sendable {
                 return try await handlePRList()
             case RPCMethod.prRefresh:
                 return try await handlePRRefresh(request.paramsData)
+            case RPCMethod.worktreeSelectionChanged:
+                return try await handleWorktreeSelectionChanged(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

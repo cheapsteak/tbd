@@ -77,10 +77,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var label: String?
     public var createdAt: Date
     public var pinnedAt: Date?
+    public var claudeSessionID: String?
+    public var suspendedAt: Date?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
-                pinnedAt: Date? = nil) {
+                pinnedAt: Date? = nil, claudeSessionID: String? = nil,
+                suspendedAt: Date? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -88,6 +91,21 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.label = label
         self.createdAt = createdAt
         self.pinnedAt = pinnedAt
+        self.claudeSessionID = claudeSessionID
+        self.suspendedAt = suspendedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
+        tmuxWindowID = try c.decode(String.self, forKey: .tmuxWindowID)
+        tmuxPaneID = try c.decode(String.self, forKey: .tmuxPaneID)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        pinnedAt = try c.decodeIfPresent(Date.self, forKey: .pinnedAt)
+        claudeSessionID = try c.decodeIfPresent(String.self, forKey: .claudeSessionID)
+        suspendedAt = try c.decodeIfPresent(Date.self, forKey: .suspendedAt)
     }
 }
 

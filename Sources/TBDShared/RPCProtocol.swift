@@ -98,6 +98,7 @@ public enum RPCMethod {
     public static let prList    = "pr.list"
     public static let prRefresh = "pr.refresh"
     public static let cleanup = "cleanup"
+    public static let worktreeSelectionChanged = "worktree.selectionChanged"
 }
 
 public struct NotificationsListResult: Codable, Sendable {
@@ -221,6 +222,13 @@ public struct NotifyParams: Codable, Sendable {
 public struct ResolvePathParams: Codable, Sendable {
     public let path: String
     public init(path: String) { self.path = path }
+}
+
+public struct WorktreeSelectionChangedParams: Codable, Sendable {
+    public let selectedWorktreeIDs: [UUID]
+    public init(selectedWorktreeIDs: [UUID]) {
+        self.selectedWorktreeIDs = selectedWorktreeIDs
+    }
 }
 
 // MARK: - Result Structs
