@@ -13,6 +13,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var label: String?
     var createdAt: Date
     var pinnedAt: Date?
+    var claudeSessionID: String?
+    var suspendedAt: Date?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -22,6 +24,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.label = terminal.label
         self.createdAt = terminal.createdAt
         self.pinnedAt = terminal.pinnedAt
+        self.claudeSessionID = terminal.claudeSessionID
+        self.suspendedAt = terminal.suspendedAt
     }
 
     func toModel() -> Terminal {
@@ -32,7 +36,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             tmuxPaneID: tmuxPaneID,
             label: label,
             createdAt: createdAt,
-            pinnedAt: pinnedAt
+            pinnedAt: pinnedAt,
+            claudeSessionID: claudeSessionID,
+            suspendedAt: suspendedAt
         )
     }
 }
@@ -50,13 +56,15 @@ public struct TerminalStore: Sendable {
         worktreeID: UUID,
         tmuxWindowID: String,
         tmuxPaneID: String,
-        label: String? = nil
+        label: String? = nil,
+        claudeSessionID: String? = nil
     ) async throws -> Terminal {
         let terminal = Terminal(
             worktreeID: worktreeID,
             tmuxWindowID: tmuxWindowID,
             tmuxPaneID: tmuxPaneID,
-            label: label
+            label: label,
+            claudeSessionID: claudeSessionID
         )
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
@@ -106,6 +114,52 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.pinnedAt = pinned ? date : nil
+            try record.update(db)
+        }
+    }
+
+    /// Mark a terminal as suspended, recording the session ID and current timestamp.
+    public func setSuspended(id: UUID, sessionID: String, at date: Date = Date()) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.claudeSessionID = sessionID
+            record.suspendedAt = date
+            try record.update(db)
+        }
+    }
+
+    /// Clear the suspended state of a terminal.
+    public func clearSuspended(id: UUID) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.suspendedAt = nil
+            try record.update(db)
+        }
+    }
+
+    /// Update the Claude session ID for a terminal.
+    public func updateSessionID(id: UUID, sessionID: String) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.claudeSessionID = sessionID
+            try record.update(db)
+        }
+    }
+
+    /// Update the tmux window and pane IDs for a terminal.
+    public func updateTmuxIDs(id: UUID, windowID: String, paneID: String) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.tmuxWindowID = windowID
+            record.tmuxPaneID = paneID
             try record.update(db)
         }
     }
