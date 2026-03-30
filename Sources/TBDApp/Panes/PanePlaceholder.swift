@@ -160,8 +160,12 @@ struct PanePlaceholder: View {
         if let terminal = terminal(for: terminalID),
            terminal.suspendedAt != nil,
            let snapshot = terminal.suspendedSnapshot {
-            SnapshotTerminalView(snapshot: snapshot)
-                .id("\(terminal.id)-snapshot")
+            ZStack(alignment: .bottomTrailing) {
+                SnapshotTerminalView(snapshot: snapshot)
+                RestoringIndicator()
+                    .padding(12)
+            }
+            .id("\(terminal.id)-snapshot")
         } else if let terminal = terminal(for: terminalID) {
             TerminalPanelView(
                 terminalID: terminalID,
@@ -238,5 +242,30 @@ struct PanePlaceholder: View {
             direction: direction,
             newContent: .terminal(terminalID: newTerminal.id)
         )
+    }
+}
+
+// MARK: - RestoringIndicator
+
+/// Subtle bottom-right pill shown over a snapshot while Claude resumes.
+private struct RestoringIndicator: View {
+    @State private var opacity: Double = 0.6
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Restoring session…")
+                .font(.caption)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .opacity(opacity)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                opacity = 1.0
+            }
+        }
     }
 }
