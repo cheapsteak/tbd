@@ -167,7 +167,7 @@ struct PanePlaceholder: View {
                     .padding(12)
             }
             .id("\(terminal.id)-snapshot")
-        } else if let terminal = term {
+        } else if let terminal = term, terminal.suspendedAt == nil {
             TerminalPanelView(
                 terminalID: terminalID,
                 tmuxServer: worktree.tmuxServer,
@@ -185,20 +185,27 @@ struct PanePlaceholder: View {
             )
             .id("\(terminal.id)-\(terminal.tmuxWindowID)")
         } else {
-            // Fallback when terminal data hasn't loaded yet
-            ZStack {
-                Color(nsColor: .black)
+            // Fallback: terminal data not loaded, or suspended without snapshot
+            ZStack(alignment: .bottomTrailing) {
+                ZStack {
+                    Color(nsColor: .black)
 
-                VStack(spacing: 8) {
-                    Image(systemName: "terminal")
-                        .font(.largeTitle)
-                        .foregroundStyle(.secondary)
-                    Text(worktree.displayName)
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                    Text(worktree.branch)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                    VStack(spacing: 8) {
+                        Image(systemName: "terminal")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                        Text(worktree.displayName)
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                        Text(worktree.branch)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                if term?.suspendedAt != nil {
+                    RestoringIndicator()
+                        .padding(12)
                 }
             }
         }
