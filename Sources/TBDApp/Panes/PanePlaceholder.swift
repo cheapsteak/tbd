@@ -157,7 +157,8 @@ struct PanePlaceholder: View {
 
     @ViewBuilder
     private func terminalContent(terminalID: UUID) -> some View {
-        if let terminal = terminal(for: terminalID),
+        let term = terminal(for: terminalID)
+        if let terminal = term,
            terminal.suspendedAt != nil,
            let snapshot = terminal.suspendedSnapshot {
             ZStack(alignment: .bottomTrailing) {
@@ -166,7 +167,7 @@ struct PanePlaceholder: View {
                     .padding(12)
             }
             .id("\(terminal.id)-snapshot")
-        } else if let terminal = terminal(for: terminalID) {
+        } else if let terminal = term {
             TerminalPanelView(
                 terminalID: terminalID,
                 tmuxServer: worktree.tmuxServer,
