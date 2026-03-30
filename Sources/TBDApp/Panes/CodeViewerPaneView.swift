@@ -20,6 +20,7 @@ struct CodeViewerPaneView: View {
                     revealPath: path
                 )
                 .frame(width: 200)
+                .transition(.move(edge: .leading))
 
                 Divider()
             }
@@ -331,7 +332,7 @@ struct CodeViewerSidebar: View {
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
                         ForEach(entries, id: \.path) { entry in
                             FileEntryRow(
                                 entry: entry,
