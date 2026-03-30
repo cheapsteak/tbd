@@ -101,6 +101,11 @@ struct ContentView: View {
             for worktreeID in newlySelected {
                 Task { await appState.refreshPRStatus(worktreeID: worktreeID) }
             }
+            Task {
+                try? await appState.daemonClient.worktreeSelectionChanged(
+                    selectedWorktreeIDs: appState.selectedWorktreeIDs
+                )
+            }
         }
         .alert(
             appState.alertIsError ? "Error" : "Success",

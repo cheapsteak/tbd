@@ -426,6 +426,14 @@ actor DaemonClient {
         return result.statuses
     }
 
+    /// Notify the daemon which worktrees are currently selected in the app.
+    func worktreeSelectionChanged(selectedWorktreeIDs: Set<UUID>) throws {
+        try callVoid(
+            method: RPCMethod.worktreeSelectionChanged,
+            params: WorktreeSelectionChangedParams(selectedWorktreeIDs: Array(selectedWorktreeIDs))
+        )
+    }
+
     /// Trigger an immediate PR status refresh for one worktree.
     /// Returns nil if no PR exists for the worktree's branch.
     func refreshPRStatus(worktreeID: UUID) throws -> PRStatus? {
