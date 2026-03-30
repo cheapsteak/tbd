@@ -144,3 +144,23 @@ import Testing
     // Should not throw in dry run mode
     try await manager.sendKeys(server: "tbd-test", paneID: "%mock-0", text: "hello")
 }
+
+@Test func capturePaneCommand() {
+    let args = TmuxManager.capturePaneCommand(server: "tbd-test", paneID: "%42")
+    #expect(args == ["-L", "tbd-test", "capture-pane", "-p", "-t", "%42"])
+}
+
+@Test func paneCurrentCommandQuery() {
+    let args = TmuxManager.paneCurrentCommandQuery(server: "tbd-test", paneID: "%42")
+    #expect(args == ["-L", "tbd-test", "list-panes", "-t", "%42", "-F", "#{pane_current_command}"])
+}
+
+@Test func panePIDQuery() {
+    let args = TmuxManager.panePIDQuery(server: "tbd-test", paneID: "%42")
+    #expect(args == ["-L", "tbd-test", "list-panes", "-t", "%42", "-F", "#{pane_pid}"])
+}
+
+@Test func sendCommandWithEnter() {
+    let args = TmuxManager.sendCommandArgs(server: "tbd-test", paneID: "%42", command: "/exit")
+    #expect(args == ["-L", "tbd-test", "send-keys", "-t", "%42", "/exit", "Enter"])
+}

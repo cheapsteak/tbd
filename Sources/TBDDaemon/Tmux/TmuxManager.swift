@@ -70,6 +70,23 @@ public struct TmuxManager: Sendable {
         ["-L", server, "list-windows", "-t", session, "-F", "#{window_id} #{pane_id}"]
     }
 
+    public static func capturePaneCommand(server: String, paneID: String) -> [String] {
+        ["-L", server, "capture-pane", "-p", "-t", paneID]
+    }
+
+    public static func paneCurrentCommandQuery(server: String, paneID: String) -> [String] {
+        ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_current_command}"]
+    }
+
+    public static func panePIDQuery(server: String, paneID: String) -> [String] {
+        ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_pid}"]
+    }
+
+    /// send-keys without -l so "Enter" is interpreted as a key name, not literal text.
+    public static func sendCommandArgs(server: String, paneID: String, command: String) -> [String] {
+        ["-L", server, "send-keys", "-t", paneID, command, "Enter"]
+    }
+
     // MARK: - Instance Execution Methods
 
     /// Ensures a tmux server and session exist.
@@ -135,6 +152,30 @@ public struct TmuxManager: Sendable {
     public func sendKeys(server: String, paneID: String, text: String) async throws {
         if dryRun { return }
         let args = Self.sendKeysCommand(server: server, paneID: paneID, text: text)
+        try await runTmux(args)
+    }
+
+    public func capturePaneOutput(server: String, paneID: String) async throws -> String {
+        if dryRun { return "" }
+        let args = Self.capturePaneCommand(server: server, paneID: paneID)
+        return try await runTmux(args)
+    }
+
+    public func paneCurrentCommand(server: String, paneID: String) async throws -> String {
+        if dryRun { return "zsh" }
+        let args = Self.paneCurrentCommandQuery(server: server, paneID: paneID)
+        return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func panePID(server: String, paneID: String) async throws -> String {
+        if dryRun { return "0" }
+        let args = Self.panePIDQuery(server: server, paneID: paneID)
+        return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func sendCommand(server: String, paneID: String, command: String) async throws {
+        if dryRun { return }
+        let args = Self.sendCommandArgs(server: server, paneID: paneID, command: command)
         try await runTmux(args)
     }
 
