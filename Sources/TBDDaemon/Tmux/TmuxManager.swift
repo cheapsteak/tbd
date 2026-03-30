@@ -76,7 +76,7 @@ public struct TmuxManager: Sendable {
 
     /// Capture pane content with ANSI escape sequences and joined wrapped lines preserved.
     public static func capturePaneWithAnsiCommand(server: String, paneID: String) -> [String] {
-        ["-L", server, "capture-pane", "-p", "-e", "-t", paneID]
+        ["-L", server, "capture-pane", "-p", "-e", "-J", "-t", paneID]
     }
 
     public static func paneCurrentCommandQuery(server: String, paneID: String) -> [String] {

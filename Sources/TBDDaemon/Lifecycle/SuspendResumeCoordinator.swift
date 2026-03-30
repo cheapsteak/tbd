@@ -195,15 +195,32 @@ public actor SuspendResumeCoordinator {
             try await db.terminals.updateTmuxIDs(
                 id: terminal.id, windowID: window.windowID, paneID: window.paneID
             )
-            try await db.terminals.clearSuspended(id: terminal.id)
             logger.info("Resumed terminal \(terminal.id) in window \(window.windowID)")
 
-            // Re-capture session ID after ~5s, and re-seed idle flag
+            // Wait for Claude to start before clearing the snapshot, so the
+            // app's polling loop has time to observe the suspended state and
+            // show SnapshotTerminalView instead of a blank pane.
             let termID = terminal.id
             let worktreeID = terminal.worktreeID
             let paneID = window.paneID
             Task {
-                try? await Task.sleep(for: .seconds(5))
+                // Poll for Claude process to appear (up to 10s)
+                var claudeDetected = false
+                for _ in 0..<50 {
+                    try? await Task.sleep(for: .milliseconds(200))
+                    if let cmd = try? await self.tmux.paneCurrentCommand(server: server, paneID: paneID),
+                       ClaudeStateDetector.isClaudeProcess(cmd) {
+                        claudeDetected = true
+                        break
+                    }
+                }
+                suspendLog("Clearing suspended for \(termID.uuidString.prefix(8)): claudeDetected=\(claudeDetected)")
+                try? await self.db.terminals.clearSuspended(id: termID)
+
+                // Re-capture session ID after Claude has settled
+                if claudeDetected {
+                    try? await Task.sleep(for: .seconds(3))
+                }
                 if let newID = await self.detector.captureSessionID(server: server, paneID: paneID) {
                     try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
                     suspendLog("Re-captured session ID for \(termID.uuidString.prefix(8)): \(newID)")
