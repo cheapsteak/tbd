@@ -10,11 +10,21 @@ public actor SuspendResumeCoordinator {
     private let detector: ClaudeStateDetector
     private var inFlight: [UUID: Task<Void, Never>] = [:]
     private var lastKnownSelection: Set<UUID> = []
+    /// Tracks when each worktree last received a response_complete notification.
+    /// Used as a belt-and-suspenders check: suspend requires BOTH this signal
+    /// AND capture-pane confirmation.
+    private var lastResponseComplete: [UUID: Date] = [:]
 
     public init(db: TBDDatabase, tmux: TmuxManager) {
         self.db = db
         self.tmux = tmux
         self.detector = ClaudeStateDetector(tmux: tmux)
+    }
+
+    /// Called when the daemon receives a response_complete notification for a worktree.
+    /// This means a Claude instance in that worktree just finished a response.
+    public func responseCompleted(worktreeID: UUID) {
+        lastResponseComplete[worktreeID] = Date()
     }
 
     public func selectionChanged(to newSelection: Set<UUID>) {
@@ -51,7 +61,23 @@ public actor SuspendResumeCoordinator {
     private func suspendTerminal(_ terminal: Terminal) async {
         guard let server = await worktreeServer(for: terminal.worktreeID) else { return }
 
-        // Cancellable phase: idle check with 1s debounce
+        // Belt: require a recent response_complete notification from this worktree.
+        // This confirms Claude finished a response and hasn't started a new turn.
+        // Without this, we'd rely solely on capture-pane which can false-positive
+        // during the thinking phase.
+        if let lastComplete = lastResponseComplete[terminal.worktreeID] {
+            let age = Date().timeIntervalSince(lastComplete)
+            if age > 60 {
+                logger.info("Skipping suspend for \(terminal.id): last response_complete was \(Int(age))s ago")
+                return
+            }
+        } else {
+            // No response_complete ever received — don't suspend (Claude may have
+            // been running since before the hook was installed)
+            return
+        }
+
+        // Suspenders: capture-pane idle check with 1s debounce
         guard await detector.isIdleConfirmed(server: server, paneID: terminal.tmuxPaneID) else { return }
         guard !Task.isCancelled else { return }
 

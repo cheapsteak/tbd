@@ -122,6 +122,11 @@ extension RPCRouter {
             type: notification.type, message: notification.message
         )))
 
+        // Signal the suspend/resume coordinator that Claude finished a response
+        if params.type == .responseComplete {
+            await suspendResumeCoordinator.responseCompleted(worktreeID: worktreeID)
+        }
+
         return try RPCResponse(result: notification)
     }
 
