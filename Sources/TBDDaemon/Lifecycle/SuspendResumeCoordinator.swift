@@ -4,6 +4,20 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "SuspendResume")
 
+/// File-based debug log for suspend/resume diagnostics (os_log not reliably captured)
+private func suspendLog(_ msg: String) {
+    let line = "[SR \(ISO8601DateFormatter().string(from: Date()))] \(msg)\n"
+    if let data = line.data(using: .utf8) {
+        if let fh = FileHandle(forWritingAtPath: "/tmp/tbd-suspend.log") {
+            fh.seekToEndOfFile()
+            fh.write(data)
+            fh.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: "/tmp/tbd-suspend.log", contents: data)
+        }
+    }
+}
+
 public actor SuspendResumeCoordinator {
     private let db: TBDDatabase
     private let tmux: TmuxManager
@@ -26,11 +40,13 @@ public actor SuspendResumeCoordinator {
     /// is now waiting for user input.
     public func responseCompleted(worktreeID: UUID) {
         worktreeIdleFromHook.insert(worktreeID)
+        suspendLog("responseCompleted for worktree \(worktreeID.uuidString.prefix(8))")
     }
 
     public func selectionChanged(to newSelection: Set<UUID>) {
         let departing = lastKnownSelection.subtracting(newSelection)
         let arriving = newSelection.subtracting(lastKnownSelection)
+        suspendLog("selectionChanged: departing=\(departing.map { $0.uuidString.prefix(8) }), arriving=\(arriving.map { $0.uuidString.prefix(8) }), idleHook=\(worktreeIdleFromHook.map { $0.uuidString.prefix(8) })")
         lastKnownSelection = newSelection
 
         for worktreeID in departing {
@@ -67,14 +83,23 @@ public actor SuspendResumeCoordinator {
         // Without this, we'd rely solely on capture-pane which can false-positive
         // during the thinking phase (bare prompt visible while Claude processes).
         guard worktreeIdleFromHook.contains(terminal.worktreeID) else {
+            suspendLog("SKIP \(terminal.id.uuidString.prefix(8)): no response_complete hook for worktree")
             return
         }
 
         // Suspenders: capture-pane idle check with 1s debounce
-        guard await detector.isIdleConfirmed(server: server, paneID: terminal.tmuxPaneID) else { return }
-        guard !Task.isCancelled else { return }
+        let idleConfirmed = await detector.isIdleConfirmed(server: server, paneID: terminal.tmuxPaneID)
+        guard idleConfirmed else {
+            suspendLog("SKIP \(terminal.id.uuidString.prefix(8)): capture-pane says not idle")
+            return
+        }
+        guard !Task.isCancelled else {
+            suspendLog("SKIP \(terminal.id.uuidString.prefix(8)): task cancelled")
+            return
+        }
 
         // POINT OF NO RETURN — send /exit
+        suspendLog("SUSPENDING \(terminal.id.uuidString.prefix(8)): sending /exit")
         do {
             try await tmux.sendCommand(server: server, paneID: terminal.tmuxPaneID, command: "/exit")
         } catch {
@@ -162,16 +187,24 @@ public actor SuspendResumeCoordinator {
             try await db.terminals.clearSuspended(id: terminal.id)
             logger.info("Resumed terminal \(terminal.id) in window \(window.windowID)")
 
-            // Re-capture session ID after ~5s
+            // Re-capture session ID after ~5s, and re-seed idle flag
             let termID = terminal.id
+            let worktreeID = terminal.worktreeID
             let paneID = window.paneID
             Task {
                 try? await Task.sleep(for: .seconds(5))
                 if let newID = await self.detector.captureSessionID(server: server, paneID: paneID) {
                     try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
-                    logger.info("Re-captured session ID for terminal \(termID): \(newID)")
+                    suspendLog("Re-captured session ID for \(termID.uuidString.prefix(8)): \(newID)")
                 } else {
-                    logger.warning("Failed to re-capture session ID for terminal \(termID)")
+                    suspendLog("Failed to re-capture session ID for \(termID.uuidString.prefix(8))")
+                }
+                // Re-seed idle flag so this terminal can be suspended again
+                // on the next worktree switch. The Stop hook may not fire after
+                // --resume if Claude just shows the prompt without generating.
+                if await self.detector.isIdle(server: server, paneID: paneID) {
+                    self.worktreeIdleFromHook.insert(worktreeID)
+                    suspendLog("Re-seeded idle hook for worktree \(worktreeID.uuidString.prefix(8)) after resume")
                 }
             }
         } catch {
@@ -193,6 +226,20 @@ public actor SuspendResumeCoordinator {
                ClaudeStateDetector.isClaudeProcess(cmd) {
                 try? await db.terminals.clearSuspended(id: terminal.id)
                 logger.info("Startup: cleared suspendedAt for running terminal \(terminal.id)")
+            }
+        }
+
+        // Seed worktreeIdleFromHook for any worktree with a live, idle Claude terminal.
+        // This handles the case where the daemon restarts while Claude is sitting idle —
+        // without this, the in-memory flag would be empty and suspend would never trigger.
+        for terminal in allTerminals {
+            guard terminal.label?.hasPrefix("claude") == true,
+                  terminal.suspendedAt == nil,
+                  terminal.claudeSessionID != nil else { continue }
+            guard let server = await worktreeServer(for: terminal.worktreeID) else { continue }
+            if await detector.isIdle(server: server, paneID: terminal.tmuxPaneID) {
+                worktreeIdleFromHook.insert(terminal.worktreeID)
+                suspendLog("Startup: seeded idle hook for worktree \(terminal.worktreeID.uuidString.prefix(8))")
             }
         }
 
