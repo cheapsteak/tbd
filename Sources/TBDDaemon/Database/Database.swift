@@ -121,6 +121,12 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v7") { db in
+            try db.alter(table: "terminal") { t in
+                t.add(column: "suspendedSnapshot", .text)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

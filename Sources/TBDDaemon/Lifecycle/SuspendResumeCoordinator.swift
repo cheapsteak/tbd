@@ -98,6 +98,17 @@ public actor SuspendResumeCoordinator {
             return
         }
 
+        // Capture terminal snapshot with ANSI colors before exit
+        let snapshot: String?
+        do {
+            let captured = try await tmux.capturePaneWithAnsi(server: server, paneID: terminal.tmuxPaneID)
+            snapshot = captured.isEmpty ? nil : captured
+            suspendLog("Captured snapshot for \(terminal.id.uuidString.prefix(8)): \(captured.count) chars")
+        } catch {
+            snapshot = nil
+            suspendLog("Failed to capture snapshot for \(terminal.id.uuidString.prefix(8)): \(error)")
+        }
+
         // POINT OF NO RETURN — send /exit
         suspendLog("SUSPENDING \(terminal.id.uuidString.prefix(8)): sending /exit")
         do {
@@ -118,7 +129,7 @@ public actor SuspendResumeCoordinator {
 
         // Always mark suspended after point of no return
         do {
-            try await db.terminals.setSuspended(id: terminal.id, sessionID: terminal.claudeSessionID!)
+            try await db.terminals.setSuspended(id: terminal.id, sessionID: terminal.claudeSessionID!, snapshot: snapshot)
             worktreeIdleFromHook.remove(terminal.worktreeID)
             logger.info("Suspended terminal \(terminal.id)")
         } catch {
