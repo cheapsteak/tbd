@@ -165,6 +165,7 @@ public actor SuspendResumeCoordinator {
 
     public func reconcileOnStartup() async {
         guard let allTerminals = try? await db.terminals.list() else { return }
+
         for terminal in allTerminals where terminal.suspendedAt != nil {
             guard let server = await worktreeServer(for: terminal.worktreeID) else { continue }
             let alive = await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID)
@@ -172,6 +173,21 @@ public actor SuspendResumeCoordinator {
                ClaudeStateDetector.isClaudeProcess(cmd) {
                 try? await db.terminals.clearSuspended(id: terminal.id)
                 logger.info("Startup: cleared suspendedAt for running terminal \(terminal.id)")
+            }
+        }
+
+        // Backfill session IDs for pre-existing Claude terminals that lack one.
+        // These were created before --session-id was added at terminal creation.
+        for terminal in allTerminals {
+            guard terminal.claudeSessionID == nil,
+                  terminal.label?.hasPrefix("claude") == true,
+                  terminal.suspendedAt == nil else { continue }
+            guard let server = await worktreeServer(for: terminal.worktreeID) else { continue }
+            let alive = await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID)
+            guard alive else { continue }
+            if let sessionID = await detector.captureSessionID(server: server, paneID: terminal.tmuxPaneID) {
+                try? await db.terminals.updateSessionID(id: terminal.id, sessionID: sessionID)
+                logger.info("Startup: backfilled session ID for terminal \(terminal.id): \(sessionID)")
             }
         }
     }
