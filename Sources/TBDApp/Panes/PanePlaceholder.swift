@@ -173,7 +173,7 @@ struct PanePlaceholder: View {
                     debugLog("OSC 777: \(title) — \(body)")
                 }
             )
-            .id(terminalID)
+            .id("\(terminal.id)-\(terminal.tmuxWindowID)")
         } else {
             // Fallback when terminal data hasn't loaded yet
             ZStack {
