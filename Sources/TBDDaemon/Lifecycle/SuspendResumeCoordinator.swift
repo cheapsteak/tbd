@@ -219,10 +219,10 @@ public actor SuspendResumeCoordinator {
             // can cancel it — otherwise stale clearSuspended/updateSessionID
             // calls could race with the new suspend cycle.
             inFlight[termID] = Task {
-                // Brief delay so the app's 2s polling loop (AppState.startPolling)
-                // has time to observe the snapshot before we clear it. Must be
-                // longer than the poll interval. Then hand off to the live
-                // terminal — Claude's startup progress is visible there.
+                // AppState.startPolling polls every 2s. Wait 3s so at least one
+                // full cycle observes the snapshot before we clear it. Then hand
+                // off to the live terminal — Claude's startup progress is visible
+                // there. If the poll interval changes, update this to match.
                 try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled else { return }
                 suspendLog("Clearing suspended for \(termID.uuidString.prefix(8))")
