@@ -94,6 +94,7 @@ struct TerminalPanelView: NSViewRepresentable {
         private var localProcess: LocalProcess?
         private var scrollMonitor: Any?
         private var clickMonitor: Any?
+        private var focusMonitor: Any?
 
         func startTmuxClient(
             terminalView: TerminalView,
@@ -216,6 +217,20 @@ struct TerminalPanelView: NSViewRepresentable {
                 }
                 return consumed ? nil : event
             }
+
+            // Claim first responder on click so Cmd+Arrow and other key
+            // equivalents route to the focused terminal, not the previously
+            // focused one (e.g. main panel vs pinned dock).
+            focusMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+                let location = event.locationInWindow
+                MainActor.assumeIsolated {
+                    guard let tv = ref.view else { return }
+                    let point = tv.convert(location, from: nil)
+                    guard tv.bounds.contains(point) else { return }
+                    tv.window?.makeFirstResponder(tv)
+                }
+                return event // always pass through
+            }
         }
 
         func cleanup() {
@@ -228,6 +243,10 @@ struct TerminalPanelView: NSViewRepresentable {
                 NSEvent.removeMonitor(monitor)
                 clickMonitor = nil
             }
+            if let monitor = focusMonitor {
+                NSEvent.removeMonitor(monitor)
+                focusMonitor = nil
+            }
             tmuxBridge?.cleanupSession(panelID: panelID, server: tmuxServer)
         }
 
@@ -237,6 +256,9 @@ struct TerminalPanelView: NSViewRepresentable {
                 NSEvent.removeMonitor(monitor)
             }
             if let monitor = clickMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            if let monitor = focusMonitor {
                 NSEvent.removeMonitor(monitor)
             }
         }
