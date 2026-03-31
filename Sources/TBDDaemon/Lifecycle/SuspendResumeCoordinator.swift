@@ -56,14 +56,16 @@ public actor SuspendResumeCoordinator {
         suspendLog("responseCompleted for worktree \(worktreeID.uuidString.prefix(8))")
     }
 
-    public func selectionChanged(to newSelection: Set<UUID>) {
+    public func selectionChanged(to newSelection: Set<UUID>, suspendEnabled: Bool = true) {
         let departing = lastKnownSelection.subtracting(newSelection)
         let arriving = newSelection.subtracting(lastKnownSelection)
-        suspendLog("selectionChanged: departing=\(departing.map { $0.uuidString.prefix(8) }), arriving=\(arriving.map { $0.uuidString.prefix(8) }), idleHook=\(worktreeIdleFromHook.map { $0.uuidString.prefix(8) })")
+        suspendLog("selectionChanged: departing=\(departing.map { $0.uuidString.prefix(8) }), arriving=\(arriving.map { $0.uuidString.prefix(8) }), suspendEnabled=\(suspendEnabled), idleHook=\(worktreeIdleFromHook.map { $0.uuidString.prefix(8) })")
         lastKnownSelection = newSelection
 
-        for worktreeID in departing {
-            scheduleSuspend(worktreeID: worktreeID)
+        if suspendEnabled {
+            for worktreeID in departing {
+                scheduleSuspend(worktreeID: worktreeID)
+            }
         }
         for worktreeID in arriving {
             scheduleResume(worktreeID: worktreeID)
@@ -210,9 +212,6 @@ public actor SuspendResumeCoordinator {
             )
             logger.info("Resumed terminal \(terminal.id) in window \(window.windowID)")
 
-            // Wait for Claude to start before clearing the snapshot, so the
-            // app's polling loop has time to observe the suspended state and
-            // show SnapshotTerminalView instead of a blank pane.
             let termID = terminal.id
             let worktreeID = terminal.worktreeID
             let paneID = window.paneID
@@ -220,25 +219,17 @@ public actor SuspendResumeCoordinator {
             // can cancel it — otherwise stale clearSuspended/updateSessionID
             // calls could race with the new suspend cycle.
             inFlight[termID] = Task {
-                // Poll for Claude process to appear (up to 10s)
-                var claudeDetected = false
-                for _ in 0..<50 {
-                    try? await Task.sleep(for: .milliseconds(200))
-                    guard !Task.isCancelled else { return }
-                    if let cmd = try? await self.tmux.paneCurrentCommand(server: server, paneID: paneID),
-                       ClaudeStateDetector.isClaudeProcess(cmd) {
-                        claudeDetected = true
-                        break
-                    }
-                }
+                // AppState.startPolling polls every 2s. Wait 3s so at least one
+                // full cycle observes the snapshot before we clear it. Then hand
+                // off to the live terminal — Claude's startup progress is visible
+                // there. If the poll interval changes, update this to match.
+                try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled else { return }
-                suspendLog("Clearing suspended for \(termID.uuidString.prefix(8)): claudeDetected=\(claudeDetected)")
+                suspendLog("Clearing suspended for \(termID.uuidString.prefix(8))")
                 try? await self.db.terminals.clearSuspended(id: termID)
 
-                // Re-capture session ID after Claude has settled
-                if claudeDetected {
-                    try? await Task.sleep(for: .seconds(3))
-                }
+                // Wait for Claude to settle, then re-capture session ID
+                try? await Task.sleep(for: .seconds(5))
                 guard !Task.isCancelled else { return }
                 if let newID = await self.detector.captureSessionID(server: server, paneID: paneID) {
                     try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)

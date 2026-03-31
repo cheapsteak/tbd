@@ -226,8 +226,12 @@ public struct ResolvePathParams: Codable, Sendable {
 
 public struct WorktreeSelectionChangedParams: Codable, Sendable {
     public let selectedWorktreeIDs: [UUID]
-    public init(selectedWorktreeIDs: [UUID]) {
+    /// Whether to suspend idle terminals on departure. Nil defaults to true
+    /// for backwards compatibility with older clients that omit this field.
+    public let suspendEnabled: Bool?
+    public init(selectedWorktreeIDs: [UUID], suspendEnabled: Bool? = nil) {
         self.selectedWorktreeIDs = selectedWorktreeIDs
+        self.suspendEnabled = suspendEnabled
     }
 }
 

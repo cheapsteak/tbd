@@ -44,10 +44,16 @@ struct ContentView: View {
             .toolbar(removing: .sidebarToggle)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button(action: addRepo) {
-                        Label("Add Repository", systemImage: "plus.rectangle.on.folder")
+                    Button {
+                        autoSuspendClaude.toggle()
+                    } label: {
+                        Image(systemName: autoSuspendClaude ? "pause.circle.fill" : "pause.circle")
+                            .foregroundStyle(autoSuspendClaude ? .primary : .secondary)
                     }
-                    .help("Add a Git repository")
+                    .accessibilityLabel(autoSuspendClaude ? "Auto-suspend on" : "Auto-suspend off")
+                    .help(autoSuspendClaude
+                        ? "Auto-suspend is on — idle Claude instances are suspended when switching worktrees"
+                        : "Auto-suspend is off — Claude instances stay running when switching worktrees")
 
                     Picker("Filter", selection: $appState.repoFilter) {
                         Text("All Repos").tag(UUID?.none)
@@ -102,14 +108,13 @@ struct ContentView: View {
             for worktreeID in newlySelected {
                 Task { await appState.refreshPRStatus(worktreeID: worktreeID) }
             }
-            if autoSuspendClaude {
-                Task {
-                    try? await appState.daemonClient.worktreeSelectionChanged(
-                        selectedWorktreeIDs: appState.selectedWorktreeIDs
-                    )
-                    for worktreeID in newSelection {
-                        await appState.refreshTerminals(worktreeID: worktreeID)
-                    }
+            Task {
+                try? await appState.daemonClient.worktreeSelectionChanged(
+                    selectedWorktreeIDs: appState.selectedWorktreeIDs,
+                    suspendEnabled: autoSuspendClaude
+                )
+                for worktreeID in newSelection {
+                    await appState.refreshTerminals(worktreeID: worktreeID)
                 }
             }
         }
