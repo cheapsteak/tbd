@@ -50,6 +50,7 @@ struct ContentView: View {
                         Image(systemName: autoSuspendClaude ? "pause.circle.fill" : "pause.circle")
                             .foregroundStyle(autoSuspendClaude ? .primary : .secondary)
                     }
+                    .accessibilityLabel(autoSuspendClaude ? "Auto-suspend on" : "Auto-suspend off")
                     .help(autoSuspendClaude
                         ? "Auto-suspend is on — idle Claude instances are suspended when switching worktrees"
                         : "Auto-suspend is off — Claude instances stay running when switching worktrees")
