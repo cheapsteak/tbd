@@ -63,9 +63,15 @@ private struct TabBarItem: View {
 
     @State private var isHovering = false
     @State private var isHoveringClose = false
+    @AppStorage("codeViewer.showSidebar") private var showSidebar = false
 
     private var showClose: Bool {
         isSelected || isHovering
+    }
+
+    private var isCodeViewer: Bool {
+        if case .codeViewer = tab.content { return true }
+        return false
     }
 
     var body: some View {
@@ -87,6 +93,23 @@ private struct TabBarItem: View {
             .buttonStyle(.plain)
             .opacity(showClose ? 1 : 0)
             .animation(.easeInOut(duration: 0.12), value: showClose)
+
+            // Sidebar toggle for code viewer tabs
+            if isCodeViewer {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        showSidebar.toggle()
+                    }
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 10))
+                        .foregroundStyle(showSidebar ? .primary : .tertiary)
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.plain)
+                .help("Toggle file tree")
+                .padding(.trailing, 2)
+            }
 
             // Type icon
             Image(systemName: tabIcon)

@@ -9,7 +9,7 @@ struct CodeViewerPaneView: View {
     let worktreePath: String
 
     @State private var selectedFiles: [String] = []
-    @State private var showSidebar = false
+    @AppStorage("codeViewer.showSidebar") private var showSidebar = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -27,50 +27,16 @@ struct CodeViewerPaneView: View {
             }
 
             // Code preview
-            VStack(spacing: 0) {
-                // Tab header bar
-                HStack(spacing: 6) {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            showSidebar.toggle()
-                        }
-                    } label: {
-                        Image(systemName: "sidebar.left")
-                            .font(.system(size: 11))
-                            .foregroundStyle(showSidebar ? .primary : .secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Toggle file tree")
-
-                    if let firstName = selectedFiles.first {
-                        Image(systemName: "doc")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text(URL(fileURLWithPath: firstName).lastPathComponent)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-
-                    Spacer()
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Color(nsColor: .controlBackgroundColor))
-
-                Divider()
-
-                if selectedFiles.isEmpty {
-                    emptyState
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(selectedFiles, id: \.self) { filePath in
-                                if selectedFiles.count > 1 {
-                                    fileHeader(filePath)
-                                }
-                                FilePreviewView(filePath: filePath)
+            if selectedFiles.isEmpty {
+                emptyState
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(selectedFiles, id: \.self) { filePath in
+                            if selectedFiles.count > 1 {
+                                fileHeader(filePath)
                             }
+                            FilePreviewView(filePath: filePath)
                         }
                     }
                 }
