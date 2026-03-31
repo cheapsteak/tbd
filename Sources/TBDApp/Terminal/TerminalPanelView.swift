@@ -184,12 +184,21 @@ struct TerminalPanelView: NSViewRepresentable {
                 return consumed ? nil : event
             }
 
-            // Intercept Cmd+Click to detect file paths in the terminal buffer.
+            // Intercept clicks: claim first responder on any click (so Cmd+Arrow
+            // routes to the focused terminal), and handle Cmd+Click for file paths.
             clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+                let location = event.locationInWindow
+
+                // Claim first responder so key equivalents route to this terminal
+                MainActor.assumeIsolated {
+                    guard let tv = ref.view else { return }
+                    let point = tv.convert(location, from: nil)
+                    guard tv.bounds.contains(point) else { return }
+                    tv.window?.makeFirstResponder(tv)
+                }
+
                 guard event.modifierFlags.contains(.command) else { return event }
 
-                // Capture event properties before entering the MainActor closure
-                let location = event.locationInWindow
                 let consumed = MainActor.assumeIsolated { () -> Bool in
                     guard let tv = ref.view as? TBDTerminalView else { return false }
                     let point = tv.convert(location, from: nil)
