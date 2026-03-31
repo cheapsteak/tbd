@@ -108,14 +108,13 @@ struct ContentView: View {
             for worktreeID in newlySelected {
                 Task { await appState.refreshPRStatus(worktreeID: worktreeID) }
             }
-            if autoSuspendClaude {
-                Task {
-                    try? await appState.daemonClient.worktreeSelectionChanged(
-                        selectedWorktreeIDs: appState.selectedWorktreeIDs
-                    )
-                    for worktreeID in newSelection {
-                        await appState.refreshTerminals(worktreeID: worktreeID)
-                    }
+            Task {
+                try? await appState.daemonClient.worktreeSelectionChanged(
+                    selectedWorktreeIDs: appState.selectedWorktreeIDs,
+                    suspendEnabled: autoSuspendClaude
+                )
+                for worktreeID in newSelection {
+                    await appState.refreshTerminals(worktreeID: worktreeID)
                 }
             }
         }

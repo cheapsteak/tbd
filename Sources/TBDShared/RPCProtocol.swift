@@ -226,8 +226,10 @@ public struct ResolvePathParams: Codable, Sendable {
 
 public struct WorktreeSelectionChangedParams: Codable, Sendable {
     public let selectedWorktreeIDs: [UUID]
-    public init(selectedWorktreeIDs: [UUID]) {
+    public var suspendEnabled: Bool?
+    public init(selectedWorktreeIDs: [UUID], suspendEnabled: Bool? = nil) {
         self.selectedWorktreeIDs = selectedWorktreeIDs
+        self.suspendEnabled = suspendEnabled
     }
 }
 

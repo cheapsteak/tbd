@@ -56,14 +56,16 @@ public actor SuspendResumeCoordinator {
         suspendLog("responseCompleted for worktree \(worktreeID.uuidString.prefix(8))")
     }
 
-    public func selectionChanged(to newSelection: Set<UUID>) {
+    public func selectionChanged(to newSelection: Set<UUID>, suspendEnabled: Bool = true) {
         let departing = lastKnownSelection.subtracting(newSelection)
         let arriving = newSelection.subtracting(lastKnownSelection)
-        suspendLog("selectionChanged: departing=\(departing.map { $0.uuidString.prefix(8) }), arriving=\(arriving.map { $0.uuidString.prefix(8) }), idleHook=\(worktreeIdleFromHook.map { $0.uuidString.prefix(8) })")
+        suspendLog("selectionChanged: departing=\(departing.map { $0.uuidString.prefix(8) }), arriving=\(arriving.map { $0.uuidString.prefix(8) }), suspendEnabled=\(suspendEnabled), idleHook=\(worktreeIdleFromHook.map { $0.uuidString.prefix(8) })")
         lastKnownSelection = newSelection
 
-        for worktreeID in departing {
-            scheduleSuspend(worktreeID: worktreeID)
+        if suspendEnabled {
+            for worktreeID in departing {
+                scheduleSuspend(worktreeID: worktreeID)
+            }
         }
         for worktreeID in arriving {
             scheduleResume(worktreeID: worktreeID)
