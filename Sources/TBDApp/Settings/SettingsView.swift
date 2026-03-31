@@ -56,7 +56,7 @@ struct RepositoriesSettingsTab: View {
                     Spacer()
                     Text("No repositories added yet.")
                         .foregroundStyle(.secondary)
-                    Text("Use the Add Repository button in the main window toolbar.")
+                    Text("Use the + button in the sidebar to add a repository.")
                         .foregroundStyle(.tertiary)
                         .font(.caption)
                     Spacer()
