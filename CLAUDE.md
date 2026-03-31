@@ -10,6 +10,7 @@ Use the `tbd-project` skill for architecture, conventions, and file reference.
 - Use conventional commit messages: `feat:`, `fix:`, `docs:`, `refactor:`
 - Verify your changes compile (`swift build`) before committing.
 - Run `swift test` if you changed daemon or shared code.
+- When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
 
 ## Critical Rules
 
