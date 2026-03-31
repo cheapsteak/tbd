@@ -44,10 +44,15 @@ struct ContentView: View {
             .toolbar(removing: .sidebarToggle)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button(action: addRepo) {
-                        Label("Add Repository", systemImage: "plus.rectangle.on.folder")
+                    Button {
+                        autoSuspendClaude.toggle()
+                    } label: {
+                        Image(systemName: autoSuspendClaude ? "pause.circle.fill" : "pause.circle")
+                            .foregroundStyle(autoSuspendClaude ? .primary : .secondary)
                     }
-                    .help("Add a Git repository")
+                    .help(autoSuspendClaude
+                        ? "Auto-suspend is on — idle Claude instances are suspended when switching worktrees"
+                        : "Auto-suspend is off — Claude instances stay running when switching worktrees")
 
                     Picker("Filter", selection: $appState.repoFilter) {
                         Text("All Repos").tag(UUID?.none)
