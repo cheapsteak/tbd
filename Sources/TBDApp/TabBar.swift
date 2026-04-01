@@ -147,8 +147,8 @@ private struct TabBarItem: View {
                         }
                 }
                 .buttonStyle(.plain)
-                .opacity(showClose ? 1 : 0)
-                .animation(.easeInOut(duration: 0.12), value: showClose)
+                .opacity((isSuspended || showClose) ? 1 : 0)
+                .animation(.easeInOut(duration: 0.12), value: isSuspended || showClose)
                 .help(isSuspended ? "Resume Claude" : "Suspend Claude")
                 .padding(.trailing, 2)
             }
