@@ -83,7 +83,7 @@ public actor SuspendResumeCoordinator {
         guard terminal.suspendedAt == nil else {
             return .alreadySuspended
         }
-        guard terminal.claudeSessionID != nil else {
+        guard let sessionID = terminal.claudeSessionID else {
             return .notClaudeTerminal
         }
         guard let server = await worktreeServer(for: terminal.worktreeID) else {
@@ -141,7 +141,7 @@ public actor SuspendResumeCoordinator {
 
         // Mark suspended
         do {
-            try await db.terminals.setSuspended(id: terminal.id, sessionID: freshTerminal.claudeSessionID!, snapshot: snapshot)
+            try await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID, snapshot: snapshot)
             worktreeIdleFromHook.remove(freshTerminal.worktreeID)
         } catch {
             return .notFound

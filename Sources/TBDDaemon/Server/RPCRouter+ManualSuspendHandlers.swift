@@ -58,7 +58,9 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found")
         }
 
-        let suspendedTerminals = terminals.filter { $0.suspendedAt != nil }
+        let suspendedTerminals = terminals.filter {
+            $0.label?.hasPrefix("claude") == true && $0.suspendedAt != nil
+        }
 
         await withTaskGroup(of: Void.self) { group in
             for terminal in suspendedTerminals {
