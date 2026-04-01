@@ -99,6 +99,10 @@ public enum RPCMethod {
     public static let prRefresh = "pr.refresh"
     public static let cleanup = "cleanup"
     public static let worktreeSelectionChanged = "worktree.selectionChanged"
+    public static let terminalSuspend = "terminal.suspend"
+    public static let terminalResume = "terminal.resume"
+    public static let worktreeSuspend = "worktree.suspend"
+    public static let worktreeResume = "worktree.resume"
 }
 
 public struct NotificationsListResult: Codable, Sendable {
@@ -233,6 +237,26 @@ public struct WorktreeSelectionChangedParams: Codable, Sendable {
         self.selectedWorktreeIDs = selectedWorktreeIDs
         self.suspendEnabled = suspendEnabled
     }
+}
+
+public struct TerminalSuspendParams: Codable, Sendable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+public struct TerminalResumeParams: Codable, Sendable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+public struct WorktreeSuspendParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct WorktreeResumeParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
 }
 
 // MARK: - Result Structs
