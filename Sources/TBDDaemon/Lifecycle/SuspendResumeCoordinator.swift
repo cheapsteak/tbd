@@ -31,6 +31,21 @@ private func suspendLog(_ msg: String) {
     }
 }
 
+public enum ManualSuspendResult: Equatable, Sendable {
+    case ok
+    case alreadySuspended
+    case notClaudeTerminal
+    case notFound
+    case busy
+}
+
+public enum ManualResumeResult: Equatable, Sendable {
+    case ok
+    case notSuspended
+    case notFound
+    case noSessionID
+}
+
 public actor SuspendResumeCoordinator {
     private let db: TBDDatabase
     private let tmux: TmuxManager
@@ -54,6 +69,134 @@ public actor SuspendResumeCoordinator {
     public func responseCompleted(worktreeID: UUID) {
         worktreeIdleFromHook.insert(worktreeID)
         suspendLog("responseCompleted for worktree \(worktreeID.uuidString.prefix(8))")
+    }
+
+    // MARK: - Manual Suspend/Resume
+
+    public func manualSuspend(terminalID: UUID) async -> ManualSuspendResult {
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
+            return .notFound
+        }
+        guard terminal.label?.hasPrefix("claude") == true else {
+            return .notClaudeTerminal
+        }
+        guard terminal.suspendedAt == nil else {
+            return .alreadySuspended
+        }
+        guard let sessionID = terminal.claudeSessionID else {
+            return .notClaudeTerminal
+        }
+        guard let server = await worktreeServer(for: terminal.worktreeID) else {
+            return .notFound
+        }
+
+        // Cancel any in-flight operation and register ourselves so auto-suspend
+        // won't spawn a concurrent suspend for the same terminal.
+        inFlight[terminalID]?.cancel()
+
+        // Wrap in a Task stored in inFlight so cancellation propagates when
+        // scheduleSuspend or another caller cancels inFlight[terminalID].
+        // Task.isCancelled checks apply to THIS task, not a wrapper.
+        let suspendTask = Task<ManualSuspendResult, Never> { [detector, tmux, db] in
+            // Wait for idle up to 10s (capture-pane only, skip hook requirement)
+            var idle = false
+            for _ in 0..<50 {
+                guard !Task.isCancelled else {
+                    suspendLog("MANUAL SUSPEND CANCELLED \(terminalID.uuidString.prefix(8))")
+                    return .busy
+                }
+                if await detector.isIdle(server: server, paneID: terminal.tmuxPaneID) {
+                    idle = true
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            guard idle else {
+                suspendLog("MANUAL SUSPEND ABORT \(terminalID.uuidString.prefix(8)): still busy after 10s")
+                return .busy
+            }
+            guard !Task.isCancelled else {
+                suspendLog("MANUAL SUSPEND CANCELLED \(terminalID.uuidString.prefix(8))")
+                return .busy
+            }
+
+            // Re-fetch terminal to verify it still exists and isn't suspended
+            guard let freshTerminal = try? await db.terminals.get(id: terminalID),
+                  freshTerminal.suspendedAt == nil else {
+                return .alreadySuspended
+            }
+
+            // Capture snapshot
+            let snapshot: String?
+            do {
+                let captured = try await tmux.capturePaneWithAnsi(server: server, paneID: freshTerminal.tmuxPaneID)
+                snapshot = captured.isEmpty ? nil : captured
+            } catch {
+                snapshot = nil
+            }
+
+            // Send /exit
+            suspendLog("MANUAL SUSPENDING \(terminalID.uuidString.prefix(8)): sending /exit")
+            do {
+                try await tmux.sendCommand(server: server, paneID: freshTerminal.tmuxPaneID, command: "/exit")
+            } catch {
+                return .notFound
+            }
+
+            // Verify exit: poll for up to 3s
+            for _ in 0..<15 {
+                try? await Task.sleep(for: .milliseconds(200))
+                if let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: freshTerminal.tmuxPaneID),
+                   !ClaudeStateDetector.isClaudeProcess(cmd) {
+                    break
+                }
+            }
+
+            // Mark suspended
+            do {
+                try await db.terminals.setSuspended(id: terminalID, sessionID: freshTerminal.claudeSessionID ?? sessionID, snapshot: snapshot)
+                self.worktreeIdleFromHook.remove(freshTerminal.worktreeID)
+            } catch {
+                return .notFound
+            }
+
+            return .ok
+        }
+        // Store a wrapper in inFlight that cancels the real task when cancelled.
+        // Swift doesn't auto-propagate cancellation to awaited tasks, so we
+        // use withTaskCancellationHandler to bridge it.
+        inFlight[terminalID] = Task {
+            await withTaskCancellationHandler {
+                _ = await suspendTask.value
+            } onCancel: {
+                suspendTask.cancel()
+            }
+        }
+        let result = await suspendTask.value
+        inFlight[terminalID] = nil
+        return result
+    }
+
+    public func manualResume(terminalID: UUID) async -> ManualResumeResult {
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
+            return .notFound
+        }
+        guard terminal.suspendedAt != nil else {
+            return .notSuspended
+        }
+        guard terminal.claudeSessionID != nil else {
+            return .noSessionID
+        }
+        guard await worktreeServer(for: terminal.worktreeID) != nil else {
+            return .notFound
+        }
+
+        // Cancel any in-flight operation for this terminal
+        inFlight[terminal.id]?.cancel()
+
+        // Reuse existing resume logic
+        await resumeTerminal(terminal)
+        return .ok
     }
 
     public func selectionChanged(to newSelection: Set<UUID>, suspendEnabled: Bool = true) {

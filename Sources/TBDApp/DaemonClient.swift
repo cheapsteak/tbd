@@ -434,6 +434,38 @@ actor DaemonClient {
         )
     }
 
+    /// Manually suspend a single Claude terminal.
+    func terminalSuspend(terminalID: UUID) throws {
+        try callVoid(
+            method: RPCMethod.terminalSuspend,
+            params: TerminalSuspendParams(terminalID: terminalID)
+        )
+    }
+
+    /// Manually resume a single suspended terminal.
+    func terminalResume(terminalID: UUID) throws {
+        try callVoid(
+            method: RPCMethod.terminalResume,
+            params: TerminalResumeParams(terminalID: terminalID)
+        )
+    }
+
+    /// Suspend all Claude terminals in a worktree.
+    func worktreeSuspend(worktreeID: UUID) throws {
+        try callVoid(
+            method: RPCMethod.worktreeSuspend,
+            params: WorktreeSuspendParams(worktreeID: worktreeID)
+        )
+    }
+
+    /// Resume all suspended terminals in a worktree.
+    func worktreeResume(worktreeID: UUID) throws {
+        try callVoid(
+            method: RPCMethod.worktreeResume,
+            params: WorktreeResumeParams(worktreeID: worktreeID)
+        )
+    }
+
     /// Trigger an immediate PR status refresh for one worktree.
     /// Returns nil if no PR exists for the worktree's branch.
     func refreshPRStatus(worktreeID: UUID) throws -> PRStatus? {

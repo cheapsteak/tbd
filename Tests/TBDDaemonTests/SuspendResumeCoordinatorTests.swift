@@ -60,6 +60,53 @@ struct SuspendResumeCoordinatorTests {
         #expect(after?.suspendedAt == nil, "Resume should clear suspendedAt when suspendEnabled is true")
     }
 
+    @Test func manualSuspendSkipsAlreadySuspended() async throws {
+        let (db, _, terminalID) = try await setupSuspendedTerminal()
+        let tmux = TmuxManager(dryRun: true)
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
+
+        let result = await coordinator.manualSuspend(terminalID: terminalID)
+        #expect(result == .alreadySuspended)
+    }
+
+    @Test func manualSuspendRejectsNonClaudeTerminal() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test-repo", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt",
+            branch: "main", path: "/tmp/test-repo",
+            tmuxServer: "tbd-test"
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            label: "zsh"
+        )
+        let tmux = TmuxManager(dryRun: true)
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
+
+        let result = await coordinator.manualSuspend(terminalID: terminal.id)
+        #expect(result == .notClaudeTerminal)
+    }
+
+    @Test func manualResumeSkipsNonSuspended() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test-repo", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt",
+            branch: "main", path: "/tmp/test-repo",
+            tmuxServer: "tbd-test"
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            label: "claude-1", claudeSessionID: "session-abc"
+        )
+        let tmux = TmuxManager(dryRun: true)
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
+
+        let result = await coordinator.manualResume(terminalID: terminal.id)
+        #expect(result == .notSuspended)
+    }
+
     @Test func suspendSkippedWhenDisabled() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/test-repo", displayName: "test", defaultBranch: "main")

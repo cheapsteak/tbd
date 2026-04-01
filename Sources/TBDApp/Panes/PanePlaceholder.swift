@@ -176,6 +176,18 @@ struct PanePlaceholder: View {
                 isSuspendedSnapshot: terminal.suspendedAt != nil
             )
             .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
+            .overlay(alignment: .topTrailing) {
+                if terminal.suspendedAt != nil {
+                    Text("Suspended")
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
+                        .padding(8)
+                }
+            }
         } else {
             // Fallback when terminal data hasn't loaded yet
             ZStack {

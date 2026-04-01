@@ -1,4 +1,5 @@
 import SwiftUI
+import TBDShared
 
 // MARK: - TabBar
 
@@ -9,6 +10,9 @@ struct TabBar: View {
     @Binding var activeTabIndex: Int
     var onAddTab: () -> Void
     var onCloseTab: (Int) -> Void
+    var terminalForTab: (UUID) -> Terminal? = { _ in nil }
+    var onSuspendTab: (UUID) -> Void = { _ in }
+    var onResumeTab: (UUID) -> Void = { _ in }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -24,8 +28,11 @@ struct TabBar: View {
                     tab: tab,
                     index: index,
                     isSelected: index == activeTabIndex,
+                    terminal: terminalForTab(tab.id),
                     onSelect: { activeTabIndex = index },
-                    onClose: { onCloseTab(index) }
+                    onClose: { onCloseTab(index) },
+                    onSuspend: { onSuspendTab(tab.id) },
+                    onResume: { onResumeTab(tab.id) }
                 )
             }
 
@@ -58,11 +65,15 @@ private struct TabBarItem: View {
     let tab: Tab
     let index: Int
     let isSelected: Bool
+    let terminal: Terminal?
     let onSelect: () -> Void
     let onClose: () -> Void
+    let onSuspend: () -> Void
+    let onResume: () -> Void
 
     @State private var isHovering = false
     @State private var isHoveringClose = false
+    @State private var isHoveringSuspend = false
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
 
     private var showClose: Bool {
@@ -72,6 +83,15 @@ private struct TabBarItem: View {
     private var isCodeViewer: Bool {
         if case .codeViewer = tab.content { return true }
         return false
+    }
+
+    private var isClaudeTerminal: Bool {
+        guard let terminal else { return false }
+        return terminal.label?.hasPrefix("claude") == true
+    }
+
+    private var isSuspended: Bool {
+        terminal?.suspendedAt != nil
     }
 
     var body: some View {
@@ -111,6 +131,28 @@ private struct TabBarItem: View {
                 .padding(.trailing, 2)
             }
 
+            // Suspend/resume button for Claude terminals
+            if isClaudeTerminal {
+                Button(action: isSuspended ? onResume : onSuspend) {
+                    Image(systemName: isSuspended ? "play.circle" : "pause.circle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(isHoveringSuspend ? .primary : .secondary)
+                        .frame(width: 16, height: 16)
+                        .background(
+                            Circle()
+                                .fill(Color.primary.opacity(isHoveringSuspend ? 0.12 : 0))
+                        )
+                        .onHover { hovering in
+                            isHoveringSuspend = hovering
+                        }
+                }
+                .buttonStyle(.plain)
+                .opacity((isSuspended || showClose) ? 1 : 0)
+                .animation(.easeInOut(duration: 0.12), value: isSuspended || showClose)
+                .help(isSuspended ? "Resume Claude" : "Suspend Claude")
+                .padding(.trailing, 2)
+            }
+
             // Type icon
             Image(systemName: tabIcon)
                 .font(.system(size: 10))
@@ -121,7 +163,7 @@ private struct TabBarItem: View {
             Text(tabLabel)
                 .font(.system(size: 11))
                 .lineLimit(1)
-                .foregroundStyle(isSelected ? .primary : .secondary)
+                .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
                 .frame(maxWidth: .infinity)
 
             // Invisible spacer matching close button width for centering
@@ -148,7 +190,8 @@ private struct TabBarItem: View {
 
     private var tabIcon: String {
         switch tab.content {
-        case .terminal: return "terminal"
+        case .terminal:
+            return isSuspended ? "moon.zzz" : "terminal"
         case .webview: return "globe"
         case .codeViewer: return "doc.text"
         }

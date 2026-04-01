@@ -83,6 +83,14 @@ private struct SingleWorktreeView: View {
         appState.tabs[worktreeID] ?? []
     }
 
+    /// Resolve a tab ID to its terminal ID (nil for non-terminal tabs).
+    private func terminalID(for tabID: UUID) -> UUID? {
+        guard case .terminal(let id) = appState.tabs[worktreeID]?.first(where: { $0.id == tabID })?.content else {
+            return nil
+        }
+        return id
+    }
+
     var body: some View {
         if let worktree {
             VStack(spacing: 0) {
@@ -106,6 +114,24 @@ private struct SingleWorktreeView: View {
                         },
                         onCloseTab: { index in
                             closeTab(at: index)
+                        },
+                        terminalForTab: { tabID in
+                            guard let terminalID = terminalID(for: tabID) else { return nil }
+                            return appState.terminals[worktreeID]?.first { $0.id == terminalID }
+                        },
+                        onSuspendTab: { tabID in
+                            guard let terminalID = terminalID(for: tabID) else { return }
+                            Task {
+                                try? await appState.daemonClient.terminalSuspend(terminalID: terminalID)
+                                await appState.refreshTerminals(worktreeID: worktreeID)
+                            }
+                        },
+                        onResumeTab: { tabID in
+                            guard let terminalID = terminalID(for: tabID) else { return }
+                            Task {
+                                try? await appState.daemonClient.terminalResume(terminalID: terminalID)
+                                await appState.refreshTerminals(worktreeID: worktreeID)
+                            }
                         }
                     )
 
