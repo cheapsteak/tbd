@@ -41,12 +41,9 @@ extension RPCRouter {
             $0.label?.hasPrefix("claude") == true && $0.suspendedAt == nil
         }
 
-        await withTaskGroup(of: Void.self) { group in
-            for terminal in claudeTerminals {
-                group.addTask {
-                    _ = await self.suspendResumeCoordinator.manualSuspend(terminalID: terminal.id)
-                }
-            }
+        // Sequential — the coordinator is an actor so calls serialize anyway
+        for terminal in claudeTerminals {
+            _ = await suspendResumeCoordinator.manualSuspend(terminalID: terminal.id)
         }
 
         return .ok()
@@ -62,12 +59,9 @@ extension RPCRouter {
             $0.label?.hasPrefix("claude") == true && $0.suspendedAt != nil
         }
 
-        await withTaskGroup(of: Void.self) { group in
-            for terminal in suspendedTerminals {
-                group.addTask {
-                    _ = await self.suspendResumeCoordinator.manualResume(terminalID: terminal.id)
-                }
-            }
+        // Sequential — the coordinator is an actor so calls serialize anyway
+        for terminal in suspendedTerminals {
+            _ = await suspendResumeCoordinator.manualResume(terminalID: terminal.id)
         }
 
         return .ok()
