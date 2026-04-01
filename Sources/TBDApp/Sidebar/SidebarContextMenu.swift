@@ -26,6 +26,34 @@ struct SidebarContextMenu: View {
                     onRename()
                 }
 
+                let terminals = appState.terminals[worktree.id] ?? []
+                let hasUnsuspendedClaude = terminals.contains {
+                    $0.label?.hasPrefix("claude") == true && $0.suspendedAt == nil
+                }
+                let hasSuspendedClaude = terminals.contains {
+                    $0.label?.hasPrefix("claude") == true && $0.suspendedAt != nil
+                }
+
+                if hasUnsuspendedClaude {
+                    Button("Suspend Claude") {
+                        let wtID = worktree.id
+                        Task {
+                            try? await appState.daemonClient.worktreeSuspend(worktreeID: wtID)
+                            await appState.refreshTerminals(worktreeID: wtID)
+                        }
+                    }
+                }
+
+                if hasSuspendedClaude {
+                    Button("Resume Claude") {
+                        let wtID = worktree.id
+                        Task {
+                            try? await appState.daemonClient.worktreeResume(worktreeID: wtID)
+                            await appState.refreshTerminals(worktreeID: wtID)
+                        }
+                    }
+                }
+
                 Button("Archive", role: .destructive) {
                     let wtID = worktree.id
                     Task {
