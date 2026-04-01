@@ -218,7 +218,17 @@ public actor SuspendResumeCoordinator {
             // Clear suspendedAt immediately. The snapshot stays in the DB so the
             // app can feed it into TerminalPanelView as initial content — the live
             // tmux output then overwrites it seamlessly.
-            try? await db.terminals.clearSuspended(id: terminal.id)
+            // Note: snapshot persists until overwritten by the next suspend. After an
+            // app restart, live terminals briefly show the stale snapshot before tmux
+            // connects and overwrites it — acceptable given the narrow window.
+            do {
+                try await db.terminals.clearSuspended(id: terminal.id)
+            } catch {
+                // If this fails, suspendedAt stays set — the sidebar shows a stale
+                // pause icon and scheduleSuspend (which guards on suspendedAt == nil)
+                // won't cycle this terminal again until a restart.
+                suspendLog("Failed to clear suspended for \(terminal.id.uuidString.prefix(8)): \(error)")
+            }
             suspendLog("Resumed terminal \(terminal.id.uuidString.prefix(8)) in window \(window.windowID)")
 
             let termID = terminal.id
