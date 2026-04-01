@@ -95,14 +95,23 @@ public actor SuspendResumeCoordinator {
 
         // Belt: require that this worktree received a response_complete from Claude's
         // Stop hook. This confirms Claude finished a response and is waiting for input.
-        // Without this, we'd rely solely on capture-pane which can false-positive
-        // during the thinking phase (bare prompt visible while Claude processes).
-        guard worktreeIdleFromHook.contains(terminal.worktreeID) else {
-            suspendLog("SKIP \(terminal.id.uuidString.prefix(8)): no response_complete hook for worktree")
-            return
+        // If the hook hasn't fired (e.g. daemon restarted, hook missed), do a
+        // just-in-time capture-pane check to seed the idle flag.
+        if !worktreeIdleFromHook.contains(terminal.worktreeID) {
+            if await detector.isIdle(server: server, paneID: terminal.tmuxPaneID) {
+                worktreeIdleFromHook.insert(terminal.worktreeID)
+                suspendLog("Just-in-time seeded idle hook for worktree \(terminal.worktreeID.uuidString.prefix(8))")
+            } else {
+                suspendLog("SKIP \(terminal.id.uuidString.prefix(8)): no response_complete hook and capture-pane says not idle")
+                return
+            }
         }
 
-        // Suspenders: capture-pane idle check with 1s debounce
+        // Suspenders: capture-pane idle check with 1s debounce.
+        // When the JIT path above fires, the first check here is redundant
+        // (idle was just confirmed), but the 1s debounce still adds value —
+        // it catches transitions from idle to busy between the JIT check
+        // and the actual suspend.
         let idleConfirmed = await detector.isIdleConfirmed(server: server, paneID: terminal.tmuxPaneID)
         guard idleConfirmed else {
             suspendLog("SKIP \(terminal.id.uuidString.prefix(8)): capture-pane says not idle")
@@ -210,24 +219,30 @@ public actor SuspendResumeCoordinator {
             try await db.terminals.updateTmuxIDs(
                 id: terminal.id, windowID: window.windowID, paneID: window.paneID
             )
-            logger.info("Resumed terminal \(terminal.id) in window \(window.windowID)")
+            // Clear suspendedAt immediately. The snapshot stays in the DB so the
+            // app can feed it into TerminalPanelView as initial content — the live
+            // tmux output then overwrites it seamlessly.
+            // Note: snapshot persists until overwritten by the next suspend. After a
+            // resume, every subsequent view recreation (tab switches, worktree
+            // navigation, app restarts) briefly shows this snapshot until live tmux
+            // output arrives. Brief stale content is better than a blank screen.
+            do {
+                try await db.terminals.clearSuspended(id: terminal.id)
+            } catch {
+                // If this fails, suspendedAt stays set — the sidebar shows a stale
+                // pause icon and scheduleSuspend (which guards on suspendedAt == nil)
+                // won't cycle this terminal again until a restart.
+                suspendLog("Failed to clear suspended for \(terminal.id.uuidString.prefix(8)): \(error)")
+            }
+            suspendLog("Resumed terminal \(terminal.id.uuidString.prefix(8)) in window \(window.windowID)")
 
             let termID = terminal.id
             let worktreeID = terminal.worktreeID
             let paneID = window.paneID
             // Track the post-resume task in inFlight so a rapid re-suspend
-            // can cancel it — otherwise stale clearSuspended/updateSessionID
-            // calls could race with the new suspend cycle.
+            // can cancel it — otherwise stale updateSessionID calls could
+            // race with the new suspend cycle.
             inFlight[termID] = Task {
-                // AppState.startPolling polls every 2s. Wait 3s so at least one
-                // full cycle observes the snapshot before we clear it. Then hand
-                // off to the live terminal — Claude's startup progress is visible
-                // there. If the poll interval changes, update this to match.
-                try? await Task.sleep(for: .seconds(3))
-                guard !Task.isCancelled else { return }
-                suspendLog("Clearing suspended for \(termID.uuidString.prefix(8))")
-                try? await self.db.terminals.clearSuspended(id: termID)
-
                 // Wait for Claude to settle, then re-capture session ID
                 try? await Task.sleep(for: .seconds(5))
                 guard !Task.isCancelled else { return }
@@ -237,12 +252,14 @@ public actor SuspendResumeCoordinator {
                 } else {
                     suspendLog("Failed to re-capture session ID for \(termID.uuidString.prefix(8))")
                 }
-                // Re-seed idle flag so this terminal can be suspended again
-                // on the next worktree switch. The Stop hook may not fire after
-                // --resume if Claude just shows the prompt without generating.
+                // Re-seed idle hook after a longer delay to avoid instant
+                // re-suspension on brief worktree departures. 30s gives the user
+                // time to settle before the terminal becomes eligible again.
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled else { return }
                 if await self.detector.isIdle(server: server, paneID: paneID) {
                     self.worktreeIdleFromHook.insert(worktreeID)
-                    suspendLog("Re-seeded idle hook for worktree \(worktreeID.uuidString.prefix(8)) after resume")
+                    suspendLog("Re-seeded idle hook for worktree \(worktreeID.uuidString.prefix(8)) after resume (delayed)")
                 }
                 self.inFlight[termID] = nil
             }

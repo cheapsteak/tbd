@@ -157,17 +157,7 @@ struct PanePlaceholder: View {
 
     @ViewBuilder
     private func terminalContent(terminalID: UUID) -> some View {
-        let term = terminal(for: terminalID)
-        if let terminal = term,
-           terminal.suspendedAt != nil,
-           let snapshot = terminal.suspendedSnapshot {
-            ZStack(alignment: .bottomTrailing) {
-                SnapshotTerminalView(snapshot: snapshot)
-                RestoringIndicator()
-                    .padding(12)
-            }
-            .id("\(terminal.id)-snapshot")
-        } else if let terminal = term, terminal.suspendedAt == nil {
+        if let terminal = terminal(for: terminalID) {
             TerminalPanelView(
                 terminalID: terminalID,
                 tmuxServer: worktree.tmuxServer,
@@ -181,31 +171,26 @@ struct PanePlaceholder: View {
                 },
                 onTerminalNotification: { title, body in
                     debugLog("OSC 777: \(title) — \(body)")
-                }
+                },
+                initialSnapshot: terminal.suspendedSnapshot,
+                isSuspendedSnapshot: terminal.suspendedAt != nil
             )
-            .id("\(terminal.id)-\(terminal.tmuxWindowID)")
+            .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
         } else {
-            // Fallback: terminal data not loaded, or suspended without snapshot
-            ZStack(alignment: .bottomTrailing) {
-                ZStack {
-                    Color(nsColor: .black)
+            // Fallback when terminal data hasn't loaded yet
+            ZStack {
+                Color(nsColor: .black)
 
-                    VStack(spacing: 8) {
-                        Image(systemName: "terminal")
-                            .font(.largeTitle)
-                            .foregroundStyle(.secondary)
-                        Text(worktree.displayName)
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                        Text(worktree.branch)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-
-                if term?.suspendedAt != nil {
-                    RestoringIndicator()
-                        .padding(12)
+                VStack(spacing: 8) {
+                    Image(systemName: "terminal")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                    Text(worktree.displayName)
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Text(worktree.branch)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
             }
         }
@@ -253,27 +238,3 @@ struct PanePlaceholder: View {
     }
 }
 
-// MARK: - RestoringIndicator
-
-/// Subtle bottom-right pill shown over a snapshot while Claude resumes.
-private struct RestoringIndicator: View {
-    @State private var opacity: Double = 0.6
-
-    var body: some View {
-        HStack(spacing: 6) {
-            ProgressView()
-                .controlSize(.small)
-            Text("Restoring session…")
-                .font(.caption)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-        .opacity(opacity)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
-                opacity = 1.0
-            }
-        }
-    }
-}

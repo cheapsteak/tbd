@@ -79,11 +79,21 @@ struct WorktreeRowView: View {
         return .secondary
     }
 
+    private var hasSuspendedTerminal: Bool {
+        let terminals = appState.terminals[worktree.id] ?? []
+        return terminals.contains { $0.suspendedAt != nil }
+    }
+
     @ViewBuilder
     private func rowIcons() -> some View {
         if isMain {
             Image(systemName: "arrow.triangle.branch")
                 .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if hasSuspendedTerminal {
+            Image(systemName: "pause.circle.fill")
+                .font(.caption2)
                 .foregroundStyle(.secondary)
         }
         if isPending && !isEditing {
