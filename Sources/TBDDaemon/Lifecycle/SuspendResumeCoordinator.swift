@@ -93,10 +93,18 @@ public actor SuspendResumeCoordinator {
         // Cancel any in-flight operation and register ourselves so auto-suspend
         // won't spawn a concurrent suspend for the same terminal.
         inFlight[terminalID]?.cancel()
-        let task = Task<ManualSuspendResult, Never> {
+
+        // Wrap in a Task stored in inFlight so cancellation propagates when
+        // scheduleSuspend or another caller cancels inFlight[terminalID].
+        // Task.isCancelled checks apply to THIS task, not a wrapper.
+        let suspendTask = Task<ManualSuspendResult, Never> { [detector, tmux, db] in
             // Wait for idle up to 10s (capture-pane only, skip hook requirement)
             var idle = false
             for _ in 0..<50 {
+                guard !Task.isCancelled else {
+                    suspendLog("MANUAL SUSPEND CANCELLED \(terminalID.uuidString.prefix(8))")
+                    return .busy
+                }
                 if await detector.isIdle(server: server, paneID: terminal.tmuxPaneID) {
                     idle = true
                     break
@@ -105,6 +113,10 @@ public actor SuspendResumeCoordinator {
             }
             guard idle else {
                 suspendLog("MANUAL SUSPEND ABORT \(terminalID.uuidString.prefix(8)): still busy after 10s")
+                return .busy
+            }
+            guard !Task.isCancelled else {
+                suspendLog("MANUAL SUSPEND CANCELLED \(terminalID.uuidString.prefix(8))")
                 return .busy
             }
 
@@ -143,15 +155,24 @@ public actor SuspendResumeCoordinator {
             // Mark suspended
             do {
                 try await db.terminals.setSuspended(id: terminalID, sessionID: sessionID, snapshot: snapshot)
-                worktreeIdleFromHook.remove(freshTerminal.worktreeID)
+                self.worktreeIdleFromHook.remove(freshTerminal.worktreeID)
             } catch {
                 return .notFound
             }
 
             return .ok
         }
-        inFlight[terminalID] = Task { _ = await task.value }
-        let result = await task.value
+        // Store a wrapper in inFlight that cancels the real task when cancelled.
+        // Swift doesn't auto-propagate cancellation to awaited tasks, so we
+        // use withTaskCancellationHandler to bridge it.
+        inFlight[terminalID] = Task {
+            await withTaskCancellationHandler {
+                _ = await suspendTask.value
+            } onCancel: {
+                suspendTask.cancel()
+            }
+        }
+        let result = await suspendTask.value
         inFlight[terminalID] = nil
         return result
     }
