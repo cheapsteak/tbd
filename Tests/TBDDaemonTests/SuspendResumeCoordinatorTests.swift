@@ -43,7 +43,8 @@ struct SuspendResumeCoordinatorTests {
 
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.suspendedAt == nil, "Resume should clear suspendedAt even when suspendEnabled is false")
-        #expect(after?.suspendedSnapshot == nil, "Resume should clear snapshot even when suspendEnabled is false")
+        // Snapshot is intentionally kept — TerminalPanelView uses it as initial content
+        #expect(after?.suspendedSnapshot != nil, "Snapshot should be preserved for initial terminal content")
     }
 
     @Test func resumeRunsWhenSuspendEnabled() async throws {

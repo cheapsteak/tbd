@@ -134,14 +134,15 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Clear the suspended state of a terminal.
+    /// Clear the suspended state of a terminal. Keeps the snapshot so the
+    /// app can feed it into TerminalPanelView as initial content while the
+    /// tmux client connects. The snapshot is overwritten on the next suspend.
     public func clearSuspended(id: UUID) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.suspendedAt = nil
-            record.suspendedSnapshot = nil
             try record.update(db)
         }
     }

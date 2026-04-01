@@ -29,6 +29,9 @@ struct TerminalPanelView: NSViewRepresentable {
     var remoteURL: String?
     var onFilePathClicked: ((String) -> Void)?
     var onTerminalNotification: ((String, String) -> Void)?
+    /// When set, this ANSI text is fed into the terminal buffer before the tmux
+    /// client connects. The live tmux output overwrites it seamlessly.
+    var initialSnapshot: String?
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -57,9 +60,15 @@ struct TerminalPanelView: NSViewRepresentable {
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
 
+        // Feed snapshot before tmux connects so the user sees the last state
+        let snapshot = initialSnapshot
         // Start tmux client as soon as the view has real dimensions from layout
         tv.onReady = { [weak tv] in
             guard let tv else { return }
+            if let snapshot {
+                // \n → \r\n so SwiftTerm renders lines correctly
+                tv.feed(text: snapshot.replacingOccurrences(of: "\n", with: "\r\n"))
+            }
             context.coordinator.startTmuxClient(
                 terminalView: tv,
                 bridge: tmuxBridge,
