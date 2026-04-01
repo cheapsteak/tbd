@@ -154,7 +154,7 @@ public actor SuspendResumeCoordinator {
 
             // Mark suspended
             do {
-                try await db.terminals.setSuspended(id: terminalID, sessionID: sessionID, snapshot: snapshot)
+                try await db.terminals.setSuspended(id: terminalID, sessionID: freshTerminal.claudeSessionID ?? sessionID, snapshot: snapshot)
                 self.worktreeIdleFromHook.remove(freshTerminal.worktreeID)
             } catch {
                 return .notFound
