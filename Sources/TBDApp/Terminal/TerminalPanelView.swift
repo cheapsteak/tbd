@@ -31,6 +31,8 @@ struct TerminalPanelView: NSViewRepresentable {
     var onTerminalNotification: ((String, String) -> Void)?
     /// When set, this ANSI text is fed into the terminal buffer before the tmux
     /// client connects. The live tmux output overwrites it seamlessly.
+    /// See docs/superpowers/specs/2026-03-31-snapshot-display-approaches.md for
+    /// alternative approaches that were tried and why they failed.
     var initialSnapshot: String?
 
     func makeNSView(context: Context) -> TBDTerminalView {
@@ -66,8 +68,12 @@ struct TerminalPanelView: NSViewRepresentable {
         tv.onReady = { [weak tv] in
             guard let tv else { return }
             if let snapshot {
-                // \n → \r\n so SwiftTerm renders lines correctly
-                tv.feed(text: snapshot.replacingOccurrences(of: "\n", with: "\r\n"))
+                // SwiftTerm expects \r\n line endings. Normalize first to avoid
+                // doubling any \r\n that might already exist in the snapshot.
+                let normalized = snapshot
+                    .replacingOccurrences(of: "\r\n", with: "\n")
+                    .replacingOccurrences(of: "\n", with: "\r\n")
+                tv.feed(text: normalized)
             }
             context.coordinator.startTmuxClient(
                 terminalView: tv,
