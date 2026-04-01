@@ -107,7 +107,11 @@ public actor SuspendResumeCoordinator {
             }
         }
 
-        // Suspenders: capture-pane idle check with 1s debounce
+        // Suspenders: capture-pane idle check with 1s debounce.
+        // When the JIT path above fires, the first check here is redundant
+        // (idle was just confirmed), but the 1s debounce still adds value —
+        // it catches transitions from idle to busy between the JIT check
+        // and the actual suspend.
         let idleConfirmed = await detector.isIdleConfirmed(server: server, paneID: terminal.tmuxPaneID)
         guard idleConfirmed else {
             suspendLog("SKIP \(terminal.id.uuidString.prefix(8)): capture-pane says not idle")
