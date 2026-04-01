@@ -222,9 +222,10 @@ public actor SuspendResumeCoordinator {
             // Clear suspendedAt immediately. The snapshot stays in the DB so the
             // app can feed it into TerminalPanelView as initial content — the live
             // tmux output then overwrites it seamlessly.
-            // Note: snapshot persists until overwritten by the next suspend. After an
-            // app restart, live terminals briefly show the stale snapshot before tmux
-            // connects and overwrites it — acceptable given the narrow window.
+            // Note: snapshot persists until overwritten by the next suspend. After a
+            // resume, every subsequent view recreation (tab switches, worktree
+            // navigation, app restarts) briefly shows this snapshot until live tmux
+            // output arrives. Brief stale content is better than a blank screen.
             do {
                 try await db.terminals.clearSuspended(id: terminal.id)
             } catch {
