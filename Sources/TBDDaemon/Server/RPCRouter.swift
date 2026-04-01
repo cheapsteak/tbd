@@ -94,6 +94,14 @@ public final class RPCRouter: Sendable {
                 return try await handlePRRefresh(request.paramsData)
             case RPCMethod.worktreeSelectionChanged:
                 return try await handleWorktreeSelectionChanged(request.paramsData)
+            case RPCMethod.terminalSuspend:
+                return try await handleTerminalSuspend(request.paramsData)
+            case RPCMethod.terminalResume:
+                return try await handleTerminalResume(request.paramsData)
+            case RPCMethod.worktreeSuspend:
+                return try await handleWorktreeSuspend(request.paramsData)
+            case RPCMethod.worktreeResume:
+                return try await handleWorktreeResume(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
