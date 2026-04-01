@@ -175,7 +175,7 @@ struct PanePlaceholder: View {
                 initialSnapshot: terminal.suspendedSnapshot,
                 isSuspendedSnapshot: terminal.suspendedAt != nil
             )
-            .id("\(terminal.id)-\(terminal.tmuxWindowID)")
+            .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
         } else {
             // Fallback when terminal data hasn't loaded yet
             ZStack {
