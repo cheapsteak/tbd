@@ -90,65 +90,70 @@ public actor SuspendResumeCoordinator {
             return .notFound
         }
 
-        // Cancel any in-flight operation for this terminal
-        inFlight[terminal.id]?.cancel()
-
-        // Wait for idle up to 10s (capture-pane only, skip hook requirement)
-        var idle = false
-        for _ in 0..<50 {
-            if await detector.isIdle(server: server, paneID: terminal.tmuxPaneID) {
-                idle = true
-                break
+        // Cancel any in-flight operation and register ourselves so auto-suspend
+        // won't spawn a concurrent suspend for the same terminal.
+        inFlight[terminalID]?.cancel()
+        let task = Task<ManualSuspendResult, Never> {
+            // Wait for idle up to 10s (capture-pane only, skip hook requirement)
+            var idle = false
+            for _ in 0..<50 {
+                if await detector.isIdle(server: server, paneID: terminal.tmuxPaneID) {
+                    idle = true
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(200))
             }
-            try? await Task.sleep(for: .milliseconds(200))
-        }
-        guard idle else {
-            suspendLog("MANUAL SUSPEND ABORT \(terminal.id.uuidString.prefix(8)): still busy after 10s")
-            return .busy
-        }
-
-        // Re-fetch terminal to verify it still exists and isn't suspended
-        guard let freshTerminal = try? await db.terminals.get(id: terminalID),
-              freshTerminal.suspendedAt == nil else {
-            return .alreadySuspended
-        }
-
-        // Capture snapshot
-        let snapshot: String?
-        do {
-            let captured = try await tmux.capturePaneWithAnsi(server: server, paneID: freshTerminal.tmuxPaneID)
-            snapshot = captured.isEmpty ? nil : captured
-        } catch {
-            snapshot = nil
-        }
-
-        // Send /exit
-        suspendLog("MANUAL SUSPENDING \(terminal.id.uuidString.prefix(8)): sending /exit")
-        do {
-            try await tmux.sendCommand(server: server, paneID: freshTerminal.tmuxPaneID, command: "/exit")
-        } catch {
-            return .notFound
-        }
-
-        // Verify exit: poll for up to 3s
-        for _ in 0..<15 {
-            try? await Task.sleep(for: .milliseconds(200))
-            if let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: freshTerminal.tmuxPaneID),
-               !ClaudeStateDetector.isClaudeProcess(cmd) {
-                break
+            guard idle else {
+                suspendLog("MANUAL SUSPEND ABORT \(terminalID.uuidString.prefix(8)): still busy after 10s")
+                return .busy
             }
-        }
 
-        // Mark suspended
-        do {
-            try await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID, snapshot: snapshot)
-            worktreeIdleFromHook.remove(freshTerminal.worktreeID)
-        } catch {
-            return .notFound
-        }
+            // Re-fetch terminal to verify it still exists and isn't suspended
+            guard let freshTerminal = try? await db.terminals.get(id: terminalID),
+                  freshTerminal.suspendedAt == nil else {
+                return .alreadySuspended
+            }
 
-        inFlight[terminal.id] = nil
-        return .ok
+            // Capture snapshot
+            let snapshot: String?
+            do {
+                let captured = try await tmux.capturePaneWithAnsi(server: server, paneID: freshTerminal.tmuxPaneID)
+                snapshot = captured.isEmpty ? nil : captured
+            } catch {
+                snapshot = nil
+            }
+
+            // Send /exit
+            suspendLog("MANUAL SUSPENDING \(terminalID.uuidString.prefix(8)): sending /exit")
+            do {
+                try await tmux.sendCommand(server: server, paneID: freshTerminal.tmuxPaneID, command: "/exit")
+            } catch {
+                return .notFound
+            }
+
+            // Verify exit: poll for up to 3s
+            for _ in 0..<15 {
+                try? await Task.sleep(for: .milliseconds(200))
+                if let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: freshTerminal.tmuxPaneID),
+                   !ClaudeStateDetector.isClaudeProcess(cmd) {
+                    break
+                }
+            }
+
+            // Mark suspended
+            do {
+                try await db.terminals.setSuspended(id: terminalID, sessionID: sessionID, snapshot: snapshot)
+                worktreeIdleFromHook.remove(freshTerminal.worktreeID)
+            } catch {
+                return .notFound
+            }
+
+            return .ok
+        }
+        inFlight[terminalID] = Task { _ = await task.value }
+        let result = await task.value
+        inFlight[terminalID] = nil
+        return result
     }
 
     public func manualResume(terminalID: UUID) async -> ManualResumeResult {
