@@ -172,7 +172,8 @@ struct PanePlaceholder: View {
                 onTerminalNotification: { title, body in
                     debugLog("OSC 777: \(title) — \(body)")
                 },
-                initialSnapshot: terminal.suspendedSnapshot
+                initialSnapshot: terminal.suspendedSnapshot,
+                isSuspendedSnapshot: terminal.suspendedAt != nil
             )
             .id("\(terminal.id)-\(terminal.tmuxWindowID)")
         } else {

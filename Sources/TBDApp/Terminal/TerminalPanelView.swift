@@ -34,6 +34,12 @@ struct TerminalPanelView: NSViewRepresentable {
     /// See docs/superpowers/specs/2026-03-31-snapshot-display-approaches.md for
     /// alternative approaches that were tried and why they failed.
     var initialSnapshot: String?
+    /// When true, the terminal was suspended at view creation time. The view
+    /// feeds the snapshot but does NOT start a tmux client — the old window's
+    /// shell would overwrite the snapshot. Once resume completes and
+    /// `tmuxWindowID` changes, the view is recreated (`.id` changes) with
+    /// this flag false, and tmux connects normally.
+    var isSuspendedSnapshot: Bool = false
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -64,6 +70,7 @@ struct TerminalPanelView: NSViewRepresentable {
 
         // Feed snapshot before tmux connects so the user sees the last state
         let snapshot = initialSnapshot
+        let suspendedOnCreate = isSuspendedSnapshot
         // Start tmux client as soon as the view has real dimensions from layout
         tv.onReady = { [weak tv] in
             guard let tv else { return }
@@ -75,6 +82,10 @@ struct TerminalPanelView: NSViewRepresentable {
                     .replacingOccurrences(of: "\n", with: "\r\n")
                 tv.feed(text: normalized)
             }
+            // Skip tmux connect for suspended terminals — the old window's shell
+            // would overwrite the snapshot. The view will be recreated with a new
+            // .id when tmuxWindowID changes after resume completes.
+            guard !suspendedOnCreate else { return }
             context.coordinator.startTmuxClient(
                 terminalView: tv,
                 bridge: tmuxBridge,
