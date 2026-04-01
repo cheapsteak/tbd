@@ -106,6 +106,28 @@ private struct SingleWorktreeView: View {
                         },
                         onCloseTab: { index in
                             closeTab(at: index)
+                        },
+                        terminalForTab: { tabID in
+                            if case .terminal(let terminalID) = appState.tabs[worktreeID]?.first(where: { $0.id == tabID })?.content {
+                                return appState.terminals[worktreeID]?.first { $0.id == terminalID }
+                            }
+                            return nil
+                        },
+                        onSuspendTab: { tabID in
+                            if case .terminal(let terminalID) = appState.tabs[worktreeID]?.first(where: { $0.id == tabID })?.content {
+                                Task {
+                                    try? await appState.daemonClient.terminalSuspend(terminalID: terminalID)
+                                    await appState.refreshTerminals(worktreeID: worktreeID)
+                                }
+                            }
+                        },
+                        onResumeTab: { tabID in
+                            if case .terminal(let terminalID) = appState.tabs[worktreeID]?.first(where: { $0.id == tabID })?.content {
+                                Task {
+                                    try? await appState.daemonClient.terminalResume(terminalID: terminalID)
+                                    await appState.refreshTerminals(worktreeID: worktreeID)
+                                }
+                            }
                         }
                     )
 
