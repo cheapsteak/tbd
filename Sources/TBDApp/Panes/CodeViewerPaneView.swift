@@ -228,7 +228,7 @@ private struct HighlightedCodeView: View {
 @MainActor
 private let sharedHighlightr: Highlightr? = {
     let h = Highlightr()
-    h?.setTheme(to: "monokai-sublime")
+    h?.setTheme(to: "atom-one-dark")
     return h
 }()
 
