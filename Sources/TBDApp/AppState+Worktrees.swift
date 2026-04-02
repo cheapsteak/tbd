@@ -65,9 +65,15 @@ extension AppState {
 
     /// Revive an archived worktree.
     func reviveWorktree(id: UUID) async {
+        // Find the repo before reviving so we can refresh the archived list
+        let repoID = archivedWorktrees.first(where: { $0.value.contains { $0.id == id } })?.key
         do {
             try await daemonClient.reviveWorktree(id: id)
             await refreshWorktrees()
+            selectedWorktreeIDs = [id]
+            if let repoID {
+                await refreshArchivedWorktrees(repoID: repoID)
+            }
         } catch {
             logger.error("Failed to revive worktree: \(error)")
             handleConnectionError(error)
@@ -96,6 +102,25 @@ extension AppState {
         } catch {
             logger.error("Failed to rename worktree: \(error)")
             handleConnectionError(error)
+        }
+    }
+
+    // MARK: - Archived Worktrees
+
+    /// Select a repo to show its archived worktrees in the content pane.
+    func selectRepo(id: UUID) {
+        selectedWorktreeIDs = []
+        selectedRepoID = id
+        Task { await refreshArchivedWorktrees(repoID: id) }
+    }
+
+    /// Fetch archived worktrees for a repo.
+    func refreshArchivedWorktrees(repoID: UUID) async {
+        do {
+            let archived = try await daemonClient.listWorktrees(repoID: repoID, status: .archived)
+            archivedWorktrees[repoID] = archived
+        } catch {
+            logger.error("Failed to list archived worktrees: \(error)")
         }
     }
 
