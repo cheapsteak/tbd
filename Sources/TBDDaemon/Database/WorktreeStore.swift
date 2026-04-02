@@ -157,8 +157,9 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Archive a worktree (set status to archived and record the timestamp).
+    /// Optionally saves Claude session IDs in the same transaction so they survive terminal deletion.
     /// Refuses to archive worktrees with `.main` status.
-    public func archive(id: UUID) async throws {
+    public func archive(id: UUID, claudeSessionIDs: [String]? = nil) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Worktree not found")
@@ -171,6 +172,10 @@ public struct WorktreeStore: Sendable {
             }
             record.status = WorktreeStatus.archived.rawValue
             record.archivedAt = Date()
+            if let sessions = claudeSessionIDs, !sessions.isEmpty {
+                record.archivedClaudeSessions = try String(
+                    data: JSONEncoder().encode(sessions), encoding: .utf8)
+            }
             try record.update(db)
         }
     }
@@ -184,18 +189,6 @@ public struct WorktreeStore: Sendable {
             record.status = WorktreeStatus.active.rawValue
             record.archivedAt = nil
             record.archivedClaudeSessions = nil
-            try record.update(db)
-        }
-    }
-
-    /// Save Claude session IDs from terminals before they are deleted during archive.
-    public func saveArchivedClaudeSessions(id: UUID, sessionIDs: [String]) async throws {
-        try await writer.write { db in
-            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
-                throw DatabaseError(message: "Worktree not found")
-            }
-            record.archivedClaudeSessions = try String(
-                data: JSONEncoder().encode(sessionIDs), encoding: .utf8)
             try record.update(db)
         }
     }

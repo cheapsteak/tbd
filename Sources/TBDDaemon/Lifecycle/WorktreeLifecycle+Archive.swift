@@ -24,16 +24,14 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
         }
 
-        // Update DB status immediately
-        try await db.worktrees.archive(id: worktreeID)
-
-        // Save Claude session IDs before deleting terminals so revive can restore conversations
+        // Collect Claude session IDs before archiving so they survive terminal deletion
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
-        let claudeSessionIDs = terminals.compactMap { $0.claudeSessionID }
-        if !claudeSessionIDs.isEmpty {
-            try await db.worktrees.saveArchivedClaudeSessions(
-                id: worktreeID, sessionIDs: claudeSessionIDs)
-        }
+        let claudeSessionIDs = terminals
+            .sorted(by: { $0.createdAt < $1.createdAt })
+            .compactMap { $0.claudeSessionID }
+
+        // Update DB status and save sessions in one transaction
+        try await db.worktrees.archive(id: worktreeID, claudeSessionIDs: claudeSessionIDs)
 
         // Kill all tmux windows for this worktree
         for terminal in terminals {
