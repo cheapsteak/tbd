@@ -31,6 +31,17 @@ final class AppState: ObservableObject {
             .sorted { ($0.pinnedAt ?? .distantPast) < ($1.pinnedAt ?? .distantPast) }
     }
 
+    /// Worktree IDs that have at least one terminal currently visible on screen.
+    /// Includes selected worktrees (active tab visible) and worktrees with pinned terminals
+    /// (always visible in either the active tab or the pinned dock).
+    var visibleWorktreeIDs: Set<UUID> {
+        var ids = selectedWorktreeIDs
+        for terminal in pinnedTerminals {
+            ids.insert(terminal.worktreeID)
+        }
+        return ids
+    }
+
     @Published var dockRatio: CGFloat = 0.3 {
         didSet { UserDefaults.standard.set(Double(dockRatio), forKey: Self.dockRatioKey) }
     }
@@ -375,12 +386,29 @@ final class AppState: ObservableObject {
     }
 
     /// Refresh unread notifications from the daemon.
+    /// Notifications for currently visible worktrees (selected or pinned) are
+    /// automatically marked as read so the badge never appears while the user
+    /// is looking at the terminal.
     func refreshNotifications() async {
         do {
             let fetched = try await daemonClient.listNotifications()
-            if fetched != notifications.compactMapValues({ $0 }) {
+
+            // Auto-mark-as-read for worktrees the user is currently looking at
+            let visible = visibleWorktreeIDs
+            let toMarkRead = fetched.keys.filter { visible.contains($0) }
+            for worktreeID in toMarkRead {
+                do {
+                    try await daemonClient.markNotificationsRead(worktreeID: worktreeID)
+                } catch {
+                    logger.warning("Failed to auto-mark-read for \(worktreeID): \(error)")
+                }
+            }
+
+            // Only include notifications for non-visible worktrees in UI state
+            let filtered = fetched.filter { !visible.contains($0.key) }
+            if filtered != notifications.compactMapValues({ $0 }) {
                 var updated: [UUID: NotificationType?] = [:]
-                for (id, type) in fetched {
+                for (id, type) in filtered {
                     updated[id] = type
                 }
                 notifications = updated
