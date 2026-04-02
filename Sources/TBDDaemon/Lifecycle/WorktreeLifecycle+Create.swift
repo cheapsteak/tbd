@@ -231,7 +231,7 @@ extension WorktreeLifecycle {
         )
 
         // Restore additional archived Claude sessions (beyond the first which was used above)
-        if let sessions = archivedClaudeSessions, sessions.count > 1 {
+        if !skipClaude, let sessions = archivedClaudeSessions, sessions.count > 1 {
             for sessionID in sessions.dropFirst() {
                 let cmd = "claude --dangerously-skip-permissions --session-id \(sessionID)"
                 let window = try await tmux.createWindow(
