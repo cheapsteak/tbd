@@ -397,8 +397,10 @@ final class AppState: ObservableObject {
             let visible = visibleWorktreeIDs
             let toMarkRead = fetched.keys.filter { visible.contains($0) }
             for worktreeID in toMarkRead {
-                Task {
-                    try? await daemonClient.markNotificationsRead(worktreeID: worktreeID)
+                do {
+                    try await daemonClient.markNotificationsRead(worktreeID: worktreeID)
+                } catch {
+                    logger.warning("Failed to auto-mark-read for \(worktreeID): \(error)")
                 }
             }
 
