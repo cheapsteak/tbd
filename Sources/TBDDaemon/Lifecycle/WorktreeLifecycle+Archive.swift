@@ -24,11 +24,16 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
         }
 
-        // Update DB status immediately
-        try await db.worktrees.archive(id: worktreeID)
+        // Collect Claude session IDs before archiving so they survive terminal deletion
+        let terminals = try await db.terminals.list(worktreeID: worktreeID)
+        let claudeSessionIDs = terminals
+            .sorted(by: { $0.createdAt < $1.createdAt })
+            .compactMap { $0.claudeSessionID }
+
+        // Update DB status and save sessions in one transaction
+        try await db.worktrees.archive(id: worktreeID, claudeSessionIDs: claudeSessionIDs)
 
         // Kill all tmux windows for this worktree
-        let terminals = try await db.terminals.list(worktreeID: worktreeID)
         for terminal in terminals {
             try? await tmux.killWindow(
                 server: worktree.tmuxServer,
@@ -119,11 +124,14 @@ extension WorktreeLifecycle {
         try await setupTerminals(
             worktreeID: worktree.id, repoPath: repo.path,
             tmuxServer: worktree.tmuxServer, worktreePath: worktree.path,
-            skipClaude: skipClaude
+            skipClaude: skipClaude,
+            archivedClaudeSessions: worktree.archivedClaudeSessions
         )
 
-        // Update status to active
-        try await db.worktrees.revive(id: worktreeID)
+        // Update status to active.
+        // Only clear archivedClaudeSessions if Claude was actually restored —
+        // otherwise preserve them so a subsequent revive (without skipClaude) can use them.
+        try await db.worktrees.revive(id: worktreeID, clearSessions: !skipClaude)
 
         // Return updated worktree
         guard let revived = try await db.worktrees.get(id: worktreeID) else {

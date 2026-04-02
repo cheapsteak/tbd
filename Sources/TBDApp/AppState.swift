@@ -19,10 +19,18 @@ final class AppState: ObservableObject {
             for id in selectedWorktreeIDs where !selectionOrder.contains(id) {
                 selectionOrder.append(id)
             }
+            // Clear repo selection when a worktree is selected
+            if !selectedWorktreeIDs.isEmpty {
+                selectedRepoID = nil
+            }
         }
     }
     /// Tracks the order of selected worktrees for split view rendering (cmd+click order).
     @Published var selectionOrder: [UUID] = []
+    /// Selected repo ID — set when a repo header is clicked, shows archived worktrees in content pane.
+    @Published var selectedRepoID: UUID? = nil
+    /// Archived worktrees keyed by repo ID, fetched on demand.
+    @Published var archivedWorktrees: [UUID: [Worktree]] = [:]
 
     /// All pinned terminals across all worktrees, sorted by pinnedAt.
     var pinnedTerminals: [Terminal] {

@@ -169,9 +169,14 @@ extension WorktreeLifecycle {
 
     /// Sets up tmux windows and terminal records for a worktree.
     /// Shared by `finishCreate` and `reviveWorktree`.
+    ///
+    /// When `archivedClaudeSessions` is provided (revive path), the first session ID
+    /// is reused for the main Claude terminal to restore the conversation, and any
+    /// additional sessions get their own terminal windows.
     func setupTerminals(
         worktreeID: UUID, repoPath: String,
-        tmuxServer: String, worktreePath: String, skipClaude: Bool
+        tmuxServer: String, worktreePath: String, skipClaude: Bool,
+        archivedClaudeSessions: [String]? = nil
     ) async throws {
         // Ensure tmux server exists — capture initial window ID to kill later
         let initialWindowID = try await tmux.ensureServer(
@@ -187,7 +192,7 @@ extension WorktreeLifecycle {
             claudeCommand = defaultShell
             claudeSessionID = nil
         } else {
-            let sessionUUID = UUID().uuidString
+            let sessionUUID = archivedClaudeSessions?.first ?? UUID().uuidString
             claudeCommand = "claude --dangerously-skip-permissions --session-id \(sessionUUID)"
             claudeSessionID = sessionUUID
         }
@@ -224,6 +229,26 @@ extension WorktreeLifecycle {
             tmuxPaneID: window2.paneID,
             label: "setup"
         )
+
+        // Restore additional archived Claude sessions (beyond the first which was used above)
+        if !skipClaude, let sessions = archivedClaudeSessions, sessions.count > 1 {
+            for sessionID in sessions.dropFirst() {
+                let cmd = "claude --dangerously-skip-permissions --session-id \(sessionID)"
+                let window = try await tmux.createWindow(
+                    server: tmuxServer,
+                    session: "main",
+                    cwd: worktreePath,
+                    shellCommand: cmd
+                )
+                _ = try await db.terminals.create(
+                    worktreeID: worktreeID,
+                    tmuxWindowID: window.windowID,
+                    tmuxPaneID: window.paneID,
+                    label: "claude",
+                    claudeSessionID: sessionID
+                )
+            }
+        }
 
         // Kill the untracked initial window that new-session created
         if let windowID = initialWindowID {

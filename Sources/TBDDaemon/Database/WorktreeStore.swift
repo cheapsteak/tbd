@@ -17,6 +17,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var createdAt: Date
     var archivedAt: Date?
     var tmuxServer: String
+    var archivedClaudeSessions: String?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -30,10 +31,19 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.createdAt = wt.createdAt
         self.archivedAt = wt.archivedAt
         self.tmuxServer = wt.tmuxServer
+        if let sessions = wt.archivedClaudeSessions {
+            self.archivedClaudeSessions = try? String(
+                data: JSONEncoder().encode(sessions), encoding: .utf8)
+        }
     }
 
     func toModel() -> Worktree {
-        Worktree(
+        var sessions: [String]?
+        if let json = archivedClaudeSessions,
+           let data = json.data(using: .utf8) {
+            sessions = try? JSONDecoder().decode([String].self, from: data)
+        }
+        return Worktree(
             id: UUID(uuidString: id)!,
             repoID: UUID(uuidString: repoID)!,
             name: name,
@@ -44,7 +54,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             hasConflicts: hasConflicts,
             createdAt: createdAt,
             archivedAt: archivedAt,
-            tmuxServer: tmuxServer
+            tmuxServer: tmuxServer,
+            archivedClaudeSessions: sessions
         )
     }
 }
@@ -146,8 +157,9 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Archive a worktree (set status to archived and record the timestamp).
+    /// Optionally saves Claude session IDs in the same transaction so they survive terminal deletion.
     /// Refuses to archive worktrees with `.main` status.
-    public func archive(id: UUID) async throws {
+    public func archive(id: UUID, claudeSessionIDs: [String]? = nil) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Worktree not found")
@@ -160,18 +172,27 @@ public struct WorktreeStore: Sendable {
             }
             record.status = WorktreeStatus.archived.rawValue
             record.archivedAt = Date()
+            if let sessions = claudeSessionIDs, !sessions.isEmpty {
+                record.archivedClaudeSessions = try String(
+                    data: JSONEncoder().encode(sessions), encoding: .utf8)
+            }
             try record.update(db)
         }
     }
 
     /// Revive an archived worktree (set status back to active, clear archivedAt).
-    public func revive(id: UUID) async throws {
+    /// When `clearSessions` is true (default), also clears archivedClaudeSessions.
+    /// Pass false to preserve sessions when Claude wasn't restored (e.g. skipClaude).
+    public func revive(id: UUID, clearSessions: Bool = true) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Worktree not found")
             }
             record.status = WorktreeStatus.active.rawValue
             record.archivedAt = nil
+            if clearSessions {
+                record.archivedClaudeSessions = nil
+            }
             try record.update(db)
         }
     }

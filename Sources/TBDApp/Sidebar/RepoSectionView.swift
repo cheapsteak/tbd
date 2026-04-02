@@ -51,7 +51,10 @@ struct RepoSectionView: View {
 
             Text(repo.displayName)
                 .font(.headline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(appState.selectedRepoID == repo.id ? .primary : .secondary)
+                .onTapGesture {
+                    appState.selectRepo(id: repo.id)
+                }
 
             Spacer()
 

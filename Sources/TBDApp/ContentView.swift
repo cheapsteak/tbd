@@ -22,6 +22,8 @@ struct ContentView: View {
                     disconnectedView
                 } else if appState.repos.isEmpty {
                     emptyStateView
+                } else if let repoID = appState.selectedRepoID {
+                    ArchivedWorktreesView(repoID: repoID)
                 } else if appState.selectedWorktreeIDs.isEmpty {
                     Text("Select a worktree or click + to create one")
                         .foregroundStyle(.secondary)

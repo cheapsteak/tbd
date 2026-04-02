@@ -127,6 +127,12 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v8") { db in
+            try db.alter(table: "worktree") { t in
+                t.add(column: "archivedClaudeSessions", .text)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

@@ -180,6 +180,156 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
     }
 }
 
+@Test func testArchivePreservesClaudeSessions() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+
+    // Create worktree with Claude (skipClaude: false creates a session ID)
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+    let terminalsBeforeArchive = try await db.terminals.list(worktreeID: wt.id)
+    let originalSessionIDs = terminalsBeforeArchive.compactMap { $0.claudeSessionID }
+    #expect(!originalSessionIDs.isEmpty, "Should have at least one Claude session")
+
+    // Archive — should save session IDs
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+    let archived = try await db.worktrees.get(id: wt.id)
+    #expect(archived?.archivedClaudeSessions == originalSessionIDs)
+
+    // Terminals should be deleted
+    let terminalsAfterArchive = try await db.terminals.list(worktreeID: wt.id)
+    #expect(terminalsAfterArchive.isEmpty)
+
+    // Revive — should restore the same Claude session ID
+    let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)
+    let terminalsAfterRevive = try await db.terminals.list(worktreeID: revived.id)
+    let revivedSessionIDs = terminalsAfterRevive.compactMap { $0.claudeSessionID }
+    #expect(revivedSessionIDs.contains(originalSessionIDs[0]),
+            "Revived terminal should reuse the original Claude session ID")
+
+    // archivedClaudeSessions should be cleared after revive
+    let revivedWt = try await db.worktrees.get(id: wt.id)
+    #expect(revivedWt?.archivedClaudeSessions == nil)
+}
+
+@Test func testArchiveWithoutClaudeSessionsDoesNotSaveEmpty() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+
+    // Create worktree without Claude
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+
+    let archived = try await db.worktrees.get(id: wt.id)
+    #expect(archived?.archivedClaudeSessions == nil,
+            "Should not save empty session list")
+}
+
+@Test func testReviveWithSkipClaudePreservesSessions() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+
+    // Create with Claude, archive, then revive with skipClaude
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+    let originalSessions = try await db.terminals.list(worktreeID: wt.id)
+        .compactMap { $0.claudeSessionID }
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+
+    _ = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: true)
+
+    // Sessions should be preserved since Claude wasn't restored
+    let revivedWt = try await db.worktrees.get(id: wt.id)
+    #expect(revivedWt?.archivedClaudeSessions == originalSessions,
+            "skipClaude revive should preserve sessions for later recovery")
+}
+
+@Test func testReviveRestoresMultipleClaudeSessions() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+
+    // Create worktree with Claude
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+
+    // Simulate a second Claude terminal added by the user
+    let secondSessionID = UUID().uuidString
+    let window = try await lifecycle.tmux.createWindow(
+        server: wt.tmuxServer, session: "main",
+        cwd: wt.path, shellCommand: "echo test"
+    )
+    _ = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: window.windowID,
+        tmuxPaneID: window.paneID,
+        label: "claude",
+        claudeSessionID: secondSessionID
+    )
+
+    let allSessions = try await db.terminals.list(worktreeID: wt.id)
+        .compactMap { $0.claudeSessionID }
+    #expect(allSessions.count == 2)
+
+    // Archive and revive
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+    let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)
+
+    // Should have 2 setup + 2 claude = but setup only creates once, so:
+    // 1 claude (from first session) + 1 setup + 1 extra claude (from second session) = 3
+    let terminals = try await db.terminals.list(worktreeID: revived.id)
+    let claudeTerminals = terminals.filter { $0.claudeSessionID != nil }
+    #expect(claudeTerminals.count == 2,
+            "Both Claude sessions should be restored")
+
+    let restoredSessionIDs = Set(claudeTerminals.compactMap { $0.claudeSessionID })
+    #expect(restoredSessionIDs.count == 2)
+}
+
 @Test func testWorktreePathStructure() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
