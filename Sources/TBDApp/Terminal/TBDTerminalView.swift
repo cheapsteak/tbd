@@ -285,6 +285,13 @@ class TBDTerminalView: TerminalView {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // Only handle key equivalents if this terminal is the first responder.
+        // performKeyEquivalent walks the entire view hierarchy — without this
+        // guard, the leftmost terminal always wins and steals Cmd+Arrow from
+        // whichever terminal the user actually clicked on.
+        guard window?.firstResponder === self else {
+            return super.performKeyEquivalent(with: event)
+        }
         if naturalTextEditing, event.type == .keyDown, handleNaturalTextEditing(event) {
             return true
         }
