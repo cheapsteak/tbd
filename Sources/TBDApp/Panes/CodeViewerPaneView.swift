@@ -157,6 +157,8 @@ private struct RenderedContentView: View {
     }
 
     private func loadContent() async {
+        content = nil
+        loadError = nil
         let fm = FileManager.default
         if let attrs = try? fm.attributesOfItem(atPath: filePath),
            let size = attrs[.size] as? UInt64, size > 1_048_576 {
