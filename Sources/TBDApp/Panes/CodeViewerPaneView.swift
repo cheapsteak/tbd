@@ -5,8 +5,16 @@ import MarkdownUI
 
 // MARK: - CodeViewerPaneView
 
+/// Preference key that child views set to signal renderable content is present.
+struct HasRenderableContentKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
 /// Files that have a rich rendered view in addition to raw source code.
-func isRenderableFile(_ path: String) -> Bool {
+private func isRenderableFile(_ path: String) -> Bool {
     let ext = (path as NSString).pathExtension.lowercased()
     return ["md", "markdown"].contains(ext)
 }
@@ -54,6 +62,7 @@ struct CodeViewerPaneView: View {
             .background(highlightrBackgroundColor)
             .colorScheme(.dark)
         }
+        .preference(key: HasRenderableContentKey.self, value: selectedFiles.contains(where: isRenderableFile))
         .onAppear {
             if !path.isEmpty && FileManager.default.fileExists(atPath: path) {
                 selectedFiles = [path]
