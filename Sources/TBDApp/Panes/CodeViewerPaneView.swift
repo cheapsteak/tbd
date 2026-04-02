@@ -27,20 +27,24 @@ struct CodeViewerPaneView: View {
             }
 
             // Code preview
-            if selectedFiles.isEmpty {
-                emptyState
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(selectedFiles, id: \.self) { filePath in
-                            if selectedFiles.count > 1 {
-                                fileHeader(filePath)
+            Group {
+                if selectedFiles.isEmpty {
+                    emptyState
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(selectedFiles, id: \.self) { filePath in
+                                if selectedFiles.count > 1 {
+                                    fileHeader(filePath)
+                                }
+                                FilePreviewView(filePath: filePath)
                             }
-                            FilePreviewView(filePath: filePath)
                         }
                     }
                 }
             }
+            .background(highlightrBackgroundColor)
+            .colorScheme(.dark)
         }
         .onAppear {
             if !path.isEmpty && FileManager.default.fileExists(atPath: path) {
@@ -72,7 +76,7 @@ struct CodeViewerPaneView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color.primary.opacity(0.08))
     }
 }
 
@@ -193,6 +197,7 @@ private struct HighlightedCodeView: View {
                     .frame(maxWidth: .infinity, minHeight: 100)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: filePath) {
             await loadAndHighlight()
         }
@@ -223,9 +228,17 @@ private struct HighlightedCodeView: View {
 @MainActor
 private let sharedHighlightr: Highlightr? = {
     let h = Highlightr()
-    h?.setTheme(to: "atom-one-dark")
+    h?.setTheme(to: "monokai-sublime")
     return h
 }()
+
+@MainActor
+private var highlightrBackgroundColor: Color {
+    if let bg = sharedHighlightr?.theme.themeBackgroundColor {
+        return Color(nsColor: bg)
+    }
+    return Color(nsColor: .textBackgroundColor)
+}
 
 @MainActor
 private func highlightCode(_ code: String, filename: String) -> NSAttributedString {
@@ -243,20 +256,7 @@ private func highlightCode(_ code: String, filename: String) -> NSAttributedStri
     // Override font to consistent monospace
     mutable.addAttribute(.font, value: monoFont, range: fullRange)
 
-    // Legibility fix: replace too-pale foreground colors
-    mutable.enumerateAttribute(.foregroundColor, in: fullRange) { value, attrRange, _ in
-        if let color = value as? NSColor, colorIsTooPale(color) {
-            mutable.addAttribute(.foregroundColor, value: NSColor.labelColor, range: attrRange)
-        }
-    }
-
     return mutable
-}
-
-private func colorIsTooPale(_ color: NSColor) -> Bool {
-    guard let rgb = color.usingColorSpace(.sRGB) else { return false }
-    let luminance = 0.2126 * rgb.redComponent + 0.7152 * rgb.greenComponent + 0.0722 * rgb.blueComponent
-    return luminance > 0.6
 }
 
 private func languageForFilename(_ filename: String) -> String? {
