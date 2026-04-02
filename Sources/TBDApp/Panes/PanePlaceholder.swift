@@ -137,16 +137,14 @@ struct PanePlaceholder: View {
             .buttonStyle(.borderless)
             .disabled(true)
 
-        case .codeViewer(_, let path):
-            if isRenderableFile(path) {
-                Button(action: { showSourceCode.toggle() }) {
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                        .font(.caption)
-                        .foregroundStyle(showSourceCode ? .primary : .secondary)
-                }
-                .buttonStyle(.borderless)
-                .help(showSourceCode ? "Show rendered view" : "Show source code")
+        case .codeViewer:
+            Button(action: { showSourceCode.toggle() }) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(showSourceCode ? .primary : .secondary)
             }
+            .buttonStyle(.borderless)
+            .help(showSourceCode ? "Show rendered view" : "Show source code")
         }
     }
 

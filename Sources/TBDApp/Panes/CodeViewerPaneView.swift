@@ -5,7 +5,7 @@ import MarkdownUI
 
 // MARK: - CodeViewerPaneView
 
-/// Files that can be rendered in a rich view (markdown now; SVG, mermaid, etc. in the future).
+/// Files that have a rich rendered view in addition to raw source code.
 func isRenderableFile(_ path: String) -> Bool {
     let ext = (path as NSString).pathExtension.lowercased()
     return ["md", "markdown"].contains(ext)
