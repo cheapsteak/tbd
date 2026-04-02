@@ -35,11 +35,13 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var createdAt: Date
     public var archivedAt: Date?
     public var tmuxServer: String
+    public var archivedClaudeSessions: [String]?
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
                 hasConflicts: Bool = false,
-                createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String) {
+                createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String,
+                archivedClaudeSessions: [String]? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -51,6 +53,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.archivedAt = archivedAt
         self.tmuxServer = tmuxServer
+        self.archivedClaudeSessions = archivedClaudeSessions
     }
 
     public init(from decoder: Decoder) throws {
@@ -66,6 +69,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
         tmuxServer = try c.decode(String.self, forKey: .tmuxServer)
+        archivedClaudeSessions = try c.decodeIfPresent([String].self, forKey: .archivedClaudeSessions)
     }
 }
 

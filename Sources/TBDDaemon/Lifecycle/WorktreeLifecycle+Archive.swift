@@ -27,8 +27,15 @@ extension WorktreeLifecycle {
         // Update DB status immediately
         try await db.worktrees.archive(id: worktreeID)
 
-        // Kill all tmux windows for this worktree
+        // Save Claude session IDs before deleting terminals so revive can restore conversations
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
+        let claudeSessionIDs = terminals.compactMap { $0.claudeSessionID }
+        if !claudeSessionIDs.isEmpty {
+            try await db.worktrees.saveArchivedClaudeSessions(
+                id: worktreeID, sessionIDs: claudeSessionIDs)
+        }
+
+        // Kill all tmux windows for this worktree
         for terminal in terminals {
             try? await tmux.killWindow(
                 server: worktree.tmuxServer,
@@ -119,10 +126,11 @@ extension WorktreeLifecycle {
         try await setupTerminals(
             worktreeID: worktree.id, repoPath: repo.path,
             tmuxServer: worktree.tmuxServer, worktreePath: worktree.path,
-            skipClaude: skipClaude
+            skipClaude: skipClaude,
+            archivedClaudeSessions: worktree.archivedClaudeSessions
         )
 
-        // Update status to active
+        // Update status to active (also clears archivedClaudeSessions)
         try await db.worktrees.revive(id: worktreeID)
 
         // Return updated worktree
