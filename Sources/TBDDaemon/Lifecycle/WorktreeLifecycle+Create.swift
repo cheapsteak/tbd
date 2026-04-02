@@ -208,7 +208,7 @@ extension WorktreeLifecycle {
         // Create terminal 2: setup hook
         let setupHookPath = hooks.resolve(
             event: .setup,
-            repoPath: repoPath,
+            repoPath: worktreePath,
             appHookPath: nil
         )
         let setupCommand = shellWrapped(setupHookPath ?? defaultShell)

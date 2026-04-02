@@ -48,7 +48,7 @@ extension WorktreeLifecycle {
         if !force {
             let archiveHookPath = hooks.resolve(
                 event: .archive,
-                repoPath: repo.path,
+                repoPath: worktree.path,
                 appHookPath: nil
             )
             if let hookPath = archiveHookPath {
