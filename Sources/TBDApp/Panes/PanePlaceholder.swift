@@ -34,7 +34,12 @@ struct PanePlaceholder: View {
             // Pane content
             paneBody
         }
-        .onPreferenceChange(HasRenderableContentKey.self) { hasRenderableContent = $0 }
+        .onPreferenceChange(HasRenderableContentKey.self) { newValue in
+            if newValue && !hasRenderableContent {
+                showSourceCode = false
+            }
+            hasRenderableContent = newValue
+        }
     }
 
     // MARK: - Toolbar
