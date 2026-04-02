@@ -180,15 +180,19 @@ public struct WorktreeStore: Sendable {
         }
     }
 
-    /// Revive an archived worktree (set status back to active, clear archivedAt and archivedClaudeSessions).
-    public func revive(id: UUID) async throws {
+    /// Revive an archived worktree (set status back to active, clear archivedAt).
+    /// When `clearSessions` is true (default), also clears archivedClaudeSessions.
+    /// Pass false to preserve sessions when Claude wasn't restored (e.g. skipClaude).
+    public func revive(id: UUID, clearSessions: Bool = true) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Worktree not found")
             }
             record.status = WorktreeStatus.active.rawValue
             record.archivedAt = nil
-            record.archivedClaudeSessions = nil
+            if clearSessions {
+                record.archivedClaudeSessions = nil
+            }
             try record.update(db)
         }
     }

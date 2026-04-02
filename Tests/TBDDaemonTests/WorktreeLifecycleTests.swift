@@ -248,6 +248,88 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
             "Should not save empty session list")
 }
 
+@Test func testReviveWithSkipClaudePreservesSessions() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+
+    // Create with Claude, archive, then revive with skipClaude
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+    let originalSessions = try await db.terminals.list(worktreeID: wt.id)
+        .compactMap { $0.claudeSessionID }
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+
+    _ = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: true)
+
+    // Sessions should be preserved since Claude wasn't restored
+    let revivedWt = try await db.worktrees.get(id: wt.id)
+    #expect(revivedWt?.archivedClaudeSessions == originalSessions,
+            "skipClaude revive should preserve sessions for later recovery")
+}
+
+@Test func testReviveRestoresMultipleClaudeSessions() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+
+    // Create worktree with Claude
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+
+    // Simulate a second Claude terminal added by the user
+    let secondSessionID = UUID().uuidString
+    let window = try await lifecycle.tmux.createWindow(
+        server: wt.tmuxServer, session: "main",
+        cwd: wt.path, shellCommand: "echo test"
+    )
+    _ = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: window.windowID,
+        tmuxPaneID: window.paneID,
+        label: "claude",
+        claudeSessionID: secondSessionID
+    )
+
+    let allSessions = try await db.terminals.list(worktreeID: wt.id)
+        .compactMap { $0.claudeSessionID }
+    #expect(allSessions.count == 2)
+
+    // Archive and revive
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+    let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)
+
+    // Should have 2 setup + 2 claude = but setup only creates once, so:
+    // 1 claude (from first session) + 1 setup + 1 extra claude (from second session) = 3
+    let terminals = try await db.terminals.list(worktreeID: revived.id)
+    let claudeTerminals = terminals.filter { $0.claudeSessionID != nil }
+    #expect(claudeTerminals.count == 2,
+            "Both Claude sessions should be restored")
+
+    let restoredSessionIDs = Set(claudeTerminals.compactMap { $0.claudeSessionID })
+    #expect(restoredSessionIDs.count == 2)
+}
+
 @Test func testWorktreePathStructure() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }

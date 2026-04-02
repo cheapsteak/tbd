@@ -128,8 +128,10 @@ extension WorktreeLifecycle {
             archivedClaudeSessions: worktree.archivedClaudeSessions
         )
 
-        // Update status to active (also clears archivedClaudeSessions)
-        try await db.worktrees.revive(id: worktreeID)
+        // Update status to active.
+        // Only clear archivedClaudeSessions if Claude was actually restored —
+        // otherwise preserve them so a subsequent revive (without skipClaude) can use them.
+        try await db.worktrees.revive(id: worktreeID, clearSessions: !skipClaude)
 
         // Return updated worktree
         guard let revived = try await db.worktrees.get(id: worktreeID) else {
