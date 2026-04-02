@@ -1,12 +1,28 @@
 import SwiftUI
 import AppKit
 @preconcurrency import Highlightr
+import MarkdownUI
 
 // MARK: - CodeViewerPaneView
+
+/// Preference key that child views set to signal renderable content is present.
+struct HasRenderableContentKey: PreferenceKey {
+    static let defaultValue = false
+    static func reduce(value: inout Bool, nextValue: () -> Bool) {
+        value = value || nextValue()
+    }
+}
+
+/// Files that have a rich rendered view in addition to raw source code.
+private func isRenderableFile(_ path: String) -> Bool {
+    let ext = (path as NSString).pathExtension.lowercased()
+    return ["md", "markdown"].contains(ext)
+}
 
 struct CodeViewerPaneView: View {
     let path: String
     let worktreePath: String
+    let showSourceCode: Bool
 
     @State private var selectedFiles: [String] = []
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
@@ -37,7 +53,7 @@ struct CodeViewerPaneView: View {
                                 if selectedFiles.count > 1 {
                                     fileHeader(filePath)
                                 }
-                                FilePreviewView(filePath: filePath)
+                                FilePreviewView(filePath: filePath, showSourceCode: showSourceCode)
                             }
                         }
                     }
@@ -46,6 +62,7 @@ struct CodeViewerPaneView: View {
             .background(highlightrBackgroundColor)
             .colorScheme(.dark)
         }
+        .preference(key: HasRenderableContentKey.self, value: selectedFiles.contains(where: isRenderableFile))
         .onAppear {
             if !path.isEmpty && FileManager.default.fileExists(atPath: path) {
                 selectedFiles = [path]
@@ -103,14 +120,64 @@ private func isTextFile(_ path: String) -> Bool {
 /// images → native NSImage, text → syntax-highlighted code, binary → "Open in Finder" fallback.
 private struct FilePreviewView: View {
     let filePath: String
+    let showSourceCode: Bool
 
     var body: some View {
-        if isImageFile(filePath) {
+        if !showSourceCode && isRenderableFile(filePath) {
+            RenderedContentView(filePath: filePath)
+        } else if isImageFile(filePath) {
             ImagePreviewView(filePath: filePath)
         } else if isTextFile(filePath) {
             HighlightedCodeView(filePath: filePath)
         } else {
             BinaryFallbackView(filePath: filePath)
+        }
+    }
+}
+
+// MARK: - RenderedContentView
+
+private struct RenderedContentView: View {
+    let filePath: String
+    @State private var content: String?
+    @State private var loadError: String?
+
+    var body: some View {
+        Group {
+            if let error = loadError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(12)
+            } else if let content {
+                Markdown(content)
+                    .markdownTheme(.gitHub)
+                    .textSelection(.enabled)
+                    .padding(16)
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 100)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .task(id: filePath) {
+            await loadContent()
+        }
+    }
+
+    private func loadContent() async {
+        content = nil
+        loadError = nil
+        let fm = FileManager.default
+        if let attrs = try? fm.attributesOfItem(atPath: filePath),
+           let size = attrs[.size] as? UInt64, size > 1_048_576 {
+            loadError = "File too large to preview (\(size / 1024)KB)"
+            return
+        }
+        do {
+            content = try String(contentsOfFile: filePath, encoding: .utf8)
+        } catch {
+            loadError = "Could not read file"
         }
     }
 }

@@ -11,6 +11,8 @@ struct PanePlaceholder: View {
     @Binding var layout: LayoutNode
     @EnvironmentObject var appState: AppState
     @State private var isHeaderHovering = false
+    @State private var showSourceCode = false
+    @State private var hasRenderableContent = false
 
     /// Find the Terminal model matching a terminal ID across all worktree terminals.
     private func terminal(for id: UUID) -> Terminal? {
@@ -31,6 +33,12 @@ struct PanePlaceholder: View {
 
             // Pane content
             paneBody
+        }
+        .onPreferenceChange(HasRenderableContentKey.self) { newValue in
+            if newValue && !hasRenderableContent {
+                showSourceCode = false
+            }
+            hasRenderableContent = newValue
         }
     }
 
@@ -137,7 +145,15 @@ struct PanePlaceholder: View {
             .disabled(true)
 
         case .codeViewer:
-            EmptyView()
+            if hasRenderableContent {
+                Button(action: { showSourceCode.toggle() }) {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(showSourceCode ? .primary : .secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(showSourceCode ? "Show rendered view" : "Show source code")
+            }
         }
     }
 
@@ -151,7 +167,7 @@ struct PanePlaceholder: View {
         case .webview(_, let url):
             WebviewPaneView(url: url)
         case .codeViewer(_, let path):
-            CodeViewerPaneView(path: path, worktreePath: worktree.path)
+            CodeViewerPaneView(path: path, worktreePath: worktree.path, showSourceCode: showSourceCode)
         }
     }
 
