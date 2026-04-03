@@ -92,6 +92,9 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
+        // Kill the old window if it still exists (avoids orphans)
+        try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+
         // Ensure tmux server exists
         _ = try await tmux.ensureServer(
             server: worktree.tmuxServer,

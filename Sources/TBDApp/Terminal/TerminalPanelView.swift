@@ -125,6 +125,8 @@ struct TerminalPanelView: NSViewRepresentable {
         private var localProcess: LocalProcess?
         private var scrollMonitor: Any?
         private var clickMonitor: Any?
+        private var recreationAttempts = 0
+        private static let maxRecreationAttempts = 2
 
         func startTmuxClient(
             terminalView: TerminalView,
@@ -138,12 +140,21 @@ struct TerminalPanelView: NSViewRepresentable {
                 server: server,
                 windowID: windowID
             ) else {
-                debugLog("PANEL: Window \(windowID) is dead — requesting recreation")
-                DispatchQueue.main.async { [weak self] in
-                    self?.onDeadWindow?()
+                recreationAttempts += 1
+                if recreationAttempts <= Self.maxRecreationAttempts {
+                    debugLog("PANEL: Window \(windowID) is dead — requesting recreation (attempt \(recreationAttempts))")
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onDeadWindow?()
+                    }
+                } else {
+                    debugLog("PANEL: Window \(windowID) is dead — max recreation attempts reached")
+                    DispatchQueue.main.async {
+                        terminalView.feed(text: "\r\n  Terminal session expired.\r\n  Close this tab and create a new terminal.\r\n")
+                    }
                 }
                 return
             }
+            recreationAttempts = 0 // Reset on successful connect
 
             let tmuxPath = findExecutable(args[0])
             let processArgs = Array(args.dropFirst())

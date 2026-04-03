@@ -67,6 +67,9 @@ final class AppState: ObservableObject {
     /// Remembers selected tab index per worktree so switching back restores the tab.
     @Published var selectedTabIndex: [UUID: Int] = [:]
 
+    /// Terminal IDs currently being recreated — prevents duplicate RPC calls.
+    var recreatingTerminalIDs: Set<UUID> = []
+
     // Alert state for user feedback
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false
