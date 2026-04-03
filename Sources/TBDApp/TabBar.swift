@@ -8,7 +8,9 @@ import TBDShared
 struct TabBar: View {
     let tabs: [Tab]
     @Binding var activeTabIndex: Int
-    var onAddTab: () -> Void
+    var onAddShell: () -> Void = {}
+    var onAddClaude: () -> Void = {}
+    var onAddNote: () -> Void = {}
     var onCloseTab: (Int) -> Void
     var terminalForTab: (UUID) -> Terminal? = { _ in nil }
     var onSuspendTab: (UUID) -> Void = { _ in }
@@ -41,15 +43,28 @@ struct TabBar: View {
                 .fill(Color.primary.opacity(0.08))
                 .frame(width: 1, height: 18)
 
-            Button(action: onAddTab) {
+            Menu {
+                Button(action: onAddShell) {
+                    Label("Shell", systemImage: "terminal")
+                }
+                Button(action: onAddClaude) {
+                    Label("Claude", systemImage: "sparkle")
+                }
+                Divider()
+                Button(action: onAddNote) {
+                    Label("Note", systemImage: "note.text")
+                }
+            } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(width: 34, height: 28)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .help("New Terminal Tab")
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 34, height: 28)
+            .help("New Tab")
 
             Spacer()
         }
@@ -194,6 +209,7 @@ private struct TabBarItem: View {
             return isSuspended ? "moon.zzz" : "terminal"
         case .webview: return "globe"
         case .codeViewer: return "doc.text"
+        case .note: return "note.text"
         }
     }
 
@@ -208,6 +224,8 @@ private struct TabBarItem: View {
             return url.host ?? "Web"
         case .codeViewer(_, let path):
             return URL(fileURLWithPath: path).lastPathComponent
+        case .note:
+            return "Note \(index + 1)"
         }
     }
 }

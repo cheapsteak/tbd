@@ -104,6 +104,16 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeResume(request.paramsData)
             case RPCMethod.terminalRecreateWindow:
                 return try await handleTerminalRecreateWindow(request.paramsData)
+            case RPCMethod.noteCreate:
+                return try await handleNoteCreate(request.paramsData)
+            case RPCMethod.noteGet:
+                return try await handleNoteGet(request.paramsData)
+            case RPCMethod.noteUpdate:
+                return try await handleNoteUpdate(request.paramsData)
+            case RPCMethod.noteDelete:
+                return try await handleNoteDelete(request.paramsData)
+            case RPCMethod.noteList:
+                return try await handleNoteList(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

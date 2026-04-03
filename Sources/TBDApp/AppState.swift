@@ -10,6 +10,7 @@ final class AppState: ObservableObject {
     @Published var repos: [Repo] = []
     @Published var worktrees: [UUID: [Worktree]] = [:]
     @Published var terminals: [UUID: [Terminal]] = [:]
+    @Published var notes: [UUID: [Note]] = [:]
     @Published var notifications: [UUID: NotificationType?] = [:]
     @Published var selectedWorktreeIDs: Set<UUID> = [] {
         didSet {
@@ -306,6 +307,18 @@ final class AppState: ObservableObject {
                     reconcileTabs(worktreeID: wtID, terminals: fetched)
                 }
             }
+
+            // Fetch all notes, group client-side
+            let allNotes = try await daemonClient.listNotes()
+            let notesByWorktree = Dictionary(grouping: allNotes, by: { $0.worktreeID })
+            for wtID in visibleWorktreeIDs {
+                let fetched = notesByWorktree[wtID] ?? []
+                let existing = notes[wtID] ?? []
+                if fetched != existing {
+                    notes[wtID] = fetched
+                    reconcileNoteTabs(worktreeID: wtID, notes: fetched)
+                }
+            }
         } catch {
             logger.error("Failed to list worktrees: \(error)")
             handleConnectionError(error)
@@ -364,6 +377,33 @@ final class AppState: ObservableObject {
         // 3. Add tabs for terminals not already in any surviving layout.
         for terminal in terminals where !terminalIDsInLayouts.contains(terminal.id) {
             currentTabs.append(Tab(id: terminal.id, content: .terminal(terminalID: terminal.id)))
+        }
+
+        tabs[worktreeID] = currentTabs
+    }
+
+    /// Reconcile note tabs — remove tabs whose note no longer exists,
+    /// add tabs for notes not already represented.
+    private func reconcileNoteTabs(worktreeID: UUID, notes: [Note]) {
+        var currentTabs = tabs[worktreeID] ?? []
+        let noteIDs = Set(notes.map(\.id))
+
+        // Collect note IDs already in tabs
+        var noteIDsInTabs = Set<UUID>()
+        currentTabs.removeAll { tab in
+            if case .note(let id) = tab.content {
+                if !noteIDs.contains(id) {
+                    layouts.removeValue(forKey: tab.id)
+                    return true
+                }
+                noteIDsInTabs.insert(id)
+            }
+            return false
+        }
+
+        // Add tabs for notes not already represented
+        for note in notes where !noteIDsInTabs.contains(note.id) {
+            currentTabs.append(Tab(id: note.id, content: .note(noteID: note.id), label: note.title))
         }
 
         tabs[worktreeID] = currentTabs

@@ -351,10 +351,10 @@ actor DaemonClient {
     }
 
     /// Create a terminal in a worktree.
-    func createTerminal(worktreeID: UUID, cmd: String? = nil) throws -> Terminal {
+    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: String? = nil) throws -> Terminal {
         return try call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type),
             resultType: Terminal.self
         )
     }
@@ -484,5 +484,51 @@ actor DaemonClient {
             resultType: PRRefreshResult.self
         )
         return result.status
+    }
+
+    // MARK: - Notes
+
+    /// Create a new note in a worktree.
+    func createNote(worktreeID: UUID) throws -> Note {
+        return try call(
+            method: RPCMethod.noteCreate,
+            params: NoteCreateParams(worktreeID: worktreeID),
+            resultType: Note.self
+        )
+    }
+
+    /// Get a note by ID.
+    func getNote(noteID: UUID) throws -> Note {
+        return try call(
+            method: RPCMethod.noteGet,
+            params: NoteGetParams(noteID: noteID),
+            resultType: Note.self
+        )
+    }
+
+    /// Update a note's title and/or content.
+    func updateNote(noteID: UUID, title: String? = nil, content: String? = nil) throws -> Note {
+        return try call(
+            method: RPCMethod.noteUpdate,
+            params: NoteUpdateParams(noteID: noteID, title: title, content: content),
+            resultType: Note.self
+        )
+    }
+
+    /// Delete a note.
+    func deleteNote(noteID: UUID) throws {
+        try callVoid(
+            method: RPCMethod.noteDelete,
+            params: NoteDeleteParams(noteID: noteID)
+        )
+    }
+
+    /// List notes, optionally filtered by worktree.
+    func listNotes(worktreeID: UUID? = nil) throws -> [Note] {
+        return try call(
+            method: RPCMethod.noteList,
+            params: NoteListParams(worktreeID: worktreeID),
+            resultType: [Note].self
+        )
     }
 }

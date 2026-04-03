@@ -10,6 +10,7 @@ public final class TBDDatabase: Sendable {
     public let worktrees: WorktreeStore
     public let terminals: TerminalStore
     public let notifications: NotificationStore
+    public let notes: NoteStore
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
     public init(path: String) throws {
@@ -25,6 +26,7 @@ public final class TBDDatabase: Sendable {
         self.worktrees = WorktreeStore(writer: pool)
         self.terminals = TerminalStore(writer: pool)
         self.notifications = NotificationStore(writer: pool)
+        self.notes = NoteStore(writer: pool)
         try Self.migrate(writer: pool)
     }
 
@@ -37,6 +39,7 @@ public final class TBDDatabase: Sendable {
         self.worktrees = WorktreeStore(writer: queue)
         self.terminals = TerminalStore(writer: queue)
         self.notifications = NotificationStore(writer: queue)
+        self.notes = NoteStore(writer: queue)
         try Self.migrate(writer: queue)
     }
 
@@ -130,6 +133,18 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v8") { db in
             try db.alter(table: "worktree") { t in
                 t.add(column: "archivedClaudeSessions", .text)
+            }
+        }
+
+        migrator.registerMigration("v9") { db in
+            try db.create(table: "note") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("worktreeID", .text).notNull()
+                    .references("worktree", onDelete: .cascade)
+                t.column("title", .text).notNull()
+                t.column("content", .text).notNull().defaults(to: "")
+                t.column("createdAt", .datetime).notNull()
+                t.column("updatedAt", .datetime).notNull()
             }
         }
 

@@ -20,7 +20,26 @@ extension RPCRouter {
             cwd: worktree.path
         )
 
-        let shellCommand = params.cmd ?? (ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+        let isClaudeType = params.type == "claude"
+        let claudeSessionID = isClaudeType ? UUID().uuidString : nil
+        let shellCommand: String
+        let label: String?
+
+        if isClaudeType {
+            if let sessionID = claudeSessionID {
+                shellCommand = "claude --session-id \(sessionID) --dangerously-skip-permissions"
+            } else {
+                shellCommand = "claude --dangerously-skip-permissions"
+            }
+            label = "claude"
+        } else if let cmd = params.cmd {
+            shellCommand = cmd
+            label = cmd
+        } else {
+            shellCommand = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            label = nil
+        }
+
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
@@ -32,7 +51,8 @@ extension RPCRouter {
             worktreeID: params.worktreeID,
             tmuxWindowID: window.windowID,
             tmuxPaneID: window.paneID,
-            label: params.cmd
+            label: label,
+            claudeSessionID: claudeSessionID
         )
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
