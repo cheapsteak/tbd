@@ -56,7 +56,7 @@ extension AppState {
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
                 cmd: nil,
-                type: "claude"
+                type: .claude
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))

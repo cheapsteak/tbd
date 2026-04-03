@@ -20,7 +20,7 @@ extension RPCRouter {
             cwd: worktree.path
         )
 
-        let isClaudeType = params.type == "claude"
+        let isClaudeType = params.type == .claude
         let claudeSessionID: String? = isClaudeType ? UUID().uuidString : nil
         let shellCommand: String
         let label: String?

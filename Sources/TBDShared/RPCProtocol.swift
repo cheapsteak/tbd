@@ -186,12 +186,16 @@ public struct WorktreeRenameParams: Codable, Sendable {
     }
 }
 
+public enum TerminalCreateType: String, Codable, Sendable {
+    case shell
+    case claude
+}
+
 public struct TerminalCreateParams: Codable, Sendable {
     public let worktreeID: UUID
     public let cmd: String?
-    /// "shell" (default) or "claude"
-    public let type: String?
-    public init(worktreeID: UUID, cmd: String? = nil, type: String? = nil) {
+    public let type: TerminalCreateType?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type
     }
 }

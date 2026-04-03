@@ -29,6 +29,10 @@ extension RPCRouter {
     func handleNoteUpdate(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(NoteUpdateParams.self, from: paramsData)
 
+        guard try await db.notes.get(id: params.noteID) != nil else {
+            return RPCResponse(error: "Note not found: \(params.noteID)")
+        }
+
         let note = try await db.notes.update(
             id: params.noteID,
             title: params.title,
