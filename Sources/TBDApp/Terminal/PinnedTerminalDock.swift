@@ -145,9 +145,12 @@ private struct PinnedTerminalCell: View {
                     tmuxServer: worktree.tmuxServer,
                     tmuxWindowID: terminal.tmuxWindowID,
                     tmuxBridge: appState.tmuxBridge,
-                    worktreePath: worktree.path
+                    worktreePath: worktree.path,
+                    onDeadWindow: {
+                        Task { await appState.recreateTerminalWindow(terminalID: terminal.id) }
+                    }
                 )
-                .id(terminal.id)
+                .id("\(terminal.id)-\(terminal.tmuxWindowID)")
             } else {
                 ZStack {
                     Color(nsColor: .textBackgroundColor)

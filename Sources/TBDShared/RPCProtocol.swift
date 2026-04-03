@@ -103,6 +103,7 @@ public enum RPCMethod {
     public static let terminalResume = "terminal.resume"
     public static let worktreeSuspend = "worktree.suspend"
     public static let worktreeResume = "worktree.resume"
+    public static let terminalRecreateWindow = "terminal.recreateWindow"
 }
 
 public struct NotificationsListResult: Codable, Sendable {
@@ -257,6 +258,11 @@ public struct WorktreeSuspendParams: Codable, Sendable {
 public struct WorktreeResumeParams: Codable, Sendable {
     public let worktreeID: UUID
     public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct TerminalRecreateWindowParams: Codable, Sendable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
 }
 
 // MARK: - Result Structs

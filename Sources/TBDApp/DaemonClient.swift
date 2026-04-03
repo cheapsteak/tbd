@@ -368,6 +368,15 @@ actor DaemonClient {
         )
     }
 
+    /// Recreate a dead tmux window for an existing terminal (preserves terminal ID).
+    func recreateTerminalWindow(terminalID: UUID) throws -> Terminal {
+        return try call(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminalID),
+            resultType: Terminal.self
+        )
+    }
+
     /// Delete a terminal (kills tmux window and removes DB record).
     func deleteTerminal(terminalID: UUID) throws {
         try callVoid(

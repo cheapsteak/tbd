@@ -56,6 +56,22 @@ extension AppState {
         }
     }
 
+    /// Recreate a dead tmux window for an existing terminal.
+    /// The daemon creates a new tmux window and updates the terminal record.
+    /// A state refresh picks up the new tmuxWindowID, causing the view to rebuild.
+    func recreateTerminalWindow(terminalID: UUID) async {
+        do {
+            let updated = try await daemonClient.recreateTerminalWindow(terminalID: terminalID)
+            // Update local state so the view rebuilds with the new tmuxWindowID
+            if let idx = terminals[updated.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
+                terminals[updated.worktreeID]?[idx] = updated
+            }
+        } catch {
+            logger.error("Failed to recreate terminal window: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
     /// Toggle pin state for a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) async {
         // Optimistic local update

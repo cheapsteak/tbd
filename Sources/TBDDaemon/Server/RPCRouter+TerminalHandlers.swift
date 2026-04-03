@@ -81,6 +81,48 @@ extension RPCRouter {
         return .ok()
     }
 
+    func handleTerminalRecreateWindow(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalRecreateWindowParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+
+        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+
+        // Ensure tmux server exists
+        _ = try await tmux.ensureServer(
+            server: worktree.tmuxServer,
+            session: "main",
+            cwd: worktree.path
+        )
+
+        // Create a new tmux window with a default shell
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let window = try await tmux.createWindow(
+            server: worktree.tmuxServer,
+            session: "main",
+            cwd: worktree.path,
+            shellCommand: shell
+        )
+
+        // Update the terminal record with new window/pane IDs
+        try await db.terminals.updateTmuxIDs(
+            id: params.terminalID,
+            windowID: window.windowID,
+            paneID: window.paneID
+        )
+
+        // Return updated terminal
+        guard let updated = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found after update")
+        }
+
+        return try RPCResponse(result: updated)
+    }
+
     func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSendParams.self, from: paramsData)
 

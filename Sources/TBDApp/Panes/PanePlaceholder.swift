@@ -188,6 +188,9 @@ struct PanePlaceholder: View {
                 onTerminalNotification: { title, body in
                     debugLog("OSC 777: \(title) — \(body)")
                 },
+                onDeadWindow: {
+                    Task { await appState.recreateTerminalWindow(terminalID: terminalID) }
+                },
                 initialSnapshot: terminal.suspendedSnapshot,
                 isSuspendedSnapshot: terminal.suspendedAt != nil
             )

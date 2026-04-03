@@ -102,6 +102,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeSuspend(request.paramsData)
             case RPCMethod.worktreeResume:
                 return try await handleWorktreeResume(request.paramsData)
+            case RPCMethod.terminalRecreateWindow:
+                return try await handleTerminalRecreateWindow(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

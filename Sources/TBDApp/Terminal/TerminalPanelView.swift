@@ -29,6 +29,9 @@ struct TerminalPanelView: NSViewRepresentable {
     var remoteURL: String?
     var onFilePathClicked: ((String) -> Void)?
     var onTerminalNotification: ((String, String) -> Void)?
+    /// Called when the tmux window is dead and needs recreation. The callback
+    /// should ask the daemon to recreate the window and trigger a state refresh.
+    var onDeadWindow: (() -> Void)?
     /// When set, this ANSI text is fed into the terminal buffer before the tmux
     /// client connects. The live tmux output overwrites it seamlessly.
     /// See docs/superpowers/specs/2026-03-31-snapshot-display-approaches.md for
@@ -67,6 +70,7 @@ struct TerminalPanelView: NSViewRepresentable {
         context.coordinator.tmuxBridge = tmuxBridge
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
+        context.coordinator.onDeadWindow = onDeadWindow
 
         // Feed snapshot before tmux connects so the user sees the last state
         let snapshot = initialSnapshot
@@ -117,6 +121,7 @@ struct TerminalPanelView: NSViewRepresentable {
         var tmuxBridge: TmuxBridge?
         var tmuxServer: String = ""
         var panelID: UUID = UUID()
+        var onDeadWindow: (() -> Void)?
         private var localProcess: LocalProcess?
         private var scrollMonitor: Any?
         private var clickMonitor: Any?
@@ -133,9 +138,9 @@ struct TerminalPanelView: NSViewRepresentable {
                 server: server,
                 windowID: windowID
             ) else {
-                debugLog("PANEL: Window \(windowID) is dead — showing message")
-                DispatchQueue.main.async {
-                    terminalView.feed(text: "\r\n  Terminal session expired.\r\n  Close this tab and create a new terminal.\r\n")
+                debugLog("PANEL: Window \(windowID) is dead — requesting recreation")
+                DispatchQueue.main.async { [weak self] in
+                    self?.onDeadWindow?()
                 }
                 return
             }
