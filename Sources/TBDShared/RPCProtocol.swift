@@ -195,8 +195,10 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let worktreeID: UUID
     public let cmd: String?
     public let type: TerminalCreateType?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil) {
-        self.worktreeID = worktreeID; self.cmd = cmd; self.type = type
+    /// Session ID to resume from (for forking a Claude session).
+    public let resumeSessionID: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil) {
+        self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID
     }
 }
 

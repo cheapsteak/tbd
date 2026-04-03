@@ -15,6 +15,7 @@ struct TabBar: View {
     var terminalForTab: (UUID) -> Terminal? = { _ in nil }
     var onSuspendTab: (UUID) -> Void = { _ in }
     var onResumeTab: (UUID) -> Void = { _ in }
+    var onForkTab: (UUID) -> Void = { _ in }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -34,7 +35,8 @@ struct TabBar: View {
                     onSelect: { activeTabIndex = index },
                     onClose: { onCloseTab(index) },
                     onSuspend: { onSuspendTab(tab.id) },
-                    onResume: { onResumeTab(tab.id) }
+                    onResume: { onResumeTab(tab.id) },
+                    onFork: { onForkTab(tab.id) }
                 )
             }
 
@@ -88,11 +90,10 @@ private struct AddTabButton: View {
 
         let shellItem = NSMenuItem(title: "Shell", action: nil, keyEquivalent: "")
         shellItem.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
-        shellItem.target = nil
         menu.addItem(shellItem)
 
         let claudeItem = NSMenuItem(title: "Claude", action: nil, keyEquivalent: "")
-        claudeItem.image = NSImage(systemSymbolName: "sparkle", accessibilityDescription: nil)
+        claudeItem.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
         menu.addItem(claudeItem)
 
         menu.addItem(.separator())
@@ -118,6 +119,7 @@ private struct AddTabButton: View {
         let location = NSEvent.mouseLocation
         menu.popUp(positioning: nil, at: location, in: nil)
     }
+
 }
 
 private class MenuCoordinator: NSObject {
@@ -147,6 +149,7 @@ private struct TabBarItem: View {
     let onClose: () -> Void
     let onSuspend: () -> Void
     let onResume: () -> Void
+    let onFork: () -> Void
 
     @State private var isHovering = false
     @State private var isHoveringClose = false
@@ -238,12 +241,16 @@ private struct TabBarItem: View {
         .contentShape(Rectangle())
         .contextMenu {
             if isClaudeTerminal {
+                Button(action: onFork) {
+                    Label("Fork Session", systemImage: "arrow.triangle.branch")
+                }
                 Button(action: isSuspended ? onResume : onSuspend) {
                     Label(
                         isSuspended ? "Resume Claude" : "Suspend Claude",
                         systemImage: isSuspended ? "play.circle" : "pause.circle"
                     )
                 }
+                Divider()
             }
             Button(action: onClose) {
                 Label("Close Tab", systemImage: "xmark")
@@ -254,10 +261,8 @@ private struct TabBarItem: View {
     private var tabIcon: String {
         switch tab.content {
         case .terminal:
-            if isClaudeTerminal {
-                return isSuspended ? "moon.zzz" : "alien.headphones"
-            }
-            return isSuspended ? "moon.zzz" : "terminal"
+            if isSuspended { return "moon.zzz" }
+            return isClaudeTerminal ? "sparkles" : "terminal"
         case .webview: return "globe"
         case .codeViewer: return "doc.text"
         case .note: return "note.text"

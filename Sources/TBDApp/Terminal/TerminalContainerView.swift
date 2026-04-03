@@ -140,6 +140,15 @@ private struct SingleWorktreeView: View {
                                 try? await appState.daemonClient.terminalResume(terminalID: terminalID)
                                 await appState.refreshTerminals(worktreeID: worktreeID)
                             }
+                        },
+                        onForkTab: { tabID in
+                            guard let terminalID = terminalID(for: tabID) else { return }
+                            let terminal = appState.terminals[worktreeID]?.first { $0.id == terminalID }
+                            guard let sessionID = terminal?.claudeSessionID else { return }
+                            Task {
+                                await appState.forkClaudeTerminal(worktreeID: worktreeID, sessionID: sessionID)
+                                selectLastTab()
+                            }
                         }
                     )
 
