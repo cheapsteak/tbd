@@ -17,17 +17,24 @@ struct NotePaneView: View {
     var body: some View {
         TextEditor(text: $text)
             .font(.system(.body, design: .monospaced))
+            .padding(12)
             .scrollContentBackground(.hidden)
             .background(Color(nsColor: .textBackgroundColor))
             .onChange(of: text) { _, newValue in
                 guard loaded else { return }
                 debounceSave(content: newValue)
             }
+            .onChange(of: note?.content) { _, newContent in
+                // Load content when note data arrives from polling
+                guard !loaded, let newContent else { return }
+                text = newContent
+                loaded = true
+            }
             .task(id: noteID) {
                 if let note {
                     text = note.content
+                    loaded = true
                 }
-                loaded = true
             }
     }
 
