@@ -351,4 +351,76 @@ struct DatabaseTests {
         let highest = try await db.notifications.highestSeverity(worktreeID: wt.id)
         #expect(highest == nil)
     }
+
+    // MARK: - Note Tests
+
+    @Test func createAndListNotes() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
+            path: "/tmp/test/.tbd/worktrees/test-wt", tmuxServer: "tbd-a1b2c3d4"
+        )
+
+        let note1 = try await db.notes.create(worktreeID: wt.id)
+        #expect(note1.title == "Note 1")
+        #expect(note1.content == "")
+
+        let note2 = try await db.notes.create(worktreeID: wt.id)
+        #expect(note2.title == "Note 2")
+
+        let notes = try await db.notes.list(worktreeID: wt.id)
+        #expect(notes.count == 2)
+    }
+
+    @Test func updateNoteContent() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
+            path: "/tmp/test/.tbd/worktrees/test-wt", tmuxServer: "tbd-a1b2c3d4"
+        )
+
+        let note = try await db.notes.create(worktreeID: wt.id)
+        let updated = try await db.notes.update(id: note.id, title: "My Note", content: "Hello world")
+        #expect(updated.title == "My Note")
+        #expect(updated.content == "Hello world")
+
+        let fetched = try await db.notes.get(id: note.id)
+        #expect(fetched?.title == "My Note")
+        #expect(fetched?.content == "Hello world")
+    }
+
+    @Test func deleteNote() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
+            path: "/tmp/test/.tbd/worktrees/test-wt", tmuxServer: "tbd-a1b2c3d4"
+        )
+
+        let note = try await db.notes.create(worktreeID: wt.id)
+        try await db.notes.delete(id: note.id)
+        let notes = try await db.notes.list(worktreeID: wt.id)
+        #expect(notes.isEmpty)
+    }
+
+    @Test func noteTitleMonotonicAfterDeletion() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
+            path: "/tmp/test/.tbd/worktrees/test-wt", tmuxServer: "tbd-a1b2c3d4"
+        )
+
+        let note1 = try await db.notes.create(worktreeID: wt.id)
+        #expect(note1.title == "Note 1")
+        let note2 = try await db.notes.create(worktreeID: wt.id)
+        #expect(note2.title == "Note 2")
+
+        // Delete Note 1, create another — should be Note 3, not Note 2
+        try await db.notes.delete(id: note1.id)
+        let note3 = try await db.notes.create(worktreeID: wt.id)
+        #expect(note3.title == "Note 3")
+    }
 }
