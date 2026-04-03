@@ -46,15 +46,17 @@ struct TerminalContainerView: View {
             }
         }
 
-        if dockTerminals.isEmpty {
-            mainContent
-        } else {
-            DockSplitView(
-                dockRatio: $appState.dockRatio,
-                mainContent: { mainContent },
-                dockContent: { PinnedTerminalDock(terminals: dockTerminals) }
-            )
-        }
+        // Always render DockSplitView so mainContent stays in the same
+        // structural position. Switching between bare `mainContent` and
+        // `DockSplitView { mainContent }` destroys all terminal views,
+        // killing their tmux sessions. Dock content is still conditionally
+        // rendered (cheap to recreate).
+        DockSplitView(
+            dockRatio: $appState.dockRatio,
+            isDockVisible: !dockTerminals.isEmpty,
+            mainContent: { mainContent },
+            dockContent: { PinnedTerminalDock(terminals: dockTerminals) }
+        )
     }
 }
 
@@ -358,6 +360,7 @@ private struct MultiWorktreeCell: View {
 /// Uses deferred resize: shows an indicator line during drag, only commits on release.
 private struct DockSplitView<Main: View, Dock: View>: View {
     @Binding var dockRatio: CGFloat
+    let isDockVisible: Bool
     @ViewBuilder let mainContent: () -> Main
     @ViewBuilder let dockContent: () -> Dock
 
@@ -368,51 +371,53 @@ private struct DockSplitView<Main: View, Dock: View>: View {
     var body: some View {
         GeometryReader { geometry in
             let totalWidth = geometry.size.width
-            let dividerWidth: CGFloat = 4
+            let dividerWidth: CGFloat = isDockVisible ? 4 : 0
             let available = totalWidth - dividerWidth
-            let dockWidth = available * dockRatio
+            let dockWidth = isDockVisible ? available * dockRatio : 0
             let mainWidth = available - dockWidth
 
             HStack(spacing: 0) {
                 mainContent()
                     .frame(width: mainWidth)
 
-                Rectangle()
-                    .fill(Color.gray.opacity(0.3))
-                    .frame(width: dividerWidth)
-                    .contentShape(Rectangle())
-                    .cursor(.resizeLeftRight)
-                    .overlay {
-                        if let preview = previewRatio {
-                            let offsetX = -(preview - dockRatio) * available
-                            Rectangle()
-                                .fill(Color.accentColor.opacity(0.6))
-                                .frame(width: 2)
-                                .offset(x: offsetX)
-                                .allowsHitTesting(false)
+                if isDockVisible {
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.3))
+                        .frame(width: dividerWidth)
+                        .contentShape(Rectangle())
+                        .cursor(.resizeLeftRight)
+                        .overlay {
+                            if let preview = previewRatio {
+                                let offsetX = -(preview - dockRatio) * available
+                                Rectangle()
+                                    .fill(Color.accentColor.opacity(0.6))
+                                    .frame(width: 2)
+                                    .offset(x: offsetX)
+                                    .allowsHitTesting(false)
+                            }
                         }
-                    }
-                    .gesture(
-                        DragGesture()
-                            .onChanged { value in
-                                if dragStartRatio == nil {
-                                    dragStartRatio = dockRatio
+                        .gesture(
+                            DragGesture()
+                                .onChanged { value in
+                                    if dragStartRatio == nil {
+                                        dragStartRatio = dockRatio
+                                    }
+                                    guard let startRatio = dragStartRatio, available > 0 else { return }
+                                    let delta = -value.translation.width / available
+                                    previewRatio = max(0.1, min(0.6, startRatio + delta))
                                 }
-                                guard let startRatio = dragStartRatio, available > 0 else { return }
-                                let delta = -value.translation.width / available
-                                previewRatio = max(0.1, min(0.6, startRatio + delta))
-                            }
-                            .onEnded { _ in
-                                if let preview = previewRatio {
-                                    dockRatio = preview
+                                .onEnded { _ in
+                                    if let preview = previewRatio {
+                                        dockRatio = preview
+                                    }
+                                    previewRatio = nil
+                                    dragStartRatio = nil
                                 }
-                                previewRatio = nil
-                                dragStartRatio = nil
-                            }
-                    )
+                        )
 
-                dockContent()
-                    .frame(width: dockWidth)
+                    dockContent()
+                        .frame(width: dockWidth)
+                }
             }
         }
     }
