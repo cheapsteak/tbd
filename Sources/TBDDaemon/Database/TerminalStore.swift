@@ -158,6 +158,21 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Clear Claude-specific metadata after window recreation.
+    /// The recreated window runs a plain shell, not Claude.
+    public func clearRecreated(id: UUID) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.claudeSessionID = nil
+            record.suspendedAt = nil
+            record.suspendedSnapshot = nil
+            record.label = "shell"
+            try record.update(db)
+        }
+    }
+
     /// Update the tmux window and pane IDs for a terminal.
     public func updateTmuxIDs(id: UUID, windowID: String, paneID: String) async throws {
         try await writer.write { db in

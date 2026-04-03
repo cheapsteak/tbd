@@ -111,12 +111,14 @@ extension RPCRouter {
             shellCommand: shell
         )
 
-        // Update the terminal record with new window/pane IDs
+        // Update the terminal record with new window/pane IDs and clear stale
+        // Claude metadata — the recreated window runs a plain shell, not Claude.
         try await db.terminals.updateTmuxIDs(
             id: params.terminalID,
             windowID: window.windowID,
             paneID: window.paneID
         )
+        try await db.terminals.clearRecreated(id: params.terminalID)
 
         // Return updated terminal
         guard let updated = try await db.terminals.get(id: params.terminalID) else {
