@@ -36,6 +36,10 @@ struct NotePaneView: View {
                     loaded = true
                 }
             }
+            .onDisappear {
+                saveTask?.cancel()
+                saveTask = nil
+            }
     }
 
     private func debounceSave(content: String) {
