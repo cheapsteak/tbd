@@ -73,16 +73,6 @@ struct PanePlaceholder: View {
         }
     }
 
-    /// Find the Note model matching a note ID across all worktree notes.
-    private func note(for id: UUID) -> Note? {
-        for (_, noteList) in appState.notes {
-            if let n = noteList.first(where: { $0.id == id }) {
-                return n
-            }
-        }
-        return nil
-    }
-
     @ViewBuilder
     private var paneLabel: some View {
         switch content {

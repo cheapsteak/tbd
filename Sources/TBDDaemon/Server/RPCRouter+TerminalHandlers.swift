@@ -21,16 +21,12 @@ extension RPCRouter {
         )
 
         let isClaudeType = params.type == "claude"
-        let claudeSessionID = isClaudeType ? UUID().uuidString : nil
+        let claudeSessionID: String? = isClaudeType ? UUID().uuidString : nil
         let shellCommand: String
         let label: String?
 
-        if isClaudeType {
-            if let sessionID = claudeSessionID {
-                shellCommand = "claude --session-id \(sessionID) --dangerously-skip-permissions"
-            } else {
-                shellCommand = "claude --dangerously-skip-permissions"
-            }
+        if isClaudeType, let sessionID = claudeSessionID {
+            shellCommand = "claude --session-id \(sessionID) --dangerously-skip-permissions"
             label = "claude"
         } else if let cmd = params.cmd {
             shellCommand = cmd
