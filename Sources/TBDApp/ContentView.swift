@@ -8,6 +8,7 @@ struct ContentView: View {
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
     @AppStorage("autoSuspendClaude") private var autoSuspendClaude: Bool = true
     @State private var conductorHotkeyMonitor = ConductorHotkeyMonitor()
+    @State private var contentAreaHeight: CGFloat = 600
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
@@ -41,12 +42,17 @@ struct ContentView: View {
                                 .id(worktree.id)
                         }
                     }
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
+                    })
+                    .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
                     .overlay(alignment: .top) {
                         if appState.showConductor,
                            let terminal = appState.currentConductorTerminal {
                             ConductorOverlayView(
                                 terminal: terminal,
-                                tmuxServer: TBDConstants.conductorsTmuxServer
+                                tmuxServer: TBDConstants.conductorsTmuxServer,
+                                parentHeight: contentAreaHeight
                             )
                         }
                     }
@@ -313,6 +319,13 @@ private struct PRButtonLabel: View {
         image.isTemplate = true
         return image
     }
+}
+
+// MARK: - ContentHeightKey
+
+private struct ContentHeightKey: PreferenceKey {
+    nonisolated(unsafe) static var defaultValue: CGFloat = 600
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 // MARK: - FilePanelDivider

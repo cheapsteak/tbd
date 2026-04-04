@@ -30,7 +30,7 @@ struct ConductorSuggestionBar: View {
             .controlSize(.small)
 
             Button {
-                appState.conductorSuggestion = nil
+                dismissSuggestion()
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
@@ -46,6 +46,16 @@ struct ConductorSuggestionBar: View {
 
     private func navigateToSuggestion() {
         appState.selectedWorktreeIDs = [suggestion.worktreeID]
+        dismissSuggestion()
+    }
+
+    private func dismissSuggestion() {
         appState.conductorSuggestion = nil
+        // Clear server-side so it doesn't flicker back on next poll
+        if let conductor = appState.currentConductor {
+            Task {
+                try? await appState.daemonClient.conductorClearSuggestion(name: conductor.name)
+            }
+        }
     }
 }

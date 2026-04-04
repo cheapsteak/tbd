@@ -33,6 +33,12 @@ final class AppState: ObservableObject {
     /// Archived worktrees keyed by repo ID, fetched on demand.
     @Published var archivedWorktrees: [UUID: [Worktree]] = [:]
 
+    /// The first selected worktree, if any.
+    var selectedWorktree: Worktree? {
+        guard let id = selectedWorktreeIDs.first else { return nil }
+        return worktrees.values.flatMap { $0 }.first { $0.id == id }
+    }
+
     /// All pinned terminals across all worktrees, sorted by pinnedAt.
     var pinnedTerminals: [Terminal] {
         terminals.values.flatMap { $0 }
@@ -76,7 +82,7 @@ final class AppState: ObservableObject {
     @Published var showConductor: Bool = false
     /// Conductor overlay height — persisted.
     @Published var conductorHeight: CGFloat = 300 {
-        didSet { UserDefaults.standard.set(Double(conductorHeight), forKey: "com.tbd.app.conductorHeight") }
+        didSet { UserDefaults.standard.set(Double(conductorHeight), forKey: Self.conductorHeightKey) }
     }
     /// Remembers selected tab index per worktree so switching back restores the tab.
     @Published var selectedTabIndex: [UUID: Int] = [:]
@@ -95,6 +101,7 @@ final class AppState: ObservableObject {
 
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
+    private static let conductorHeightKey = "com.tbd.app.conductorHeight"
 
     private var memoryPressureSource: DispatchSourceMemoryPressure?
 
@@ -103,7 +110,7 @@ final class AppState: ObservableObject {
         if let saved = UserDefaults.standard.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
-        if let savedHeight = UserDefaults.standard.object(forKey: "com.tbd.app.conductorHeight") as? Double {
+        if let savedHeight = UserDefaults.standard.object(forKey: Self.conductorHeightKey) as? Double {
             conductorHeight = max(100, min(800, CGFloat(savedHeight)))
         }
         startMemoryPressureMonitor()
@@ -524,21 +531,21 @@ final class AppState: ObservableObject {
 
             // Update suggestion from the conductor matching the current selection
             let newSuggestion: ConductorSuggestion? = {
-                guard let selectedID = selectedWorktreeIDs.first,
-                      let selectedWt = worktrees.values.flatMap({ $0 }).first(where: { $0.id == selectedID }),
+                guard let selectedWt = selectedWorktree,
                       let conductor = byRepo[selectedWt.repoID] else { return nil }
                 return conductor.suggestion
             }()
             if newSuggestion != conductorSuggestion { conductorSuggestion = newSuggestion }
         } catch {
-            // Don't log connection errors for conductors — they're not critical
+            if !(error is DaemonClientError) {
+                logger.error("Failed to refresh conductors: \(error)")
+            }
         }
     }
 
     /// The conductor for the repo of the currently selected worktree.
     var currentConductor: Conductor? {
-        guard let selectedID = selectedWorktreeIDs.first,
-              let selectedWt = worktrees.values.flatMap({ $0 }).first(where: { $0.id == selectedID }) else { return nil }
+        guard let selectedWt = selectedWorktree else { return nil }
         return conductorsByRepo[selectedWt.repoID]
     }
 
@@ -550,8 +557,7 @@ final class AppState: ObservableObject {
 
     /// The conductor's terminal for the currently selected repo.
     var currentConductorTerminal: Terminal? {
-        guard let selectedID = selectedWorktreeIDs.first,
-              let selectedWt = worktrees.values.flatMap({ $0 }).first(where: { $0.id == selectedID }) else { return nil }
+        guard let selectedWt = selectedWorktree else { return nil }
         return conductorTerminalsByRepo[selectedWt.repoID]
     }
 
@@ -568,8 +574,7 @@ final class AppState: ObservableObject {
 
     /// One-click conductor: setup (if needed) + start + show overlay.
     func ensureConductorRunning() async {
-        guard let selectedID = selectedWorktreeIDs.first,
-              let selectedWt = worktrees.values.flatMap({ $0 }).first(where: { $0.id == selectedID }) else { return }
+        guard let selectedWt = selectedWorktree else { return }
         let repoID = selectedWt.repoID
 
         do {

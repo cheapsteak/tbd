@@ -573,4 +573,12 @@ actor DaemonClient {
             params: ConductorNameParams(name: name)
         )
     }
+
+    /// Clear the navigation suggestion for a conductor.
+    func conductorClearSuggestion(name: String) throws {
+        try callVoid(
+            method: RPCMethod.conductorClearSuggestion,
+            params: ConductorNameParams(name: name)
+        )
+    }
 }
