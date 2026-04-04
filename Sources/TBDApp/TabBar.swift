@@ -93,7 +93,14 @@ private struct AddTabButton: View {
         menu.addItem(shellItem)
 
         let claudeItem = NSMenuItem(title: "Claude", action: nil, keyEquivalent: "")
-        claudeItem.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+        let claudeLabel = NSAttributedString(string: "✳", attributes: [.font: NSFont.systemFont(ofSize: 13)])
+        let claudeLabelSize = claudeLabel.size()
+        let claudeImage = NSImage(size: claudeLabelSize)
+        claudeImage.lockFocus()
+        claudeLabel.draw(at: .zero)
+        claudeImage.unlockFocus()
+        claudeImage.isTemplate = true
+        claudeItem.image = claudeImage
         menu.addItem(claudeItem)
 
         menu.addItem(.separator())
@@ -192,9 +199,7 @@ private struct TabBarItem: View {
                     }
 
                     // Type icon
-                    Image(systemName: tabIcon)
-                        .font(.system(size: 10))
-                        .foregroundStyle(isSelected ? .primary : .tertiary)
+                    tabIconView
                         .frame(width: 14)
                         .padding(.trailing, 3)
 
@@ -263,14 +268,36 @@ private struct TabBarItem: View {
         }
     }
 
-    private var tabIcon: String {
+    @ViewBuilder
+    private var tabIconView: some View {
+        let style = isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary)
         switch tab.content {
         case .terminal:
-            if isSuspended { return "moon.zzz" }
-            return isClaudeTerminal ? "sparkles" : "terminal"
-        case .webview: return "globe"
-        case .codeViewer: return "doc.text"
-        case .note: return "note.text"
+            if isSuspended {
+                Image(systemName: "moon.zzz")
+                    .font(.system(size: 10))
+                    .foregroundStyle(style)
+            } else if isClaudeTerminal {
+                Text("✳")
+                    .font(.system(size: 10))
+                    .foregroundStyle(style)
+            } else {
+                Image(systemName: "terminal")
+                    .font(.system(size: 10))
+                    .foregroundStyle(style)
+            }
+        case .webview:
+            Image(systemName: "globe")
+                .font(.system(size: 10))
+                .foregroundStyle(style)
+        case .codeViewer:
+            Image(systemName: "doc.text")
+                .font(.system(size: 10))
+                .foregroundStyle(style)
+        case .note:
+            Image(systemName: "note.text")
+                .font(.system(size: 10))
+                .foregroundStyle(style)
         }
     }
 

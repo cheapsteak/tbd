@@ -206,7 +206,7 @@ extension WorktreeLifecycle {
             worktreeID: worktreeID,
             tmuxWindowID: window1.windowID,
             tmuxPaneID: window1.paneID,
-            label: skipClaude ? "shell" : "claude",
+            label: skipClaude ? "shell" : "Claude Code",
             claudeSessionID: claudeSessionID
         )
 
@@ -244,7 +244,7 @@ extension WorktreeLifecycle {
                     worktreeID: worktreeID,
                     tmuxWindowID: window.windowID,
                     tmuxPaneID: window.paneID,
-                    label: "claude",
+                    label: "Claude Code",
                     claudeSessionID: sessionID
                 )
             }
