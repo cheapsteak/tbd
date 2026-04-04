@@ -144,6 +144,9 @@ public struct WorktreeStore: Sendable {
             }
             if let status {
                 request = request.filter(Column("status") == status.rawValue)
+            } else {
+                // Exclude conductor worktrees from default listing
+                request = request.filter(Column("status") != WorktreeStatus.conductor.rawValue)
             }
             return try request.fetchAll(db).map { $0.toModel() }
         }

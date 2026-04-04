@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalOutput.self, TerminalConversation.self]
     )
 }
 
@@ -126,6 +126,92 @@ struct TerminalSend: AsyncParsableCommand {
             printJSON(["status": "sent"])
         } else {
             print("Text sent.")
+        }
+    }
+}
+
+// MARK: - terminal output
+
+struct TerminalOutput: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "output",
+        abstract: "Capture terminal output"
+    )
+
+    @Argument(help: "Terminal ID")
+    var terminal: String
+
+    @Option(name: .long, help: "Number of lines to capture (default 50)")
+    var lines: Int?
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+        let result: TerminalOutputResult = try client.call(
+            method: RPCMethod.terminalOutput,
+            params: TerminalOutputParams(terminalID: terminalID, lines: lines),
+            resultType: TerminalOutputResult.self
+        )
+
+        if json {
+            printJSON(result)
+        } else {
+            print(result.output)
+        }
+    }
+}
+
+// MARK: - terminal conversation
+
+struct TerminalConversation: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "conversation",
+        abstract: "Read Claude conversation messages from a terminal"
+    )
+
+    @Argument(help: "Terminal ID")
+    var terminal: String
+
+    @Option(name: .long, help: "Number of messages to return (default 1)")
+    var messages: Int?
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+        let result: TerminalConversationResult = try client.call(
+            method: RPCMethod.terminalConversation,
+            params: TerminalConversationParams(terminalID: terminalID, messages: messages),
+            resultType: TerminalConversationResult.self
+        )
+
+        if json {
+            printJSON(result)
+        } else {
+            if let sid = result.sessionID {
+                print("Session: \(sid)")
+                print()
+            }
+            if result.messages.isEmpty {
+                print("No messages found.")
+            } else {
+                for msg in result.messages {
+                    print("[\(msg.role)]")
+                    print(msg.content)
+                    print()
+                }
+            }
         }
     }
 }

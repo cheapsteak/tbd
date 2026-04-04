@@ -516,6 +516,17 @@ struct RPCRouterTests {
         #expect(resp.error?.contains("Note not found") == true)
     }
 
+    // MARK: - Terminal Output
+
+    @Test("terminal.output returns error when terminal not found")
+    func terminalOutputReturnsError_whenTerminalNotFound() async throws {
+        let params = TerminalOutputParams(terminalID: UUID())
+        let request = try RPCRequest(method: RPCMethod.terminalOutput, params: params)
+        let response = await router.handle(request)
+        #expect(!response.success)
+        #expect(response.error?.contains("Terminal not found") == true)
+    }
+
     // MARK: - Unknown Method
 
     @Test("unknown method returns error")

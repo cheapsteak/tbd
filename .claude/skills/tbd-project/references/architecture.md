@@ -39,15 +39,19 @@ Stateless. Connects to daemon socket, sends RPC, prints result, exits.
 
 ## Data Model (SQLite)
 
-Four tables: `repo`, `worktree`, `terminal`, `notification`. See `Sources/TBDShared/Models.swift` for struct definitions and `Sources/TBDDaemon/Database/` for GRDB record types.
+Five tables: `repo`, `worktree`, `terminal`, `notification`, `conductor`. See `Sources/TBDShared/Models.swift` and `Sources/TBDShared/ConductorModels.swift` for struct definitions and `Sources/TBDDaemon/Database/` + `Sources/TBDDaemon/Conductor/` for GRDB record types.
 
 ### Migrations
 - **v1** — initial schema: repo, worktree, terminal, notification tables
 - **v2** — adds `gitStatus` column to worktree (defaults to "current")
 - **v3** — adds `hasConflicts` bool column to worktree (defaults to false), replacing the gitStatus enum
+- **v4-v8** — adds pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, archivedClaudeSessions columns
+- **v9** — adds `conductor` table + synthetic "Conductors" pseudo-repo (well-known UUID)
 
 ### Key model types
-- `WorktreeStatus`: `.active`, `.archived`, `.main`, `.creating`
+- `WorktreeStatus`: `.active`, `.archived`, `.main`, `.creating`, `.conductor`
+- `Conductor`: meta-agent session with scoped repos, permissions (`.observe`/`.observeAndInteract`), heartbeat config
+- `ConductorPermission`: enum — `.observe` (read-only) or `.observeAndInteract` (can send to terminals)
 - `Worktree.hasConflicts`: bool indicating merge-tree conflict detection against main
 - `PRStatus`: open/merged/closed state + `PRMergeableState` (mergeable/conflicting/unknown)
 - `PaneContent`: `.terminal(terminalID:)`, `.webview(url:)`, `.codeViewer(filePath:)`
@@ -126,4 +130,4 @@ Environment variables: `TBD_REPO_PATH`, `TBD_WORKTREE_PATH`, `TBD_WORKTREE_NAME`
 
 JSON-RPC style over Unix socket (newline-delimited) and HTTP POST `/rpc`.
 
-Methods: `repo.add`, `repo.remove`, `repo.list`, `worktree.create`, `worktree.list`, `worktree.archive`, `worktree.revive`, `worktree.rename`, `terminal.create`, `terminal.list`, `terminal.send`, `terminal.delete`, `notify`, `daemon.status`, `state.subscribe`, `resolve.path`, `notifications.list`, `notifications.markRead`, `pr.list`, `pr.refresh`, `cleanup`
+Methods: `repo.add`, `repo.remove`, `repo.list`, `worktree.create`, `worktree.list`, `worktree.archive`, `worktree.revive`, `worktree.rename`, `terminal.create`, `terminal.list`, `terminal.send`, `terminal.delete`, `terminal.output`, `notify`, `daemon.status`, `state.subscribe`, `resolve.path`, `notifications.list`, `notifications.markRead`, `pr.list`, `pr.refresh`, `cleanup`, `conductor.setup`, `conductor.start`, `conductor.stop`, `conductor.teardown`, `conductor.list`, `conductor.status`

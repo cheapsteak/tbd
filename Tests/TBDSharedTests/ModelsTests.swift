@@ -199,6 +199,27 @@ import Testing
     #expect(decoded.connectedClients == 2)
 }
 
+@Test func conductorStatusRoundTrips() throws {
+    let status = WorktreeStatus.conductor
+    let data = try JSONEncoder().encode(status)
+    let decoded = try JSONDecoder().decode(WorktreeStatus.self, from: data)
+    #expect(decoded == .conductor)
+}
+
+@Test func conductorModelRoundTrips() throws {
+    let conductor = Conductor(
+        id: UUID(),
+        name: "test-conductor",
+        repos: ["*"],
+        heartbeatIntervalMinutes: 10,
+        createdAt: Date()
+    )
+    let data = try JSONEncoder().encode(conductor)
+    let decoded = try JSONDecoder().decode(Conductor.self, from: data)
+    #expect(decoded.name == "test-conductor")
+    #expect(decoded.repos == ["*"])
+}
+
 @Test func testResolvedPathResultRoundTrip() throws {
     let repoID = UUID()
     let result = ResolvedPathResult(repoID: repoID, worktreeID: nil)

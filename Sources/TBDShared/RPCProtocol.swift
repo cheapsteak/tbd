@@ -109,6 +109,14 @@ public enum RPCMethod {
     public static let noteUpdate = "note.update"
     public static let noteDelete = "note.delete"
     public static let noteList = "note.list"
+    public static let terminalOutput = "terminal.output"
+    public static let conductorSetup = "conductor.setup"
+    public static let conductorStart = "conductor.start"
+    public static let conductorStop = "conductor.stop"
+    public static let conductorTeardown = "conductor.teardown"
+    public static let conductorList = "conductor.list"
+    public static let conductorStatus = "conductor.status"
+    public static let terminalConversation = "terminal.conversation"
 }
 
 public struct NotificationsListResult: Codable, Sendable {
@@ -334,5 +342,81 @@ public struct CleanupResult: Codable, Sendable {
         self.reposProcessed = reposProcessed
         self.worktreesReconciled = worktreesReconciled
         self.errors = errors
+    }
+}
+
+// MARK: - Terminal Output
+
+public struct TerminalOutputParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let lines: Int?
+    public init(terminalID: UUID, lines: Int? = nil) {
+        self.terminalID = terminalID; self.lines = lines
+    }
+}
+
+public struct TerminalOutputResult: Codable, Sendable {
+    public let output: String
+    public init(output: String) { self.output = output }
+}
+
+// MARK: - Conductor
+
+public struct ConductorSetupParams: Codable, Sendable {
+    public let name: String
+    public let repos: [String]?
+    public let worktrees: [String]?
+    public let terminalLabels: [String]?
+    public let heartbeatIntervalMinutes: Int?
+    public init(name: String, repos: [String]? = nil, worktrees: [String]? = nil,
+                terminalLabels: [String]? = nil,
+                heartbeatIntervalMinutes: Int? = nil) {
+        self.name = name; self.repos = repos; self.worktrees = worktrees
+        self.terminalLabels = terminalLabels
+        self.heartbeatIntervalMinutes = heartbeatIntervalMinutes
+    }
+}
+
+public struct ConductorNameParams: Codable, Sendable {
+    public let name: String
+    public init(name: String) { self.name = name }
+}
+
+public struct ConductorListResult: Codable, Sendable {
+    public let conductors: [Conductor]
+    public init(conductors: [Conductor]) { self.conductors = conductors }
+}
+
+public struct ConductorStatusResult: Codable, Sendable {
+    public let conductor: Conductor
+    public let isRunning: Bool
+    public init(conductor: Conductor, isRunning: Bool) {
+        self.conductor = conductor; self.isRunning = isRunning
+    }
+}
+
+// MARK: - Terminal Conversation
+
+public struct TerminalConversationParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let messages: Int?  // number of assistant messages to return, default 1
+    public init(terminalID: UUID, messages: Int? = nil) {
+        self.terminalID = terminalID; self.messages = messages
+    }
+}
+
+public struct TerminalConversationResult: Codable, Sendable {
+    public let messages: [ConversationMessage]
+    public let sessionID: String?
+    public init(messages: [ConversationMessage], sessionID: String? = nil) {
+        self.messages = messages; self.sessionID = sessionID
+    }
+}
+
+public struct ConversationMessage: Codable, Sendable {
+    public let role: String  // "assistant" or "user"
+    public let content: String
+    public init(role: String, content: String) {
+        self.role = role; self.content = content
     }
 }

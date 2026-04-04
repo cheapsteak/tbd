@@ -12,6 +12,7 @@ public final class RPCRouter: Sendable {
     public let subscriptions: StateSubscriptionManager
     public let prManager: PRStatusManager
     public let suspendResumeCoordinator: SuspendResumeCoordinator
+    public let conductorManager: ConductorManager
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -23,7 +24,8 @@ public final class RPCRouter: Sendable {
         git: GitManager = GitManager(),
         startTime: Date = Date(),
         subscriptions: StateSubscriptionManager = StateSubscriptionManager(),
-        prManager: PRStatusManager = PRStatusManager()
+        prManager: PRStatusManager = PRStatusManager(),
+        conductorManager: ConductorManager? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -33,6 +35,7 @@ public final class RPCRouter: Sendable {
         self.subscriptions = subscriptions
         self.prManager = prManager
         self.suspendResumeCoordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
+        self.conductorManager = conductorManager ?? ConductorManager(db: db, tmux: tmux)
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -114,6 +117,22 @@ public final class RPCRouter: Sendable {
                 return try await handleNoteDelete(request.paramsData)
             case RPCMethod.noteList:
                 return try await handleNoteList(request.paramsData)
+            case RPCMethod.terminalOutput:
+                return try await handleTerminalOutput(request.paramsData)
+            case RPCMethod.terminalConversation:
+                return try await handleTerminalConversation(request.paramsData)
+            case RPCMethod.conductorSetup:
+                return try await handleConductorSetup(request.paramsData)
+            case RPCMethod.conductorStart:
+                return try await handleConductorStart(request.paramsData)
+            case RPCMethod.conductorStop:
+                return try await handleConductorStop(request.paramsData)
+            case RPCMethod.conductorTeardown:
+                return try await handleConductorTeardown(request.paramsData)
+            case RPCMethod.conductorList:
+                return try await handleConductorList()
+            case RPCMethod.conductorStatus:
+                return try await handleConductorStatus(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
