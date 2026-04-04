@@ -104,14 +104,22 @@ private struct SingleWorktreeView: View {
                             get: { activeTabIndex },
                             set: { activeTabIndex = $0 }
                         ),
-                        onAddTab: {
+                        onAddShell: {
                             Task {
                                 await appState.createTerminal(worktreeID: worktreeID)
-                                // Select the newly added tab
-                                let newCount = appState.tabs[worktreeID]?.count ?? 0
-                                if newCount > 0 {
-                                    activeTabIndex = newCount - 1
-                                }
+                                selectLastTab()
+                            }
+                        },
+                        onAddClaude: {
+                            Task {
+                                await appState.createClaudeTerminal(worktreeID: worktreeID)
+                                selectLastTab()
+                            }
+                        },
+                        onAddNote: {
+                            Task {
+                                await appState.createNote(worktreeID: worktreeID)
+                                selectLastTab()
                             }
                         },
                         onCloseTab: { index in
@@ -133,6 +141,15 @@ private struct SingleWorktreeView: View {
                             Task {
                                 try? await appState.daemonClient.terminalResume(terminalID: terminalID)
                                 await appState.refreshTerminals(worktreeID: worktreeID)
+                            }
+                        },
+                        onForkTab: { tabID in
+                            guard let tID = terminalID(for: tabID) else { return }
+                            let terminal = appState.terminals[worktreeID]?.first { $0.id == tID }
+                            guard let sessionID = terminal?.claudeSessionID else { return }
+                            Task {
+                                await appState.forkClaudeTerminal(worktreeID: worktreeID, sessionID: sessionID)
+                                selectLastTab()
                             }
                         }
                     )
@@ -188,6 +205,13 @@ private struct SingleWorktreeView: View {
         }
     }
 
+    private func selectLastTab() {
+        let newCount = appState.tabs[worktreeID]?.count ?? 0
+        if newCount > 0 {
+            activeTabIndex = newCount - 1
+        }
+    }
+
     private var activeTab: Tab? {
         let tabs = worktreeTabs
         guard !tabs.isEmpty else { return nil }
@@ -213,6 +237,13 @@ private struct SingleWorktreeView: View {
         for terminalID in terminalIDsInTab {
             Task {
                 await appState.deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
+            }
+        }
+
+        // Delete note if this is a note tab
+        if case .note(let noteID) = tab.content {
+            Task {
+                await appState.deleteNote(noteID: noteID, worktreeID: worktreeID)
             }
         }
 

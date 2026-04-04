@@ -102,6 +102,8 @@ struct PanePlaceholder: View {
             Text(url.host ?? url.absoluteString)
         case .codeViewer(_, let path):
             Text(URL(fileURLWithPath: path).lastPathComponent)
+        case .note(let noteID):
+            EditableNoteTitle(noteID: noteID, worktreeID: worktree.id)
         }
     }
 
@@ -154,6 +156,9 @@ struct PanePlaceholder: View {
                 .buttonStyle(.borderless)
                 .help(showSourceCode ? "Show rendered view" : "Show source code")
             }
+
+        case .note:
+            EmptyView()
         }
     }
 
@@ -168,6 +173,8 @@ struct PanePlaceholder: View {
             WebviewPaneView(url: url)
         case .codeViewer(_, let path):
             CodeViewerPaneView(path: path, worktreePath: worktree.path, showSourceCode: showSourceCode)
+        case .note(let noteID):
+            NotePaneView(noteID: noteID, worktreeID: worktree.id)
         }
     }
 
@@ -230,6 +237,11 @@ struct PanePlaceholder: View {
     // MARK: - Close
 
     private func closePane() {
+        // Delete the underlying resource for note panes
+        if case .note(let noteID) = content {
+            Task { await appState.deleteNote(noteID: noteID, worktreeID: worktree.id) }
+        }
+
         if let newLayout = layout.removePane(id: content.paneID) {
             layout = newLayout
         } else {
@@ -266,6 +278,53 @@ struct PanePlaceholder: View {
             direction: direction,
             newContent: .terminal(terminalID: newTerminal.id)
         )
+    }
+}
+
+// MARK: - EditableNoteTitle
+
+/// An inline-editable title for note panes. Displays as text, becomes
+/// a text field on click. Commits on Enter or focus loss.
+struct EditableNoteTitle: View {
+    let noteID: UUID
+    let worktreeID: UUID
+    @EnvironmentObject var appState: AppState
+    @State private var isEditing = false
+    @State private var editText = ""
+    @FocusState private var isFocused: Bool
+
+    private var note: Note? {
+        appState.notes[worktreeID]?.first { $0.id == noteID }
+    }
+
+    var body: some View {
+        if isEditing {
+            TextField("Title", text: $editText, onCommit: {
+                commitEdit()
+            })
+            .textFieldStyle(.plain)
+            .font(.caption)
+            .focused($isFocused)
+            .onAppear { isFocused = true }
+            .onChange(of: isFocused) { _, focused in
+                if !focused { commitEdit() }
+            }
+        } else {
+            Text(note?.title ?? "Note")
+                .onTapGesture {
+                    editText = note?.title ?? ""
+                    isEditing = true
+                }
+        }
+    }
+
+    private func commitEdit() {
+        isEditing = false
+        let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != note?.title else { return }
+        Task {
+            await appState.updateNote(noteID: noteID, worktreeID: worktreeID, title: trimmed)
+        }
     }
 }
 

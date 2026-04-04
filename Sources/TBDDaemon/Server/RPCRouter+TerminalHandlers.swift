@@ -20,7 +20,31 @@ extension RPCRouter {
             cwd: worktree.path
         )
 
-        let shellCommand = params.cmd ?? (ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+        let isClaudeType = params.type == .claude || params.resumeSessionID != nil
+        let claudeSessionID: String?
+        let shellCommand: String
+        let label: String?
+
+        if let resumeID = params.resumeSessionID {
+            // Fork: resume from an existing session (creates a new session that shares context)
+            claudeSessionID = resumeID
+            shellCommand = "claude --resume \(resumeID) --dangerously-skip-permissions"
+            label = "claude"
+        } else if isClaudeType {
+            let sessionID = UUID().uuidString
+            claudeSessionID = sessionID
+            shellCommand = "claude --session-id \(sessionID) --dangerously-skip-permissions"
+            label = "claude"
+        } else if let cmd = params.cmd {
+            claudeSessionID = nil
+            shellCommand = cmd
+            label = cmd
+        } else {
+            claudeSessionID = nil
+            shellCommand = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            label = nil
+        }
+
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
@@ -32,7 +56,8 @@ extension RPCRouter {
             worktreeID: params.worktreeID,
             tmuxWindowID: window.windowID,
             tmuxPaneID: window.paneID,
-            label: params.cmd
+            label: label,
+            claudeSessionID: claudeSessionID
         )
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(

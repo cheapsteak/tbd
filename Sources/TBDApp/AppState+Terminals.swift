@@ -76,6 +76,39 @@ extension AppState {
         }
     }
 
+    /// Create a Claude terminal in a worktree and add a new tab for it.
+    func createClaudeTerminal(worktreeID: UUID) async {
+        do {
+            let terminal = try await daemonClient.createTerminal(
+                worktreeID: worktreeID,
+                cmd: nil,
+                type: .claude
+            )
+            terminals[worktreeID, default: []].append(terminal)
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
+            tabs[worktreeID, default: []].append(tab)
+        } catch {
+            logger.error("Failed to create Claude terminal: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
+    /// Fork a Claude terminal by resuming from an existing session ID.
+    func forkClaudeTerminal(worktreeID: UUID, sessionID: String) async {
+        do {
+            let terminal = try await daemonClient.createTerminal(
+                worktreeID: worktreeID,
+                resumeSessionID: sessionID
+            )
+            terminals[worktreeID, default: []].append(terminal)
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
+            tabs[worktreeID, default: []].append(tab)
+        } catch {
+            logger.error("Failed to fork Claude terminal: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
     /// Toggle pin state for a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) async {
         // Optimistic local update

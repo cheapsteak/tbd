@@ -104,6 +104,11 @@ public enum RPCMethod {
     public static let worktreeSuspend = "worktree.suspend"
     public static let worktreeResume = "worktree.resume"
     public static let terminalRecreateWindow = "terminal.recreateWindow"
+    public static let noteCreate = "note.create"
+    public static let noteGet = "note.get"
+    public static let noteUpdate = "note.update"
+    public static let noteDelete = "note.delete"
+    public static let noteList = "note.list"
 }
 
 public struct NotificationsListResult: Codable, Sendable {
@@ -181,11 +186,19 @@ public struct WorktreeRenameParams: Codable, Sendable {
     }
 }
 
+public enum TerminalCreateType: String, Codable, Sendable {
+    case shell
+    case claude
+}
+
 public struct TerminalCreateParams: Codable, Sendable {
     public let worktreeID: UUID
     public let cmd: String?
-    public init(worktreeID: UUID, cmd: String? = nil) {
-        self.worktreeID = worktreeID; self.cmd = cmd
+    public let type: TerminalCreateType?
+    /// Session ID to resume from (for forking a Claude session).
+    public let resumeSessionID: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil) {
+        self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID
     }
 }
 
@@ -263,6 +276,35 @@ public struct WorktreeResumeParams: Codable, Sendable {
 public struct TerminalRecreateWindowParams: Codable, Sendable {
     public let terminalID: UUID
     public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+public struct NoteCreateParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct NoteGetParams: Codable, Sendable {
+    public let noteID: UUID
+    public init(noteID: UUID) { self.noteID = noteID }
+}
+
+public struct NoteUpdateParams: Codable, Sendable {
+    public let noteID: UUID
+    public let title: String?
+    public let content: String?
+    public init(noteID: UUID, title: String? = nil, content: String? = nil) {
+        self.noteID = noteID; self.title = title; self.content = content
+    }
+}
+
+public struct NoteDeleteParams: Codable, Sendable {
+    public let noteID: UUID
+    public init(noteID: UUID) { self.noteID = noteID }
+}
+
+public struct NoteListParams: Codable, Sendable {
+    public let worktreeID: UUID?
+    public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
 }
 
 // MARK: - Result Structs

@@ -437,6 +437,85 @@ struct RPCRouterTests {
         #expect(result.status == nil)
     }
 
+    // MARK: - Claude Terminal Creation
+
+    @Test("terminal.create with type claude sets label and sessionID")
+    func terminalCreateClaude() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "test-wt",
+            branch: "tbd/test-wt",
+            path: "/tmp/test-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-test"
+        )
+
+        let createReq = try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        )
+        let createResp = await router.handle(createReq)
+        #expect(createResp.success)
+
+        let terminal = try createResp.decodeResult(Terminal.self)
+        #expect(terminal.label == "claude")
+        #expect(terminal.claudeSessionID != nil)
+    }
+
+    // MARK: - Note RPC Tests
+
+    @Test("note.create and note.list work together")
+    func noteCreateAndList() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        let wt = try await db.worktrees.create(
+            repoID: repo.id,
+            name: "test-wt",
+            branch: "tbd/test-wt",
+            path: "/tmp/test-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-test"
+        )
+
+        let createReq = try RPCRequest(
+            method: RPCMethod.noteCreate,
+            params: NoteCreateParams(worktreeID: wt.id)
+        )
+        let createResp = await router.handle(createReq)
+        #expect(createResp.success)
+
+        let note = try createResp.decodeResult(Note.self)
+        #expect(note.title == "Note 1")
+        #expect(note.worktreeID == wt.id)
+
+        let listReq = try RPCRequest(
+            method: RPCMethod.noteList,
+            params: NoteListParams(worktreeID: wt.id)
+        )
+        let listResp = await router.handle(listReq)
+        #expect(listResp.success)
+
+        let notes = try listResp.decodeResult([Note].self)
+        #expect(notes.count == 1)
+    }
+
+    @Test("note.update returns error for missing note")
+    func noteUpdateMissing() async throws {
+        let updateReq = try RPCRequest(
+            method: RPCMethod.noteUpdate,
+            params: NoteUpdateParams(noteID: UUID(), title: "x")
+        )
+        let resp = await router.handle(updateReq)
+        #expect(!resp.success)
+        #expect(resp.error?.contains("Note not found") == true)
+    }
+
     // MARK: - Unknown Method
 
     @Test("unknown method returns error")

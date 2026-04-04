@@ -116,6 +116,25 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+public struct Note: Codable, Sendable, Identifiable, Equatable {
+    public let id: UUID
+    public var worktreeID: UUID
+    public var title: String
+    public var content: String
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(id: UUID = UUID(), worktreeID: UUID, title: String,
+                content: String = "", createdAt: Date = Date(), updatedAt: Date = Date()) {
+        self.id = id
+        self.worktreeID = worktreeID
+        self.title = title
+        self.content = content
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
 public enum NotificationType: String, Codable, Sendable {
     case responseComplete = "response_complete"
     case error
