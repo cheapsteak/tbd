@@ -11,6 +11,7 @@ public final class TBDDatabase: Sendable {
     public let terminals: TerminalStore
     public let notifications: NotificationStore
     public let notes: NoteStore
+    public let conductors: ConductorStore
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
     public init(path: String) throws {
@@ -27,6 +28,7 @@ public final class TBDDatabase: Sendable {
         self.terminals = TerminalStore(writer: pool)
         self.notifications = NotificationStore(writer: pool)
         self.notes = NoteStore(writer: pool)
+        self.conductors = ConductorStore(writer: pool)
         try Self.migrate(writer: pool)
     }
 
@@ -40,6 +42,7 @@ public final class TBDDatabase: Sendable {
         self.terminals = TerminalStore(writer: queue)
         self.notifications = NotificationStore(writer: queue)
         self.notes = NoteStore(writer: queue)
+        self.conductors = ConductorStore(writer: queue)
         try Self.migrate(writer: queue)
     }
 
@@ -146,6 +149,36 @@ public final class TBDDatabase: Sendable {
                 t.column("createdAt", .datetime).notNull()
                 t.column("updatedAt", .datetime).notNull()
             }
+        }
+
+        migrator.registerMigration("v10") { db in
+            // Conductor table
+            try db.create(table: "conductor") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("name", .text).notNull().unique()
+                t.column("repos", .text).notNull().defaults(to: "[\"*\"]")
+                t.column("worktrees", .text)
+                t.column("terminalLabels", .text)
+                t.column("heartbeatIntervalMinutes", .integer).notNull().defaults(to: 10)
+                t.column("terminalID", .text)
+                    .references("terminal", onDelete: .setNull)
+                t.column("worktreeID", .text)
+                    .references("worktree", onDelete: .setNull)
+                t.column("createdAt", .datetime).notNull()
+            }
+
+            // Synthetic "conductors" pseudo-repo
+            try db.execute(
+                sql: """
+                INSERT OR IGNORE INTO repo (id, path, displayName, defaultBranch, createdAt)
+                VALUES (?, ?, 'Conductors', 'main', ?)
+                """,
+                arguments: [
+                    TBDConstants.conductorsRepoID.uuidString,
+                    TBDConstants.conductorsDir.path,
+                    Date()
+                ]
+            )
         }
 
         try migrator.migrate(writer)

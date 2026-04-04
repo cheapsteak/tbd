@@ -153,6 +153,116 @@ extension RPCRouter {
         return try RPCResponse(result: updated)
     }
 
+    func handleTerminalOutput(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalOutputParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+
+        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+
+        let rawOutput = try await tmux.capturePaneOutput(
+            server: worktree.tmuxServer,
+            paneID: terminal.tmuxPaneID
+        )
+
+        let lines = params.lines ?? 50
+        let outputLines = rawOutput.split(separator: "\n", omittingEmptySubsequences: false)
+        let trimmed = outputLines.suffix(lines).joined(separator: "\n")
+
+        return try RPCResponse(result: TerminalOutputResult(output: trimmed))
+    }
+
+    func handleTerminalConversation(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalConversationParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+
+        guard let sessionID = terminal.claudeSessionID else {
+            return RPCResponse(error: "No Claude session ID for terminal \(params.terminalID)")
+        }
+
+        let count = params.messages ?? 1
+        let messages = Self.readSessionMessages(sessionID: sessionID, count: count)
+        return try RPCResponse(result: TerminalConversationResult(messages: messages, sessionID: sessionID))
+    }
+
+    // MARK: - Session JSONL Parsing (Codable)
+
+    private struct SessionEntry: Decodable {
+        let type: String
+        let message: SessionMessage?
+    }
+
+    private struct SessionMessage: Decodable {
+        let role: String?
+        let content: [ContentBlock]?
+    }
+
+    private struct ContentBlock: Decodable {
+        let type: String
+        let text: String?
+    }
+
+    /// Search `~/.claude/projects/` for a session JSONL file matching the given session ID,
+    /// parse it, and return the last N assistant messages with text content.
+    static func readSessionMessages(sessionID: String, count: Int) -> [ConversationMessage] {
+        let claudeDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects")
+
+        let fm = FileManager.default
+        guard let projectDirs = try? fm.contentsOfDirectory(atPath: claudeDir.path) else {
+            return []
+        }
+
+        var sessionPath: URL?
+        for dir in projectDirs {
+            let candidate = claudeDir
+                .appendingPathComponent(dir)
+                .appendingPathComponent("\(sessionID).jsonl")
+            if fm.fileExists(atPath: candidate.path) {
+                sessionPath = candidate
+                break
+            }
+        }
+
+        guard let path = sessionPath,
+              let data = fm.contents(atPath: path.path),
+              let content = String(data: data, encoding: .utf8) else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        var allMessages: [ConversationMessage] = []
+
+        for line in content.components(separatedBy: "\n") where !line.isEmpty {
+            guard let lineData = line.data(using: .utf8),
+                  let entry = try? decoder.decode(SessionEntry.self, from: lineData) else {
+                continue
+            }
+
+            guard entry.type == "assistant" || entry.type == "user",
+                  let blocks = entry.message?.content else {
+                continue
+            }
+
+            let textParts = blocks.compactMap { $0.type == "text" ? $0.text : nil }
+            if !textParts.isEmpty {
+                allMessages.append(ConversationMessage(
+                    role: entry.type,
+                    content: textParts.joined(separator: "\n")
+                ))
+            }
+        }
+
+        return Array(allMessages.suffix(count))
+    }
+
     func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSendParams.self, from: paramsData)
 

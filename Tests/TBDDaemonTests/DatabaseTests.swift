@@ -11,12 +11,14 @@ struct DatabaseTests {
 
     @Test func createAndListRepos() async throws {
         let db = try TBDDatabase(inMemory: true)
+        // v9 migration inserts the synthetic "Conductors" pseudo-repo
+        let baseCount = try await db.repos.list().count
         let repo = try await db.repos.create(path: "/tmp/test-repo", displayName: "test", defaultBranch: "main")
         #expect(repo.displayName == "test")
 
         let repos = try await db.repos.list()
-        #expect(repos.count == 1)
-        #expect(repos[0].id == repo.id)
+        #expect(repos.count == baseCount + 1)
+        #expect(repos.contains(where: { $0.id == repo.id }))
     }
 
     @Test func removeRepo() async throws {
@@ -24,7 +26,8 @@ struct DatabaseTests {
         let repo = try await db.repos.create(path: "/tmp/test", displayName: "test", defaultBranch: "main")
         try await db.repos.remove(id: repo.id)
         let repos = try await db.repos.list()
-        #expect(repos.isEmpty)
+        // Synthetic conductor repo is filtered from list, so only real repos remain
+        #expect(!repos.contains(where: { $0.id == repo.id }))
     }
 
     @Test func findRepoByPath() async throws {
@@ -339,6 +342,50 @@ struct DatabaseTests {
 
         let highest = try await db.notifications.highestSeverity(worktreeID: wt.id)
         #expect(highest == .error)
+    }
+
+    // MARK: - Conductor Filtering Tests
+
+    @Test func worktreeListExcludesConductorByDefault() async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        let repo = try await db.repos.create(path: "/tmp/test-repo-cond", displayName: "Test", defaultBranch: "main")
+
+        // Create a normal worktree
+        _ = try await db.worktrees.create(
+            repoID: repo.id, name: "normal", branch: "main",
+            path: "/tmp/normal", tmuxServer: "test"
+        )
+
+        // Create a conductor worktree
+        _ = try await db.worktrees.create(
+            repoID: TBDConstants.conductorsRepoID,
+            name: "conductor-test", branch: "conductor",
+            path: "/tmp/conductor", tmuxServer: "tbd-conductor",
+            status: .conductor
+        )
+
+        // Default list should exclude conductor
+        let defaultList = try await db.worktrees.list()
+        #expect(defaultList.count == 1)
+        #expect(defaultList[0].name == "normal")
+
+        // Explicit conductor list
+        let conductorList = try await db.worktrees.list(status: .conductor)
+        #expect(conductorList.count == 1)
+        #expect(conductorList[0].name == "conductor-test")
+    }
+
+    @Test func repoListExcludesSyntheticConductorsRepo() async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        // Create a real repo
+        let repo = try await db.repos.create(path: "/tmp/real-repo", displayName: "Real", defaultBranch: "main")
+
+        // Default list should only show real repos, not the synthetic conductors repo
+        let all = try await db.repos.list()
+        #expect(all.count == 1)
+        #expect(all[0].displayName == "Real")
     }
 
     @Test func highestSeverityReturnsNilWhenNoUnread() async throws {

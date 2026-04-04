@@ -6,7 +6,8 @@ Key source files and what they do.
 - `Package.swift` — SPM manifest. Targets: TBDShared, TBDDaemonLib, TBDDaemon, TBDCLI, TBDApp
 
 ## Sources/TBDShared/
-- `Constants.swift` — paths (~/.tbd/), version string, socket path
+- `Constants.swift` — paths (~/.tbd/), version string, socket path, conductor constants
+- `ConductorModels.swift` — Conductor struct, ConductorPermission enum
 - `Models.swift` — Repo, Worktree (with hasConflicts bool), Terminal, TBDNotification, NotificationType, WorktreeStatus (.active/.archived/.main/.creating), PRStatus, PRMergeableState
 - `RPCProtocol.swift` — RPCRequest/Response, all param/result structs, RPCMethod constants
 - `NameGenerator.swift` — YYYYMMDD-adjective-animal name generation
@@ -16,8 +17,12 @@ Key source files and what they do.
 
 ## Sources/TBDDaemon/ (TBDDaemonLib target)
 
+### Conductor/
+- `ConductorStore.swift` — GRDB store for conductor table (CRUD, updateTerminalID, updateWorktreeID)
+- `ConductorManager.swift` — Conductor lifecycle: setup (directory + synthetic worktree + DB + CLAUDE.md), start (tmux window), stop, teardown. Name validation, interact conflict check, template generation.
+
 ### Database/
-- `Database.swift` — TBDDatabase class, GRDB setup, WAL mode, migrations (v1: schema, v2: gitStatus column, v3: hasConflicts bool replacing gitStatus)
+- `Database.swift` — TBDDatabase class, GRDB setup, WAL mode, migrations (v1: schema, v2: gitStatus column, v3: hasConflicts bool replacing gitStatus, ..., v9: conductor table + synthetic repo)
 - `RepoStore.swift` — Repo CRUD
 - `WorktreeStore.swift` — Worktree CRUD (archive, revive, rename, findByPath, updateHasConflicts, updateTmuxServer)
 - `TerminalStore.swift` — Terminal CRUD (list supports optional worktreeID filter for batch fetching)
@@ -48,7 +53,8 @@ Key source files and what they do.
 - `RPCRouter.swift` — maps RPC method names to handler functions (dispatch switch)
 - `RPCRouter+RepoHandlers.swift` — repo.add, repo.remove, repo.list handlers
 - `RPCRouter+WorktreeHandlers.swift` — worktree.create, worktree.list, worktree.archive, worktree.revive, worktree.rename handlers
-- `RPCRouter+TerminalHandlers.swift` — terminal.create, terminal.list, terminal.send, terminal.delete, notify, notifications.list, notifications.markRead, cleanup, daemon.status, resolve.path, pr.refresh handlers
+- `RPCRouter+TerminalHandlers.swift` — terminal.create, terminal.list, terminal.send, terminal.delete, terminal.output, notify, notifications.list, notifications.markRead, cleanup, daemon.status, resolve.path, pr.refresh handlers
+- `RPCRouter+ConductorHandlers.swift` — conductor.setup, conductor.start, conductor.stop, conductor.teardown, conductor.list, conductor.status handlers
 - `SocketServer.swift` — Unix domain socket server (NIO)
 - `HTTPServer.swift` — HTTP server on localhost (NIO + NIOHTTP1)
 - `StateSubscription.swift` — StateDelta events (worktreeConflictsChanged, etc.) + StateSubscriptionManager for streaming deltas to clients
@@ -65,7 +71,8 @@ Key source files and what they do.
 - `Utilities.swift` — printJSON, resolvePath helpers
 - `Commands/RepoCommands.swift` — tbd repo add/remove/list
 - `Commands/WorktreeCommands.swift` — tbd worktree create/list/archive/revive/rename
-- `Commands/TerminalCommands.swift` — tbd terminal create/list/send
+- `Commands/TerminalCommands.swift` — tbd terminal create/list/send/output
+- `Commands/ConductorCommands.swift` — tbd conductor setup/start/stop/teardown/list/status
 - `Commands/NotifyCommand.swift` — tbd notify (auto-resolves worktree from PWD)
 - `Commands/DaemonCommands.swift` — tbd daemon status
 - `Commands/SetupHooksCommand.swift` — tbd setup-hooks --global/--repo
@@ -118,6 +125,8 @@ Key source files and what they do.
 - `Tests/TBDDaemonTests/SSHAgentResolverTests.swift` — SSH agent resolution tests
 - `Tests/TBDDaemonTests/TmuxManagerTests.swift` — tmux manager tests
 - `Tests/TBDDaemonTests/WorktreeLifecycleTests.swift` — lifecycle orchestration tests
+- `Tests/TBDDaemonTests/ConductorStoreTests.swift` — conductor DB store tests
+- `Tests/TBDDaemonTests/ConductorManagerTests.swift` — conductor lifecycle tests
 - `Tests/TBDAppTests/LayoutNodeTests.swift` — layout node tree tests
 - `Tests/TBDAppTests/PaneContentTests.swift` — pane content encoding/decoding tests
 - `Tests/TBDAppTests/PlaceholderTests.swift` — placeholder
