@@ -174,37 +174,40 @@ private struct TabBarItem: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Sidebar toggle for code viewer tabs
-            if isCodeViewer {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        showSidebar.toggle()
+            // Clickable tab content area
+            Button(action: onSelect) {
+                HStack(spacing: 0) {
+                    // Sidebar toggle for code viewer tabs
+                    if isCodeViewer {
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 10))
+                            .foregroundStyle(showSidebar ? .primary : .tertiary)
+                            .frame(width: 16, height: 16)
+                            .padding(.trailing, 2)
+                            .onTapGesture {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    showSidebar.toggle()
+                                }
+                            }
                     }
-                } label: {
-                    Image(systemName: "sidebar.left")
+
+                    // Type icon
+                    Image(systemName: tabIcon)
                         .font(.system(size: 10))
-                        .foregroundStyle(showSidebar ? .primary : .tertiary)
-                        .frame(width: 16, height: 16)
+                        .foregroundStyle(isSelected ? .primary : .tertiary)
+                        .frame(width: 14)
+                        .padding(.trailing, 3)
+
+                    Text(tabLabel)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
                 }
-                .buttonStyle(.plain)
-                .help("Toggle file tree")
-                .padding(.trailing, 2)
             }
+            .buttonStyle(.plain)
 
-            // Type icon
-            Image(systemName: tabIcon)
-                .font(.system(size: 10))
-                .foregroundStyle(isSelected ? .primary : .tertiary)
-                .frame(width: 14)
-                .padding(.trailing, 3)
-
-            Text(tabLabel)
-                .font(.system(size: 11))
-                .lineLimit(1)
-                .fixedSize()
-                .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
-
-            // Close button — right side, flush to edge
+            // Close button — right side
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 8, weight: .bold))
@@ -232,29 +235,31 @@ private struct TabBarItem: View {
                 : (isHovering ? Color.primary.opacity(0.04) : Color.clear)
         )
         .animation(.easeInOut(duration: 0.1), value: isHovering)
+        .contextMenu { contextMenuContent }
         .onHover { hovering in
             isHovering = hovering
         }
-        .onTapGesture {
-            onSelect()
+    }
+
+    @ViewBuilder
+    private var contextMenuContent: some View {
+        if isClaudeTerminal {
+            Button(action: onFork) {
+                Label("Fork Session", systemImage: "arrow.triangle.branch")
+            }
+
+            Button(action: isSuspended ? onResume : onSuspend) {
+                Label(
+                    isSuspended ? "Resume Claude" : "Suspend Claude",
+                    systemImage: isSuspended ? "play.circle" : "pause.circle"
+                )
+            }
+
+            Divider()
         }
-        .contentShape(Rectangle())
-        .contextMenu {
-            if isClaudeTerminal {
-                Button(action: onFork) {
-                    Label("Fork Session", systemImage: "arrow.triangle.branch")
-                }
-                Button(action: isSuspended ? onResume : onSuspend) {
-                    Label(
-                        isSuspended ? "Resume Claude" : "Suspend Claude",
-                        systemImage: isSuspended ? "play.circle" : "pause.circle"
-                    )
-                }
-                Divider()
-            }
-            Button(action: onClose) {
-                Label("Close Tab", systemImage: "xmark")
-            }
+
+        Button(action: onClose) {
+            Label("Close Tab", systemImage: "xmark")
         }
     }
 
@@ -285,3 +290,4 @@ private struct TabBarItem: View {
         }
     }
 }
+

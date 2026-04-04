@@ -142,8 +142,8 @@ private struct SingleWorktreeView: View {
                             }
                         },
                         onForkTab: { tabID in
-                            guard let terminalID = terminalID(for: tabID) else { return }
-                            let terminal = appState.terminals[worktreeID]?.first { $0.id == terminalID }
+                            guard let tID = terminalID(for: tabID) else { return }
+                            let terminal = appState.terminals[worktreeID]?.first { $0.id == tID }
                             guard let sessionID = terminal?.claudeSessionID else { return }
                             Task {
                                 await appState.forkClaudeTerminal(worktreeID: worktreeID, sessionID: sessionID)
