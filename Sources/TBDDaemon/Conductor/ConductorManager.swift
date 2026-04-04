@@ -1,13 +1,36 @@
 import Foundation
+import os
 import TBDShared
 
 public final class ConductorManager: Sendable {
     let db: TBDDatabase
     let tmux: TmuxManager
+    private let _suggestions = OSAllocatedUnfairLock(initialState: [String: ConductorSuggestion]())
 
     public init(db: TBDDatabase, tmux: TmuxManager) {
         self.db = db
         self.tmux = tmux
+    }
+
+    // MARK: - Suggestions
+
+    public func suggest(name: String, worktreeID: UUID, worktreeName: String, label: String?) async throws {
+        guard let _ = try await db.conductors.get(name: name) else {
+            throw ConductorError.notFound(name: name)
+        }
+        let suggestion = ConductorSuggestion(worktreeID: worktreeID, worktreeName: worktreeName, label: label)
+        _suggestions.withLock { $0[name] = suggestion }
+    }
+
+    public func clearSuggestion(name: String) async throws {
+        guard let _ = try await db.conductors.get(name: name) else {
+            throw ConductorError.notFound(name: name)
+        }
+        _suggestions.withLock { $0.removeValue(forKey: name) }
+    }
+
+    public func suggestion(for name: String) -> ConductorSuggestion? {
+        _suggestions.withLock { $0[name] }
     }
 
     // MARK: - Setup
@@ -241,8 +264,23 @@ public final class ConductorManager: Sendable {
         | `tbd conductor list --json` | List all conductors |
         | `tbd conductor status \(name) --json` | Your own scope and config |
         | `tbd notify --type attention_needed "message"` | Escalate to user via macOS notification |
+        | `tbd conductor suggest \(name) --worktree <id> [--label "text"]` | Show navigation pill in UI |
+        | `tbd conductor clear-suggestion \(name)` | Clear navigation pill |
 
         Terminal IDs are UUIDs. Use the full ID from `tbd terminal list` output.
+
+        ## Navigation Suggestions
+
+        When discussing a specific worktree, help the user navigate to it:
+
+        | Command | Description |
+        |---------|-------------|
+        | `tbd conductor suggest \(name) --worktree <id>` | Show a "Go to" pill in the UI |
+        | `tbd conductor suggest \(name) --worktree <id> --label "waiting for input"` | With context label |
+        | `tbd conductor clear-suggestion \(name)` | Remove the pill |
+
+        Set a suggestion when surfacing info about a worktree. Clear it when moving on
+        to a different topic or when the user has acknowledged it.
 
         ## Terminal States
 
