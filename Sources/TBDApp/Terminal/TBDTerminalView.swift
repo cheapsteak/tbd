@@ -1,6 +1,13 @@
 import AppKit
 import SwiftTerm
 
+private extension CharacterSet {
+    /// Characters that require shell quoting when they appear in a file path.
+    static let shellUnsafe = CharacterSet.alphanumerics
+        .union(CharacterSet(charactersIn: "/_.-+@:,"))
+        .inverted
+}
+
 /// Subclass of SwiftTerm's TerminalView that adds natural text editing support.
 /// When enabled, macOS-native shortcuts (Cmd+Arrow, Cmd/Opt+Delete) are translated
 /// to the escape sequences that shells expect.
@@ -113,9 +120,40 @@ class TBDTerminalView: TerminalView {
         super.viewDidMoveToWindow()
         if window != nil {
             installMouseMonitor()
+            registerForDraggedTypes([.fileURL])
         } else {
             removeMouseMonitor()
         }
+    }
+
+    // MARK: - Drag and drop
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else {
+            return []
+        }
+        return .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+              !urls.isEmpty else {
+            return false
+        }
+        let quoted = urls.map { shellQuote($0.path) }
+        let text = quoted.joined(separator: " ")
+        let bytes = Array(text.utf8)
+        send(bytes)
+        return true
+    }
+
+    /// Shell-quotes a path using single quotes, escaping embedded single quotes.
+    private func shellQuote(_ path: String) -> String {
+        if path.rangeOfCharacter(from: .shellUnsafe) == nil {
+            return path
+        }
+        let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+        return "'\(escaped)'"
     }
 
     deinit {
