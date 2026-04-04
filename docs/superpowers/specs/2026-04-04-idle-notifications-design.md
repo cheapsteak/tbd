@@ -13,14 +13,13 @@ Claude Code Stop hook
   → reads JSON from stdin (last_assistant_message, stop_reason)
   → calls: tbd notify --type response_complete --message "<truncated>"
   → NotifyCommand resolves worktree via TBD_WORKTREE_ID env var or CWD (PathResolver — already implemented)
-  → daemon stores notification in DB
-  → app polls refreshNotifications() every ~2s, detects new unread entries
-  → compares against previous snapshot to identify newly arrived notifications
+  → daemon stores notification in DB, broadcasts StateDelta.notificationReceived
+  → app receives delta instantly via persistent subscription socket
   → checks worktree visibility (same logic as unread badge: blue dot / bold)
   → if not visible: plays sound (NSSound) and/or posts macOS notification (UNUserNotificationCenter)
 ```
 
-**Note:** The app does not have a real-time subscription to daemon state deltas. `StateSubscriptionManager` exists in the daemon but is consumed only by daemon-internal code. The app discovers new notifications via its existing 2-second polling loop in `refreshNotifications()`. This means up to ~2s latency between Claude stopping and the sound/notification firing, which is acceptable.
+The app subscribes to daemon state deltas via a persistent socket connection for real-time notification delivery (see Component 7).
 
 ## Components
 
@@ -67,7 +66,7 @@ Additionally, set `TBD_WORKTREE_ID` in the tmux environment when TBD creates a t
 
 ### 3. App-Side: Sound Playback
 
-Triggered from `refreshNotifications()` when new unread entries appear for non-visible worktrees (compared against previous polling snapshot):
+Triggered when the app receives a `notificationReceived` delta via its subscription (Component 7):
 1. Check if the worktree is visible (same logic as unread badge — selected tab or visible pinned terminal)
 2. If not visible and `enableNotificationSounds` is on, play the configured sound
 
@@ -89,7 +88,7 @@ Two keys distinguish system sounds from custom paths: `notificationSoundName` fo
 
 ### 4. App-Side: macOS Notification Banners
 
-Triggered alongside sound from `refreshNotifications()` for non-visible worktrees with new unread entries. When `enableNotifications` is on:
+Triggered alongside sound when the app receives a `notificationReceived` delta for a non-visible worktree. When `enableNotifications` is on:
 
 ```swift
 let content = UNMutableNotificationContent()
@@ -111,7 +110,7 @@ If the user denies notification permission at the OS level, the toggle remains i
 
 **Files changed:**
 - New: `Sources/TBDApp/Services/MacNotificationManager.swift`
-- `Sources/TBDApp/AppState.swift` — hook into `refreshNotifications()` to detect new entries and fire sound/notification
+- `Sources/TBDApp/AppState.swift` — handle incoming deltas to fire sound/notification
 
 ### 5. Settings UI
 
@@ -156,6 +155,50 @@ The trigger condition for sound/notification is the same as the unread badge (bl
 **Files changed:**
 - Refactor visibility check into a shared helper if not already extracted
 
+### 7. Real-Time State Subscription
+
+The app subscribes to daemon state deltas via a persistent socket connection for instant notification delivery. The daemon's `StateSubscriptionManager` already broadcasts `StateDelta` events — this component connects the app to that stream.
+
+#### Daemon Side: `state.subscribe` RPC
+
+Add a new RPC method that holds the socket open and streams deltas:
+
+1. Client sends `{"method": "state.subscribe", "params": "{}"}` 
+2. Daemon registers the socket as a subscriber via `StateSubscriptionManager.addSubscriber()`
+3. The callback writes newline-delimited JSON to the socket for each delta
+4. The socket stays open indefinitely — no response is sent until a delta occurs
+
+When a write fails (broken pipe / client disconnected), the subscriber is automatically removed. This is the key invariant that prevents leaks.
+
+**Cleanup on write failure:** Update `StateSubscriptionManager.broadcast()` to catch write errors and call `removeSubscriber()` for the failed ID. Currently it fire-and-forgets to callbacks — the callback itself needs to signal failure so the manager can clean up.
+
+Approach: change the callback signature to return a Bool (success/failure), or have the RPC handler wrapper catch the write error and call `removeSubscriber()` directly using the stored subscriber ID.
+
+**Files changed:**
+- `Sources/TBDDaemon/Server/RPCRouter.swift` — add `state.subscribe` handler
+- `Sources/TBDShared/RPCProtocol.swift` — add `RPCMethod.stateSubscribe` constant
+- `Sources/TBDDaemon/Server/StateSubscription.swift` — update broadcast to handle dead subscribers
+
+#### App Side: Persistent Subscription in DaemonClient
+
+`DaemonClient` opens a second, long-lived socket connection dedicated to the subscription stream:
+
+1. On connect (in `connectAndLoadInitialState()`), open a persistent socket and send the `state.subscribe` RPC
+2. Spawn an async task that reads newline-delimited JSON from the socket in a loop
+3. Decode each line as `StateDelta` and dispatch to a handler on `@MainActor`
+4. On read failure (daemon restarted, socket closed), tear down and let the existing reconnect logic in `startPolling()` re-establish the subscription
+
+The subscription is a **supplement** to polling, not a replacement. Polling continues for full state refresh (worktree list, terminal list, etc.). The subscription adds instant delivery for notifications specifically (and any future delta-driven features).
+
+**Handling reconnection:**
+- When the persistent socket disconnects, set a flag so the polling loop knows to re-subscribe on next successful connection
+- The subscription task uses `[weak self]` to avoid retain cycles — if `DaemonClient` is deallocated, the task ends naturally
+- Only one subscription socket is active at a time; reconnect tears down the old one first
+
+**Files changed:**
+- `Sources/TBDApp/DaemonClient.swift` — add persistent subscription socket, delta reading loop, reconnect logic
+- `Sources/TBDApp/AppState.swift` — add delta handler that checks visibility and fires sound/notification
+
 ## Non-Goals
 
 - Per-worktree mute/notification settings (can add later)
@@ -169,3 +212,5 @@ The trigger condition for sound/notification is the same as the unread badge (bl
 - Sound picker: verify it enumerates system sounds correctly
 - Settings persistence: verify toggles and sound name round-trip through `@AppStorage`
 - Visibility logic: verify notifications only fire for non-visible worktrees
+- State subscription: verify subscriber is auto-removed on broken pipe (daemon-side unit test)
+- State subscription: verify reconnect after daemon restart re-establishes subscription
