@@ -531,4 +531,46 @@ actor DaemonClient {
             resultType: [Note].self
         )
     }
+
+    // MARK: - Conductors
+
+    /// List all conductors.
+    func listConductors() throws -> [Conductor] {
+        let result = try callNoParams(method: RPCMethod.conductorList, resultType: ConductorListResult.self)
+        return result.conductors
+    }
+
+    /// Set up a new conductor with defaults.
+    func conductorSetup(name: String, repos: [String] = ["*"]) throws -> Conductor {
+        return try call(
+            method: RPCMethod.conductorSetup,
+            params: ConductorSetupParams(name: name, repos: repos),
+            resultType: Conductor.self
+        )
+    }
+
+    /// Start a conductor.
+    func conductorStart(name: String) throws -> Terminal {
+        return try call(
+            method: RPCMethod.conductorStart,
+            params: ConductorNameParams(name: name),
+            resultType: Terminal.self
+        )
+    }
+
+    /// Stop a conductor.
+    func conductorStop(name: String) throws {
+        try callVoid(
+            method: RPCMethod.conductorStop,
+            params: ConductorNameParams(name: name)
+        )
+    }
+
+    /// Teardown (remove) a conductor.
+    func conductorTeardown(name: String) throws {
+        try callVoid(
+            method: RPCMethod.conductorTeardown,
+            params: ConductorNameParams(name: name)
+        )
+    }
 }
