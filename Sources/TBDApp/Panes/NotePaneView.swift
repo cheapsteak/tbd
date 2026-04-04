@@ -39,6 +39,12 @@ struct NotePaneView: View {
             .onDisappear {
                 saveTask?.cancel()
                 saveTask = nil
+                // Flush an immediate save so content isn't lost on tab switch.
+                // If the note was deleted, updateNote gets "Note not found"
+                // which handleConnectionError already absorbs silently.
+                if loaded {
+                    Task { await appState.updateNote(noteID: noteID, worktreeID: worktreeID, content: text) }
+                }
             }
     }
 
