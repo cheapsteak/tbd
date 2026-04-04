@@ -26,7 +26,7 @@ public final class ConductorManager: Sendable {
         guard let _ = try await db.conductors.get(name: name) else {
             throw ConductorError.notFound(name: name)
         }
-        _suggestions.withLock { $0.removeValue(forKey: name) }
+        _ = _suggestions.withLock { $0.removeValue(forKey: name) }
     }
 
     public func suggestion(for name: String) -> ConductorSuggestion? {
