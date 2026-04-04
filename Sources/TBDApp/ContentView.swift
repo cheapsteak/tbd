@@ -7,6 +7,7 @@ struct ContentView: View {
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
     @AppStorage("autoSuspendClaude") private var autoSuspendClaude: Bool = true
+    @State private var conductorHotkeyMonitor = ConductorHotkeyMonitor()
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
@@ -40,6 +41,15 @@ struct ContentView: View {
                                 .id(worktree.id)
                         }
                     }
+                    .overlay(alignment: .top) {
+                        if appState.showConductor,
+                           let terminal = appState.currentConductorTerminal {
+                            ConductorOverlayView(
+                                terminal: terminal,
+                                tmuxServer: TBDConstants.conductorsTmuxServer
+                            )
+                        }
+                    }
                 }
             }
             .navigationSplitViewStyle(.prominentDetail)
@@ -56,6 +66,41 @@ struct ContentView: View {
                     .help(autoSuspendClaude
                         ? "Auto-suspend is on — idle Claude instances are suspended when switching worktrees"
                         : "Auto-suspend is off — Claude instances stay running when switching worktrees")
+
+                    // Conductor toggle
+                    Button {
+                        if appState.conductorActive {
+                            appState.showConductor.toggle()
+                        } else {
+                            Task { await appState.ensureConductorRunning() }
+                        }
+                    } label: {
+                        Image(systemName: appState.conductorActive
+                            ? (appState.showConductor ? "wand.and.stars" : "wand.and.stars.inverse")
+                            : "wand.and.stars.inverse")
+                            .foregroundStyle(appState.showConductor ? .primary : .secondary)
+                    }
+                    .help(appState.conductorActive
+                        ? (appState.showConductor ? "Hide conductor (\u{2325}.)" : "Show conductor (\u{2325}.)")
+                        : "Start conductor (\u{2325}.)")
+                    .contextMenu {
+                        if appState.conductorActive, let conductor = appState.currentConductor {
+                            Button("Stop Conductor") {
+                                Task {
+                                    try? await appState.daemonClient.conductorStop(name: conductor.name)
+                                    appState.showConductor = false
+                                    await appState.refreshConductors()
+                                }
+                            }
+                            Button("Remove Conductor", role: .destructive) {
+                                Task {
+                                    try? await appState.daemonClient.conductorTeardown(name: conductor.name)
+                                    appState.showConductor = false
+                                    await appState.refreshConductors()
+                                }
+                            }
+                        }
+                    }
 
                     Picker("Filter", selection: $appState.repoFilter) {
                         Text("All Repos").tag(UUID?.none)
@@ -130,6 +175,16 @@ struct ContentView: View {
             Button("OK") { appState.alertMessage = nil }
         } message: {
             Text(appState.alertMessage ?? "")
+        }
+        .onAppear {
+            conductorHotkeyMonitor.install { [weak appState] in
+                guard let appState else { return }
+                if appState.conductorActive {
+                    appState.showConductor.toggle()
+                } else {
+                    Task { await appState.ensureConductorRunning() }
+                }
+            }
         }
     }
 
