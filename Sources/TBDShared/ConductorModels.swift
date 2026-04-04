@@ -1,5 +1,17 @@
 import Foundation
 
+public struct ConductorSuggestion: Codable, Sendable, Equatable {
+    public let worktreeID: UUID
+    public let worktreeName: String
+    public let label: String?
+
+    public init(worktreeID: UUID, worktreeName: String, label: String? = nil) {
+        self.worktreeID = worktreeID
+        self.worktreeName = worktreeName
+        self.label = label
+    }
+}
+
 public struct Conductor: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var name: String
@@ -10,6 +22,7 @@ public struct Conductor: Codable, Sendable, Identifiable, Equatable {
     public var terminalID: UUID?           // FK to terminal (conductor's own terminal)
     public var worktreeID: UUID?           // FK to synthetic worktree
     public var createdAt: Date
+    public var suggestion: ConductorSuggestion?
 
     public init(
         id: UUID = UUID(),
@@ -20,7 +33,8 @@ public struct Conductor: Codable, Sendable, Identifiable, Equatable {
         heartbeatIntervalMinutes: Int = 10,
         terminalID: UUID? = nil,
         worktreeID: UUID? = nil,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        suggestion: ConductorSuggestion? = nil
     ) {
         self.id = id
         self.name = name
@@ -31,5 +45,6 @@ public struct Conductor: Codable, Sendable, Identifiable, Equatable {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.createdAt = createdAt
+        self.suggestion = suggestion
     }
 }

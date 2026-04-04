@@ -33,7 +33,10 @@ extension RPCRouter {
     }
 
     func handleConductorList() async throws -> RPCResponse {
-        let conductors = try await db.conductors.list()
+        var conductors = try await db.conductors.list()
+        for i in conductors.indices {
+            conductors[i].suggestion = conductorManager.suggestion(for: conductors[i].name)
+        }
         return try RPCResponse(result: ConductorListResult(conductors: conductors))
     }
 
@@ -50,6 +53,32 @@ extension RPCRouter {
                 windowID: terminal.tmuxWindowID
             )
         }
-        return try RPCResponse(result: ConductorStatusResult(conductor: conductor, isRunning: isRunning))
+        var enriched = conductor
+        enriched.suggestion = conductorManager.suggestion(for: conductor.name)
+        return try RPCResponse(result: ConductorStatusResult(conductor: enriched, isRunning: isRunning))
+    }
+
+    func handleConductorSuggest(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConductorSuggestParams.self, from: paramsData)
+        // Look up worktree name for the suggestion
+        let worktreeName: String
+        if let wt = try await db.worktrees.get(id: params.worktreeID) {
+            worktreeName = wt.displayName
+        } else {
+            return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
+        }
+        try await conductorManager.suggest(
+            name: params.name,
+            worktreeID: params.worktreeID,
+            worktreeName: worktreeName,
+            label: params.label
+        )
+        return .ok()
+    }
+
+    func handleConductorClearSuggestion(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConductorNameParams.self, from: paramsData)
+        try await conductorManager.clearSuggestion(name: params.name)
+        return .ok()
     }
 }

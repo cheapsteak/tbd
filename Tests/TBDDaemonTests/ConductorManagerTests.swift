@@ -80,7 +80,7 @@ import TBDShared
         let tmux = TmuxManager(dryRun: true)
         let manager = ConductorManager(db: db, tmux: tmux)
 
-        let conductor = try await manager.setup(name: "test-suggest", repos: ["*"])
+        _ = try await manager.setup(name: "test-suggest", repos: ["*"])
         defer { try? FileManager.default.removeItem(at: TBDConstants.conductorsDir.appendingPathComponent("test-suggest")) }
 
         // Create a worktree to suggest
