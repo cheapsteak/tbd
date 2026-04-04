@@ -1,5 +1,8 @@
 import SwiftUI
 import TBDShared
+import os
+
+private let logger = Logger(subsystem: "com.tbd.app", category: "ConductorSuggestion")
 
 struct ConductorSuggestionBar: View {
     @EnvironmentObject var appState: AppState
@@ -45,16 +48,23 @@ struct ConductorSuggestionBar: View {
     }
 
     private func navigateToSuggestion() {
+        // Capture conductor name before changing selection (currentConductor depends on selection)
+        let conductorName = appState.currentConductor?.name
         appState.selectedWorktreeIDs = [suggestion.worktreeID]
-        dismissSuggestion()
+        dismissSuggestion(conductorName: conductorName)
     }
 
-    private func dismissSuggestion() {
+    private func dismissSuggestion(conductorName: String? = nil) {
+        let name = conductorName ?? appState.currentConductor?.name
         appState.conductorSuggestion = nil
         // Clear server-side so it doesn't flicker back on next poll
-        if let conductor = appState.currentConductor {
+        if let name {
             Task {
-                try? await appState.daemonClient.conductorClearSuggestion(name: conductor.name)
+                do {
+                    try await appState.daemonClient.conductorClearSuggestion(name: name)
+                } catch {
+                    logger.warning("Failed to clear suggestion server-side: \(error)")
+                }
             }
         }
     }
