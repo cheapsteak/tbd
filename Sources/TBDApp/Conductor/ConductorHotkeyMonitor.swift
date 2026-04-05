@@ -8,6 +8,7 @@ final class ConductorHotkeyMonitor {
     /// Install the local event monitor. Call once at app startup.
     /// The `toggle` closure is called on the main thread when the hotkey fires.
     func install(toggle: @escaping () -> Void) {
+        guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             // Opt+. : modifiers = option, keyCode 47 = period
             if event.modifierFlags.contains(.option),
