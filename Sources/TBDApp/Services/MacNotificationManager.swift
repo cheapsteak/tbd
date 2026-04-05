@@ -40,7 +40,7 @@ final class MacNotificationManager {
         content.sound = nil
 
         let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
+            identifier: worktreeID.uuidString,
             content: content,
             trigger: nil
         )
