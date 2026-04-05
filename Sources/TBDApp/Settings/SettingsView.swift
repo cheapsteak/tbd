@@ -95,7 +95,6 @@ struct GeneralSettingsTab: View {
 
         if panel.runModal() == .OK, let url = panel.url {
             customPath = url.path
-            soundName = "__custom__"
         }
     }
 }
