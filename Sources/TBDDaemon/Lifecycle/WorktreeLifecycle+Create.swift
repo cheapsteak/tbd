@@ -89,7 +89,7 @@ extension WorktreeLifecycle {
 
             // 5. Setup tmux terminals
             try await setupTerminals(
-                worktreeID: worktreeID, repoPath: repo.path,
+                worktreeID: worktreeID, repo: repo,
                 tmuxServer: worktree.tmuxServer, worktreePath: result.path,
                 skipClaude: skipClaude
             )
@@ -174,7 +174,7 @@ extension WorktreeLifecycle {
     /// is reused for the main Claude terminal to restore the conversation, and any
     /// additional sessions get their own terminal windows.
     func setupTerminals(
-        worktreeID: UUID, repoPath: String,
+        worktreeID: UUID, repo: Repo,
         tmuxServer: String, worktreePath: String, skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil
     ) async throws {
@@ -193,8 +193,17 @@ extension WorktreeLifecycle {
             claudeSessionID = nil
         } else {
             let sessionUUID = archivedClaudeSessions?.first ?? UUID().uuidString
-            claudeCommand = "claude --dangerously-skip-permissions --session-id \(sessionUUID)"
+            var cmd = "claude --dangerously-skip-permissions --session-id \(sessionUUID)"
             claudeSessionID = sessionUUID
+
+            // Inject per-repo system prompt
+            let isResume = archivedClaudeSessions?.first != nil
+            if let worktree = try await db.worktrees.get(id: worktreeID),
+               let prompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: isResume) {
+                cmd += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
+            }
+
+            claudeCommand = cmd
         }
         let window1 = try await tmux.createWindow(
             server: tmuxServer,

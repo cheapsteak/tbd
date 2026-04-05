@@ -462,7 +462,7 @@ struct RPCRouterTests {
         #expect(createResp.success)
 
         let terminal = try createResp.decodeResult(Terminal.self)
-        #expect(terminal.label == "claude")
+        #expect(terminal.label == "Claude Code")
         #expect(terminal.claudeSessionID != nil)
     }
 
