@@ -12,8 +12,13 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
 
     private var hasRequestedPermission = false
 
+    /// UNUserNotificationCenter crashes unbundled executables (no CFBundleIdentifier).
+    private var isAvailable: Bool {
+        Bundle.main.bundleIdentifier != nil
+    }
+
     func requestPermissionIfNeeded() {
-        guard !hasRequestedPermission else { return }
+        guard isAvailable, !hasRequestedPermission else { return }
         hasRequestedPermission = true
 
         let center = UNUserNotificationCenter.current()
@@ -26,7 +31,7 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func postIfEnabled(worktreeID: UUID, message: String?, worktrees: [Worktree]) {
-        guard enabled else { return }
+        guard enabled, isAvailable else { return }
         requestPermissionIfNeeded()
 
         let worktreeName = worktrees.first(where: { $0.id == worktreeID })?.displayName
