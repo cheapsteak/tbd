@@ -61,7 +61,7 @@ struct SetupHooksCommand: AsyncParsableCommand {
         var stopHooks = hooks["Stop"] as? [[String: Any]] ?? []
 
         // The hook command we want to add
-        let tbdNotifyCommand = "tbd notify --type response_complete 2>/dev/null || true"
+        let tbdNotifyCommand = #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
 
         let correctEntry: [String: Any] = [
             "hooks": [
@@ -76,8 +76,9 @@ struct SetupHooksCommand: AsyncParsableCommand {
         var found = false
         for (i, matcher) in stopHooks.enumerated() {
             if let innerHooks = matcher["hooks"] as? [[String: Any]] {
-                // Correct format — check if it's ours
                 if innerHooks.contains(where: { ($0["command"] as? String)?.contains("tbd notify") == true }) {
+                    // Update the command even if format is correct (command may have changed)
+                    stopHooks[i] = correctEntry
                     found = true
                 }
             } else if let command = matcher["command"] as? String, command.contains("tbd notify") {
