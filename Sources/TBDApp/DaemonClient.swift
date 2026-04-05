@@ -515,6 +515,7 @@ actor DaemonClient {
             Darwin.send(fd, buffer.baseAddress!, buffer.count, 0)
         }
         guard sent == message.count else {
+            daemonClientLogger.warning("subscribe: partial send (\(sent)/\(message.count) bytes)")
             close(fd)
             return
         }
@@ -540,7 +541,9 @@ actor DaemonClient {
                 let lineData = accumulated[accumulated.startIndex..<newlineIndex]
                 accumulated = accumulated[accumulated.index(after: newlineIndex)...]
 
-                // Skip the initial ack response (RPCResponse with success=true, no result)
+                // Skip the initial ack from SocketServer's subscription handler.
+                // This is the only RPC that sends an RPCResponse with success=true
+                // and no result — all other RPCs include a result payload.
                 if let response = try? decoder.decode(RPCResponse.self, from: Data(lineData)),
                    response.success && response.result == nil {
                     continue
