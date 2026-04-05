@@ -87,12 +87,8 @@ struct GeneralSettingsTab: View {
 
     private func pickCustomSound() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [
-            UTType(filenameExtension: "aiff")!,
-            UTType(filenameExtension: "mp3")!,
-            UTType(filenameExtension: "wav")!,
-            UTType(filenameExtension: "m4a")!,
-        ]
+        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+            .compactMap { UTType(filenameExtension: $0) }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.message = "Choose a notification sound"
