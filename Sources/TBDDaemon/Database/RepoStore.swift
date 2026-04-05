@@ -12,6 +12,8 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var displayName: String
     var defaultBranch: String
     var createdAt: Date
+    var renamePrompt: String?
+    var customInstructions: String?
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -20,6 +22,8 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.displayName = repo.displayName
         self.defaultBranch = repo.defaultBranch
         self.createdAt = repo.createdAt
+        self.renamePrompt = repo.renamePrompt
+        self.customInstructions = repo.customInstructions
     }
 
     func toModel() -> Repo {
@@ -29,7 +33,9 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             remoteURL: remoteURL,
             displayName: displayName,
             defaultBranch: defaultBranch,
-            createdAt: createdAt
+            createdAt: createdAt,
+            renamePrompt: renamePrompt,
+            customInstructions: customInstructions
         )
     }
 }
@@ -83,6 +89,16 @@ public struct RepoStore: Sendable {
     public func remove(id: UUID) async throws {
         _ = try await writer.write { db in
             try RepoRecord.deleteOne(db, key: id.uuidString)
+        }
+    }
+
+    /// Update per-repo instruction fields.
+    public func updateInstructions(id: UUID, renamePrompt: String?, customInstructions: String?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET renamePrompt = ?, customInstructions = ? WHERE id = ?",
+                arguments: [renamePrompt, customInstructions, id.uuidString]
+            )
         }
     }
 
