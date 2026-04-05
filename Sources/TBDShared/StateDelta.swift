@@ -15,6 +15,7 @@ public enum StateDelta: Codable, Sendable {
     case terminalRemoved(TerminalIDDelta)
     case worktreeConflictsChanged(WorktreeConflictDelta)
     case terminalPinChanged(TerminalPinDelta)
+    case worktreeReordered(RepoIDDelta)
 }
 
 /// Delta payload for worktree creation/revival.

@@ -87,6 +87,11 @@ extension RPCRouter {
     func handleWorktreeReorder(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeReorderParams.self, from: paramsData)
         try await db.worktrees.reorder(repoID: params.repoID, worktreeIDs: params.worktreeIDs)
+
+        subscriptions.broadcast(delta: .worktreeReordered(RepoIDDelta(
+            repoID: params.repoID
+        )))
+
         return .ok()
     }
 }
