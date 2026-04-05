@@ -567,8 +567,8 @@ final class AppState: ObservableObject {
         let cleaned = repoName
             .lowercased()
             .replacing(/[^a-z0-9]+/, with: "-")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         let truncated = String(cleaned.prefix(64))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         return truncated.isEmpty ? "conductor" : truncated
     }
 
@@ -590,6 +590,9 @@ final class AppState: ObservableObject {
                 _ = try await daemonClient.conductorSetup(name: name, repos: [repoID.uuidString])
                 _ = try await daemonClient.conductorStart(name: name)
             }
+            // Refresh worktrees first so terminals dict is populated,
+            // then refresh conductors to find the new terminal
+            await refreshWorktrees()
             await refreshConductors()
             showConductor = true
         } catch {
