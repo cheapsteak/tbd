@@ -124,7 +124,7 @@ extension AppState {
         }
     }
 
-    // MARK: - Keyboard Shortcut Actions
+    // MARK: - Reorder
 
     /// Reorder worktrees within a repo. Updates locally first (optimistic), then persists via RPC.
     /// Rolls back local state if the RPC call fails.
@@ -151,6 +151,8 @@ extension AppState {
             }
         }
     }
+
+    // MARK: - Keyboard Shortcut Actions
 
     /// All worktrees in sidebar order (sorted by repo, then by sortOrder).
     var allWorktreesOrdered: [Worktree] {
