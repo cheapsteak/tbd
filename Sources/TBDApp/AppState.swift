@@ -177,7 +177,8 @@ final class AppState: ObservableObject {
                     self?.handleDelta(delta)
                 }
             }
-            // Subscription disconnected — will reconnect on next poll cycle
+            // Subscription disconnected — nil out so poll loop restarts it
+            await MainActor.run { self.subscriptionTask = nil }
         }
     }
 
