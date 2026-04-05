@@ -1,5 +1,7 @@
+import AppKit
 import SwiftUI
 import TBDShared
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     var body: some View {
@@ -14,7 +16,7 @@ struct SettingsView: View {
                     Label("Repositories", systemImage: "folder")
                 }
         }
-        .frame(width: 500, height: 360)
+        .frame(width: 500, height: 420)
     }
 }
 
@@ -24,12 +26,52 @@ struct GeneralSettingsTab: View {
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage("autoSuspendClaude") private var autoSuspend: Bool = true
+    @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
+    @AppStorage("notificationSoundName") private var soundName: String = "Blow"
+    @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
+
+    private var systemSounds: [String] { NotificationSoundPlayer.systemSoundNames() }
+    private let soundPlayer = NotificationSoundPlayer()
 
     var body: some View {
         Form {
             Section("Notifications") {
                 Toggle("Enable macOS notifications", isOn: $enableNotifications)
-                    .help("Show system notifications when tasks complete or need attention")
+                    .help("Show system notifications when background tasks complete")
+                Toggle("Enable notification sounds", isOn: $enableSounds)
+                    .help("Play a sound when background tasks complete")
+
+                if enableSounds {
+                    HStack {
+                        Picker("Sound", selection: Binding(
+                            get: { customPath.isEmpty ? soundName : "__custom__" },
+                            set: { newValue in
+                                if newValue == "__custom__" {
+                                    pickCustomSound()
+                                } else {
+                                    soundName = newValue
+                                    customPath = ""
+                                }
+                            }
+                        )) {
+                            ForEach(systemSounds, id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                            Divider()
+                            Text("Custom…").tag("__custom__")
+                            if !customPath.isEmpty {
+                                Text(URL(fileURLWithPath: customPath).lastPathComponent)
+                                    .tag("__custom__")
+                            }
+                        }
+                        .frame(maxWidth: 200)
+
+                        Button("Test") {
+                            soundPlayer.playTest()
+                        }
+                        .controlSize(.small)
+                    }
+                }
             }
 
             Section("Claude") {
@@ -41,6 +83,19 @@ struct GeneralSettingsTab: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func pickCustomSound() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+            .compactMap { UTType(filenameExtension: $0) }
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Choose a notification sound"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            customPath = url.path
+        }
     }
 }
 

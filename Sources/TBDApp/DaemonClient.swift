@@ -154,47 +154,55 @@ actor DaemonClient {
 
     // MARK: - Low-level socket communication
 
+    /// Create a connected Unix domain socket to the daemon.
+    /// Caller is responsible for closing the returned file descriptor.
+    private nonisolated func makeConnectedSocket() throws -> Int32 {
+        guard FileManager.default.fileExists(atPath: socketPath) else {
+            throw DaemonClientError.daemonNotRunning
+        }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw DaemonClientError.connectionFailed("Could not create socket")
+        }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = socketPath.utf8CString
+        guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+            close(fd)
+            throw DaemonClientError.connectionFailed("Socket path too long")
+        }
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
+                for i in 0..<pathBytes.count {
+                    dest[i] = pathBytes[i]
+                }
+            }
+        }
+
+        let connectResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+
+        guard connectResult == 0 else {
+            close(fd)
+            throw DaemonClientError.daemonNotRunning
+        }
+
+        return fd
+    }
+
     /// Send an RPCRequest over a fresh POSIX Unix socket and return the RPCResponse.
     /// Wrapped in autoreleasepool to ensure ObjC-bridged objects (from JSON coding,
     /// FileManager, etc.) are freed immediately — prevents accumulation across
     /// the 2-second polling cycle.
     private func sendRaw(_ request: RPCRequest) throws -> RPCResponse {
         try autoreleasepool {
-            guard FileManager.default.fileExists(atPath: socketPath) else {
-                throw DaemonClientError.daemonNotRunning
-            }
-
-            // Create socket
-            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-            guard fd >= 0 else {
-                throw DaemonClientError.connectionFailed("Could not create socket")
-            }
+            let fd = try makeConnectedSocket()
             defer { close(fd) }
-
-            // Connect
-            var addr = sockaddr_un()
-            addr.sun_family = sa_family_t(AF_UNIX)
-            let pathBytes = socketPath.utf8CString
-            guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
-                throw DaemonClientError.connectionFailed("Socket path too long")
-            }
-            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-                ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
-                    for i in 0..<pathBytes.count {
-                        dest[i] = pathBytes[i]
-                    }
-                }
-            }
-
-            let connectResult = withUnsafePointer(to: &addr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-                }
-            }
-
-            guard connectResult == 0 else {
-                throw DaemonClientError.daemonNotRunning
-            }
 
             // Encode request as JSON + newline
             let encoder = JSONEncoder()
@@ -484,6 +492,68 @@ actor DaemonClient {
             resultType: PRRefreshResult.self
         )
         return result.status
+    }
+
+    // MARK: - State Subscription
+
+    typealias DeltaHandler = @Sendable (StateDelta) -> Void
+
+    /// Open a persistent socket that receives state deltas from the daemon.
+    /// Runs in a loop until the socket disconnects or the task is cancelled.
+    nonisolated func subscribe(onDelta: @escaping DeltaHandler) async {
+        guard let fd = try? makeConnectedSocket() else { return }
+
+        // Send subscribe request
+        let request = RPCRequest(method: RPCMethod.stateSubscribe)
+        guard let requestData = try? JSONEncoder().encode(request) else {
+            close(fd)
+            return
+        }
+        var message = requestData
+        message.append(contentsOf: [0x0A])
+        let sent = message.withUnsafeBytes { buffer in
+            Darwin.send(fd, buffer.baseAddress!, buffer.count, 0)
+        }
+        guard sent == message.count else {
+            daemonClientLogger.warning("subscribe: partial send (\(sent)/\(message.count) bytes)")
+            close(fd)
+            return
+        }
+
+        // Read loop
+        let bufferSize = 65536
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer {
+            buffer.deallocate()
+            close(fd)
+        }
+
+        var accumulated = Data()
+        let decoder = JSONDecoder()
+
+        while !Task.isCancelled {
+            let bytesRead = recv(fd, buffer, bufferSize, 0)
+            if bytesRead <= 0 { break }
+
+            accumulated.append(buffer, count: bytesRead)
+
+            while let newlineIndex = accumulated.firstIndex(of: 0x0A) {
+                let lineData = accumulated[accumulated.startIndex..<newlineIndex]
+                accumulated = accumulated[accumulated.index(after: newlineIndex)...]
+
+                // Skip the initial ack from SocketServer's subscription handler.
+                // This is the only RPC that sends an RPCResponse with success=true
+                // and no result — all other RPCs include a result payload.
+                if let response = try? decoder.decode(RPCResponse.self, from: Data(lineData)),
+                   response.success && response.result == nil {
+                    continue
+                }
+
+                if let delta = try? decoder.decode(StateDelta.self, from: Data(lineData)) {
+                    onDelta(delta)
+                }
+            }
+        }
     }
 
     // MARK: - Notes

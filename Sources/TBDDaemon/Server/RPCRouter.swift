@@ -137,6 +137,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConductorSuggest(request.paramsData)
             case RPCMethod.conductorClearSuggestion:
                 return try await handleConductorClearSuggestion(request.paramsData)
+            case RPCMethod.stateSubscribe:
+                return RPCResponse(error: "state.subscribe must be handled by SocketServer")
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

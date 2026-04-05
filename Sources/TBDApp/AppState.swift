@@ -98,6 +98,9 @@ final class AppState: ObservableObject {
     let tmuxBridge = TmuxBridge()
     private var pollTimer: Timer?
     private var pollCycle = 0
+    private var subscriptionTask: Task<Void, Never>?
+    let notificationSoundPlayer = NotificationSoundPlayer()
+    let macNotificationManager = MacNotificationManager()
 
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
@@ -161,6 +164,56 @@ final class AppState: ObservableObject {
     func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
+        stopSubscription()
+    }
+
+    /// Start listening for real-time state deltas from the daemon.
+    func startSubscription() {
+        subscriptionTask?.cancel()
+        subscriptionTask = Task { [weak self] in
+            guard let self else { return }
+            await self.daemonClient.subscribe { [weak self] delta in
+                Task { @MainActor [weak self] in
+                    self?.handleDelta(delta)
+                }
+            }
+            // Subscription disconnected — nil out so poll loop restarts it
+            await MainActor.run { self.subscriptionTask = nil }
+        }
+    }
+
+    func stopSubscription() {
+        subscriptionTask?.cancel()
+        subscriptionTask = nil
+    }
+
+    private func handleDelta(_ delta: StateDelta) {
+        switch delta {
+        case .notificationReceived(let notification):
+            handleNotificationDelta(notification)
+        default:
+            break
+        }
+    }
+
+    private func handleNotificationDelta(_ notification: NotificationDelta) {
+        let visible = visibleWorktreeIDs
+        guard !visible.contains(notification.worktreeID) else { return }
+
+        // Update local notification state
+        notifications[notification.worktreeID] = notification.type
+
+        // Fire sound + macOS notification
+        notificationSoundPlayer.playIfEnabled()
+        macNotificationManager.postIfEnabled(
+            worktreeID: notification.worktreeID,
+            message: notification.message,
+            worktrees: allWorktrees
+        )
+    }
+
+    private var allWorktrees: [Worktree] {
+        worktrees.values.flatMap { $0 }
     }
 
     /// Poll daemon for state changes every 2 seconds.
@@ -179,6 +232,9 @@ final class AppState: ObservableObject {
                     if !self.isConnected { return }
                 }
                 await self.refreshAll()
+                if self.subscriptionTask == nil || self.subscriptionTask?.isCancelled == true {
+                    self.startSubscription()
+                }
                 self.pollCycle += 1
                 if self.pollCycle % 15 == 0 {
                     await self.refreshPRStatuses()
@@ -196,6 +252,7 @@ final class AppState: ObservableObject {
         isConnected = didConnect
         if didConnect {
             await refreshAll()
+            startSubscription()
             await refreshPRStatuses()
             Task {
                 try? await daemonClient.worktreeSelectionChanged(

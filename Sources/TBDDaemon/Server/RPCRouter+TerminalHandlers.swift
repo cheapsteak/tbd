@@ -49,7 +49,8 @@ extension RPCRouter {
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
-            shellCommand: shellCommand
+            shellCommand: shellCommand,
+            env: ["TBD_WORKTREE_ID": params.worktreeID.uuidString]
         )
 
         let terminal = try await db.terminals.create(
@@ -127,7 +128,9 @@ extension RPCRouter {
             cwd: worktree.path
         )
 
-        // Create a new tmux window with a default shell
+        // Create a new tmux window with a default shell.
+        // Note: no TBD_WORKTREE_ID env var here (unlike handleTerminalCreate)
+        // since recreated windows run a plain shell, not Claude.
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,

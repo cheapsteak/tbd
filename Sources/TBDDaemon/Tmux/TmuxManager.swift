@@ -50,12 +50,18 @@ public struct TmuxManager: Sendable {
         ["-L", server, "has-session", "-t", session]
     }
 
-    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String) -> [String] {
+    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:]) -> [String] {
         // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
         // -i keeps it interactive (loads .zshrc), -c runs the command
         // After the command exits, the pane closes (tmux default behavior)
         let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        return ["-L", server, "new-window", "-t", session, "-c", cwd, "-PF", "#{window_id} #{pane_id}", userShell, "-ic", shellCommand]
+        var envPrefix = ""
+        for (key, value) in env.sorted(by: { $0.key < $1.key }) {
+            let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+            envPrefix += "export \(key)='\(escaped)'; "
+        }
+        let fullCommand = envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
+        return ["-L", server, "new-window", "-t", session, "-c", cwd, "-PF", "#{window_id} #{pane_id}", userShell, "-ic", fullCommand]
     }
 
     public static func killWindowCommand(server: String, windowID: String) -> [String] {
@@ -134,12 +140,12 @@ public struct TmuxManager: Sendable {
         try await runTmux(["-L", server, "kill-server"])
     }
 
-    public func createWindow(server: String, session: String, cwd: String, shellCommand: String) async throws -> (windowID: String, paneID: String) {
+    public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:]) async throws -> (windowID: String, paneID: String) {
         if dryRun {
             let n = counter.next()
             return (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
         }
-        let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand)
+        let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env)
         let output = try await runTmux(args)
         let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         guard parts.count == 2 else {
