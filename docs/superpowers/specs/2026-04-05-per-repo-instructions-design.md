@@ -6,42 +6,104 @@ Add configurable per-repo instructions that TBD injects into spawned Claude Code
 
 Users want project-specific conventions (testing frameworks, code style, forbidden patterns) applied to every Claude session in a repo. Today the only option is CLAUDE.md, which is committed to the repo and visible to all collaborators. Per-repo instructions in TBD are local, per-user, and managed through the app UI.
 
+Additionally, TBD creates worktrees with auto-generated adjective-animal names and `tbd/<name>` branches. Users want Claude to rename these to meaningful names on session start, following their preferred conventions — similar to how Conductor (conductor.build) handles branch renames.
+
+## Instruction Layers
+
+There are three distinct instruction layers, injected via `--append-system-prompt`:
+
+### 1. Rename Prompt (per-repo, user-editable, conditional)
+
+A prompt telling Claude to rename the git branch and TBD worktree display name on session start. Pre-populated with a sensible default that the user can fully customize.
+
+**When injected:** Only when the worktree hasn't been renamed yet — i.e., when `worktree.displayName == worktree.name` (the auto-generated adjective-animal name). Once anyone (Claude or the user) renames the worktree, this prompt stops firing for all sessions in that worktree.
+
+**Default prompt:**
+
+```
+To do immediately, before any other work:
+
+1. Rename the git branch to reflect the task:
+   git branch -m <new-branch-name>
+
+2. Rename the TBD worktree display name:
+   tbd worktree rename "$(basename "$(git rev-parse --show-toplevel)")" "<emoji> <display name>"
+
+Branch naming: use kebab-case, be concise (<30 chars), be specific.
+Display name: pick a relevant emoji, convert branch name to title case with spaces.
+
+Examples:
+  Branch: fix-login-timeout → Display: ⏱ Fix Login Timeout
+  Branch: add-export-csv   → Display: 📊 Add Export CSV
+
+Do this before reading files, using skills, or any other tools.
+```
+
+The user can edit this to add their own conventions (e.g., `cw/4/feat-{feature}` prefix, specific emoji rules, etc.).
+
+### 2. Built-in TBD Context (not user-editable, always injected)
+
+A system-level prompt that tells Claude it's running inside a TBD worktree and what CLI commands are available. Always injected on fresh sessions, not configurable by the user.
+
+```
+You are running inside a TBD-managed worktree. TBD is a macOS worktree + terminal manager.
+
+Available CLI commands:
+- tbd worktree rename "<worktree-name>" "<display-name>" — rename the worktree display name
+- tbd worktree list [--repo <id>] — list worktrees
+- tbd terminal create <worktree> [--cmd <command>] — create a new terminal
+- tbd terminal output <terminal-id> [--lines N] — read terminal output
+- tbd notify --type <type> [--message <msg>] — send notifications to TBD UI
+  Types: response_complete, error, task_complete, attention_needed
+
+Environment variables:
+- TBD_WORKTREE_ID — UUID of the current worktree (auto-set in all TBD terminals)
+```
+
+### 3. General Instructions (per-repo, user-editable, always injected)
+
+Freeform text for project conventions. Injected as user preferences after the TBD context.
+
 ## Data Model & Storage
 
 ### DB Migration v11
 
-Add a `customInstructions` TEXT column to the `repo` table, defaulting to NULL:
+Add two columns to the `repo` table:
 
 ```swift
 migrator.registerMigration("v11") { db in
     try db.alter(table: "repo") { t in
+        t.add(column: "renamePrompt", .text)
         t.add(column: "customInstructions", .text)
     }
 }
 ```
+
+Both default to NULL. NULL `renamePrompt` means "use the built-in default" (not "no rename prompt"). An explicitly empty string means "disabled."
 
 ### Shared Model (TBDShared/Models.swift)
 
 Add to `Repo`:
 
 ```swift
+public var renamePrompt: String?
 public var customInstructions: String?
 ```
 
-Must be optional so existing JSON/rows decode without error. Add to `init` with default `nil`. Add to the manual `init(from decoder:)` with `decodeIfPresent`.
+Both optional so existing JSON/rows decode without error. Add to `init` with default `nil`. Add to the manual `init(from decoder:)` with `decodeIfPresent`.
 
 ### RepoRecord (TBDDaemon/Database/RepoStore.swift)
 
-Add `customInstructions: String?` to `RepoRecord`. Update `init(from:)` and `toModel()` to map the field.
+Add both fields to `RepoRecord`. Update `init(from:)` and `toModel()` to map them.
 
 Add an update method:
 
 ```swift
-public func update(id: UUID, customInstructions: String?) async throws {
+public func updateInstructions(id: UUID, renamePrompt: String?, customInstructions: String?) async throws {
     try await writer.write { db in
         try db.execute(
-            sql: "UPDATE repo SET customInstructions = ? WHERE id = ?",
-            arguments: [customInstructions, id.uuidString]
+            sql: "UPDATE repo SET renamePrompt = ?, customInstructions = ? WHERE id = ?",
+            arguments: [renamePrompt, customInstructions, id.uuidString]
         )
     }
 }
@@ -57,40 +119,61 @@ public static let repoUpdateInstructions = "repo.updateInstructions"
 
 public struct RepoUpdateInstructionsParams: Codable, Sendable {
     public let repoID: UUID
+    public let renamePrompt: String?
     public let customInstructions: String?
-    public init(repoID: UUID, customInstructions: String?) {
+    public init(repoID: UUID, renamePrompt: String?, customInstructions: String?) {
         self.repoID = repoID
+        self.renamePrompt = renamePrompt
         self.customInstructions = customInstructions
     }
 }
 ```
 
-No separate read RPC needed — `repo.list` already returns `[Repo]` which will include `customInstructions` automatically.
+No separate read RPC needed — `repo.list` already returns `[Repo]` which will include both fields automatically.
 
 ## Instruction Injection
 
-### Fresh Claude Sessions (WorktreeLifecycle+Create.swift)
+### Composing the System Prompt
 
-In `setupTerminals()`, after building the base `claudeCommand` and before spawning:
-
-1. Look up the repo's `customInstructions` from the database using the worktree's `repoID`.
-2. If non-nil and non-empty after trimming, append `--append-system-prompt '<escaped>'` to the command string.
+At spawn time, build the appended system prompt by concatenating applicable layers:
 
 ```swift
-// Pseudocode
+var parts: [String] = []
+
+// Layer 1: Rename prompt (conditional)
+if worktree.displayName == worktree.name {
+    let renamePrompt = repo.renamePrompt ?? Self.defaultRenamePrompt
+    if !renamePrompt.isEmpty {
+        parts.append(renamePrompt)
+    }
+}
+
+// Layer 2: Built-in TBD context (always)
+parts.append(Self.builtInTBDContext)
+
+// Layer 3: User general instructions (if set)
 if let instructions = repo.customInstructions?.trimmingCharacters(in: .whitespacesAndNewlines),
    !instructions.isEmpty {
-    claudeCommand += " --append-system-prompt \(shellEscape(instructions))"
+    parts.append(instructions)
+}
+
+if !parts.isEmpty {
+    let combined = parts.joined(separator: "\n\n---\n\n")
+    claudeCommand += " --append-system-prompt \(shellEscape(combined))"
 }
 ```
 
-### Conductor Sessions (ConductorManager.swift)
+The default rename prompt and built-in TBD context are static strings defined on the lifecycle class.
 
-Same logic at conductor start. The conductor's working directory is `~/.tbd/conductors/<name>/`, not a repo directory, so the injection must explicitly look up the repo. If the conductor's `repos` scope is a single repo ID, use that repo's instructions. If the scope is `["*"]` (all repos) or multiple repos, skip injection — there's no single set of instructions to apply.
+### Where Injection Happens
 
-### Resumed Sessions
+**Fresh worktree Claude sessions** (`WorktreeLifecycle+Create.swift` `setupTerminals()`) — yes, with rename conditional check.
 
-`--resume` restores the full conversation including the original system prompt. Do NOT re-inject instructions on resume to avoid double-injection.
+**New Claude terminals** (`RPCRouter+TerminalHandlers.swift` terminal creation) — yes, same logic. This covers the case where a user opens a second Claude terminal before the first one has renamed.
+
+**Conductor sessions** (`ConductorManager.swift`) — inject layers 2 and 3 only (no rename prompt). If conductor's `repos` scope is a single repo ID, use that repo's instructions. If scope is `["*"]` or multiple repos, skip layer 3 (no single set of instructions to apply). Layer 2 (TBD context) is always injected.
+
+**Resumed sessions** (`--resume`) — no injection. The original session already has the prompt.
 
 ### Shell Escaping
 
@@ -121,7 +204,6 @@ struct RepoDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Segmented control at top
             Picker("", selection: $selectedTab) {
                 ForEach(Tab.allCases, id: \.self) { tab in
                     Text(tab.rawValue).tag(tab)
@@ -133,7 +215,6 @@ struct RepoDetailView: View {
 
             Divider()
 
-            // Tab content
             switch selectedTab {
             case .archived:
                 ArchivedWorktreesView(repoID: repoID)
@@ -158,31 +239,43 @@ RepoDetailView(repoID: repoID)
 ### RepoInstructionsView (new file: TBDApp/RepoInstructionsView.swift)
 
 ```
-┌─────────────────────────────────────────┐
-│  Custom Instructions                    │
-│  Added to all new Claude sessions in    │
-│  this repo via --append-system-prompt   │
-├─────────────────────────────────────────┤
-│                                         │
-│  ┌─────────────────────────────────┐    │
-│  │ TextEditor                      │    │
-│  │                                 │    │
-│  │ (placeholder when empty:        │    │
-│  │  "e.g. Always use pytest...")   │    │
-│  │                                 │    │
-│  └─────────────────────────────────┘    │
-│                                         │
-│                          Saved ✓  (fade)│
-└─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│                                                  │
+│  Rename Prompt                                   │
+│  Sent with first message in worktrees that       │
+│  haven't been renamed yet                        │
+│                                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │ To do immediately, before any other work:  │  │
+│  │                                            │  │
+│  │ 1. Rename the git branch...               │  │
+│  │ 2. Rename the TBD worktree...             │  │
+│  │ ...                                       │  │
+│  └────────────────────────────────────────────┘  │
+│                                       [Reset]    │
+│                                                  │
+│  ──────────────────────────────────────────────  │
+│                                                  │
+│  General Instructions                            │
+│  Added to all new Claude sessions in this repo   │
+│                                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │ (placeholder: "e.g. Always use pytest...") │  │
+│  │                                            │  │
+│  │                                            │  │
+│  └────────────────────────────────────────────┘  │
+│                                                  │
+│                                    Saved ✓ (fade)│
+└──────────────────────────────────────────────────┘
 ```
 
 Behavior:
-- `@State var draft: String` initialized from `repo.customInstructions ?? ""`
-- Placeholder overlay that hides when draft is non-empty
-- `.onChange(of: draft)` triggers a debounced save (~1 second)
-- Calls `appState.updateRepoInstructions(repoID:instructions:)` on save
-- Subtle "Saved" text with a fade-in/fade-out animation after each successful save
-- Empty/whitespace-only text saves as `nil` (clears the instructions)
+- Two sections in a single scrollable view
+- **Rename prompt**: `TextEditor` pre-populated with the default rename prompt (or the user's saved version). A "Reset" button restores the default. Saving an empty string disables the rename prompt entirely.
+- **General instructions**: `TextEditor` with placeholder overlay, empty by default.
+- Both fields share the same debounced auto-save (~1 second). A single `Saved` indicator covers both.
+- Calls `appState.updateRepoInstructions(repoID:renamePrompt:customInstructions:)` on save.
+- `renamePrompt` saves as `nil` when it matches the default (so the DB only stores customizations). Saves as `""` (empty string) when the user explicitly clears it (disabling rename).
 
 ## State & RPC Wiring
 
@@ -191,7 +284,7 @@ Behavior:
 Add method:
 
 ```swift
-func repoUpdateInstructions(repoID: UUID, customInstructions: String?) async throws
+func repoUpdateInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async throws
 ```
 
 Wraps the `repo.updateInstructions` RPC call.
@@ -201,8 +294,10 @@ Wraps the `repo.updateInstructions` RPC call.
 Add method:
 
 ```swift
-func updateRepoInstructions(repoID: UUID, instructions: String?) async {
-    try? await daemonClient.repoUpdateInstructions(repoID: repoID, customInstructions: instructions)
+func updateRepoInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async {
+    try? await daemonClient.repoUpdateInstructions(
+        repoID: repoID, renamePrompt: renamePrompt, customInstructions: customInstructions
+    )
     await refreshRepos()
 }
 ```
@@ -214,7 +309,11 @@ Handle `repo.updateInstructions`:
 ```swift
 case RPCMethod.repoUpdateInstructions:
     let params = try decode(RepoUpdateInstructionsParams.self, from: request.params)
-    try await db.repos.update(id: params.repoID, customInstructions: params.customInstructions)
+    try await db.repos.updateInstructions(
+        id: params.repoID,
+        renamePrompt: params.renamePrompt,
+        customInstructions: params.customInstructions
+    )
     let repo = try await db.repos.get(id: params.repoID)
     return encode(repo)
 ```
@@ -225,14 +324,25 @@ No new state subscriptions needed. Instructions only matter at spawn time (daemo
 
 ### DB Migration
 
-- Verify v11 migration adds `customInstructions` column
-- Existing repos have NULL instructions after migration
-- Can store and retrieve instructions text
+- Verify v11 migration adds both `renamePrompt` and `customInstructions` columns
+- Existing repos have NULL for both after migration
+- Can store and retrieve both fields
 
-### Instruction Injection (branching conditional — both branches tested)
+### Rename Prompt Conditional (branching — both branches tested)
 
-- **With instructions**: when `customInstructions` is set, the spawned claude command includes `--append-system-prompt` with the instructions text
-- **Without instructions**: when `customInstructions` is nil or empty, the command does NOT include `--append-system-prompt`
+- **Worktree not renamed** (`displayName == name`): rename prompt is included in the appended system prompt
+- **Worktree already renamed** (`displayName != name`): rename prompt is NOT included
+- **Rename prompt explicitly disabled** (empty string in DB): rename prompt is NOT included even if worktree hasn't been renamed
+
+### General Instructions Injection (branching — both branches tested)
+
+- **With instructions**: when `customInstructions` is set, the spawned command includes it in `--append-system-prompt`
+- **Without instructions**: when `customInstructions` is nil or empty, it is omitted
+
+### Built-in TBD Context
+
+- Always present in the appended system prompt for fresh sessions
+- Not present for resumed sessions
 
 ### Shell Escaping
 
@@ -243,4 +353,4 @@ No new state subscriptions needed. Instructions only matter at spawn time (daemo
 
 ### Not Tested (UI)
 
-No existing SwiftUI test infrastructure. The segmented control, TextEditor, debounce, and save indicator are standard SwiftUI composition and are verified manually.
+No existing SwiftUI test infrastructure. The segmented control, text editors, debounce, and save indicator are standard SwiftUI composition and are verified manually.
