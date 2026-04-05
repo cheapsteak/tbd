@@ -116,6 +116,8 @@ public enum RPCMethod {
     public static let conductorTeardown = "conductor.teardown"
     public static let conductorList = "conductor.list"
     public static let conductorStatus = "conductor.status"
+    public static let conductorSuggest = "conductor.suggest"
+    public static let conductorClearSuggestion = "conductor.clearSuggestion"
     public static let terminalConversation = "terminal.conversation"
 }
 
@@ -392,6 +394,15 @@ public struct ConductorStatusResult: Codable, Sendable {
     public let isRunning: Bool
     public init(conductor: Conductor, isRunning: Bool) {
         self.conductor = conductor; self.isRunning = isRunning
+    }
+}
+
+public struct ConductorSuggestParams: Codable, Sendable {
+    public let name: String
+    public let worktreeID: UUID
+    public let label: String?
+    public init(name: String, worktreeID: UUID, label: String? = nil) {
+        self.name = name; self.worktreeID = worktreeID; self.label = label
     }
 }
 

@@ -71,6 +71,57 @@ import TBDShared
         )
         #expect(template.contains("Conductor: my-conductor"))
         #expect(template.contains("tbd terminal output"))
+        #expect(template.contains("tbd conductor suggest my-conductor"))
+        #expect(template.contains("tbd conductor clear-suggestion my-conductor"))
+    }
+
+    @Test func suggestAndClearSuggestion() async throws {
+        let db = try makeDB()
+        let tmux = TmuxManager(dryRun: true)
+        let manager = ConductorManager(db: db, tmux: tmux)
+
+        _ = try await manager.setup(name: "test-suggest", repos: ["*"])
+        defer { try? FileManager.default.removeItem(at: TBDConstants.conductorsDir.appendingPathComponent("test-suggest")) }
+
+        // Create a worktree to suggest
+        let wt = try await db.worktrees.create(
+            repoID: TBDConstants.conductorsRepoID,
+            name: "fake-wt",
+            branch: "main",
+            path: "/tmp/fake",
+            tmuxServer: "test",
+            status: .active
+        )
+
+        // No suggestion initially
+        #expect(manager.suggestion(for: "test-suggest") == nil)
+
+        // Set suggestion
+        try await manager.suggest(name: "test-suggest", worktreeID: wt.id, worktreeName: "fake-wt", label: "waiting")
+        let s = manager.suggestion(for: "test-suggest")
+        #expect(s?.worktreeID == wt.id)
+        #expect(s?.label == "waiting")
+
+        // Overwrite suggestion
+        try await manager.suggest(name: "test-suggest", worktreeID: wt.id, worktreeName: "fake-wt", label: "new label")
+        #expect(manager.suggestion(for: "test-suggest")?.label == "new label")
+
+        // Clear
+        try await manager.clearSuggestion(name: "test-suggest")
+        #expect(manager.suggestion(for: "test-suggest") == nil)
+    }
+
+    @Test func suggestForNonexistentConductorFails() async throws {
+        let db = try makeDB()
+        let tmux = TmuxManager(dryRun: true)
+        let manager = ConductorManager(db: db, tmux: tmux)
+
+        do {
+            try await manager.suggest(name: "nope", worktreeID: UUID(), worktreeName: "x", label: nil)
+            Issue.record("Expected not found error")
+        } catch {
+            #expect(error.localizedDescription.contains("not found"))
+        }
     }
 
     @Test func invalidNameRejected() async throws {

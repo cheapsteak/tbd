@@ -133,6 +133,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConductorList()
             case RPCMethod.conductorStatus:
                 return try await handleConductorStatus(request.paramsData)
+            case RPCMethod.conductorSuggest:
+                return try await handleConductorSuggest(request.paramsData)
+            case RPCMethod.conductorClearSuggestion:
+                return try await handleConductorClearSuggestion(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

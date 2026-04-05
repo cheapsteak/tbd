@@ -13,6 +13,8 @@ struct ConductorCommand: ParsableCommand {
             ConductorTeardown.self,
             ConductorListCmd.self,
             ConductorStatusCmd.self,
+            ConductorSuggestCmd.self,
+            ConductorClearSuggestionCmd.self,
         ]
     )
 }
@@ -221,6 +223,58 @@ struct ConductorStatusCmd: AsyncParsableCommand {
             if let wt = c.worktrees { print("  Worktrees:   \(wt.joined(separator: ", "))") }
             if let labels = c.terminalLabels { print("  Labels:      \(labels.joined(separator: ", "))") }
         }
+    }
+}
+
+// MARK: - conductor suggest
+
+struct ConductorSuggestCmd: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "suggest",
+        abstract: "Set a navigation suggestion for the UI"
+    )
+
+    @Argument(help: "Conductor name")
+    var name: String
+
+    @Option(name: .long, help: "Worktree ID to suggest navigating to")
+    var worktree: String
+
+    @Option(name: .long, help: "Optional label (e.g. 'waiting for input')")
+    var label: String?
+
+    mutating func run() async throws {
+        guard let worktreeID = UUID(uuidString: worktree) else {
+            print("Error: invalid worktree UUID: \(worktree)")
+            throw ExitCode.failure
+        }
+        let client = SocketClient()
+        try client.callVoid(
+            method: RPCMethod.conductorSuggest,
+            params: ConductorSuggestParams(name: name, worktreeID: worktreeID, label: label)
+        )
+        print("Suggestion set for conductor '\(name)'")
+    }
+}
+
+// MARK: - conductor clear-suggestion
+
+struct ConductorClearSuggestionCmd: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "clear-suggestion",
+        abstract: "Clear the navigation suggestion"
+    )
+
+    @Argument(help: "Conductor name")
+    var name: String
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        try client.callVoid(
+            method: RPCMethod.conductorClearSuggestion,
+            params: ConductorNameParams(name: name)
+        )
+        print("Suggestion cleared for conductor '\(name)'")
     }
 }
 
