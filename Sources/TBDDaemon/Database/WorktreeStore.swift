@@ -281,7 +281,7 @@ public struct WorktreeStore: Sendable {
             try db.execute(
                 sql: """
                     UPDATE worktree SET sortOrder = ? + rowid
-                    WHERE repoID = ? AND id NOT IN (\(placeholders))
+                    WHERE repoID = ? AND status IN ('active', 'creating') AND id NOT IN (\(placeholders))
                     """,
                 arguments: StatementArguments(args)
             )
