@@ -130,6 +130,9 @@ extension AppState {
     func reorderWorktrees(repoID: UUID, fromOffsets source: IndexSet, toOffset destination: Int) {
         guard var repoWorktrees = worktrees[repoID]?.filter({ $0.status == .active || $0.status == .creating }) else { return }
         repoWorktrees.move(fromOffsets: source, toOffset: destination)
+        for i in repoWorktrees.indices {
+            repoWorktrees[i].sortOrder = i
+        }
 
         // Rebuild the full array: keep main/other statuses in place, replace active/creating with reordered
         let others = (worktrees[repoID] ?? []).filter { $0.status != .active && $0.status != .creating }
