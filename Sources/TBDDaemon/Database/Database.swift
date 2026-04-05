@@ -189,6 +189,13 @@ public final class TBDDatabase: Sendable {
             try db.execute(sql: "UPDATE worktree SET sortOrder = rowid")
         }
 
+        migrator.registerMigration("v12") { db in
+            try db.alter(table: "repo") { t in
+                t.add(column: "renamePrompt", .text)
+                t.add(column: "customInstructions", .text)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

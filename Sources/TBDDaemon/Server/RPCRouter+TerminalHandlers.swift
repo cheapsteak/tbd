@@ -33,8 +33,16 @@ extension RPCRouter {
         } else if isClaudeType {
             let sessionID = UUID().uuidString
             claudeSessionID = sessionID
-            shellCommand = "claude --session-id \(sessionID) --dangerously-skip-permissions"
-            label = "claude"
+            var cmd = "claude --session-id \(sessionID) --dangerously-skip-permissions"
+
+            // Inject per-repo system prompt for new Claude sessions
+            if let repo = try await db.repos.get(id: worktree.repoID),
+               let prompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false) {
+                cmd += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
+            }
+
+            shellCommand = cmd
+            label = "Claude Code"
         } else if let cmd = params.cmd {
             claudeSessionID = nil
             shellCommand = cmd

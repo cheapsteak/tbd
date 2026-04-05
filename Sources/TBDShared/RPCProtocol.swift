@@ -120,6 +120,7 @@ public enum RPCMethod {
     public static let conductorSuggest = "conductor.suggest"
     public static let conductorClearSuggestion = "conductor.clearSuggestion"
     public static let terminalConversation = "terminal.conversation"
+    public static let repoUpdateInstructions = "repo.updateInstructions"
 }
 
 public struct NotificationsListResult: Codable, Sendable {
@@ -160,6 +161,17 @@ public struct RepoRemoveParams: Codable, Sendable {
     public let repoID: UUID
     public let force: Bool
     public init(repoID: UUID, force: Bool = false) { self.repoID = repoID; self.force = force }
+}
+
+public struct RepoUpdateInstructionsParams: Codable, Sendable {
+    public let repoID: UUID
+    public let renamePrompt: String?
+    public let customInstructions: String?
+    public init(repoID: UUID, renamePrompt: String?, customInstructions: String?) {
+        self.repoID = repoID
+        self.renamePrompt = renamePrompt
+        self.customInstructions = customInstructions
+    }
 }
 
 public struct WorktreeCreateParams: Codable, Sendable {

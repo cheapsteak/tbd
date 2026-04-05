@@ -7,15 +7,20 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public var displayName: String
     public var defaultBranch: String
     public var createdAt: Date
+    public var renamePrompt: String?
+    public var customInstructions: String?
 
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
-                displayName: String, defaultBranch: String = "main", createdAt: Date = Date()) {
+                displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
+                renamePrompt: String? = nil, customInstructions: String? = nil) {
         self.id = id
         self.path = path
         self.remoteURL = remoteURL
         self.displayName = displayName
         self.defaultBranch = defaultBranch
         self.createdAt = createdAt
+        self.renamePrompt = renamePrompt
+        self.customInstructions = customInstructions
     }
 }
 

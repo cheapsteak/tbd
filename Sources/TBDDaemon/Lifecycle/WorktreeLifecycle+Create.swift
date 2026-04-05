@@ -89,8 +89,8 @@ extension WorktreeLifecycle {
 
             // 5. Setup tmux terminals
             try await setupTerminals(
-                worktreeID: worktreeID, repoPath: repo.path,
-                tmuxServer: worktree.tmuxServer, worktreePath: result.path,
+                worktree: worktree, repo: repo,
+                worktreePath: result.path,
                 skipClaude: skipClaude
             )
 
@@ -174,10 +174,13 @@ extension WorktreeLifecycle {
     /// is reused for the main Claude terminal to restore the conversation, and any
     /// additional sessions get their own terminal windows.
     func setupTerminals(
-        worktreeID: UUID, repoPath: String,
-        tmuxServer: String, worktreePath: String, skipClaude: Bool,
+        worktree: Worktree, repo: Repo,
+        worktreePath: String? = nil, skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil
     ) async throws {
+        let worktreeID = worktree.id
+        let tmuxServer = worktree.tmuxServer
+        let worktreePath = worktreePath ?? worktree.path
         // Ensure tmux server exists — capture initial window ID to kill later
         let initialWindowID = try await tmux.ensureServer(
             server: tmuxServer,
@@ -193,8 +196,16 @@ extension WorktreeLifecycle {
             claudeSessionID = nil
         } else {
             let sessionUUID = archivedClaudeSessions?.first ?? UUID().uuidString
-            claudeCommand = "claude --dangerously-skip-permissions --session-id \(sessionUUID)"
+            var cmd = "claude --dangerously-skip-permissions --session-id \(sessionUUID)"
             claudeSessionID = sessionUUID
+
+            // Inject per-repo system prompt
+            let isResume = archivedClaudeSessions?.first != nil
+            if let prompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: isResume) {
+                cmd += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
+            }
+
+            claudeCommand = cmd
         }
         let window1 = try await tmux.createWindow(
             server: tmuxServer,

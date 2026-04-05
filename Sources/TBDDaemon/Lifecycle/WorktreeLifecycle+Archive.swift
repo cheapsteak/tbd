@@ -122,8 +122,7 @@ extension WorktreeLifecycle {
         )
 
         try await setupTerminals(
-            worktreeID: worktree.id, repoPath: repo.path,
-            tmuxServer: worktree.tmuxServer, worktreePath: worktree.path,
+            worktree: worktree, repo: repo,
             skipClaude: skipClaude,
             archivedClaudeSessions: worktree.archivedClaudeSessions
         )

@@ -462,7 +462,7 @@ struct RPCRouterTests {
         #expect(createResp.success)
 
         let terminal = try createResp.decodeResult(Terminal.self)
-        #expect(terminal.label == "claude")
+        #expect(terminal.label == "Claude Code")
         #expect(terminal.claudeSessionID != nil)
     }
 
@@ -536,5 +536,91 @@ struct RPCRouterTests {
 
         #expect(!response.success)
         #expect(response.error?.contains("Unknown method") == true)
+    }
+
+    // MARK: - Repo Instructions Tests
+
+    @Test("repo.updateInstructions stores and retrieves instructions")
+    func repoUpdateInstructions() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+
+        let request = try RPCRequest(
+            method: RPCMethod.repoUpdateInstructions,
+            params: RepoUpdateInstructionsParams(
+                repoID: repo.id,
+                renamePrompt: "Use cw/4/feat- prefix",
+                customInstructions: "Always use pytest"
+            )
+        )
+        let response = await router.handle(request)
+
+        #expect(response.success)
+        let updated = try response.decodeResult(Repo.self)
+        #expect(updated.renamePrompt == "Use cw/4/feat- prefix")
+        #expect(updated.customInstructions == "Always use pytest")
+
+        // Verify via repo.list
+        let listResp = await router.handle(RPCRequest(method: RPCMethod.repoList))
+        let repos = try listResp.decodeResult([Repo].self)
+        let found = repos.first { $0.id == repo.id }
+        #expect(found?.renamePrompt == "Use cw/4/feat- prefix")
+        #expect(found?.customInstructions == "Always use pytest")
+    }
+
+    @Test("repo.updateInstructions with nil clears instructions")
+    func repoUpdateInstructionsClear() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+
+        // Set instructions
+        let setReq = try RPCRequest(
+            method: RPCMethod.repoUpdateInstructions,
+            params: RepoUpdateInstructionsParams(repoID: repo.id, renamePrompt: "test", customInstructions: "test")
+        )
+        _ = await router.handle(setReq)
+
+        // Clear them
+        let clearReq = try RPCRequest(
+            method: RPCMethod.repoUpdateInstructions,
+            params: RepoUpdateInstructionsParams(repoID: repo.id, renamePrompt: nil, customInstructions: nil)
+        )
+        let response = await router.handle(clearReq)
+
+        #expect(response.success)
+        let updated = try response.decodeResult(Repo.self)
+        #expect(updated.renamePrompt == nil)
+        #expect(updated.customInstructions == nil)
+    }
+
+    @Test("repo.updateInstructions returns error for unknown repo")
+    func repoUpdateInstructionsUnknownRepo() async throws {
+        let request = try RPCRequest(
+            method: RPCMethod.repoUpdateInstructions,
+            params: RepoUpdateInstructionsParams(repoID: UUID(), renamePrompt: nil, customInstructions: nil)
+        )
+        let response = await router.handle(request)
+
+        #expect(!response.success)
+        #expect(response.error?.contains("Repository not found") == true)
+    }
+
+    @Test("existing repos have nil instructions after migration")
+    func existingReposNilInstructions() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+
+        let fetched = try await db.repos.get(id: repo.id)
+        #expect(fetched?.renamePrompt == nil)
+        #expect(fetched?.customInstructions == nil)
     }
 }

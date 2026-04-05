@@ -303,6 +303,15 @@ actor DaemonClient {
         )
     }
 
+    /// Update per-repo instruction fields.
+    func repoUpdateInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) throws -> Repo {
+        return try call(
+            method: RPCMethod.repoUpdateInstructions,
+            params: RepoUpdateInstructionsParams(repoID: repoID, renamePrompt: renamePrompt, customInstructions: customInstructions),
+            resultType: Repo.self
+        )
+    }
+
     /// List all repositories.
     func listRepos() throws -> [Repo] {
         return try callNoParams(method: RPCMethod.repoList, resultType: [Repo].self)
