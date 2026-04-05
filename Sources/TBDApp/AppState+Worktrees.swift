@@ -127,7 +127,9 @@ extension AppState {
     // MARK: - Keyboard Shortcut Actions
 
     /// Reorder worktrees within a repo. Updates locally first (optimistic), then persists via RPC.
+    /// Rolls back local state if the RPC call fails.
     func reorderWorktrees(repoID: UUID, fromOffsets source: IndexSet, toOffset destination: Int) {
+        let previousWorktrees = worktrees[repoID]
         guard var repoWorktrees = worktrees[repoID]?.filter({ $0.status == .active || $0.status == .creating }) else { return }
         repoWorktrees.move(fromOffsets: source, toOffset: destination)
         for i in repoWorktrees.indices {
@@ -145,6 +147,7 @@ extension AppState {
                 try await daemonClient.reorderWorktrees(repoID: repoID, worktreeIDs: worktreeIDs)
             } catch {
                 logger.error("Failed to reorder worktrees: \(error)")
+                worktrees[repoID] = previousWorktrees
             }
         }
     }
