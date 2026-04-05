@@ -54,8 +54,7 @@ enum SystemPromptBuilder {
     }
 
     /// Build the system prompt for a conductor session.
-    /// Conductors get TBD context + general instructions (no rename prompt).
-    /// Returns nil only if there's nothing to append.
+    /// Always includes TBD context; adds custom instructions for single-repo conductors.
     static func buildForConductor(repo: Repo?) -> String {
         var parts = [builtInTBDContext]
 

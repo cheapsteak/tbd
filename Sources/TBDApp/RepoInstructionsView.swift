@@ -69,7 +69,7 @@ struct RepoInstructionsView: View {
                             Text("e.g. Always use pytest. Never mock the database.")
                                 .font(.body.monospaced())
                                 .foregroundStyle(.tertiary)
-                                .padding(12)
+                                .padding(8)
                                 .allowsHitTesting(false)
                         }
                     }
@@ -107,6 +107,12 @@ struct RepoInstructionsView: View {
         }
         .onDisappear {
             saveTask?.cancel()
+            // Flush any pending edits
+            let renameToSave = renamePromptDraft == RepoConstants.defaultRenamePrompt ? nil : renamePromptDraft
+            let instructionsToSave = customInstructionsDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : customInstructionsDraft
+            Task {
+                await appState.updateRepoInstructions(repoID: repoID, renamePrompt: renameToSave, customInstructions: instructionsToSave)
+            }
         }
     }
 
