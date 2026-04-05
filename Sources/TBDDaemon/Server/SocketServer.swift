@@ -170,13 +170,12 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
            request.method == RPCMethod.stateSubscribe {
             let sendableCtx = wrappedCtx
 
-            // Register subscriber; callback streams deltas as newline-delimited JSON
+            // Register subscriber; callback streams deltas as newline-delimited JSON.
+            // The callback may be invoked from any thread (via broadcast), so all
+            // ChannelHandlerContext access must be dispatched to the event loop.
+            // Accessing context.channel off the event loop hits a NIO precondition.
             let subID = router.registerSubscription { deltaData in
                 let context = sendableCtx.context
-                // Quick pre-check (thread-safe)
-                guard context.channel.isActive else { return false }
-
-                // Actual write must happen on the event loop
                 context.eventLoop.execute {
                     guard context.channel.isActive else { return }
                     guard let deltaString = String(data: deltaData, encoding: .utf8) else { return }
@@ -185,16 +184,17 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
                     outBuffer.writeString("\n")
                     context.writeAndFlush(Self.wrapOutboundOut(outBuffer), promise: nil)
                 }
-
-                // Always return true as long as channel appears active;
-                // closeFuture handler will do definitive cleanup
+                // Always return true; closeFuture handler does definitive cleanup
                 return true
             }
 
-            // Clean up subscription when the channel closes
+            // Clean up subscription when the channel closes.
+            // Must access context.channel on the event loop.
             let context = sendableCtx.context
-            context.channel.closeFuture.whenComplete { _ in
-                router.removeSubscription(id: subID)
+            context.eventLoop.execute {
+                context.channel.closeFuture.whenComplete { _ in
+                    router.removeSubscription(id: subID)
+                }
             }
 
             // Send initial ack so the client knows subscription is active
