@@ -30,4 +30,17 @@ extension AppState {
             handleConnectionError(error)
         }
     }
+
+    /// Update per-repo instruction fields.
+    func updateRepoInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async {
+        do {
+            _ = try await daemonClient.repoUpdateInstructions(
+                repoID: repoID, renamePrompt: renamePrompt, customInstructions: customInstructions
+            )
+            await refreshRepos()
+        } catch {
+            logger.error("Failed to update instructions: \(error)")
+            handleConnectionError(error)
+        }
+    }
 }
