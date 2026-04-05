@@ -4,8 +4,13 @@ macOS native worktree + terminal manager for multi-agent Claude Code workflows.
 
 Use the `tbd-project` skill for architecture, conventions, and file reference.
 
+## Main Session Agent
+
+The main chat session agent should not write code directly. Delegate all implementation work to suitable subagents (Agent tool). The main session focuses on planning, coordination, and reviewing subagent results.
+
 ## Workflow
 
+- Only stage and commit files you actually changed — never commit unrelated or other agents' modifications.
 - Always commit after completing work. Don't wait to be asked.
 - Use conventional commit messages: `feat:`, `fix:`, `docs:`, `refactor:`
 - Verify your changes compile (`swift build`) before committing.
@@ -25,6 +30,17 @@ When adding a DB column in `Sources/TBDDaemon/Database/Database.swift`:
 4. All three changes in the same commit
 
 Migrations use GRDB's `DatabaseMigrator`, numbered sequentially (`v1`, `v2`, `v3`...). Never modify an existing migration — always add a new one.
+
+### Unbundled executable constraints
+TBDApp runs as a bare SPM executable, not a `.app` bundle. APIs that require a bundle identifier will crash at runtime. Before using any Apple framework API, check whether it requires a bundle:
+- `UNUserNotificationCenter.current()` — crashes without `CFBundleIdentifier`
+- `NSApp.applicationIconImage` — must be set *after* `setActivationPolicy(.regular)`
+- Any API that reads `Info.plist` keys — will return nil
+
+Guard these with `Bundle.main.bundleIdentifier != nil` checks.
+
+### NIO thread safety
+All `ChannelHandlerContext` property access (`context.channel`, `context.pipeline`) must happen on the channel's event loop. Accessing from any other thread triggers a precondition crash. Always wrap in `context.eventLoop.execute { ... }` — never use `context.channel.isActive` as a pre-check outside the event loop.
 
 ## Quick Reference
 
