@@ -2,6 +2,9 @@ import Foundation
 import UserNotifications
 import SwiftUI
 import TBDShared
+import os
+
+private let logger = Logger(subsystem: "com.tbd.app", category: "MacNotificationManager")
 
 @MainActor
 final class MacNotificationManager {
@@ -15,7 +18,7 @@ final class MacNotificationManager {
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, error in
             if let error {
-                print("[MacNotificationManager] Permission error: \(error)")
+                logger.error("Permission error: \(error)")
             }
         }
     }
@@ -47,7 +50,7 @@ final class MacNotificationManager {
 
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
-                print("[MacNotificationManager] Post error: \(error)")
+                logger.error("Post error: \(error)")
             }
         }
     }
