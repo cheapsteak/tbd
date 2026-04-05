@@ -486,6 +486,95 @@ actor DaemonClient {
         return result.status
     }
 
+    // MARK: - State Subscription
+
+    typealias DeltaHandler = @Sendable (StateDelta) -> Void
+
+    /// Open a persistent socket that receives state deltas from the daemon.
+    /// Runs in a loop until the socket disconnects or the task is cancelled.
+    func subscribe(onDelta: @escaping DeltaHandler) async {
+        guard FileManager.default.fileExists(atPath: socketPath) else { return }
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+
+        // Connect (same pattern as sendRaw)
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = socketPath.utf8CString
+        guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+            close(fd)
+            return
+        }
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dest in
+                for i in 0..<pathBytes.count {
+                    dest[i] = pathBytes[i]
+                }
+            }
+        }
+
+        let connectResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+
+        guard connectResult == 0 else {
+            close(fd)
+            return
+        }
+
+        // Send subscribe request
+        let request = RPCRequest(method: RPCMethod.stateSubscribe)
+        guard let requestData = try? JSONEncoder().encode(request) else {
+            close(fd)
+            return
+        }
+        var message = requestData
+        message.append(contentsOf: [0x0A])
+        let sent = message.withUnsafeBytes { buffer in
+            Darwin.send(fd, buffer.baseAddress!, buffer.count, 0)
+        }
+        guard sent == message.count else {
+            close(fd)
+            return
+        }
+
+        // Read loop
+        let bufferSize = 65536
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer {
+            buffer.deallocate()
+            close(fd)
+        }
+
+        var accumulated = Data()
+        let decoder = JSONDecoder()
+
+        while !Task.isCancelled {
+            let bytesRead = recv(fd, buffer, bufferSize, 0)
+            if bytesRead <= 0 { break }
+
+            accumulated.append(buffer, count: bytesRead)
+
+            while let newlineIndex = accumulated.firstIndex(of: 0x0A) {
+                let lineData = accumulated[accumulated.startIndex..<newlineIndex]
+                accumulated = accumulated[accumulated.index(after: newlineIndex)...]
+
+                // Skip the initial ack response (RPCResponse with success=true, no result)
+                if let response = try? decoder.decode(RPCResponse.self, from: Data(lineData)),
+                   response.success && response.result == nil {
+                    continue
+                }
+
+                if let delta = try? decoder.decode(StateDelta.self, from: Data(lineData)) {
+                    onDelta(delta)
+                }
+            }
+        }
+    }
+
     // MARK: - Notes
 
     /// Create a new note in a worktree.
