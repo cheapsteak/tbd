@@ -53,6 +53,36 @@ struct StateSubscriptionTests {
         #expect(liveReceived.count == 1)
     }
 
+    @Test("broadcast suppresses conductor worktree deltas")
+    func broadcastSuppressesConductorDeltas() {
+        let manager = StateSubscriptionManager()
+        let received = SendableBox<Data>()
+
+        manager.addSubscriber { data in
+            received.append(data)
+            return true
+        }
+
+        // Conductor worktree delta should be suppressed
+        let conductorWorktree = WorktreeDelta(
+            worktreeID: UUID(), repoID: UUID(), name: "conductor-test",
+            path: "/tmp/test", status: .conductor
+        )
+        manager.broadcast(delta: .worktreeCreated(conductorWorktree))
+        #expect(received.count == 0)
+
+        // Conductor terminal delta should be suppressed
+        let conductorTerminal = TerminalDelta(
+            terminalID: UUID(), worktreeID: UUID(), label: "conductor:main"
+        )
+        manager.broadcast(delta: .terminalCreated(conductorTerminal))
+        #expect(received.count == 0)
+
+        // Non-conductor delta should be delivered
+        manager.broadcast(delta: makeDelta())
+        #expect(received.count == 1)
+    }
+
     @Test("broadcast delivers to all live subscribers")
     func broadcastDeliversToAll() {
         let manager = StateSubscriptionManager()
