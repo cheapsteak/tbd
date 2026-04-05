@@ -105,6 +105,9 @@ struct RepoInstructionsView: View {
             guard initialized else { return }
             scheduleSave()
         }
+        .onDisappear {
+            saveTask?.cancel()
+        }
     }
 
     private func scheduleSave() {

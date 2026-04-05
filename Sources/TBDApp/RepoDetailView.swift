@@ -29,6 +29,7 @@ struct RepoDetailView: View {
                 ArchivedWorktreesView(repoID: repoID)
             case .instructions:
                 RepoInstructionsView(repoID: repoID)
+                    .id(repoID)
             }
         }
     }

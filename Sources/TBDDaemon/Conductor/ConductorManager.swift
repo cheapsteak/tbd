@@ -131,22 +131,17 @@ public final class ConductorManager: Sendable {
         let conductorDir = TBDConstants.conductorsDir.appendingPathComponent(name)
         var shellCommand = "claude --dangerously-skip-permissions"
 
-        // Inject TBD context + general instructions for single-repo conductors
+        // Inject TBD context + general instructions (single-repo only)
         let repoIDs = conductor.repos
+        let singleRepo: Repo?
         if repoIDs.count == 1, let repoIDStr = repoIDs.first, repoIDStr != "*",
-           let repoUUID = UUID(uuidString: repoIDStr),
-           let repo = try await db.repos.get(id: repoUUID) {
-            var parts = [SystemPromptBuilder.builtInTBDContext]
-            if let instructions = repo.customInstructions?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !instructions.isEmpty {
-                parts.append(instructions)
-            }
-            let combined = parts.joined(separator: "\n\n---\n\n")
-            shellCommand += " --append-system-prompt \(SystemPromptBuilder.shellEscape(combined))"
+           let repoUUID = UUID(uuidString: repoIDStr) {
+            singleRepo = try await db.repos.get(id: repoUUID)
         } else {
-            // Multi-repo or wildcard — just inject TBD context
-            shellCommand += " --append-system-prompt \(SystemPromptBuilder.shellEscape(SystemPromptBuilder.builtInTBDContext))"
+            singleRepo = nil
         }
+        let prompt = SystemPromptBuilder.buildForConductor(repo: singleRepo)
+        shellCommand += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
 
         try await tmux.ensureServer(
             server: TBDConstants.conductorsTmuxServer,
