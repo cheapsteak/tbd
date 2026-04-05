@@ -110,4 +110,24 @@ extension RPCRouter {
         let repos = try await db.repos.list()
         return try RPCResponse(result: repos)
     }
+
+    func handleRepoUpdateInstructions(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(RepoUpdateInstructionsParams.self, from: paramsData)
+
+        guard try await db.repos.get(id: params.repoID) != nil else {
+            return RPCResponse(error: "Repository not found: \(params.repoID)")
+        }
+
+        try await db.repos.updateInstructions(
+            id: params.repoID,
+            renamePrompt: params.renamePrompt,
+            customInstructions: params.customInstructions
+        )
+
+        guard let updated = try await db.repos.get(id: params.repoID) else {
+            return RPCResponse(error: "Repository not found after update: \(params.repoID)")
+        }
+
+        return try RPCResponse(result: updated)
+    }
 }
