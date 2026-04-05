@@ -10,11 +10,11 @@ final class ConductorHotkeyMonitor {
     func install(toggle: @escaping () -> Void) {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Opt+. : modifiers = option, keyCode 47 = period
+            // Opt+' : modifiers = option, keyCode 39 = apostrophe
             if event.modifierFlags.contains(.option),
                !event.modifierFlags.contains(.command),
                !event.modifierFlags.contains(.control),
-               event.keyCode == 47 {
+               event.keyCode == 39 {
                 toggle()
                 return nil  // consume the event
             }

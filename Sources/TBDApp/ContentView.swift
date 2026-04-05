@@ -9,6 +9,8 @@ struct ContentView: View {
     @AppStorage("autoSuspendClaude") private var autoSuspendClaude: Bool = true
     @State private var conductorHotkeyMonitor = ConductorHotkeyMonitor()
     @State private var contentAreaHeight: CGFloat = 600
+    /// Saved first responder to restore when conductor hides.
+    @State private var previousFirstResponder: NSResponder?
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
@@ -47,13 +49,14 @@ struct ContentView: View {
                     })
                     .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
                     .overlay(alignment: .top) {
-                        if appState.showConductor,
-                           let terminal = appState.currentConductorTerminal {
+                        if let terminal = appState.currentConductorTerminal {
                             ConductorOverlayView(
                                 terminal: terminal,
                                 tmuxServer: TBDConstants.conductorsTmuxServer,
                                 parentHeight: contentAreaHeight
                             )
+                            .opacity(appState.showConductor ? 1 : 0)
+                            .allowsHitTesting(appState.showConductor)
                         }
                     }
                 }
@@ -75,11 +78,7 @@ struct ContentView: View {
 
                     // Conductor toggle
                     Button {
-                        if appState.conductorActive {
-                            appState.showConductor.toggle()
-                        } else {
-                            Task { await appState.ensureConductorRunning() }
-                        }
+                        toggleConductor()
                     } label: {
                         Image(systemName: appState.conductorActive
                             ? (appState.showConductor ? "wand.and.stars" : "wand.and.stars.inverse")
@@ -87,8 +86,8 @@ struct ContentView: View {
                             .foregroundStyle(appState.showConductor ? .primary : .secondary)
                     }
                     .help(appState.conductorActive
-                        ? (appState.showConductor ? "Hide conductor (\u{2325}.)" : "Show conductor (\u{2325}.)")
-                        : "Start conductor (\u{2325}.)")
+                        ? (appState.showConductor ? "Hide conductor (\u{2325}')" : "Show conductor (\u{2325}')")
+                        : "Start conductor (\u{2325}')")
                     .contextMenu {
                         if appState.conductorActive, let conductor = appState.currentConductor {
                             Button("Stop Conductor") {
@@ -185,12 +184,29 @@ struct ContentView: View {
         .onAppear {
             conductorHotkeyMonitor.install { [weak appState] in
                 guard let appState else { return }
-                if appState.conductorActive {
-                    appState.showConductor.toggle()
-                } else {
-                    Task { await appState.ensureConductorRunning() }
-                }
+                toggleConductor()
             }
+        }
+    }
+
+    // MARK: - Conductor
+
+    private func toggleConductor() {
+        if appState.conductorActive {
+            if appState.showConductor {
+                // Hiding — restore previous focus
+                appState.showConductor = false
+                if let prev = previousFirstResponder {
+                    NSApp.keyWindow?.makeFirstResponder(prev)
+                    previousFirstResponder = nil
+                }
+            } else {
+                // Showing — save current focus
+                previousFirstResponder = NSApp.keyWindow?.firstResponder
+                appState.showConductor = true
+            }
+        } else {
+            Task { await appState.ensureConductorRunning() }
         }
     }
 

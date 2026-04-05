@@ -80,8 +80,8 @@ final class AppState: ObservableObject {
     @Published var conductorSuggestion: ConductorSuggestion? = nil
     /// Whether the conductor overlay is visible.
     @Published var showConductor: Bool = false
-    /// Conductor overlay height — persisted.
-    @Published var conductorHeight: CGFloat = 300 {
+    /// Conductor overlay height — persisted. 0 means "use default (50% of parent)".
+    @Published var conductorHeight: CGFloat = 0 {
         didSet { UserDefaults.standard.set(Double(conductorHeight), forKey: Self.conductorHeightKey) }
     }
     /// Remembers selected tab index per worktree so switching back restores the tab.
@@ -501,6 +501,11 @@ final class AppState: ObservableObject {
         do {
             let conductors = try await daemonClient.listConductors()
 
+            // Fetch all terminals to find conductor terminals (conductor worktrees
+            // are excluded from worktree.list, so self.terminals doesn't contain them)
+            let allTerminals = try await daemonClient.listTerminals()
+            let terminalsById = Dictionary(allTerminals.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+
             // Build conductorsByRepo: expand ["*"] conductors across all repo IDs
             var byRepo: [UUID: Conductor] = [:]
             var termByRepo: [UUID: Terminal] = [:]
@@ -516,10 +521,8 @@ final class AppState: ObservableObject {
                 for repoID in matchingRepoIDs {
                     if byRepo[repoID] == nil {  // first match wins
                         byRepo[repoID] = conductor
-                        // Find the conductor's terminal in the terminals dict
                         if let termID = conductor.terminalID,
-                           let wtID = conductor.worktreeID,
-                           let term = terminals[wtID]?.first(where: { $0.id == termID }) {
+                           let term = terminalsById[termID] {
                             termByRepo[repoID] = term
                         }
                     }
