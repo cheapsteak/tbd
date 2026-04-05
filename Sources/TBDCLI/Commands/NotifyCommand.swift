@@ -38,6 +38,9 @@ struct NotifyCommand: AsyncParsableCommand {
                 return
             }
             worktreeID = id
+        } else if let envID = ProcessInfo.processInfo.environment["TBD_WORKTREE_ID"],
+                  let id = UUID(uuidString: envID) {
+            worktreeID = id
         } else {
             // Try to resolve from PWD; exit silently if not in a worktree
             do {

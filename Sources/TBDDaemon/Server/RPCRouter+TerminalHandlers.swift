@@ -49,7 +49,8 @@ extension RPCRouter {
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
-            shellCommand: shellCommand
+            shellCommand: shellCommand,
+            env: ["TBD_WORKTREE_ID": params.worktreeID.uuidString]
         )
 
         let terminal = try await db.terminals.create(
