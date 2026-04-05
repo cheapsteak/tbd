@@ -37,6 +37,7 @@ struct RepoSectionView: View {
     var worktrees: [Worktree] {
         (appState.worktrees[repo.id] ?? [])
             .filter { $0.status == .active || $0.status == .creating }
+            .sorted { $0.sortOrder < $1.sortOrder }
     }
 
     var body: some View {
@@ -78,6 +79,9 @@ struct RepoSectionView: View {
                 WorktreeRowView(worktree: worktree)
                     .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 0))
                     .tag(worktree.id)
+            }
+            .onMove { source, destination in
+                appState.reorderWorktrees(repoID: repo.id, fromOffsets: source, toOffset: destination)
             }
         }
     }

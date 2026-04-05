@@ -18,6 +18,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var archivedAt: Date?
     var tmuxServer: String
     var archivedClaudeSessions: String?
+    var sortOrder: Int
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -31,6 +32,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.createdAt = wt.createdAt
         self.archivedAt = wt.archivedAt
         self.tmuxServer = wt.tmuxServer
+        self.sortOrder = wt.sortOrder
         if let sessions = wt.archivedClaudeSessions {
             self.archivedClaudeSessions = try? String(
                 data: JSONEncoder().encode(sessions), encoding: .utf8)
@@ -55,7 +57,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             createdAt: createdAt,
             archivedAt: archivedAt,
             tmuxServer: tmuxServer,
-            archivedClaudeSessions: sessions
+            archivedClaudeSessions: sessions,
+            sortOrder: sortOrder
         )
     }
 }
@@ -69,6 +72,7 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Create a new worktree. The displayName defaults to the name.
+    /// Automatically assigns sortOrder = max(sortOrder) + 1 for the repo.
     public func create(
         repoID: UUID,
         name: String,
@@ -77,20 +81,26 @@ public struct WorktreeStore: Sendable {
         tmuxServer: String,
         status: WorktreeStatus = .active
     ) async throws -> Worktree {
-        let wt = Worktree(
-            repoID: repoID,
-            name: name,
-            displayName: name,
-            branch: branch,
-            path: path,
-            status: status,
-            tmuxServer: tmuxServer
-        )
-        let record = WorktreeRecord(from: wt)
         try await writer.write { db in
+            let maxOrder = try Int.fetchOne(
+                db,
+                sql: "SELECT MAX(sortOrder) FROM worktree WHERE repoID = ?",
+                arguments: [repoID.uuidString]
+            ) ?? 0
+            let wt = Worktree(
+                repoID: repoID,
+                name: name,
+                displayName: name,
+                branch: branch,
+                path: path,
+                status: status,
+                tmuxServer: tmuxServer,
+                sortOrder: maxOrder + 1
+            )
+            let record = WorktreeRecord(from: wt)
             try record.insert(db)
+            return wt
         }
-        return wt
     }
 
     /// Update a worktree's status.
@@ -148,7 +158,7 @@ public struct WorktreeStore: Sendable {
                 // Exclude conductor worktrees from default listing
                 request = request.filter(Column("status") != WorktreeStatus.conductor.rawValue)
             }
-            return try request.fetchAll(db).map { $0.toModel() }
+            return try request.order(Column("sortOrder").asc).fetchAll(db).map { $0.toModel() }
         }
     }
 
@@ -251,6 +261,30 @@ public struct WorktreeStore: Sendable {
                 .filter(Column("path") == path)
                 .fetchOne(db)?
                 .toModel()
+        }
+    }
+
+    /// Reorder worktrees within a repo. The worktreeIDs array defines the new order.
+    /// Worktrees not in the array are pushed to sortOrder values after the provided list.
+    public func reorder(repoID: UUID, worktreeIDs: [UUID]) async throws {
+        try await writer.write { db in
+            for (index, wtID) in worktreeIDs.enumerated() {
+                try db.execute(
+                    sql: "UPDATE worktree SET sortOrder = ? WHERE id = ? AND repoID = ?",
+                    arguments: [index, wtID.uuidString, repoID.uuidString]
+                )
+            }
+            // Push any worktrees not in the provided list to after the reordered ones
+            let idStrings = worktreeIDs.map(\.uuidString)
+            let placeholders = idStrings.map { _ in "?" }.joined(separator: ",")
+            let args: [any DatabaseValueConvertible] = [worktreeIDs.count, repoID.uuidString] + idStrings
+            try db.execute(
+                sql: """
+                    UPDATE worktree SET sortOrder = ? + rowid
+                    WHERE repoID = ? AND status IN ('active', 'creating') AND id NOT IN (\(placeholders))
+                    """,
+                arguments: StatementArguments(args)
+            )
         }
     }
 

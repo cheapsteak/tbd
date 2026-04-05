@@ -350,6 +350,14 @@ actor DaemonClient {
         )
     }
 
+    /// Reorder worktrees within a repo.
+    func reorderWorktrees(repoID: UUID, worktreeIDs: [UUID]) throws {
+        try callVoid(
+            method: RPCMethod.worktreeReorder,
+            params: WorktreeReorderParams(repoID: repoID, worktreeIDs: worktreeIDs)
+        )
+    }
+
     /// Set or clear the pin on a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) throws {
         try callVoid(
