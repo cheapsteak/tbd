@@ -492,7 +492,7 @@ actor DaemonClient {
 
     /// Open a persistent socket that receives state deltas from the daemon.
     /// Runs in a loop until the socket disconnects or the task is cancelled.
-    func subscribe(onDelta: @escaping DeltaHandler) async {
+    nonisolated func subscribe(onDelta: @escaping DeltaHandler) async {
         guard FileManager.default.fileExists(atPath: socketPath) else { return }
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
