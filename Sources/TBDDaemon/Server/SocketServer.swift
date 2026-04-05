@@ -165,6 +165,56 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
     private static func processLine(_ line: String, router: RPCRouter, wrappedCtx: SendableContext) async {
         guard let data = line.data(using: .utf8) else { return }
 
+        // Check for state.subscribe — handle as a streaming subscription
+        if let request = try? JSONDecoder().decode(RPCRequest.self, from: data),
+           request.method == RPCMethod.stateSubscribe {
+            let sendableCtx = wrappedCtx
+
+            // Register subscriber; callback streams deltas as newline-delimited JSON
+            let subID = router.registerSubscription { deltaData in
+                let context = sendableCtx.context
+                // Quick pre-check (thread-safe)
+                guard context.channel.isActive else { return false }
+
+                // Actual write must happen on the event loop
+                context.eventLoop.execute {
+                    guard context.channel.isActive else { return }
+                    guard let deltaString = String(data: deltaData, encoding: .utf8) else { return }
+                    var outBuffer = context.channel.allocator.buffer(capacity: deltaString.utf8.count + 1)
+                    outBuffer.writeString(deltaString)
+                    outBuffer.writeString("\n")
+                    context.writeAndFlush(Self.wrapOutboundOut(outBuffer), promise: nil)
+                }
+
+                // Always return true as long as channel appears active;
+                // closeFuture handler will do definitive cleanup
+                return true
+            }
+
+            // Clean up subscription when the channel closes
+            let context = sendableCtx.context
+            context.channel.closeFuture.whenComplete { _ in
+                router.removeSubscription(id: subID)
+            }
+
+            // Send initial ack so the client knows subscription is active
+            let ack = RPCResponse.ok()
+            if let ackData = try? JSONEncoder().encode(ack),
+               let ackString = String(data: ackData, encoding: .utf8) {
+                context.eventLoop.execute {
+                    guard context.channel.isActive else { return }
+                    var outBuffer = context.channel.allocator.buffer(capacity: ackString.utf8.count + 1)
+                    outBuffer.writeString(ackString)
+                    outBuffer.writeString("\n")
+                    context.writeAndFlush(Self.wrapOutboundOut(outBuffer), promise: nil)
+                }
+            }
+
+            // Return WITHOUT closing — this is a long-lived streaming connection
+            return
+        }
+
+        // Normal (non-subscribe) request path
         let response = await router.handleRaw(data)
 
         do {
