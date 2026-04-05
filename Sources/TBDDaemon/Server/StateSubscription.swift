@@ -119,7 +119,8 @@ public final class StateSubscriptionManager: @unchecked Sendable {
     public typealias SubscriberID = UUID
 
     /// Callback that receives encoded delta JSON data.
-    public typealias SubscriberCallback = @Sendable (Data) -> Void
+    /// Returns `true` if the subscriber is still alive, `false` to unsubscribe.
+    public typealias SubscriberCallback = @Sendable (Data) -> Bool
 
     private let lock = NSLock()
     private var subscribers: [SubscriberID: SubscriberCallback] = [:]
@@ -173,8 +174,20 @@ public final class StateSubscriptionManager: @unchecked Sendable {
         let currentSubscribers = subscribers
         lock.unlock()
 
-        for (_, callback) in currentSubscribers {
-            callback(data)
+        var deadIDs = [SubscriberID]()
+        for (id, callback) in currentSubscribers {
+            let alive = callback(data)
+            if !alive {
+                deadIDs.append(id)
+            }
+        }
+
+        if !deadIDs.isEmpty {
+            lock.lock()
+            for id in deadIDs {
+                subscribers.removeValue(forKey: id)
+            }
+            lock.unlock()
         }
     }
 }
