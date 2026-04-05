@@ -133,12 +133,13 @@ struct RepoInstructionsView: View {
                 ? nil
                 : customInstructionsDraft
 
-            await appState.updateRepoInstructions(
+            let success = await appState.updateRepoInstructions(
                 repoID: repoID,
                 renamePrompt: renameToSave,
                 customInstructions: instructionsToSave
             )
 
+            guard success else { return }
             withAnimation(.easeInOut(duration: 0.3)) { showSaved = true }
             try? await Task.sleep(for: .seconds(2))
             withAnimation(.easeInOut(duration: 0.3)) { showSaved = false }

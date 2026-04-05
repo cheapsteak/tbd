@@ -31,16 +31,19 @@ extension AppState {
         }
     }
 
-    /// Update per-repo instruction fields.
-    func updateRepoInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async {
+    /// Update per-repo instruction fields. Returns true on success.
+    @discardableResult
+    func updateRepoInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async -> Bool {
         do {
             _ = try await daemonClient.repoUpdateInstructions(
                 repoID: repoID, renamePrompt: renamePrompt, customInstructions: customInstructions
             )
             await refreshRepos()
+            return true
         } catch {
             logger.error("Failed to update instructions: \(error)")
             handleConnectionError(error)
+            return false
         }
     }
 }
