@@ -126,10 +126,30 @@ extension AppState {
 
     // MARK: - Keyboard Shortcut Actions
 
-    /// All worktrees in sidebar order (sorted by repo, then by creation date).
+    /// Reorder worktrees within a repo. Updates locally first (optimistic), then persists via RPC.
+    func reorderWorktrees(repoID: UUID, fromOffsets source: IndexSet, toOffset destination: Int) {
+        guard var repoWorktrees = worktrees[repoID]?.filter({ $0.status == .active || $0.status == .creating }) else { return }
+        repoWorktrees.move(fromOffsets: source, toOffset: destination)
+
+        // Rebuild the full array: keep main/other statuses in place, replace active/creating with reordered
+        let others = (worktrees[repoID] ?? []).filter { $0.status != .active && $0.status != .creating }
+        worktrees[repoID] = others + repoWorktrees
+
+        // Persist via RPC
+        let worktreeIDs = repoWorktrees.map(\.id)
+        Task {
+            do {
+                try await daemonClient.reorderWorktrees(repoID: repoID, worktreeIDs: worktreeIDs)
+            } catch {
+                logger.error("Failed to reorder worktrees: \(error)")
+            }
+        }
+    }
+
+    /// All worktrees in sidebar order (sorted by repo, then by sortOrder).
     var allWorktreesOrdered: [Worktree] {
         repos.flatMap { repo in
-            (worktrees[repo.id] ?? []).sorted { $0.createdAt < $1.createdAt }
+            (worktrees[repo.id] ?? []).sorted { $0.sortOrder < $1.sortOrder }
         }
     }
 

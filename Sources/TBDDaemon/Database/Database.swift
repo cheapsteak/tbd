@@ -181,6 +181,14 @@ public final class TBDDatabase: Sendable {
             )
         }
 
+        migrator.registerMigration("v11") { db in
+            try db.alter(table: "worktree") { t in
+                t.add(column: "sortOrder", .integer).notNull().defaults(to: 0)
+            }
+            // Initialize sortOrder from rowid to preserve insertion order
+            try db.execute(sql: "UPDATE worktree SET sortOrder = rowid")
+        }
+
         try migrator.migrate(writer)
     }
 }

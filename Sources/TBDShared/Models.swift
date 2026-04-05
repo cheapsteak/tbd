@@ -36,12 +36,13 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var archivedAt: Date?
     public var tmuxServer: String
     public var archivedClaudeSessions: [String]?
+    public var sortOrder: Int = 0
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
                 hasConflicts: Bool = false,
                 createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String,
-                archivedClaudeSessions: [String]? = nil) {
+                archivedClaudeSessions: [String]? = nil, sortOrder: Int = 0) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -54,6 +55,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.archivedAt = archivedAt
         self.tmuxServer = tmuxServer
         self.archivedClaudeSessions = archivedClaudeSessions
+        self.sortOrder = sortOrder
     }
 
     public init(from decoder: Decoder) throws {
@@ -70,6 +72,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
         tmuxServer = try c.decode(String.self, forKey: .tmuxServer)
         archivedClaudeSessions = try c.decodeIfPresent([String].self, forKey: .archivedClaudeSessions)
+        sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
     }
 }
 
