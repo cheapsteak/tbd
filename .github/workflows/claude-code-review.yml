@@ -13,7 +13,8 @@ jobs:
     if: >-
       github.event.pull_request.draft != true &&
       (github.event.pull_request.head.repo.full_name == github.repository ||
-      contains(github.event.pull_request.labels.*.name, 'agent-review'))
+      contains(github.event.pull_request.labels.*.name, 'agent-review')) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'agent-review')
 
     runs-on: ubuntu-latest
     permissions:
@@ -56,7 +57,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           show_full_output: true
           use_sticky_comment: true
-          track_progress: true
+          track_progress: ${{ github.event.action != 'labeled' }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: |
