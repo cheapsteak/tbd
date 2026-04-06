@@ -14,9 +14,10 @@ extension RPCRouter {
         // Phase 2: Fire-and-forget — git operations + tmux setup in background
         let lifecycle = self.lifecycle
         let subs = self.subscriptions
+        let initialPrompt = params.prompt
         Task.detached {
             do {
-                try await lifecycle.completeCreateWorktree(worktreeID: pending.id)
+                try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt)
                 // Broadcast the completed worktree
                 subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
                     worktreeID: pending.id, repoID: pending.repoID,

@@ -8,9 +8,9 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, name: String? = nil, skipClaude: Bool = false) async throws -> Worktree {
+    public func createWorktree(repoID: UUID, name: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil) async throws -> Worktree {
         let pending = try await beginCreateWorktree(repoID: repoID, name: name, skipClaude: skipClaude)
-        try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude)
+        try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt)
         guard let completed = try await db.worktrees.get(id: pending.id) else {
             throw WorktreeLifecycleError.worktreeNotFound(pending.id)
         }
@@ -50,7 +50,7 @@ extension WorktreeLifecycle {
 
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
     /// then updates status to `.active`. On failure, deletes the DB row.
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false) async throws {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil) async throws {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -91,7 +91,8 @@ extension WorktreeLifecycle {
             try await setupTerminals(
                 worktree: worktree, repo: repo,
                 worktreePath: result.path,
-                skipClaude: skipClaude
+                skipClaude: skipClaude,
+                initialPrompt: initialPrompt
             )
 
             // 6. Update status to active
@@ -176,7 +177,8 @@ extension WorktreeLifecycle {
     func setupTerminals(
         worktree: Worktree, repo: Repo,
         worktreePath: String? = nil, skipClaude: Bool,
-        archivedClaudeSessions: [String]? = nil
+        archivedClaudeSessions: [String]? = nil,
+        initialPrompt: String? = nil
     ) async throws {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
@@ -203,6 +205,11 @@ extension WorktreeLifecycle {
             let isResume = archivedClaudeSessions?.first != nil
             if let prompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: isResume) {
                 cmd += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
+            }
+
+            // Pass initial prompt as positional arg (only for fresh sessions, not resumes)
+            if !isResume, let initialPrompt, !initialPrompt.isEmpty {
+                cmd += " \(SystemPromptBuilder.shellEscape(initialPrompt))"
             }
 
             claudeCommand = cmd

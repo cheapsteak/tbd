@@ -177,7 +177,11 @@ public struct RepoUpdateInstructionsParams: Codable, Sendable {
 public struct WorktreeCreateParams: Codable, Sendable {
     public let repoID: UUID
     public let name: String?
-    public init(repoID: UUID, name: String? = nil) { self.repoID = repoID; self.name = name }
+    /// Optional initial prompt to pass to the auto-created default Claude session.
+    public let prompt: String?
+    public init(repoID: UUID, name: String? = nil, prompt: String? = nil) {
+        self.repoID = repoID; self.name = name; self.prompt = prompt
+    }
 }
 
 public struct WorktreeListParams: Codable, Sendable {

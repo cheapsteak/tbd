@@ -27,6 +27,9 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Repository path or ID")
     var repo: String?
 
+    @Option(name: .long, help: "Initial prompt to send to the auto-created default Claude session")
+    var prompt: String?
+
     @Flag(name: .long, help: "Return immediately without waiting for the worktree to become active")
     var noWait = false
 
@@ -52,7 +55,7 @@ struct WorktreeCreate: AsyncParsableCommand {
 
         let pending: Worktree = try client.call(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID),
+            params: WorktreeCreateParams(repoID: repoID, prompt: prompt),
             resultType: Worktree.self
         )
 
