@@ -72,6 +72,11 @@ public struct TmuxManager: Sendable {
         ["-L", server, "send-keys", "-l", "-t", paneID, text]
     }
 
+    /// Send a tmux key name (e.g. "Enter", "Escape") without the -l (literal) flag.
+    public static func sendKeyCommand(server: String, paneID: String, key: String) -> [String] {
+        ["-L", server, "send-keys", "-t", paneID, key]
+    }
+
     public static func listWindowsCommand(server: String, session: String) -> [String] {
         ["-L", server, "list-windows", "-t", session, "-F", "#{window_id} #{pane_id}"]
     }
@@ -163,6 +168,12 @@ public struct TmuxManager: Sendable {
     public func sendKeys(server: String, paneID: String, text: String) async throws {
         if dryRun { return }
         let args = Self.sendKeysCommand(server: server, paneID: paneID, text: text)
+        try await runTmux(args)
+    }
+
+    public func sendKey(server: String, paneID: String, key: String) async throws {
+        if dryRun { return }
+        let args = Self.sendKeyCommand(server: server, paneID: paneID, key: key)
         try await runTmux(args)
     }
 

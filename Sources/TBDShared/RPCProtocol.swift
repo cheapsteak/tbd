@@ -241,8 +241,10 @@ public struct TerminalListParams: Codable, Sendable {
 public struct TerminalSendParams: Codable, Sendable {
     public let terminalID: UUID
     public let text: String
-    public init(terminalID: UUID, text: String) {
-        self.terminalID = terminalID; self.text = text
+    /// When true, sends an Enter keypress after the text to submit it.
+    public let submit: Bool?
+    public init(terminalID: UUID, text: String, submit: Bool? = nil) {
+        self.terminalID = terminalID; self.text = text; self.submit = submit
     }
 }
 

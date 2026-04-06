@@ -119,6 +119,9 @@ struct TerminalSend: AsyncParsableCommand {
     @Option(name: .long, help: "Text to send")
     var text: String
 
+    @Flag(name: .long, help: "Press Enter after sending text")
+    var submit = false
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
@@ -130,7 +133,7 @@ struct TerminalSend: AsyncParsableCommand {
         let client = SocketClient()
         try client.callVoid(
             method: RPCMethod.terminalSend,
-            params: TerminalSendParams(terminalID: terminalID, text: text)
+            params: TerminalSendParams(terminalID: terminalID, text: text, submit: submit ? true : nil)
         )
 
         if json {

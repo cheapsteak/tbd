@@ -299,6 +299,14 @@ extension RPCRouter {
             text: params.text
         )
 
+        if params.submit == true {
+            try await tmux.sendKey(
+                server: worktree.tmuxServer,
+                paneID: terminal.tmuxPaneID,
+                key: "Enter"
+            )
+        }
+
         return .ok()
     }
 
