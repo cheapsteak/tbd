@@ -31,6 +31,9 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Terminal type (shell or claude)")
     var type: TerminalCreateType?
 
+    @Option(name: .long, help: "Initial prompt to send to the Claude session (requires --type claude)")
+    var prompt: String?
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
@@ -40,7 +43,7 @@ struct TerminalCreate: AsyncParsableCommand {
 
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: prompt),
             resultType: Terminal.self
         )
 

@@ -48,6 +48,11 @@ extension RPCRouter {
                 cmd += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
             }
 
+            // Pass initial prompt as positional arg (starts interactive session with this message)
+            if let initialPrompt = params.prompt, !initialPrompt.isEmpty {
+                cmd += " \(SystemPromptBuilder.shellEscape(initialPrompt))"
+            }
+
             shellCommand = cmd
             label = "Claude Code"
         } else if let cmd = params.cmd {

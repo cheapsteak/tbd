@@ -31,16 +31,14 @@ enum SystemPromptBuilder {
         - TBD_PROMPT_RENAME — Worktree rename prompt (set if worktree hasn't been renamed yet)
 
         Spawning a new Claude tab in the current worktree:
-          tbd terminal create "$TBD_WORKTREE_ID" --type claude --json
-          # then send it a task:
-          tbd terminal send --terminal <id-from-json> --text "your task here" --submit
-
-        Spawning a new Claude tab with a custom command (env vars expand in the new shell):
-          tbd terminal create "$TBD_WORKTREE_ID" --cmd 'claude --prompt "your task" --append-system-prompt "$TBD_PROMPT_CONTEXT"'
+          tbd terminal create "$TBD_WORKTREE_ID" --type claude --prompt "your task here"
 
         Creating a new worktree with its own Claude tab:
           WORKTREE=$(tbd worktree create --json | jq -r '.id')
-          tbd terminal create "$WORKTREE" --type claude --json
+          tbd terminal create "$WORKTREE" --type claude --prompt "your task here"
+
+        Using --cmd for full control (env vars expand in the new shell):
+          tbd terminal create "$TBD_WORKTREE_ID" --cmd 'claude --append-system-prompt "$TBD_PROMPT_CONTEXT"'
         """
 
     /// Returns the individual prompt layers as env-var-name → value pairs.
