@@ -161,6 +161,7 @@ private struct TabBarItem: View {
     @State private var isHovering = false
     @State private var isHoveringClose = false
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
+    @EnvironmentObject private var appState: AppState
 
     private var showClose: Bool {
         isSelected || isHovering
@@ -246,9 +247,63 @@ private struct TabBarItem: View {
         }
     }
 
+    private func formatPct(_ value: Double?) -> String? {
+        guard let value else { return nil }
+        return "\(Int(value.rounded()))%"
+    }
+
+    private func formatTokenHeader(_ tokenID: UUID?) -> String {
+        guard let tokenID else { return "Token: Default (logged in)" }
+        guard let entry = appState.claudeTokens.first(where: { $0.token.id == tokenID }) else {
+            return "Token: (missing)"
+        }
+        if let usage = entry.usage,
+           let fiveH = formatPct(usage.fiveHourPct),
+           let sevenD = formatPct(usage.sevenDayPct) {
+            return "Token: \(entry.token.name) · 5h \(fiveH) · 7d \(sevenD)"
+        }
+        return "Token: \(entry.token.name)"
+    }
+
+    private func formatTokenSubmenuLabel(_ entry: ClaudeTokenWithUsage) -> String {
+        if let usage = entry.usage,
+           let fiveH = formatPct(usage.fiveHourPct),
+           let sevenD = formatPct(usage.sevenDayPct) {
+            return "\(entry.token.name)  5h \(fiveH) · 7d \(sevenD)"
+        }
+        return entry.token.name
+    }
+
     @ViewBuilder
     private var contextMenuContent: some View {
         if isClaudeTerminal {
+            Button(formatTokenHeader(terminal?.claudeTokenID)) {}
+                .disabled(true)
+
+            Menu("Swap token") {
+                Button {
+                    guard let terminalID = terminal?.id else { return }
+                    Task { await appState.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: nil) }
+                } label: {
+                    let prefix = terminal?.claudeTokenID == nil ? "● " : "  "
+                    Text("\(prefix)Default (logged in)")
+                }
+
+                Divider()
+
+                ForEach(appState.claudeTokens, id: \.token.id) { entry in
+                    Button {
+                        guard let terminalID = terminal?.id else { return }
+                        Task { await appState.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: entry.token.id) }
+                    } label: {
+                        let prefix = terminal?.claudeTokenID == entry.token.id ? "● " : "  "
+                        Text("\(prefix)\(formatTokenSubmenuLabel(entry))")
+                    }
+                }
+            }
+
+            Divider()
+
             Button(action: onFork) {
                 Label("Fork Session", systemImage: "arrow.triangle.branch")
             }
