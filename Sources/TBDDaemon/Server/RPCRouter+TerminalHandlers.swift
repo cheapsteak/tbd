@@ -24,18 +24,8 @@ extension RPCRouter {
         let repo = try await db.repos.get(id: worktree.repoID)
 
         // Build env vars available in all TBD terminals
-        var env: [String: String] = ["TBD_WORKTREE_ID": params.worktreeID.uuidString]
-        env["TBD_PROMPT_CONTEXT"] = SystemPromptBuilder.builtInTBDContext
-        if worktree.displayName == worktree.name {
-            let renamePrompt = repo?.renamePrompt ?? SystemPromptBuilder.defaultRenamePrompt
-            if !renamePrompt.isEmpty {
-                env["TBD_PROMPT_RENAME"] = renamePrompt
-            }
-        }
-        if let instructions = repo?.customInstructions?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !instructions.isEmpty {
-            env["TBD_PROMPT_INSTRUCTIONS"] = instructions
-        }
+        var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
+        env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
 
         let isClaudeType = params.type == .claude || params.resumeSessionID != nil
         let claudeSessionID: String?

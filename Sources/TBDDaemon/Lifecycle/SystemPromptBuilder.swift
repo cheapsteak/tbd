@@ -28,33 +28,46 @@ enum SystemPromptBuilder {
         - TBD_PROMPT_INSTRUCTIONS — Per-repo custom instructions (set if configured)
         - TBD_PROMPT_RENAME — Worktree rename prompt (set if worktree hasn't been renamed yet)
 
-        To spawn a new Claude session tab with a custom prompt:
-          tbd terminal create "$TBD_WORKTREE_ID" --cmd "claude --prompt 'your task here' --append-system-prompt \\"$TBD_PROMPT_CONTEXT\\""
+        To create a new Claude session tab with a custom prompt, use --cmd.
+        The TBD_PROMPT_* env vars are set in the spawned terminal, so reference
+        them with single-dollar signs (no escaping needed):
+          tbd terminal create "$TBD_WORKTREE_ID" --cmd 'claude --prompt "your task" --append-system-prompt "$TBD_PROMPT_CONTEXT"'
         """
+
+    /// Returns the individual prompt layers as env-var-name → value pairs.
+    /// Used both to set env vars in terminals and to build the combined `--append-system-prompt`.
+    static func promptLayers(repo: Repo?, worktree: Worktree) -> [String: String] {
+        var layers: [String: String] = [:]
+
+        layers["TBD_PROMPT_CONTEXT"] = builtInTBDContext
+
+        if worktree.displayName == worktree.name {
+            let renamePrompt = repo?.renamePrompt ?? defaultRenamePrompt
+            if !renamePrompt.isEmpty {
+                layers["TBD_PROMPT_RENAME"] = renamePrompt
+            }
+        }
+
+        if let instructions = repo?.customInstructions?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !instructions.isEmpty {
+            layers["TBD_PROMPT_INSTRUCTIONS"] = instructions
+        }
+
+        return layers
+    }
 
     /// Build the combined system prompt for a Claude session.
     /// Returns nil if there's nothing to append (e.g., resume session).
     static func build(repo: Repo, worktree: Worktree, isResume: Bool) -> String? {
         if isResume { return nil }
 
+        let layers = promptLayers(repo: repo, worktree: worktree)
         var parts: [String] = []
 
-        // Layer 1: Rename prompt (conditional on worktree not yet renamed)
-        if worktree.displayName == worktree.name {
-            let renamePrompt = repo.renamePrompt ?? defaultRenamePrompt
-            if !renamePrompt.isEmpty {
-                parts.append(renamePrompt)
-            }
-        }
-
-        // Layer 2: Built-in TBD context (always)
+        // Order: rename prompt, TBD context, custom instructions
+        if let rename = layers["TBD_PROMPT_RENAME"] { parts.append(rename) }
         parts.append(builtInTBDContext)
-
-        // Layer 3: User general instructions (if set)
-        if let instructions = repo.customInstructions?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !instructions.isEmpty {
-            parts.append(instructions)
-        }
+        if let instructions = layers["TBD_PROMPT_INSTRUCTIONS"] { parts.append(instructions) }
 
         return parts.isEmpty ? nil : parts.joined(separator: "\n\n---\n\n")
     }
