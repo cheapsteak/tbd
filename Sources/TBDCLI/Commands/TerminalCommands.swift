@@ -24,6 +24,9 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Command to run in the terminal")
     var cmd: String?
 
+    @Option(name: .long, help: "Terminal type: shell or claude")
+    var type: String?
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
@@ -31,9 +34,17 @@ struct TerminalCreate: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
 
+        var createType: TerminalCreateType?
+        if let type {
+            guard let parsed = TerminalCreateType(rawValue: type) else {
+                throw CLIError.invalidArgument("Invalid terminal type: \(type). Must be 'shell' or 'claude'.")
+            }
+            createType = parsed
+        }
+
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: createType),
             resultType: Terminal.self
         )
 
