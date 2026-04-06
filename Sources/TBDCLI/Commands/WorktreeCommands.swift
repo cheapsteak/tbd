@@ -21,11 +21,14 @@ struct WorktreeCommand: ParsableCommand {
 struct WorktreeCreate: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a new worktree"
+        abstract: "Create a new worktree (waits for git setup to complete)"
     )
 
     @Option(name: .long, help: "Repository path or ID")
     var repo: String?
+
+    @Flag(name: .long, help: "Return immediately without waiting for the worktree to become active")
+    var noWait = false
 
     @Flag(name: .long, help: "Output JSON")
     var json = false
@@ -47,11 +50,21 @@ struct WorktreeCreate: AsyncParsableCommand {
             repoID = try resolver.resolveRepoID()
         }
 
-        let worktree: Worktree = try client.call(
+        let pending: Worktree = try client.call(
             method: RPCMethod.worktreeCreate,
             params: WorktreeCreateParams(repoID: repoID),
             resultType: Worktree.self
         )
+
+        // Poll until the worktree is active (git setup finished) or fails (deleted).
+        // The daemon's worktree create returns immediately with status = .creating
+        // while git operations + tmux setup run in a detached background task.
+        let worktree: Worktree
+        if noWait {
+            worktree = pending
+        } else {
+            worktree = try waitForActive(pending: pending, client: client)
+        }
 
         if json {
             printJSON(worktree)
@@ -61,6 +74,28 @@ struct WorktreeCreate: AsyncParsableCommand {
             print("  Branch: \(worktree.branch)")
             print("  Path:   \(worktree.path)")
         }
+    }
+
+    private func waitForActive(pending: Worktree, client: SocketClient) throws -> Worktree {
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline {
+            let worktrees: [Worktree] = try client.call(
+                method: RPCMethod.worktreeList,
+                params: WorktreeListParams(repoID: pending.repoID),
+                resultType: [Worktree].self
+            )
+            if let updated = worktrees.first(where: { $0.id == pending.id }) {
+                if updated.status == .active || updated.status == .main {
+                    return updated
+                }
+                // Still .creating — keep polling
+            } else {
+                // Worktree disappeared from the list — creation failed and DB row was deleted
+                throw CLIError.invalidArgument("Worktree creation failed (see daemon logs)")
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        throw CLIError.invalidArgument("Timed out waiting for worktree to become active")
     }
 }
 
