@@ -39,8 +39,8 @@ deleted an hour later.
 
 | Level     | When to use                                                                                                              | Visible by default? |
 |-----------|--------------------------------------------------------------------------------------------------------------------------|---------------------|
-| `.debug`  | Per-event traces: "received X", "computed Y", "about to call Z". The stuff you'd `print()` during a bug hunt.            | No                  |
-| `.info`   | Lifecycle milestones inside a subsystem: "tmux server started", "resolved ssh agent at /tmp/...", "loaded N worktrees".  | No                  |
+| `.debug`  | Per-event traces: "received X", "computed Y", "about to call Z". The stuff you'd `print()` during a bug hunt.            | No (ring buffer only — see below) |
+| `.info`   | Lifecycle milestones inside a subsystem: "tmux server started", "resolved ssh agent at /tmp/...", "loaded N worktrees".  | No (briefly retained)             |
 | `.notice` | Things a user-facing operator should see in Console.app without filtering: startup, shutdown, config changes, migrations.| **Yes** (default)   |
 | `.error`  | Recoverable failures. The operation didn't happen but the process is fine.                                               | Yes                 |
 | `.fault`  | Invariants violated, programmer errors, "this should never happen". Pair with `assertionFailure` in debug builds.        | Yes                 |
@@ -48,6 +48,47 @@ deleted an hour later.
 The promise to ourselves: **default log stream = `.notice` and up only.** If
 you're tempted to demote a `.notice` because it's noisy, that means it should
 have been `.info` from the start.
+
+Note on persistence: only `.notice` and above are persisted to disk by default.
+`.info` is retained briefly. `.debug` lives in an in-memory ring buffer and is
+**not** persisted unless either (a) a `log stream` subscriber is active, or
+(b) you've raised the subsystem's persistence with `log config` (see Streaming
+Recipes). This affects the "reproduce then `log show --last 5m`" workflow:
+without the config bump, `log show` will only return `.info`+ for past events.
+
+Note on cost: `.debug` is *near*-free, not free. The format string is deferred,
+but argument capture (value copies, autoclosure setup) still runs. Don't put
+`.debug` inside per-byte NIO handlers, per-frame draw code, or other genuine
+hot paths. Per-message / per-event is fine.
+
+### Privacy interpolation (read this — it bites everyone once)
+
+`Logger` redacts every dynamic interpolation as `<private>` by default. If you
+write `logger.debug("opened url \(url)")` you will see `opened url <private>`
+in Console and conclude logging is broken. It isn't.
+
+Convention for TBD (an internal developer tool, not a shipping consumer app
+handling user PII):
+
+- **Default to `.public` for dynamic interpolations.** Be explicit: every
+  dynamic interpolation gets a `privacy:` argument. No exceptions, even when
+  `.public` is what you want — explicitness keeps reviewers honest.
+- **Mark secrets `.private` or `.sensitive`**: API tokens, ssh key contents,
+  anything from `~/.ssh`, environment variables that might contain creds.
+- **File paths and URLs are `.public`** — they're the whole point of most TBD
+  diagnostics.
+
+```swift
+logger.debug("link tap url=\(url, privacy: .public) mods=\(mods.rawValue, privacy: .public)")
+logger.debug("ssh agent socket=\(path, privacy: .public)")
+logger.error("auth failed token=\(token, privacy: .private)")
+```
+
+### Message format: prefer `key=value`
+
+Use `key=value` pairs inside log messages so `log show --predicate
+'eventMessage CONTAINS "url="'` stays grep-friendly across the codebase. The
+worked example below follows this convention; everything new should too.
 
 ### Subsystem and category conventions
 
@@ -100,10 +141,17 @@ log stream --level debug \
 log stream --level info \
   --predicate 'subsystem == "com.tbd.daemon"'
 
-# Replay the last 5 minutes of debug logs from one area (great for "I just
-# reproduced the bug — show me what happened")
+# Replay the last 5 minutes of logs from one area (great for "I just
+# reproduced the bug — show me what happened"). NOTE: this only returns
+# .info+ unless you've raised debug persistence — see next command.
 log show --last 5m --level debug \
   --predicate 'subsystem BEGINSWITH "com.tbd" AND category == "terminals"'
+
+# One-time: persist .debug to disk for one subsystem so `log show --last`
+# can replay debug events after the fact. Survives until you revert it.
+sudo log config --subsystem com.tbd.app --mode "level:debug,persist:debug"
+# Revert:
+sudo log config --subsystem com.tbd.app --reset
 ```
 
 The `log show --last` form is the killer feature: you don't have to start
@@ -130,14 +178,26 @@ should add one CLI convenience: `tbd diagnostics dump [--category X] [--last
 10m]` that wraps `log show` with the right predicate and writes to a file.
 That's a small follow-up, not a prerequisite.
 
+Beyond the `log show` shellout, the proper Swift API is `OSLogStore(scope:
+.currentProcessIdentifier)`, which lets the app tail its own logs in-process —
+useful for an in-app log viewer, a crash-time tail attached to bug reports, or
+embedding recent logs in `tbd notify` payloads. Treat this as the v2 of
+`tbd diagnostics dump`, not v1.
+
 ### Signposts (Instruments)
 
 For genuine performance work — "why does worktree creation take 4 seconds",
 "why is the terminal panel janky" — use `OSSignposter` rather than logs. Add
-signposts at the same seams as the categories above (begin/end around the
-top-level operation in each manager). Then any developer can open Instruments,
-pick the os_signpost track, and see a flame graph without anyone having to
+signposts at the same seams as the categories above (around the top-level
+operation in each manager). Then any developer can open Instruments, pick the
+os_signpost track, and see a flame graph without anyone having to
 hand-instrument timing. This is additive; don't block on it.
+
+Prefer the closure form `signposter.withIntervalSignpost("worktree.create") {
+... }` (macOS 12+) over manual `beginInterval` / `endInterval` — it auto-
+balances on early return and throw, which manual pairs do not. Dangling
+intervals make Instruments choke. Put payload data on the begin call, not the
+end call.
 
 ## Migration path
 
