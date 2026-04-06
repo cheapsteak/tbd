@@ -195,8 +195,47 @@ struct RepoSettingsRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+
+            Picker("Claude token", selection: tokenOverrideBinding) {
+                Text("Inherit global default").tag(UUID?.none)
+                ForEach(appState.claudeTokens, id: \.token.id) { entry in
+                    Text(entry.token.name).tag(UUID?.some(entry.token.id))
+                }
+            }
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            .font(.caption)
+
+            if let caption = tokenOverrideCaption {
+                Text(caption)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 4)
+    }
+
+    private var tokenOverrideBinding: Binding<UUID?> {
+        Binding(
+            get: { repo.claudeTokenOverrideID },
+            set: { newValue in
+                Task {
+                    await appState.setRepoClaudeTokenOverride(repoID: repo.id, tokenID: newValue)
+                }
+            }
+        )
+    }
+
+    private var tokenOverrideCaption: String? {
+        if let overrideID = repo.claudeTokenOverrideID {
+            let name = appState.claudeTokens.first(where: { $0.token.id == overrideID })?.token.name ?? "Unknown token"
+            return "Overriding with: \(name)"
+        }
+        if let defaultID = appState.globalDefaultClaudeTokenID,
+           let name = appState.claudeTokens.first(where: { $0.token.id == defaultID })?.token.name {
+            return "Inheriting: \(name)"
+        }
+        return "Inheriting: Default (claude keychain login)"
     }
 
     private func commitRename() {
