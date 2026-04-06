@@ -38,6 +38,21 @@ struct ClaudeTokenStoreTests {
         #expect(try await db.claudeTokens.get(id: tok.id) == nil)
     }
 
+    @Test func repoOverrideRoundTrip() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let tok = try await db.claudeTokens.create(name: "Personal", kind: .oauth)
+        let repo = try await db.repos.create(path: "/tmp/r", displayName: "r", defaultBranch: "main")
+        #expect(repo.claudeTokenOverrideID == nil)
+
+        try await db.repos.setClaudeTokenOverride(id: repo.id, tokenID: tok.id)
+        let fetched = try await db.repos.get(id: repo.id)
+        #expect(fetched?.claudeTokenOverrideID == tok.id)
+
+        try await db.repos.setClaudeTokenOverride(id: repo.id, tokenID: nil)
+        let cleared = try await db.repos.get(id: repo.id)
+        #expect(cleared?.claudeTokenOverrideID == nil)
+    }
+
     @Test func touchLastUsed() async throws {
         let db = try TBDDatabase(inMemory: true)
         let tok = try await db.claudeTokens.create(name: "Personal", kind: .oauth)

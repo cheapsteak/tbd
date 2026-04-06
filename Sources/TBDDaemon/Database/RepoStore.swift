@@ -14,6 +14,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var createdAt: Date
     var renamePrompt: String?
     var customInstructions: String?
+    var claude_token_override_id: String?
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -24,6 +25,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.createdAt = repo.createdAt
         self.renamePrompt = repo.renamePrompt
         self.customInstructions = repo.customInstructions
+        self.claude_token_override_id = repo.claudeTokenOverrideID?.uuidString
     }
 
     func toModel() -> Repo {
@@ -35,7 +37,8 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             defaultBranch: defaultBranch,
             createdAt: createdAt,
             renamePrompt: renamePrompt,
-            customInstructions: customInstructions
+            customInstructions: customInstructions,
+            claudeTokenOverrideID: claude_token_override_id.flatMap(UUID.init(uuidString:))
         )
     }
 }
@@ -98,6 +101,16 @@ public struct RepoStore: Sendable {
             try db.execute(
                 sql: "UPDATE repo SET renamePrompt = ?, customInstructions = ? WHERE id = ?",
                 arguments: [renamePrompt, customInstructions, id.uuidString]
+            )
+        }
+    }
+
+    /// Set or clear the Claude token override for a repo.
+    public func setClaudeTokenOverride(id: UUID, tokenID: UUID?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET claude_token_override_id = ? WHERE id = ?",
+                arguments: [tokenID?.uuidString, id.uuidString]
             )
         }
     }
