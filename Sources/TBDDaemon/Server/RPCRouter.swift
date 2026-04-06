@@ -14,6 +14,7 @@ public final class RPCRouter: Sendable {
     public let suspendResumeCoordinator: SuspendResumeCoordinator
     public let conductorManager: ConductorManager
     public let usageFetcher: ClaudeUsageFetcher
+    public let claudeTokenResolver: ClaudeTokenResolver
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -27,7 +28,8 @@ public final class RPCRouter: Sendable {
         subscriptions: StateSubscriptionManager = StateSubscriptionManager(),
         prManager: PRStatusManager = PRStatusManager(),
         conductorManager: ConductorManager? = nil,
-        usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher()
+        usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
+        claudeTokenResolver: ClaudeTokenResolver? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -39,6 +41,11 @@ public final class RPCRouter: Sendable {
         self.suspendResumeCoordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
         self.conductorManager = conductorManager ?? ConductorManager(db: db, tmux: tmux)
         self.usageFetcher = usageFetcher
+        self.claudeTokenResolver = claudeTokenResolver ?? ClaudeTokenResolver(
+            tokens: db.claudeTokens,
+            repos: db.repos,
+            config: db.config
+        )
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -86,6 +93,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalDelete(request.paramsData)
             case RPCMethod.terminalSetPin:
                 return try await handleTerminalSetPin(request.paramsData)
+            case RPCMethod.terminalSwapClaudeToken:
+                return try await handleTerminalSwapClaudeToken(request.paramsData)
             case RPCMethod.notify:
                 return try await handleNotify(request.paramsData)
             case RPCMethod.daemonStatus:

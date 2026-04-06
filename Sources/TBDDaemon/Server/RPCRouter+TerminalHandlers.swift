@@ -29,41 +29,62 @@ extension RPCRouter {
 
         let isClaudeType = params.type == .claude || params.resumeSessionID != nil
         let claudeSessionID: String?
-        let shellCommand: String
         let label: String?
 
+        // Resolve claude token (repo override → global default → none).
+        // Failure here must NOT break terminal spawn — fall back to keychain login.
+        var resolvedToken: ResolvedClaudeToken? = nil
+        if isClaudeType {
+            do {
+                resolvedToken = try await claudeTokenResolver.resolve(repoID: worktree.repoID)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[RPCRouter] warning: claude token resolution failed; falling back to keychain login\n".utf8
+                ))
+                resolvedToken = nil
+            }
+        }
+
+        // Build the spawn command via the pure helper.
+        let appendSystemPrompt: String?
+        let freshSessionID: String?
         if let resumeID = params.resumeSessionID {
-            // Fork: resume from an existing session (creates a new session that shares context)
             claudeSessionID = resumeID
-            shellCommand = "claude --resume \(resumeID) --dangerously-skip-permissions"
+            freshSessionID = nil
+            appendSystemPrompt = nil
             label = "claude"
         } else if isClaudeType {
             let sessionID = UUID().uuidString
             claudeSessionID = sessionID
-            var cmd = "claude --session-id \(sessionID) --dangerously-skip-permissions"
-
-            // Inject per-repo system prompt for new Claude sessions
+            freshSessionID = sessionID
             if let repo,
                let prompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false) {
-                cmd += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
+                appendSystemPrompt = prompt
+            } else {
+                appendSystemPrompt = nil
             }
-
-            // Pass initial prompt as positional arg (starts interactive session with this message)
-            if let initialPrompt = params.prompt, !initialPrompt.isEmpty {
-                cmd += " \(SystemPromptBuilder.shellEscape(initialPrompt))"
-            }
-
-            shellCommand = cmd
             label = "Claude Code"
         } else if let cmd = params.cmd {
             claudeSessionID = nil
-            shellCommand = cmd
+            freshSessionID = nil
+            appendSystemPrompt = nil
             label = cmd
         } else {
             claudeSessionID = nil
-            shellCommand = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            freshSessionID = nil
+            appendSystemPrompt = nil
             label = nil
         }
+
+        let shellCommand = ClaudeSpawnCommandBuilder.build(
+            resumeID: params.resumeSessionID,
+            freshSessionID: freshSessionID,
+            appendSystemPrompt: appendSystemPrompt,
+            initialPrompt: params.prompt,
+            tokenSecret: resolvedToken?.secret,
+            cmd: params.cmd,
+            shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        )
 
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
@@ -78,7 +99,8 @@ extension RPCRouter {
             tmuxWindowID: window.windowID,
             tmuxPaneID: window.paneID,
             label: label,
-            claudeSessionID: claudeSessionID
+            claudeSessionID: claudeSessionID,
+            claudeTokenID: resolvedToken?.tokenID
         )
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -284,6 +306,93 @@ extension RPCRouter {
         }
 
         return Array(allMessages.suffix(count))
+    }
+
+    // MARK: - Swap Claude Token (mid-conversation)
+
+    func handleTerminalSwapClaudeToken(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSwapClaudeTokenParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+        guard let sessionID = terminal.claudeSessionID else {
+            return RPCResponse(error: "Terminal \(params.terminalID) is not a Claude terminal")
+        }
+        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+
+        // Resolve the requested token (nil = clear; fall back to keychain login).
+        let resolved: ResolvedClaudeToken?
+        if let newID = params.newTokenID {
+            do {
+                resolved = try await claudeTokenResolver.loadByID(newID)
+            } catch {
+                return RPCResponse(error: "Failed to load token")
+            }
+            if resolved == nil {
+                return RPCResponse(error: "Token not found or unreadable")
+            }
+        } else {
+            resolved = nil
+        }
+
+        // 1. Interrupt the running claude process.
+        try await tmux.sendKey(
+            server: worktree.tmuxServer,
+            paneID: terminal.tmuxPaneID,
+            key: "C-c"
+        )
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        // 2. Build the respawn command (resume the same session, new env).
+        let respawn = ClaudeSpawnCommandBuilder.build(
+            resumeID: sessionID,
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            tokenSecret: resolved?.secret,
+            cmd: nil,
+            shellFallback: ""
+        )
+
+        // 3. Type the command into the existing pane and submit.
+        try await tmux.sendCommand(
+            server: worktree.tmuxServer,
+            paneID: terminal.tmuxPaneID,
+            command: respawn
+        )
+
+        // 4. Persist the new token id on the terminal.
+        try await db.terminals.setClaudeTokenID(id: terminal.id, tokenID: resolved?.tokenID)
+
+        // 5. Fire-and-forget usage refresh for the new token.
+        if let newID = resolved?.tokenID {
+            let fetcher = self.usageFetcher
+            let database = self.db
+            Task.detached {
+                guard let secret = (try? ClaudeTokenKeychain.load(id: newID.uuidString)) ?? nil else { return }
+                let status = await fetcher.fetchUsage(token: secret)
+                if case .ok(let usage) = status {
+                    let row = ClaudeTokenUsage(
+                        tokenID: newID,
+                        fiveHourPct: usage.fiveHourPct,
+                        sevenDayPct: usage.sevenDayPct,
+                        fiveHourResetsAt: usage.fiveHourResetsAt,
+                        sevenDayResetsAt: usage.sevenDayResetsAt,
+                        fetchedAt: Date(),
+                        lastStatus: "ok"
+                    )
+                    try? await database.claudeTokenUsage.upsert(row)
+                }
+            }
+        }
+
+        guard let updated = try await db.terminals.get(id: terminal.id) else {
+            return RPCResponse(error: "Terminal vanished after swap")
+        }
+        return try RPCResponse(result: updated)
     }
 
     func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {

@@ -26,6 +26,13 @@ public struct ClaudeTokenResolver: Sendable {
         self.keychain = keychain
     }
 
+    /// Load a token by explicit ID, bypassing the repo/global precedence chain.
+    /// Used by mid-conversation swap when the caller has already chosen a specific token.
+    /// Returns nil if the row is missing OR the keychain secret is missing/empty.
+    public func loadByID(_ id: UUID) async throws -> ResolvedClaudeToken? {
+        try await loadResolved(id: id)
+    }
+
     private func loadResolved(id: UUID) async throws -> ResolvedClaudeToken? {
         guard let row = try await tokens.get(id: id) else { return nil }
         guard let secret = try keychain(id.uuidString), !secret.isEmpty else { return nil }

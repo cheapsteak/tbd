@@ -4,6 +4,11 @@ import os
 public struct TmuxManager: Sendable {
     public let dryRun: Bool
     private let counter: Counter
+    /// Optional test hook that records every dryRun command invocation. When set,
+    /// dry-run paths still no-op, but the recorder receives the argv that would
+    /// have been passed to tmux. Used by spawn / swap integration tests to assert
+    /// command shapes without spawning an actual tmux server.
+    public let dryRunRecorder: (@Sendable ([String]) -> Void)?
 
     // Thread-safe counter for generating unique mock IDs
     private final class Counter: Sendable {
@@ -18,9 +23,10 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil) {
         self.dryRun = dryRun
         self.counter = Counter()
+        self.dryRunRecorder = dryRunRecorder
     }
 
     // MARK: - Static Command Builders
@@ -147,6 +153,8 @@ public struct TmuxManager: Sendable {
 
     public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:]) async throws -> (windowID: String, paneID: String) {
         if dryRun {
+            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env)
+            dryRunRecorder?(args)
             let n = counter.next()
             return (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
         }
@@ -172,8 +180,11 @@ public struct TmuxManager: Sendable {
     }
 
     public func sendKey(server: String, paneID: String, key: String) async throws {
-        if dryRun { return }
         let args = Self.sendKeyCommand(server: server, paneID: paneID, key: key)
+        if dryRun {
+            dryRunRecorder?(args)
+            return
+        }
         try await runTmux(args)
     }
 
@@ -203,8 +214,11 @@ public struct TmuxManager: Sendable {
     }
 
     public func sendCommand(server: String, paneID: String, command: String) async throws {
-        if dryRun { return }
         let args = Self.sendCommandArgs(server: server, paneID: paneID, command: command)
+        if dryRun {
+            dryRunRecorder?(args)
+            return
+        }
         try await runTmux(args)
     }
 

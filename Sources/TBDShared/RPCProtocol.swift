@@ -128,6 +128,18 @@ public enum RPCMethod {
     public static let claudeTokenSetGlobalDefault = "claudeToken.setGlobalDefault"
     public static let claudeTokenSetRepoOverride = "claudeToken.setRepoOverride"
     public static let claudeTokenFetchUsage = "claudeToken.fetchUsage"
+    public static let terminalSwapClaudeToken = "terminal.swapClaudeToken"
+}
+
+// MARK: - Terminal Swap Claude Token
+
+public struct TerminalSwapClaudeTokenParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let newTokenID: UUID?
+    public init(terminalID: UUID, newTokenID: UUID?) {
+        self.terminalID = terminalID
+        self.newTokenID = newTokenID
+    }
 }
 
 // MARK: - Claude Token RPC
