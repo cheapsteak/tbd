@@ -16,6 +16,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var claudeSessionID: String?
     var suspendedAt: Date?
     var suspendedSnapshot: String?
+    var claude_token_id: String?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -28,6 +29,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.claudeSessionID = terminal.claudeSessionID
         self.suspendedAt = terminal.suspendedAt
         self.suspendedSnapshot = terminal.suspendedSnapshot
+        self.claude_token_id = terminal.claudeTokenID?.uuidString
     }
 
     func toModel() -> Terminal {
@@ -41,7 +43,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             pinnedAt: pinnedAt,
             claudeSessionID: claudeSessionID,
             suspendedAt: suspendedAt,
-            suspendedSnapshot: suspendedSnapshot
+            suspendedSnapshot: suspendedSnapshot,
+            claudeTokenID: claude_token_id.flatMap(UUID.init(uuidString:))
         )
     }
 }
@@ -60,14 +63,16 @@ public struct TerminalStore: Sendable {
         tmuxWindowID: String,
         tmuxPaneID: String,
         label: String? = nil,
-        claudeSessionID: String? = nil
+        claudeSessionID: String? = nil,
+        claudeTokenID: UUID? = nil
     ) async throws -> Terminal {
         let terminal = Terminal(
             worktreeID: worktreeID,
             tmuxWindowID: tmuxWindowID,
             tmuxPaneID: tmuxPaneID,
             label: label,
-            claudeSessionID: claudeSessionID
+            claudeSessionID: claudeSessionID,
+            claudeTokenID: claudeTokenID
         )
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
@@ -170,6 +175,16 @@ public struct TerminalStore: Sendable {
             record.suspendedSnapshot = nil
             record.label = "shell"
             try record.update(db)
+        }
+    }
+
+    /// Set or clear the Claude token ID for a terminal.
+    public func setClaudeTokenID(id: UUID, tokenID: UUID?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE terminal SET claude_token_id = ? WHERE id = ?",
+                arguments: [tokenID?.uuidString, id.uuidString]
+            )
         }
     }
 

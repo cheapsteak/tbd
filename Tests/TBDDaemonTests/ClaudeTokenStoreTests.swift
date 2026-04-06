@@ -53,6 +53,28 @@ struct ClaudeTokenStoreTests {
         #expect(cleared?.claudeTokenOverrideID == nil)
     }
 
+    @Test func terminalTokenIDRoundTrip() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let tok = try await db.claudeTokens.create(name: "Personal", kind: .oauth)
+        let repo = try await db.repos.create(path: "/tmp/r2", displayName: "r2", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "tbd/w",
+            path: "/tmp/r2/.tbd/worktrees/w", tmuxServer: "tbd-test"
+        )
+        let term = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%0", label: "claude"
+        )
+        #expect(term.claudeTokenID == nil)
+
+        try await db.terminals.setClaudeTokenID(id: term.id, tokenID: tok.id)
+        let fetched = try await db.terminals.get(id: term.id)
+        #expect(fetched?.claudeTokenID == tok.id)
+
+        try await db.terminals.setClaudeTokenID(id: term.id, tokenID: nil)
+        let cleared = try await db.terminals.get(id: term.id)
+        #expect(cleared?.claudeTokenID == nil)
+    }
+
     @Test func touchLastUsed() async throws {
         let db = try TBDDatabase(inMemory: true)
         let tok = try await db.claudeTokens.create(name: "Personal", kind: .oauth)
