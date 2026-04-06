@@ -9,10 +9,12 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public var createdAt: Date
     public var renamePrompt: String?
     public var customInstructions: String?
+    public var claudeTokenOverrideID: UUID?
 
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
                 displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
-                renamePrompt: String? = nil, customInstructions: String? = nil) {
+                renamePrompt: String? = nil, customInstructions: String? = nil,
+                claudeTokenOverrideID: UUID? = nil) {
         self.id = id
         self.path = path
         self.remoteURL = remoteURL
@@ -21,6 +23,20 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.renamePrompt = renamePrompt
         self.customInstructions = customInstructions
+        self.claudeTokenOverrideID = claudeTokenOverrideID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        path = try c.decode(String.self, forKey: .path)
+        remoteURL = try c.decodeIfPresent(String.self, forKey: .remoteURL)
+        displayName = try c.decode(String.self, forKey: .displayName)
+        defaultBranch = try c.decode(String.self, forKey: .defaultBranch)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        renamePrompt = try c.decodeIfPresent(String.self, forKey: .renamePrompt)
+        customInstructions = try c.decodeIfPresent(String.self, forKey: .customInstructions)
+        claudeTokenOverrideID = try c.decodeIfPresent(UUID.self, forKey: .claudeTokenOverrideID)
     }
 }
 
@@ -92,11 +108,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var claudeSessionID: String?
     public var suspendedAt: Date?
     public var suspendedSnapshot: String?
+    public var claudeTokenID: UUID?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
                 pinnedAt: Date? = nil, claudeSessionID: String? = nil,
-                suspendedAt: Date? = nil, suspendedSnapshot: String? = nil) {
+                suspendedAt: Date? = nil, suspendedSnapshot: String? = nil,
+                claudeTokenID: UUID? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -107,6 +125,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.claudeSessionID = claudeSessionID
         self.suspendedAt = suspendedAt
         self.suspendedSnapshot = suspendedSnapshot
+        self.claudeTokenID = claudeTokenID
     }
 
     public init(from decoder: Decoder) throws {
@@ -121,6 +140,64 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         claudeSessionID = try c.decodeIfPresent(String.self, forKey: .claudeSessionID)
         suspendedAt = try c.decodeIfPresent(Date.self, forKey: .suspendedAt)
         suspendedSnapshot = try c.decodeIfPresent(String.self, forKey: .suspendedSnapshot)
+        claudeTokenID = try c.decodeIfPresent(UUID.self, forKey: .claudeTokenID)
+    }
+}
+
+public enum ClaudeTokenKind: String, Codable, Sendable {
+    case oauth
+    case apiKey
+}
+
+public struct ClaudeToken: Codable, Sendable, Identifiable, Equatable {
+    public let id: UUID
+    public var name: String
+    public var kind: ClaudeTokenKind
+    public var createdAt: Date
+    public var lastUsedAt: Date?
+
+    public init(id: UUID = UUID(), name: String, kind: ClaudeTokenKind,
+                createdAt: Date = Date(), lastUsedAt: Date? = nil) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.createdAt = createdAt
+        self.lastUsedAt = lastUsedAt
+    }
+}
+
+public struct ClaudeTokenUsage: Codable, Sendable, Equatable {
+    public var tokenID: UUID
+    public var fiveHourPct: Double?
+    public var sevenDayPct: Double?
+    public var fiveHourResetsAt: Date?
+    public var sevenDayResetsAt: Date?
+    public var fetchedAt: Date?
+    public var lastStatus: String?
+
+    public init(tokenID: UUID, fiveHourPct: Double? = nil, sevenDayPct: Double? = nil,
+                fiveHourResetsAt: Date? = nil, sevenDayResetsAt: Date? = nil,
+                fetchedAt: Date? = nil, lastStatus: String? = nil) {
+        self.tokenID = tokenID
+        self.fiveHourPct = fiveHourPct
+        self.sevenDayPct = sevenDayPct
+        self.fiveHourResetsAt = fiveHourResetsAt
+        self.sevenDayResetsAt = sevenDayResetsAt
+        self.fetchedAt = fetchedAt
+        self.lastStatus = lastStatus
+    }
+}
+
+public struct Config: Codable, Sendable, Equatable {
+    public var defaultClaudeTokenID: UUID?
+
+    public init(defaultClaudeTokenID: UUID? = nil) {
+        self.defaultClaudeTokenID = defaultClaudeTokenID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        defaultClaudeTokenID = try c.decodeIfPresent(UUID.self, forKey: .defaultClaudeTokenID)
     }
 }
 
