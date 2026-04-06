@@ -135,7 +135,8 @@ sibling categories to enable.
 
 ### Streaming recipes
 
-These should live in this doc and in `CLAUDE.md` so they're discoverable:
+These live in this doc; a follow-up should copy the most common ones into
+`CLAUDE.md`'s Quick Reference so they surface where developers look first.
 
 ```bash
 # Default-level events from both processes
@@ -216,7 +217,7 @@ end call.
 This is intentionally a slow, no-big-bang migration. The proposal is the
 guardrails; the cleanup happens opportunistically.
 
-1. **Stop the bleeding (immediately).** Add a `CLAUDE.md` rule that `print(`
+1. **Stop the bleeding (follow-up after this doc lands).** Add a `CLAUDE.md` rule that `print(`
    is forbidden in `Sources/` and new code uses `Logger` only. We rely on
    CLAUDE.md rather than a CI grep gate because all authoring in this repo
    flows through Claude — the rule is enforced at write time, not merge time.
