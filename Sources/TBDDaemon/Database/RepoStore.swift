@@ -115,6 +115,16 @@ public struct RepoStore: Sendable {
         }
     }
 
+    /// Clear the Claude token override on every repo whose override matches the given token.
+    public func clearClaudeTokenOverride(matching tokenID: UUID) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET claude_token_override_id = NULL WHERE claude_token_override_id = ?",
+                arguments: [tokenID.uuidString]
+            )
+        }
+    }
+
     /// Find a repo by its filesystem path.
     public func findByPath(path: String) async throws -> Repo? {
         try await writer.read { db in

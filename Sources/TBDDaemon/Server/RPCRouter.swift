@@ -13,6 +13,7 @@ public final class RPCRouter: Sendable {
     public let prManager: PRStatusManager
     public let suspendResumeCoordinator: SuspendResumeCoordinator
     public let conductorManager: ConductorManager
+    public let usageFetcher: ClaudeUsageFetcher
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -25,7 +26,8 @@ public final class RPCRouter: Sendable {
         startTime: Date = Date(),
         subscriptions: StateSubscriptionManager = StateSubscriptionManager(),
         prManager: PRStatusManager = PRStatusManager(),
-        conductorManager: ConductorManager? = nil
+        conductorManager: ConductorManager? = nil,
+        usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher()
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -36,6 +38,7 @@ public final class RPCRouter: Sendable {
         self.prManager = prManager
         self.suspendResumeCoordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
         self.conductorManager = conductorManager ?? ConductorManager(db: db, tmux: tmux)
+        self.usageFetcher = usageFetcher
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -141,6 +144,20 @@ public final class RPCRouter: Sendable {
                 return try await handleConductorSuggest(request.paramsData)
             case RPCMethod.conductorClearSuggestion:
                 return try await handleConductorClearSuggestion(request.paramsData)
+            case RPCMethod.claudeTokenList:
+                return try await handleClaudeTokenList()
+            case RPCMethod.claudeTokenAdd:
+                return try await handleClaudeTokenAdd(request.paramsData)
+            case RPCMethod.claudeTokenDelete:
+                return try await handleClaudeTokenDelete(request.paramsData)
+            case RPCMethod.claudeTokenRename:
+                return try await handleClaudeTokenRename(request.paramsData)
+            case RPCMethod.claudeTokenSetGlobalDefault:
+                return try await handleClaudeTokenSetGlobalDefault(request.paramsData)
+            case RPCMethod.claudeTokenSetRepoOverride:
+                return try await handleClaudeTokenSetRepoOverride(request.paramsData)
+            case RPCMethod.claudeTokenFetchUsage:
+                return try await handleClaudeTokenFetchUsage(request.paramsData)
             case RPCMethod.stateSubscribe:
                 return RPCResponse(error: "state.subscribe must be handled by SocketServer")
             default:

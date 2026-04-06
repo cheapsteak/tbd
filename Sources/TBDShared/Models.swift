@@ -188,6 +188,15 @@ public struct ClaudeTokenUsage: Codable, Sendable, Equatable {
     }
 }
 
+public struct ClaudeTokenWithUsage: Codable, Sendable, Equatable {
+    public let token: ClaudeToken
+    public let usage: ClaudeTokenUsage?
+    public init(token: ClaudeToken, usage: ClaudeTokenUsage? = nil) {
+        self.token = token
+        self.usage = usage
+    }
+}
+
 public struct Config: Codable, Sendable, Equatable {
     public var defaultClaudeTokenID: UUID?
 

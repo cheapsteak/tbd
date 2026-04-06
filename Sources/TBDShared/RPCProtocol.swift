@@ -121,6 +121,74 @@ public enum RPCMethod {
     public static let conductorClearSuggestion = "conductor.clearSuggestion"
     public static let terminalConversation = "terminal.conversation"
     public static let repoUpdateInstructions = "repo.updateInstructions"
+    public static let claudeTokenList = "claudeToken.list"
+    public static let claudeTokenAdd = "claudeToken.add"
+    public static let claudeTokenDelete = "claudeToken.delete"
+    public static let claudeTokenRename = "claudeToken.rename"
+    public static let claudeTokenSetGlobalDefault = "claudeToken.setGlobalDefault"
+    public static let claudeTokenSetRepoOverride = "claudeToken.setRepoOverride"
+    public static let claudeTokenFetchUsage = "claudeToken.fetchUsage"
+}
+
+// MARK: - Claude Token RPC
+
+public struct ClaudeTokenAddParams: Codable, Sendable {
+    public let name: String
+    public let token: String
+    public init(name: String, token: String) {
+        self.name = name
+        self.token = token
+    }
+}
+
+public struct ClaudeTokenAddResult: Codable, Sendable {
+    public let token: ClaudeToken
+    public let warning: String?
+    public init(token: ClaudeToken, warning: String? = nil) {
+        self.token = token
+        self.warning = warning
+    }
+}
+
+public struct ClaudeTokenDeleteParams: Codable, Sendable {
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+}
+
+public struct ClaudeTokenRenameParams: Codable, Sendable {
+    public let id: UUID
+    public let name: String
+    public init(id: UUID, name: String) {
+        self.id = id; self.name = name
+    }
+}
+
+public struct ClaudeTokenSetGlobalDefaultParams: Codable, Sendable {
+    public let id: UUID?
+    public init(id: UUID?) { self.id = id }
+}
+
+public struct ClaudeTokenSetRepoOverrideParams: Codable, Sendable {
+    public let repoID: UUID
+    public let tokenID: UUID?
+    public init(repoID: UUID, tokenID: UUID?) {
+        self.repoID = repoID; self.tokenID = tokenID
+    }
+}
+
+public struct ClaudeTokenFetchUsageParams: Codable, Sendable {
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+}
+
+public struct ClaudeTokenListResult: Codable, Sendable {
+    public let tokens: [ClaudeTokenWithUsage]
+    public init(tokens: [ClaudeTokenWithUsage]) { self.tokens = tokens }
+}
+
+public struct ClaudeTokenFetchUsageResult: Codable, Sendable {
+    public let usage: ClaudeTokenUsage
+    public init(usage: ClaudeTokenUsage) { self.usage = usage }
 }
 
 public struct NotificationsListResult: Codable, Sendable {
