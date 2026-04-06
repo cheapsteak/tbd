@@ -15,8 +15,11 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Repositories", systemImage: "folder")
                 }
+
+            ClaudeTokensSettingsView()
+                .tabItem { Label("Claude Tokens", systemImage: "key.fill") }
         }
-        .frame(width: 500, height: 420)
+        .frame(width: 500, height: 520)
     }
 }
 
