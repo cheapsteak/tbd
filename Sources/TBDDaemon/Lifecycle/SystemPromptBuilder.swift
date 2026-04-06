@@ -41,7 +41,7 @@ enum SystemPromptBuilder {
 
         layers["TBD_PROMPT_CONTEXT"] = builtInTBDContext
 
-        if worktree.displayName == worktree.name {
+        if worktree.status != .main && worktree.displayName == worktree.name {
             let renamePrompt = repo?.renamePrompt ?? defaultRenamePrompt
             if !renamePrompt.isEmpty {
                 layers["TBD_PROMPT_RENAME"] = renamePrompt
