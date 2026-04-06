@@ -33,9 +33,9 @@ enum SystemPromptBuilder {
         Spawning a new Claude tab in the current worktree:
           tbd terminal create "$TBD_WORKTREE_ID" --type claude --prompt "your task here"
 
-        Creating a new worktree with its own Claude tab:
-          WORKTREE=$(tbd worktree create --json | jq -r '.id')
-          tbd terminal create "$WORKTREE" --type claude --prompt "your task here"
+        Creating a new worktree with its own Claude tab (two steps):
+          1. WORKTREE=$(tbd worktree create --json | jq -r '.id')
+          2. tbd terminal create "$WORKTREE" --type claude --prompt "your task here"
 
         Using --cmd for full control (env vars expand in the new shell):
           tbd terminal create "$TBD_WORKTREE_ID" --cmd 'claude --append-system-prompt "$TBD_PROMPT_CONTEXT"'
