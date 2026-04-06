@@ -24,6 +24,12 @@ enum SystemPromptBuilder {
 
         Environment variables:
         - TBD_WORKTREE_ID — UUID of the current worktree (auto-set in all TBD terminals)
+        - TBD_PROMPT_CONTEXT — Built-in TBD context (this text), for passing to spawned sessions
+        - TBD_PROMPT_INSTRUCTIONS — Per-repo custom instructions (set if configured)
+        - TBD_PROMPT_RENAME — Worktree rename prompt (set if worktree hasn't been renamed yet)
+
+        To spawn a new Claude session tab with a custom prompt:
+          tbd terminal create "$TBD_WORKTREE_ID" --cmd "claude --prompt 'your task here' --append-system-prompt \\"$TBD_PROMPT_CONTEXT\\""
         """
 
     /// Build the combined system prompt for a Claude session.
