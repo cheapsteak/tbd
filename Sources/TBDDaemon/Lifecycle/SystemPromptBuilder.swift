@@ -16,8 +16,10 @@ enum SystemPromptBuilder {
 
         Available CLI commands:
         - tbd worktree rename "<worktree-name>" "<display-name>" — rename the worktree display name
+        - tbd worktree create [--repo <path-or-id>] — create a new worktree (auto-named)
         - tbd worktree list [--repo <id>] — list worktrees
-        - tbd terminal create <worktree> [--cmd <command>] — create a new terminal
+        - tbd terminal create <worktree> [--type claude|shell] [--cmd <command>] — create a new terminal tab
+        - tbd terminal send --terminal <id> --text <text> [--submit] — send text to a terminal (--submit presses Enter)
         - tbd terminal output <terminal-id> [--lines N] — read terminal output
         - tbd notify --type <type> [--message <msg>] — send notifications to TBD UI
           Types: response_complete, error, task_complete, attention_needed
@@ -28,10 +30,17 @@ enum SystemPromptBuilder {
         - TBD_PROMPT_INSTRUCTIONS — Per-repo custom instructions (set if configured)
         - TBD_PROMPT_RENAME — Worktree rename prompt (set if worktree hasn't been renamed yet)
 
-        To create a new Claude session tab with a custom prompt, use --cmd.
-        The TBD_PROMPT_* env vars are set in the spawned terminal, so reference
-        them with single-dollar signs (no escaping needed):
+        Spawning a new Claude tab in the current worktree:
+          tbd terminal create "$TBD_WORKTREE_ID" --type claude --json
+          # then send it a task:
+          tbd terminal send --terminal <id-from-json> --text "your task here" --submit
+
+        Spawning a new Claude tab with a custom command (env vars expand in the new shell):
           tbd terminal create "$TBD_WORKTREE_ID" --cmd 'claude --prompt "your task" --append-system-prompt "$TBD_PROMPT_CONTEXT"'
+
+        Creating a new worktree with its own Claude tab:
+          WORKTREE=$(tbd worktree create --json | jq -r '.id')
+          tbd terminal create "$WORKTREE" --type claude --json
         """
 
     /// Returns the individual prompt layers as env-var-name → value pairs.

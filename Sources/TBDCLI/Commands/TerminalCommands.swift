@@ -10,12 +10,16 @@ struct TerminalCommand: ParsableCommand {
     )
 }
 
+// MARK: - ExpressibleByArgument conformance for CLI
+
+extension TerminalCreateType: ExpressibleByArgument {}
+
 // MARK: - terminal create
 
 struct TerminalCreate: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a new terminal in a worktree"
+        abstract: "Create a new terminal in a worktree (TBD_PROMPT_* env vars are set automatically)"
     )
 
     @Argument(help: "Worktree name or ID")
@@ -24,8 +28,8 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Command to run in the terminal")
     var cmd: String?
 
-    @Option(name: .long, help: "Terminal type: shell or claude")
-    var type: String?
+    @Option(name: .long, help: "Terminal type (shell or claude)")
+    var type: TerminalCreateType?
 
     @Flag(name: .long, help: "Output JSON")
     var json = false
@@ -34,17 +38,9 @@ struct TerminalCreate: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
 
-        var createType: TerminalCreateType?
-        if let type {
-            guard let parsed = TerminalCreateType(rawValue: type) else {
-                throw CLIError.invalidArgument("Invalid terminal type: \(type). Must be 'shell' or 'claude'.")
-            }
-            createType = parsed
-        }
-
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: createType),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type),
             resultType: Terminal.self
         )
 
@@ -133,7 +129,7 @@ struct TerminalSend: AsyncParsableCommand {
         let client = SocketClient()
         try client.callVoid(
             method: RPCMethod.terminalSend,
-            params: TerminalSendParams(terminalID: terminalID, text: text, submit: submit ? true : nil)
+            params: TerminalSendParams(terminalID: terminalID, text: text, submit: submit)
         )
 
         if json {
