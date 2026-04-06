@@ -340,9 +340,16 @@ private struct RenderedContentView: View {
                     .foregroundStyle(.secondary)
                     .padding(12)
             } else if let content {
-                Markdown(content)
+                Markdown(content, baseURL: URL(fileURLWithPath: filePath))
                     .markdownTheme(.codeViewer)
                     .textSelection(.enabled)
+                    .environment(\.openURL, OpenURLAction { url in
+                        if url.isFileURL {
+                            NSWorkspace.shared.open(url)
+                            return .handled
+                        }
+                        return .systemAction
+                    })
                     .padding(16)
             } else {
                 ProgressView()
