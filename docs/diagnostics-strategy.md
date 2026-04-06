@@ -109,8 +109,16 @@ participate):
 | Category            | Covers                                                          |
 |---------------------|------------------------------------------------------------------|
 | `worktrees`         | Create / list / rename / delete, git worktree shellouts          |
-| `terminals`         | Terminal lifecycle, tmux pane creation, send/output              |
-| `tmux`              | TmuxManager, TmuxBridge, libtmux protocol                        |
+| `terminals`         | Terminal lifecycle as a *feature*: create/destroy, send/output, what the user asked for |
+| `tmux`              | tmux as a *transport*: TmuxManager/TmuxBridge protocol traffic, libtmux command/response |
+
+**Boundary rule for `terminals` vs `tmux`:** `terminals` is feature-level
+intent ("user asked to create a terminal in worktree X"). `tmux` is the
+protocol/transport layer ("sent `new-window` command, got pane id %42 back").
+A single user action will usually produce one `terminals` line and several
+`tmux` lines. When in doubt: if removing tmux from the architecture would
+delete the line, it's `tmux`; if it would survive a transport swap, it's
+`terminals`.
 | `notifications`     | MacNotificationManager, daemon→app notification fanout           |
 | `notes`             | Note CRUD, persistence                                           |
 | `pr-status`         | PR polling, gh shellouts                                         |
@@ -141,17 +149,21 @@ log stream --level debug \
 log stream --level info \
   --predicate 'subsystem == "com.tbd.daemon"'
 
+# ⚠️ READ FIRST before using `log show --last` for debug events:
+# .debug is NOT persisted by default, so `log show` will return zero debug
+# rows even if your code is logging them. To make replay work, raise debug
+# persistence ONCE PER SUBSYSTEM (TBD has two: app + daemon):
+sudo log config --subsystem com.tbd.app    --mode "level:debug,persist:debug"
+sudo log config --subsystem com.tbd.daemon --mode "level:debug,persist:debug"
+# Revert (also one per subsystem):
+sudo log config --subsystem com.tbd.app    --reset
+sudo log config --subsystem com.tbd.daemon --reset
+
 # Replay the last 5 minutes of logs from one area (great for "I just
-# reproduced the bug — show me what happened"). NOTE: this only returns
-# .info+ unless you've raised debug persistence — see next command.
+# reproduced the bug — show me what happened"). Requires the persist
+# config above if you want .debug rows back.
 log show --last 5m --level debug \
   --predicate 'subsystem BEGINSWITH "com.tbd" AND category == "terminals"'
-
-# One-time: persist .debug to disk for one subsystem so `log show --last`
-# can replay debug events after the fact. Survives until you revert it.
-sudo log config --subsystem com.tbd.app --mode "level:debug,persist:debug"
-# Revert:
-sudo log config --subsystem com.tbd.app --reset
 ```
 
 The `log show --last` form is the killer feature: you don't have to start
@@ -204,8 +216,12 @@ end call.
 This is intentionally a slow, no-big-bang migration. The proposal is the
 guardrails; the cleanup happens opportunistically.
 
-1. **Stop the bleeding (immediately).** Add a lint/CI check (or just a CLAUDE.md
-   rule) that `print(` is forbidden in `Sources/`. New code uses `Logger` only.
+1. **Stop the bleeding (immediately).** Add a `CLAUDE.md` rule that `print(`
+   is forbidden in `Sources/` and new code uses `Logger` only. We rely on
+   CLAUDE.md rather than a CI grep gate because all authoring in this repo
+   flows through Claude — the rule is enforced at write time, not merge time.
+   If that ever stops being true, a two-line `grep` step in CI is the
+   belt-and-suspenders fallback.
 2. **Collapse categories at the file you're already touching.** When you edit a
    file with `category: "AppState+Worktrees"`, change it to `category:
    "worktrees"` as part of the same commit. No standalone rename PR. Within a
