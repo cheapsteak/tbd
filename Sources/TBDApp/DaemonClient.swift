@@ -668,4 +668,82 @@ actor DaemonClient {
             params: ConductorNameParams(name: name)
         )
     }
+
+    // MARK: - Claude Tokens
+    //
+    // IMPORTANT: never log raw token bytes. The `addClaudeToken` wrapper is
+    // the only place a secret token crosses the actor boundary in the app
+    // process — keep it out of any logger / print statement.
+
+    /// List all Claude tokens with cached usage and the global default ID.
+    func listClaudeTokens() throws -> ClaudeTokenListResult {
+        return try callNoParams(method: RPCMethod.claudeTokenList, resultType: ClaudeTokenListResult.self)
+    }
+
+    /// Add a Claude token. The raw token string MUST NOT be logged.
+    func addClaudeToken(name: String, token: String) throws -> ClaudeTokenAddResult {
+        return try call(
+            method: RPCMethod.claudeTokenAdd,
+            params: ClaudeTokenAddParams(name: name, token: token),
+            resultType: ClaudeTokenAddResult.self
+        )
+    }
+
+    /// Delete a Claude token by ID.
+    func deleteClaudeToken(id: UUID) throws {
+        try callVoid(
+            method: RPCMethod.claudeTokenDelete,
+            params: ClaudeTokenDeleteParams(id: id)
+        )
+    }
+
+    /// Rename a Claude token.
+    func renameClaudeToken(id: UUID, name: String) throws {
+        try callVoid(
+            method: RPCMethod.claudeTokenRename,
+            params: ClaudeTokenRenameParams(id: id, name: name)
+        )
+    }
+
+    /// Set or clear the global default Claude token.
+    func setGlobalDefaultClaudeToken(id: UUID?) throws {
+        try callVoid(
+            method: RPCMethod.claudeTokenSetGlobalDefault,
+            params: ClaudeTokenSetGlobalDefaultParams(id: id)
+        )
+    }
+
+    /// Set or clear a per-repo Claude token override.
+    func setRepoClaudeTokenOverride(repoID: UUID, tokenID: UUID?) throws {
+        try callVoid(
+            method: RPCMethod.claudeTokenSetRepoOverride,
+            params: ClaudeTokenSetRepoOverrideParams(repoID: repoID, tokenID: tokenID)
+        )
+    }
+
+    /// Fetch fresh usage for a single Claude token (60s server-side dedupe).
+    func fetchClaudeTokenUsage(id: UUID) throws -> ClaudeTokenUsage {
+        let result = try call(
+            method: RPCMethod.claudeTokenFetchUsage,
+            params: ClaudeTokenFetchUsageParams(id: id),
+            resultType: ClaudeTokenFetchUsageResult.self
+        )
+        return result.usage
+    }
+
+    /// Swap the Claude token associated with a running terminal.
+    func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?) throws {
+        try callVoid(
+            method: RPCMethod.terminalSwapClaudeToken,
+            params: TerminalSwapClaudeTokenParams(terminalID: terminalID, newTokenID: newTokenID)
+        )
+    }
+
+    /// Notify the daemon whether the app is in the foreground (drives usage poller).
+    func setAppForegroundState(isForeground: Bool) throws {
+        try callVoid(
+            method: RPCMethod.appSetForegroundState,
+            params: AppSetForegroundStateParams(isForeground: isForeground)
+        )
+    }
 }

@@ -13,7 +13,8 @@ extension RPCRouter {
             let usage = try await db.claudeTokenUsage.get(tokenID: token.id)
             result.append(ClaudeTokenWithUsage(token: token, usage: usage))
         }
-        return try RPCResponse(result: ClaudeTokenListResult(tokens: result))
+        let config = try await db.config.get()
+        return try RPCResponse(result: ClaudeTokenListResult(tokens: result, defaultID: config.defaultClaudeTokenID))
     }
 
     // MARK: - Add

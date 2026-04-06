@@ -201,7 +201,17 @@ public struct ClaudeTokenFetchUsageParams: Codable, Sendable {
 
 public struct ClaudeTokenListResult: Codable, Sendable {
     public let tokens: [ClaudeTokenWithUsage]
-    public init(tokens: [ClaudeTokenWithUsage]) { self.tokens = tokens }
+    public let defaultID: UUID?
+    public init(tokens: [ClaudeTokenWithUsage], defaultID: UUID? = nil) {
+        self.tokens = tokens
+        self.defaultID = defaultID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tokens = try c.decode([ClaudeTokenWithUsage].self, forKey: .tokens)
+        defaultID = try c.decodeIfPresent(UUID.self, forKey: .defaultID)
+    }
 }
 
 public struct ClaudeTokenFetchUsageResult: Codable, Sendable {
