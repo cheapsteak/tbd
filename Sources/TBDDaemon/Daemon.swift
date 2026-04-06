@@ -14,6 +14,7 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var sshRefreshTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
+    public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public let pidFile: PIDFile
     public let startTime: Date
 
@@ -134,6 +135,19 @@ public final class Daemon: Sendable {
             }
         }
 
+        // 12b. Start Claude OAuth usage poller (30-min cadence, 30s stagger).
+        let poller = ClaudeUsagePoller(
+            tokens: database.claudeTokens,
+            usage: database.claudeTokenUsage,
+            keychain: { id in try ClaudeTokenKeychain.load(id: id) },
+            fetcher: LiveClaudeUsageFetcher(),
+            clock: SystemPollerClock(),
+            broadcast: { [weak subs] row in subs?.broadcastClaudeTokenUsage(row) }
+        )
+        self.claudeUsagePoller = poller
+        rpcRouter.claudeUsagePoller = poller
+        await poller.start()
+
         print("[Daemon] Started successfully (PID \(ProcessInfo.processInfo.processIdentifier))")
 
         // 13. Periodic git status refresh (branch sync, conflict detection)
@@ -153,6 +167,11 @@ public final class Daemon: Sendable {
     /// Stop the daemon: shut down servers, remove PID and socket files.
     public func stop() async {
         print("[Daemon] Shutting down...")
+
+        // Stop Claude usage poller before other background tasks.
+        if let poller = claudeUsagePoller {
+            await poller.stop()
+        }
 
         // Cancel background tasks
         sshRefreshTask?.cancel()

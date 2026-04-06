@@ -186,6 +186,7 @@ extension RPCRouter {
                 lastStatus: "ok"
             )
             try await db.claudeTokenUsage.upsert(row)
+            subscriptions.broadcastClaudeTokenUsage(row)
             return try RPCResponse(result: ClaudeTokenFetchUsageResult(usage: row))
         case .http401:
             return RPCResponse(error: "Token invalid")

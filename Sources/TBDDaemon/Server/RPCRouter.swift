@@ -15,6 +15,7 @@ public final class RPCRouter: Sendable {
     public let conductorManager: ConductorManager
     public let usageFetcher: ClaudeUsageFetcher
     public let claudeTokenResolver: ClaudeTokenResolver
+    public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -167,6 +168,10 @@ public final class RPCRouter: Sendable {
                 return try await handleClaudeTokenSetRepoOverride(request.paramsData)
             case RPCMethod.claudeTokenFetchUsage:
                 return try await handleClaudeTokenFetchUsage(request.paramsData)
+            case RPCMethod.appSetForegroundState:
+                let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
+                await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)
+                return .ok()
             case RPCMethod.stateSubscribe:
                 return RPCResponse(error: "state.subscribe must be handled by SocketServer")
             default:

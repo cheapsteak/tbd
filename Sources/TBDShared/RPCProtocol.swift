@@ -129,6 +129,12 @@ public enum RPCMethod {
     public static let claudeTokenSetRepoOverride = "claudeToken.setRepoOverride"
     public static let claudeTokenFetchUsage = "claudeToken.fetchUsage"
     public static let terminalSwapClaudeToken = "terminal.swapClaudeToken"
+    public static let appSetForegroundState = "app.setForegroundState"
+}
+
+public struct AppSetForegroundStateParams: Codable, Sendable {
+    public let isForeground: Bool
+    public init(isForeground: Bool) { self.isForeground = isForeground }
 }
 
 // MARK: - Terminal Swap Claude Token
