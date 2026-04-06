@@ -6,6 +6,9 @@ import TBDShared
 public final class TBDDatabase: Sendable {
     private let writer: any DatabaseWriter
 
+    /// Test-only accessor exposing the underlying writer for migration / schema tests.
+    internal var writerForTests: any DatabaseWriter { writer }
+
     public let repos: RepoStore
     public let worktrees: WorktreeStore
     public let terminals: TerminalStore
@@ -193,6 +196,45 @@ public final class TBDDatabase: Sendable {
             try db.alter(table: "repo") { t in
                 t.add(column: "renamePrompt", .text)
                 t.add(column: "customInstructions", .text)
+            }
+        }
+
+        migrator.registerMigration("v13") { db in
+            try db.create(table: "claude_tokens") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("name", .text).notNull().unique()
+                t.column("keychain_ref", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("created_at", .datetime).notNull()
+                t.column("last_used_at", .datetime)
+            }
+
+            try db.create(table: "claude_token_usage") { t in
+                t.primaryKey("token_id", .text).notNull()
+                    .references("claude_tokens", onDelete: .cascade)
+                t.column("five_hour_pct", .double)
+                t.column("seven_day_pct", .double)
+                t.column("five_hour_resets_at", .datetime)
+                t.column("seven_day_resets_at", .datetime)
+                t.column("fetched_at", .datetime)
+                t.column("last_status", .text)
+            }
+
+            try db.create(table: "config") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("default_claude_token_id", .text)
+                    .references("claude_tokens", onDelete: .setNull)
+            }
+            try db.execute(
+                sql: "INSERT OR IGNORE INTO config (id, default_claude_token_id) VALUES ('singleton', NULL)"
+            )
+
+            try db.alter(table: "repo") { t in
+                t.add(column: "claude_token_override_id", .text)
+            }
+
+            try db.alter(table: "terminal") { t in
+                t.add(column: "claude_token_id", .text)
             }
         }
 
