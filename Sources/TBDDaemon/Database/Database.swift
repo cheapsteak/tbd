@@ -15,6 +15,7 @@ public final class TBDDatabase: Sendable {
     public let notifications: NotificationStore
     public let notes: NoteStore
     public let conductors: ConductorStore
+    public let claudeTokens: ClaudeTokenStore
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
     public init(path: String) throws {
@@ -32,6 +33,7 @@ public final class TBDDatabase: Sendable {
         self.notifications = NotificationStore(writer: pool)
         self.notes = NoteStore(writer: pool)
         self.conductors = ConductorStore(writer: pool)
+        self.claudeTokens = ClaudeTokenStore(writer: pool)
         try Self.migrate(writer: pool)
     }
 
@@ -46,6 +48,7 @@ public final class TBDDatabase: Sendable {
         self.notifications = NotificationStore(writer: queue)
         self.notes = NoteStore(writer: queue)
         self.conductors = ConductorStore(writer: queue)
+        self.claudeTokens = ClaudeTokenStore(writer: queue)
         try Self.migrate(writer: queue)
     }
 
