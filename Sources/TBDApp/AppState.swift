@@ -14,6 +14,16 @@ final class AppState: ObservableObject {
     @Published var notifications: [UUID: NotificationType?] = [:]
     @Published var selectedWorktreeIDs: Set<UUID> = [] {
         didSet {
+            // If the List selected a repo header tag (not a worktree), treat it
+            // as a repo selection and remove the ID from the worktree set.
+            let repoIDs = Set(repos.map(\.id))
+            let selectedRepoIDs = selectedWorktreeIDs.intersection(repoIDs)
+            if !selectedRepoIDs.isEmpty {
+                selectedWorktreeIDs.subtract(selectedRepoIDs)
+                // selectRepo() already handles this; avoid overriding it
+                return
+            }
+
             // Remove deselected items from order
             selectionOrder.removeAll { !selectedWorktreeIDs.contains($0) }
             // Append newly selected items (maintains insertion order for cmd+click)

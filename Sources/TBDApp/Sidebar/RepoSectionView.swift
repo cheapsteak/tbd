@@ -53,9 +53,6 @@ struct RepoSectionView: View {
             Text(repo.displayName)
                 .font(.headline)
                 .foregroundStyle(appState.selectedRepoID == repo.id ? .primary : .secondary)
-                .onTapGesture {
-                    appState.selectRepo(id: repo.id)
-                }
 
             Spacer()
 
@@ -67,7 +64,12 @@ struct RepoSectionView: View {
             .buttonStyle(HoverPressButtonStyle())
             .help("New worktree")
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            appState.selectRepo(id: repo.id)
+        }
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+        .tag(repo.id)
 
         if isExpanded {
             if let main = mainWorktree {
