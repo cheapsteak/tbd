@@ -62,6 +62,9 @@ public struct ClaudeTokenResolver: Sendable {
             if let resolved = try await loadResolved(id: defaultID) {
                 return resolved
             }
+            FileHandle.standardError.write(Data(
+                "[ClaudeTokenResolver] warning: global default claude token \(defaultID) is missing; no token will be injected\n".utf8
+            ))
             return nil
         }
 
