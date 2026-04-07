@@ -190,29 +190,44 @@ extension WorktreeLifecycle {
             cwd: worktreePath
         )
 
+        // Resolve claude token (repo override → global default → none).
+        // Failures here must NOT break worktree creation — fall back to keychain login.
+        var resolvedToken: ResolvedClaudeToken? = nil
+        if !skipClaude, let resolver = claudeTokenResolver {
+            do {
+                resolvedToken = try await resolver.resolve(repoID: repo.id)
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "[WorktreeLifecycle] warning: claude token resolution failed; falling back to keychain login\n".utf8
+                ))
+                resolvedToken = nil
+            }
+        }
+
         // Create terminal 1: claude (or shell if skipClaude)
         let claudeCommand: String
         let claudeSessionID: String?
+        let claudeTokenID: UUID?
         if skipClaude {
             claudeCommand = defaultShell
             claudeSessionID = nil
+            claudeTokenID = nil
         } else {
             let sessionUUID = archivedClaudeSessions?.first ?? UUID().uuidString
-            var cmd = "claude --dangerously-skip-permissions --session-id \(sessionUUID)"
             claudeSessionID = sessionUUID
-
-            // Inject per-repo system prompt
             let isResume = archivedClaudeSessions?.first != nil
-            if let prompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: isResume) {
-                cmd += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
-            }
-
-            // Pass initial prompt as positional arg (only for fresh sessions, not resumes)
-            if !isResume, let initialPrompt, !initialPrompt.isEmpty {
-                cmd += " \(SystemPromptBuilder.shellEscape(initialPrompt))"
-            }
-
-            claudeCommand = cmd
+            let appendPrompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: isResume)
+            claudeCommand = ClaudeSpawnCommandBuilder.build(
+                resumeID: nil,
+                freshSessionID: sessionUUID,
+                appendSystemPrompt: appendPrompt,
+                initialPrompt: isResume ? nil : initialPrompt,
+                tokenSecret: resolvedToken?.secret,
+                tokenKind: resolvedToken?.kind,
+                cmd: nil,
+                shellFallback: defaultShell
+            )
+            claudeTokenID = resolvedToken?.tokenID
         }
         let window1 = try await tmux.createWindow(
             server: tmuxServer,
@@ -225,7 +240,8 @@ extension WorktreeLifecycle {
             tmuxWindowID: window1.windowID,
             tmuxPaneID: window1.paneID,
             label: skipClaude ? "shell" : "Claude Code",
-            claudeSessionID: claudeSessionID
+            claudeSessionID: claudeSessionID,
+            claudeTokenID: claudeTokenID
         )
 
         // Create terminal 2: setup hook
@@ -251,7 +267,16 @@ extension WorktreeLifecycle {
         // Restore additional archived Claude sessions (beyond the first which was used above)
         if !skipClaude, let sessions = archivedClaudeSessions, sessions.count > 1 {
             for sessionID in sessions.dropFirst() {
-                let cmd = "claude --dangerously-skip-permissions --session-id \(sessionID)"
+                let cmd = ClaudeSpawnCommandBuilder.build(
+                    resumeID: nil,
+                    freshSessionID: sessionID,
+                    appendSystemPrompt: nil,
+                    initialPrompt: nil,
+                    tokenSecret: resolvedToken?.secret,
+                    tokenKind: resolvedToken?.kind,
+                    cmd: nil,
+                    shellFallback: defaultShell
+                )
                 let window = try await tmux.createWindow(
                     server: tmuxServer,
                     session: "main",
@@ -263,7 +288,8 @@ extension WorktreeLifecycle {
                     tmuxWindowID: window.windowID,
                     tmuxPaneID: window.paneID,
                     label: "Claude Code",
-                    claudeSessionID: sessionID
+                    claudeSessionID: sessionID,
+                    claudeTokenID: resolvedToken?.tokenID
                 )
             }
         }

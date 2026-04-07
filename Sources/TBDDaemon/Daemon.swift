@@ -79,7 +79,16 @@ public final class Daemon: Sendable {
         let git = GitManager()
         let tmux = TmuxManager()
         let hooks = HookResolver()
-        let lifecycle = WorktreeLifecycle(db: database, git: git, tmux: tmux, hooks: hooks, subscriptions: subs)
+        let claudeTokenResolver = ClaudeTokenResolver(
+            tokens: database.claudeTokens,
+            repos: database.repos,
+            config: database.config
+        )
+        let lifecycle = WorktreeLifecycle(
+            db: database, git: git, tmux: tmux, hooks: hooks,
+            subscriptions: subs,
+            claudeTokenResolver: claudeTokenResolver
+        )
         let prManager = PRStatusManager()
 
         // 8. Initialize RPC router
