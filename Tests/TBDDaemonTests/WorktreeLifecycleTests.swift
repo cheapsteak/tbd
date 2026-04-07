@@ -330,6 +330,56 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
     #expect(restoredSessionIDs.count == 2)
 }
 
+@Test func testCreateInjectsTokenWhenResolverProvided() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+
+    // Seed a token row and set it as the global default.
+    let token = try await db.claudeTokens.create(name: "Test", kind: .oauth)
+    try await db.config.setDefaultClaudeTokenID(token.id)
+
+    let secret = "sk-ant-oat01-FAKETOKEN_value"
+    let resolver = ClaudeTokenResolver(
+        tokens: db.claudeTokens,
+        repos: db.repos,
+        config: db.config,
+        keychain: { id in id == token.id.uuidString ? secret : nil }
+    )
+
+    // Recorder captures the dryRun shellCommand args from createWindow.
+    let recorded = LifecycleRecordedCommands()
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: tmux,
+        hooks: HookResolver(),
+        claudeTokenResolver: resolver
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+
+    // (a) Captured shell command for the Claude window contains the env var injection.
+    let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+    let claudeCmd = joined.first { $0.contains("CLAUDE_CODE_OAUTH_TOKEN='\(secret)'") }
+    #expect(claudeCmd != nil,
+            "expected createWindow call with CLAUDE_CODE_OAUTH_TOKEN injected; got: \(joined)")
+
+    // (b) Persisted terminal row has claudeTokenID set to the known token UUID.
+    let terminals = try await db.terminals.list(worktreeID: wt.id)
+    let claudeTerminal = terminals.first { $0.claudeTokenID != nil }
+    #expect(claudeTerminal?.claudeTokenID == token.id,
+            "expected the Claude terminal to persist claudeTokenID=\(token.id)")
+}
+
 @Test func testWorktreePathStructure() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -351,4 +401,20 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
     #expect(wt.path.hasPrefix(repoDir.path))
     #expect(wt.path.contains(".tbd/worktrees/"))
     #expect(wt.path.contains(wt.name))
+}
+
+/// Thread-safe collector for TmuxManager dryRun recorded args.
+private final class LifecycleRecordedCommands: @unchecked Sendable {
+    private let lock = NSLock()
+    private var commands: [[String]] = []
+
+    func append(_ args: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        commands.append(args)
+    }
+
+    func snapshot() -> [[String]] {
+        lock.lock(); defer { lock.unlock() }
+        return commands
+    }
 }
