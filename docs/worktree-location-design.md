@@ -1,6 +1,6 @@
 # Worktree Location Design
 
-Status: **Proposal v8** — bot review folded in: `legacyAndCanonicalPrefixes` delegates to `basePath`, §5b "missing repo" applies to manual command only, per-worktree step numbering aligned with lock-sequence box, `layout_version` rationale explained.
+Status: **Proposal v9** — bot review round 2: real WorktreeStatus values used (`.active` not `.ready`), new `.failed` case added, Step 4 inline recovery removed (deferred to journal), `layout_version` mechanism fully specified with table/constant/initial-value.
 Author: Claude (design pass, 2026-04-07)
 
 ## Decisions locked in (round 1)
@@ -136,6 +136,16 @@ ALTER TABLE repo ADD COLUMN worktree_root TEXT;                       -- NULL = 
 ALTER TABLE repo ADD COLUMN status        TEXT NOT NULL DEFAULT 'ok'; -- 'ok' | 'missing'
 ```
 
+Plus a **new `WorktreeStatus` case** in `Sources/TBDShared/Models.swift:27-29`:
+
+```swift
+public enum WorktreeStatus: String, Codable, Sendable {
+    case active, archived, main, creating, conductor, failed   // 'failed' is new
+}
+```
+
+`worktree.status` is already a TEXT column (`Database.swift:69`), so no schema migration is needed for the new enum case — only the Swift enum and any switch statements that exhaustively match it. Per `CLAUDE.md` (TBDShared section), the daemon must be restarted after this change.
+
 Field roles:
 
 - **`worktree_slot`** — source of truth for the per-repo directory name. Sanitized display name at add-time. UNIQUE-constrained. Never auto-changes.
@@ -231,9 +241,24 @@ You asked what could go wrong with auto-migrate-on-upgrade. Here's the honest li
 
 Given that the only current user has explicitly accepted editor-state loss as a non-issue ("editors are easy to reopen"), we **move everything** on first post-upgrade startup. The failure list above remains valid as a record of what we're consciously accepting, not a list of cases we defend against.
 
-- **Auto-migrate runs once on daemon startup after an upgrade**, gated by a `layout_version` row in a TBD-owned table. This is **deliberately not a GRDB migration**: GRDB migrations are single-pass and non-retryable (they run inside one transaction and either succeed or roll back), but the filesystem migration must survive crashes mid-batch and resume on the next boot — exactly the property the journal in §5b provides. Conflating the two would lose crash-resumability. The `layout_version` row records "the last layout version that finished migrating," and the resume logic at startup re-runs the migration if that value is behind the current layout version. It does not run on every launch. No countdown, no user prompt — the user knows it's coming.
+- **Auto-migrate runs once on daemon startup after an upgrade**, gated by a `layout_version` value. Concrete shape:
+
+  ```sql
+  CREATE TABLE IF NOT EXISTS tbd_meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+  );
+  -- After successful migration: INSERT OR REPLACE INTO tbd_meta VALUES ('layout_version', '1');
+  ```
+
+  - **Table:** a new `tbd_meta` key/value table created in the same GRDB migration (`vN`) that adds the `repo` columns. This is just for daemon-managed sentinels that aren't GRDB schema versions.
+  - **Current version constant:** `WorktreeLayout.currentVersion: Int = 1`, hardcoded in Swift. Bumped manually if a future TBD release introduces a new layout migration.
+  - **Initial value for existing installs:** absent. The startup code reads `tbd_meta.layout_version`; if missing or `< currentVersion`, runs migration. After successful migration completes (every repo's worktrees processed, success or skip), writes `currentVersion` to the row.
+  - **Why this is deliberately not a GRDB migration:** GRDB migrations are single-pass and non-retryable — they run inside one transaction and either succeed or roll back. The filesystem migration must survive crashes mid-batch and resume on the next boot, exactly what the journal in §5b provides. A GRDB migration that called out to `FileManager.moveItem` would lose crash-resumability and could leave the schema marked "migrated" with the filesystem half-done. The `tbd_meta.layout_version` row records "the last layout version that finished migrating end-to-end," and only flips after the resume loop terminates with no journal entries left.
+
+  It does not run on every launch. No countdown, no user prompt — the user knows it's coming.
 - **Minimal pre-flight per worktree** (not for safety, but to avoid moving things that are demonstrably broken or in-flight):
-  - Status is `.ready` (skip `.creating`/`.error`/`.archived`).
+  - Status is `.active` (skip `.creating`/`.archived`/`.main`/`.conductor`/`.failed`).
   - The migrator **actively closes** any TBD-owned terminal whose CWD is this worktree before the move. TBD-owned terminals are TBD's problem; the user reopens them post-migration. (No pre-flight check here — it's an action, not a gate.)
   - The repo's main path still exists and is a git repo. **If not, the repo is marked `.missing` (§4b) and its worktrees are *skipped*, not failed.** The legacy worktrees stay where they are and remain reachable via the dual-prefix reconcile view (§4a code-change surface). When the user later runs `tbd repo relocate`, the next startup sweep (or manual `tbd repo migrate-worktrees`) picks them up.
   - **Crucially: a missing repo must never block daemon startup.** Migration iterates repos in isolation — one missing repo skips that repo only, the daemon continues, and the user can invoke `tbd repo relocate` via RPC the moment startup finishes. Without this, the daemon would be unbootable any time a repo directory has moved, with no recovery path (relocate is an RPC that requires a running daemon).
@@ -274,14 +299,14 @@ acquire migration.lock
 release migration.lock
 ```
 
-The lock is held only for the duration of one move, then released so other RPCs aren't starved. On daemon startup, recovery (§5b "Failure recovery") runs *before* releasing the lock for normal operation.
+The lock is held only for the duration of one move, then released between worktrees. With migration currently blocking daemon startup (§5a), no RPCs can arrive between moves, so the per-move release is moot today — but the granularity is preserved so this code can move to background migration in a future release without redesigning the locking. On daemon startup, recovery (§5b "Failure recovery") runs *before* releasing the lock for normal operation.
 
 ### Per-worktree migration steps
 
 For each worktree owned by the repo, **step 0 runs outside the lock** (so a skip is cheap), then **steps 1–5 run under the lock** and use the same numbering as the lock-sequence box above:
 
 **Step 0 — Pre-flight and prep** (outside lock; skip this worktree if any *check* fails; do not abort the batch):
-- *Check:* worktree status is `.ready`.
+- *Check:* worktree status is `.active`.
 - *Check:* destination path does not already exist.
 - *Check:* the owning repo's status is `.ok` (not `.missing`).
 - *Action:* close/detach any TBD terminal in the `terminal` table whose CWD is this worktree. Logged at `info`.
@@ -291,7 +316,7 @@ For each worktree owned by the repo, **step 0 runs outside the lock** (so a skip
 1. **Write the journal entry** (`{worktree_id, old_path, new_path, started_at}`) to `~/.tbd/migration-journal.json`.
 2. **Move the directory** with `FileManager.moveItem(at:to:)`. On the same volume this resolves to `rename(2)`, whose final inode flip is atomic. Cross-volume falls back to copy-then-delete and is **not atomic**; the journal from step 1 is what makes it recoverable.
 3. **Repair git's bookkeeping** with `git -C <new-worktree-path> worktree repair`. This rewrites both `<main-repo>/.git/worktrees/<wt-name>/gitdir` (absolute path to the worktree's `.git` file) and `<worktree-path>/.git` (which contains `gitdir: <main-repo>/.git/worktrees/<wt-name>`). Verify with `git worktree list` from the main repo.
-4. **Update `state.db`** in a transaction: `UPDATE worktree SET path = ? WHERE id = ?`. If the transaction fails, `git worktree repair` again with the *old* path (it's idempotent) and fail loudly.
+4. **Update `state.db`** in a transaction: `UPDATE worktree SET path = ? WHERE id = ?`. If the transaction fails, **do not attempt inline recovery** — at this point `old_path` no longer exists on disk (Step 2 moved it) and git's metadata already points to `new_path` (Step 3 repaired it), so a `git worktree repair` from the old path would fail. The journal entry from Step 1 still describes the in-flight move, and the on-disk state matches the "only `new_path` exists" case in §5b's recovery routine: on next daemon startup, recovery re-runs Steps 3–5 idempotently. Inline behavior: log at `error` level (`os.Logger`, category `migration`), mark this worktree `.failed` in memory for the rest of the current sweep so nothing else touches it, and **continue the batch** to the next worktree. Do not abort the sweep — one DB write failure shouldn't strand every other worktree.
 5. **Delete the journal entry**, then **sweep the old `<repo>/.tbd/worktrees/` directory** if it's now empty. Leave `<repo>/.tbd/` alone in case the user has other files there.
 
 ### Failure recovery
@@ -302,8 +327,8 @@ The dangerous moment is between step 2 (directory moved) and step 4 (DB updated)
 - **On daemon startup**, before running any new migrations, check `migration.lock` and `migration-journal.json`. If a journal entry exists, run recovery:
   - Only `new_path` exists → step 2 succeeded; finish steps 3–5.
   - Only `old_path` exists → step 2 failed or was rolled back; delete the journal entry and **re-queue the worktree into the current startup sweep** so it retries this boot. (Without re-queue, the iteration that started this attempt has already moved on, and the worktree would stay in legacy until the user manually runs `tbd repo migrate-worktrees`.)
-  - Both `old_path` and `new_path` exist → ambiguous (something recreated the old path). Mark the worktree `.error`, leave both directories in place, log loudly (`os.Logger` at `error` level, category `migration`), and **continue startup**. The user investigates manually — `tbd worktree forget` + re-reconcile is the normal recovery. Refusing to start would strand the user with no RPCs available.
-  - Neither exists → catastrophic. Mark the worktree `.error` in the DB, delete the journal entry, continue startup.
+  - Both `old_path` and `new_path` exist → ambiguous (something recreated the old path). Mark the worktree `.failed`, leave both directories in place, log loudly (`os.Logger` at `error` level, category `migration`), and **continue startup**. The user investigates manually — `tbd worktree forget` + re-reconcile is the normal recovery. Refusing to start would strand the user with no RPCs available.
+  - Neither exists → catastrophic. Mark the worktree `.failed` in the DB, delete the journal entry, continue startup.
 
   In every case the daemon comes up. Migration never blocks startup on an unrecoverable state — startup is a prerequisite for the user to do anything about it.
 - Because the lock is held across the entire sequence and the journal is single-entry, "lost journal" is not a possible state under normal operation. (If the user manually deletes `~/.tbd/migration-journal.json` mid-flight, that's on them.)
