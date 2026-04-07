@@ -103,7 +103,7 @@ extension AppState {
             terminals[worktreeID, default: []].append(newTerminal)
             let newTab = Tab(id: newTerminal.id, content: .terminal(terminalID: newTerminal.id))
             tabs[worktreeID, default: []].append(newTab)
-            selectedTabIndex[worktreeID] = (tabs[worktreeID]?.count ?? 1) - 1
+            activeTabIndices[worktreeID] = (tabs[worktreeID]?.count ?? 1) - 1
         } catch {
             logger.error("Failed to swap Claude token on terminal: \(error)")
             showAlert("Failed to swap Claude token: \(error.localizedDescription)", isError: true)
