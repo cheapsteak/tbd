@@ -50,7 +50,7 @@ Putting TBD's metadata inside the repo working tree leaks TBD into every tool th
 
 | Option | Layout | Pollutes repo? | Survives repo move? | Collisions? | Discoverable? | Migration cost |
 |---|---|---|---|---|---|---|
-| **A. App-support, UUID-namespaced** | `~/.tbd/worktrees/<repo-uuid>/<wt-name>/` | No | Yes (if repo lookup is fixed) | No (UUID) | Medium (hidden dir) | Medium |
+| **A. App-support, slot-namespaced** | `~/.tbd/worktrees/<slot>/<wt-name>/` (slot = sanitized display name, see §4a) | No | Yes | No (UNIQUE slot) | Medium (hidden dir) | Medium |
 | **B. App-support, name-namespaced** | `~/.tbd/worktrees/<repo-name>/<wt-name>/` | No | Yes | **Yes** (two repos named `app`) | Medium | Medium |
 | **C. Home dir, visible** | `~/tbd-worktrees/<repo-name>/<wt-name>/` | No | Yes | Yes | High | Medium |
 | **D. Sibling dir** | `<repo-parent>/<repo-name>.tbd/<wt-name>/` | No (sibling) | No (breaks on move) | Possible | High | Low |
@@ -66,12 +66,12 @@ Notes on rejected options:
 
 ## 4. Recommendation
 
-**Option F: default to A (`~/.tbd/worktrees/<repo-uuid>/<wt-name>/`), with an optional per-repo `worktree_root` override persisted in `state.db`.**
+**Option F: default to `~/.tbd/worktrees/<slot>/<wt-name>/` where `<slot>` is the sanitized repo display name (§4a), with an optional per-repo `worktree_root` override persisted in `state.db`.**
 
 Rationale:
 
 1. **Reuses existing infrastructure.** TBD already owns `~/.tbd/`. No new directory convention to teach users. `~/Library/Application Support/TBD/` would be more "Mac-correct" but inconsistent with where `state.db` already lives, and migrating *that* is out of scope.
-2. **UUID namespacing is collision-proof and rename-proof.** The repo's display name and filesystem path can change freely without touching the worktree directory. This also nudges us toward fixing the latent "moved repo breaks lookup" bug — once worktrees no longer derive from `repo.path`, the only thing tying a repo to its filesystem location is the `repos.path` column, which can be repaired with a `tbd repo relocate` command later.
+2. **Readable and rename-proof.** The display name is what the user already thinks of the repo as. The slot is frozen at add time, so the repo's filesystem path can change freely without touching the worktree directory. This also nudges us toward fixing the latent "moved repo breaks lookup" bug — once worktrees no longer derive from `repo.path`, the only thing tying a repo to its filesystem location is the `repo.path` column, which can be repaired with `tbd repo relocate` (§4b).
 3. **Per-repo override gives power users an escape hatch** without changing the default. Useful for:
    - Repos on a fast scratch SSD while the main repo lives on a slow networked drive.
    - Users who *want* sibling-dir layout for muscle memory.
