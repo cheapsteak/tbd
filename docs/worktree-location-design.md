@@ -335,7 +335,7 @@ For each worktree owned by the repo, **step 0 runs outside the lock** (so a skip
    4. Attempt steps 3–5 (repair → DB update → delete journal). On success, the journal is gone and the count is moot. On any failure, the next boot reads the incremented count and the loop converges.
 
    This applies equally to step-3 (`git worktree repair`) failures — the most common real-world case being "the main repo was moved or deleted after migration started." Without the bound, that scenario would loop forever.
-5. **Delete the journal entry**, then **sweep the old `<repo>/.tbd/worktrees/` directory** if it's now empty. Leave `<repo>/.tbd/` alone in case the user has other files there.
+5. **Delete the journal entry**, then **sweep the old `<repo>/.tbd/worktrees/` directory** if it's now empty. If `<repo>/.tbd/` is *also* empty after that removal, remove it too — leaving an empty `<repo>/.tbd/` behind would defeat the `.tbd/`-pollution fix in §2 (the directory would still show up in `git status` and IDE trees). Only remove if strictly empty; if the user has put anything else in there, leave it alone.
 
 ### Failure recovery
 
