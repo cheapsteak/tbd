@@ -347,6 +347,10 @@ private struct TabBarItem: View {
         }
         switch tab.content {
         case .terminal:
+            if isClaudeTerminal, let tokenID = terminal?.claudeTokenID,
+               let entry = appState.claudeTokens.first(where: { $0.token.id == tokenID }) {
+                return entry.token.name
+            }
             return "Terminal \(index + 1)"
         case .webview(_, let url):
             return url.host ?? "Web"
