@@ -1,6 +1,6 @@
 # Worktree Location Design
 
-Status: **Proposal v10** — bot review round 3: Step 2 inline failure path, `migration.lock` is `fcntl` advisory (auto-released on crash), stale-lock recovery, infinite-recovery-loop bound (3 retries then accept on-disk state).
+Status: **Proposal v11** — bot review round 4: `retry_count` write-before-attempt protocol, recovery bound covers step 3 *and* step 4, backfill collision uses an explicit in-memory set, `--force` flag removed.
 Author: Claude (design pass, 2026-04-07)
 
 ## Decisions locked in (round 1)
@@ -159,6 +159,7 @@ The `Repo` Codable model in `Sources/TBDShared/Models.swift` gains matching opti
 The GRDB migration must populate `worktree_slot` for every pre-existing row in `repo`. The `tbd repo add` interactive collision-rejection path doesn't apply here — the migration runs unattended and **must not fail**. Algorithm:
 
 ```
+assigned_slots: Set<String> = SELECT worktree_slot FROM repo WHERE worktree_slot IS NOT NULL
 for each existing repo, ordered by createdAt ASC (stable):
     if repo.worktree_slot IS NOT NULL:
         continue   # already assigned (resumed run); don't re-suffix
@@ -167,10 +168,11 @@ for each existing repo, ordered by createdAt ASC (stable):
         base = "repo-\(repo.id.uuidString.prefix(6))"   # always-valid fallback
     slot = base
     n = 2
-    while another repo (already processed in this loop) has worktree_slot == slot:
+    while assigned_slots contains slot:
         slot = "\(base)-\(n)"
         n += 1
     repo.worktree_slot = slot
+    assigned_slots.insert(slot)   # in-memory; UNIQUE constraint backstops the DB write
 ```
 
 Properties:
@@ -280,7 +282,6 @@ Auto-migrate at startup for the safe cases (§5a), with a manual `tbd repo migra
 ```
 tbd repo migrate-worktrees [<repo>]   # default: all repos
                           [--dry-run]
-                          [--force]    # currently a no-op; reserved for future stricter pre-flight checks
 ```
 
 ### Locking and journal scope
@@ -322,7 +323,14 @@ For each worktree owned by the repo, **step 0 runs outside the lock** (so a skip
 3. **Repair git's bookkeeping** with `git -C <new-worktree-path> worktree repair`. This rewrites both `<main-repo>/.git/worktrees/<wt-name>/gitdir` (absolute path to the worktree's `.git` file) and `<worktree-path>/.git` (which contains `gitdir: <main-repo>/.git/worktrees/<wt-name>`). Verify with `git worktree list` from the main repo.
 4. **Update `state.db`** in a transaction: `UPDATE worktree SET path = ? WHERE id = ?`. If the transaction fails, **do not attempt inline recovery** — at this point `old_path` no longer exists on disk (Step 2 moved it) and git's metadata already points to `new_path` (Step 3 repaired it), so a `git worktree repair` from the old path would fail. The journal entry from Step 1 still describes the in-flight move, and the on-disk state matches the "only `new_path` exists" case in §5b's recovery routine: on next daemon startup, recovery re-runs Steps 3–5 idempotently. Inline behavior: log at `error` level (`os.Logger`, category `migration`), mark this worktree `.failed` in memory for the rest of the current sweep so nothing else touches it, and **continue the batch** to the next worktree. Do not abort the sweep — one DB write failure shouldn't strand every other worktree.
 
-   **Failed-step-4-recovery edge case:** if the same DB issue persists across reboots, recovery's own attempt to re-run step 4 fails again, and the journal stays on disk indefinitely (each boot retries and fails). To avoid an infinite recovery loop: after **3 consecutive boot attempts** (track via a `retry_count` field in the journal entry), recovery deletes the journal entry, accepts the on-disk state (`new_path`) as authoritative, and emits a loud `error`-level log instructing the user to run `tbd worktree repair --reconcile` (or whatever the equivalent command becomes) to manually update the DB row. The user's worktree is *physically intact* at the new location — only the DB pointer is stale, and reconcile (§4a code-change surface) can rebuild that from the dual-prefix scan.
+   **Bounded-recovery edge case:** if *any* step in recovery's "only `new_path` exists" branch (step 3 `git worktree repair` *or* step 4 DB update) persistently fails across reboots, the journal would stay on disk indefinitely. To bound this, the journal entry carries a **`retry_count: Int`** field, and the recovery protocol on each boot is strict:
+
+   1. Read the journal entry, including `retry_count` (default `0` if absent — fresh entry from a pre-recovery crash).
+   2. **If `retry_count >= 3`:** delete the journal entry, mark the worktree `.failed` in the DB, log at `error` level with instructions to run `tbd worktree repair --reconcile` (or equivalent) to reconcile the DB pointer, and continue startup. The worktree is *physically intact* at `new_path` — only the DB row is stale, and reconcile (§4a code-change surface) can rebuild it from the dual-prefix scan.
+   3. **Otherwise**, write `retry_count + 1` to the journal file on disk **before attempting recovery**. The increment-then-fsync-then-attempt order is load-bearing: if the daemon crashes after the in-memory increment but before the write, the count would reset on next boot and the bound would never be reached.
+   4. Attempt steps 3–5 (repair → DB update → delete journal). On success, the journal is gone and the count is moot. On any failure, the next boot reads the incremented count and the loop converges.
+
+   This applies equally to step-3 (`git worktree repair`) failures — the most common real-world case being "the main repo was moved or deleted after migration started." Without the bound, that scenario would loop forever.
 5. **Delete the journal entry**, then **sweep the old `<repo>/.tbd/worktrees/` directory** if it's now empty. Leave `<repo>/.tbd/` alone in case the user has other files there.
 
 ### Failure recovery
@@ -331,7 +339,7 @@ The dangerous moment is between step 2 (directory moved) and step 4 (DB updated)
 
 - The journal is written *before* step 2 and deleted *after* step 4, so a daemon crash anywhere in the danger window leaves exactly one journal entry on disk.
 - **On daemon startup**, before running any new migrations, check `migration.lock` and `migration-journal.json`. If a journal entry exists, run recovery:
-  - Only `new_path` exists → step 2 succeeded; finish steps 3–5.
+  - Only `new_path` exists → step 2 succeeded; run the bounded-retry protocol from Step 4 above (read `retry_count`, bail if ≥3, otherwise increment-and-persist then attempt steps 3–5). If step 3 (`git worktree repair`) or step 4 (DB update) throws during this retry and the count hasn't reached the bound, the journal stays on disk with the incremented count and the next boot tries again. If either step throws *and* the count has now reached the bound, the worktree is marked `.failed`, the journal is deleted, and startup continues.
   - Only `old_path` exists → step 2 failed or was rolled back; delete the journal entry and **re-queue the worktree into the current startup sweep** so it retries this boot. (Without re-queue, the iteration that started this attempt has already moved on, and the worktree would stay in legacy until the user manually runs `tbd repo migrate-worktrees`.)
   - Both `old_path` and `new_path` exist → ambiguous (something recreated the old path). Mark the worktree `.failed`, leave both directories in place, log loudly (`os.Logger` at `error` level, category `migration`), and **continue startup**. The user investigates manually — `tbd worktree forget` + re-reconcile is the normal recovery. Refusing to start would strand the user with no RPCs available.
   - Neither exists → catastrophic. Mark the worktree `.failed` in the DB, delete the journal entry, continue startup.
