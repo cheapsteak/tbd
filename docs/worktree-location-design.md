@@ -109,13 +109,17 @@ slot = sanitize(repo.displayName)                  # e.g. "tbd", "longeye-app"
 if any existing repo has worktree_slot == slot:
     refuse `tbd repo add` with:
         "display name '<new.displayName>' sanitizes to slot '<slot>',
-         which is already used by repo '<existing.displayName>' (at <existing.path>).
-         Pass --name <different-name> or rename the existing repo first."
+         which is frozen to repo '<existing.displayName>' (at <existing.path>).
+         (Slot is set at add time and does not change when a repo is renamed,
+          so '<existing.displayName>' may hold a slot that no longer matches its
+          current display name.)
+         Pass --name <different-name>, or run
+         `tbd repo rename-slot <existing.displayName> <new-slot>` first."
 else:
     repo.worktree_slot = slot
 ```
 
-(The error surfaces *both* display names so the user understands why `TBD` and `tbd`, or `my-app` and `my_app`, collide — the sanitized slot is the same even though the names look different.)
+The error surfaces *both* display names and the sanitized slot so the user understands why `TBD` and `tbd`, or `my-app` and `my_app`, collide. It also explicitly names the slot-frozen-at-add-time invariant, because this is the *only* user-facing surface where slot/displayName divergence is visible — without this explanation, a user whose existing repo was renamed sees "slot `foo` is used by repo `bar`" and has no mental model for why.
 
 Properties:
 
