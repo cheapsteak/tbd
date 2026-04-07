@@ -17,6 +17,13 @@ The main chat session agent should not write code directly. Delegate all impleme
 - Run `swift test` if you changed daemon or shared code.
 - When adding a branching conditional that gates behavior (feature flags, toggles, mode switches), add a test for each branch. Verify the gated behavior is off when the flag is off, and that ungated behavior still works.
 
+### Restart must use the worktree's own script
+Always run `scripts/restart.sh` (relative, from the worktree cwd), never an absolute path to the main project's copy. Using `/Users/chang/projects/tbd/scripts/restart.sh` builds and starts binaries from the main branch, leaving old worktree processes running and causing "Unknown method" RPC errors. After any restart, verify with:
+```
+ps aux | grep -E "\.build/debug/TBD" | grep -v grep
+```
+There should be exactly one `TBDDaemon` and one `TBDApp`, both from the worktree path. If stale processes exist: `pkill -f TBDDaemon; pkill -f TBDApp` then re-run `scripts/restart.sh`.
+
 ## Critical Rules
 
 ### NEVER delete ~/.tbd/state.db
