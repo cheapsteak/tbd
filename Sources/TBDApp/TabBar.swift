@@ -188,6 +188,10 @@ private struct TabBarItem: View {
         terminal?.claudeSessionID != nil
     }
 
+    private var isCodexTerminal: Bool {
+        terminal?.label == "Codex"
+    }
+
     private var isSuspended: Bool {
         terminal?.suspendedAt != nil
     }
@@ -331,6 +335,10 @@ private struct TabBarItem: View {
                     .foregroundStyle(style)
             } else if isClaudeTerminal {
                 Text("✳")
+                    .font(.system(size: 10))
+                    .foregroundStyle(style)
+            } else if isCodexTerminal {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
                     .font(.system(size: 10))
                     .foregroundStyle(style)
             } else {
