@@ -358,9 +358,7 @@ private struct FilePanelDivider: View {
         Color.clear
             .frame(width: 8)
             .overlay(Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1))
-            .onHover { hovering in
-                if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
-            }
+            .cursor(.resizeLeftRight)
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in

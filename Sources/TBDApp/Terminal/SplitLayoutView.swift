@@ -229,13 +229,40 @@ struct SplitDivider: View {
 // MARK: - Cursor helper
 
 extension View {
+    /// Overlays an AppKit cursor rect on the view. More reliable than `.onHover` +
+    /// push/pop, which can miss events when a gesture is attached or leave the
+    /// cursor stack unbalanced if the view disappears while hovered.
     func cursor(_ cursor: NSCursor) -> some View {
-        self.onHover { hovering in
-            if hovering {
-                cursor.push()
-            } else {
-                NSCursor.pop()
-            }
-        }
+        self.overlay(CursorRectView(cursor: cursor).allowsHitTesting(false))
     }
+}
+
+/// NSViewRepresentable that installs an `addCursorRect` over its bounds so the
+/// cursor changes whenever the pointer enters, regardless of SwiftUI gestures.
+private struct CursorRectView: NSViewRepresentable {
+    let cursor: NSCursor
+
+    func makeNSView(context: Context) -> CursorNSView {
+        let view = CursorNSView()
+        view.cursor = cursor
+        return view
+    }
+
+    func updateNSView(_ nsView: CursorNSView, context: Context) {
+        nsView.cursor = cursor
+        nsView.window?.invalidateCursorRects(for: nsView)
+    }
+}
+
+final class CursorNSView: NSView {
+    var cursor: NSCursor = .arrow
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: cursor)
+    }
+
+    override var isFlipped: Bool { true }
+
+    // Don't intercept mouse events — let SwiftUI handle them.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
