@@ -42,9 +42,14 @@ Guard these with `Bundle.main.bundleIdentifier != nil` checks.
 ### NIO thread safety
 All `ChannelHandlerContext` property access (`context.channel`, `context.pipeline`) must happen on the channel's event loop. Accessing from any other thread triggers a precondition crash. Always wrap in `context.eventLoop.execute { ... }` — never use `context.channel.isActive` as a pre-check outside the event loop.
 
+### No `print()` in `Sources/`
+Use `os.Logger` (`import os`) with one of the established subsystems (`com.tbd.app`, `com.tbd.daemon`) and a feature-shaped category. `.debug` is the right level for traces you'd previously have used `print()` for — they're silent by default and activated with `log stream --level debug`. Always pass an explicit `privacy:` argument on dynamic interpolations (default `.public` for this dev tool, `.private`/`.sensitive` for secrets). Full rationale and category taxonomy: [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md).
+
 ## Quick Reference
 
 - **Build**: `swift build`
 - **Test**: `swift test`
 - **Restart**: `scripts/restart.sh`
-- **Debug logs**: `/tmp/tbd-bridge.log`
+- **Diagnostics**: see [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md). Quick recipes:
+  - Stream one feature area live: `log stream --level debug --predicate 'subsystem BEGINSWITH "com.tbd" AND category == "markdown"'`
+  - Replay the last 5 minutes after reproducing a bug: `log show --last 5m --level debug --predicate 'subsystem BEGINSWITH "com.tbd"'` (requires `sudo log config --subsystem com.tbd.app --mode "level:debug,persist:debug"` once per subsystem to capture `.debug` rows)
