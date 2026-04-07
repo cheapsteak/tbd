@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "usagePoller")
 
 /// Background poller that keeps `claude_token_usage` rows fresh for OAuth tokens.
 ///
@@ -316,7 +319,7 @@ public actor ClaudeUsagePoller {
             entry.backoffActive = true
             if !loggedBackoff.contains(tokenID) {
                 loggedBackoff.insert(tokenID)
-                print("[ClaudeUsagePoller] 429 backoff for token \(tokenID)")
+                logger.warning("429 backoff for token \(tokenID)")
             }
             entry.nextFireAt = clock.now().addingTimeInterval(Self.backoff)
             schedule[tokenID] = entry
