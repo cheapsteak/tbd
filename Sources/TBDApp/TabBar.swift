@@ -349,7 +349,30 @@ private struct TabBarItem: View {
         case .terminal:
             if isClaudeTerminal, let tokenID = terminal?.claudeTokenID,
                let entry = appState.claudeTokens.first(where: { $0.token.id == tokenID }) {
-                return entry.token.name
+                let name = entry.token.name
+                let worktreeID = terminal!.worktreeID
+                let allTabs = appState.tabs[worktreeID] ?? []
+                let allTerminals = appState.terminals[worktreeID] ?? []
+                let sameTokenTerminalIDs = Set(
+                    allTerminals
+                        .filter { $0.claudeTokenID == tokenID }
+                        .map { $0.id }
+                )
+                let sameTokenTabs = allTabs.filter { tab in
+                    if case .terminal(let tID) = tab.content {
+                        return sameTokenTerminalIDs.contains(tID)
+                    }
+                    return false
+                }
+                if sameTokenTabs.count > 1 {
+                    let myTerminalID = terminal!.id
+                    let position = (sameTokenTabs.firstIndex { tab in
+                        if case .terminal(let tID) = tab.content { return tID == myTerminalID }
+                        return false
+                    } ?? 0) + 1
+                    return "\(name) \(position)"
+                }
+                return name
             }
             return "Terminal \(index + 1)"
         case .webview(_, let url):
