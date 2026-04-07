@@ -1,6 +1,6 @@
 # Worktree Location Design
 
-Status: **Proposal v9** — bot review round 2: real WorktreeStatus values used (`.active` not `.ready`), new `.failed` case added, Step 4 inline recovery removed (deferred to journal), `layout_version` mechanism fully specified with table/constant/initial-value.
+Status: **Proposal v10** — bot review round 3: Step 2 inline failure path, `migration.lock` is `fcntl` advisory (auto-released on crash), stale-lock recovery, infinite-recovery-loop bound (3 retries then accept on-disk state).
 Author: Claude (design pass, 2026-04-07)
 
 ## Decisions locked in (round 1)
@@ -280,14 +280,18 @@ Auto-migrate at startup for the safe cases (§5a), with a manual `tbd repo migra
 ```
 tbd repo migrate-worktrees [<repo>]   # default: all repos
                           [--dry-run]
-                          [--force]    # bypass dirty/lsof checks
+                          [--force]    # currently a no-op; reserved for future stricter pre-flight checks
 ```
 
 ### Locking and journal scope
 
 Migrations are **serialized one worktree at a time**, even with `--all`. The journal file at `~/.tbd/migration-journal.json` holds **exactly one entry** at a time, not the whole batch. This makes recovery trivial: at startup, either the journal is absent (nothing in flight) or it describes exactly one half-done move.
 
-A separate **`~/.tbd/migration.lock`** file (flock-style) prevents two daemon processes from racing. The strict ordering for every move is:
+A separate **`~/.tbd/migration.lock`** file prevents two daemon processes from racing. **The locking primitive is OS-level `fcntl(F_SETLK)` (`flock(2)` on macOS via `Foundation`'s `FileHandle.lock`/`unlock` or a direct `fcntl` call).** This is intentional — kernel-managed advisory locks are released automatically when the holding process dies, so a daemon crash cannot leave a permanent stale lock. The lock file itself may persist on disk, but the *lock state* does not.
+
+**Stale-lock recovery edge case:** if the daemon crashes after `acquire migration.lock` but *before* writing the journal in step 1, the kernel releases the lock on process death and the lock file remains as an empty marker. On next boot the recovery routine sees `migration.lock` exists but no journal entry — this means a crash made no filesystem changes. Treat the lock file as informational, attempt to acquire the kernel lock fresh (it will succeed since the dead process is gone), and proceed normally. If a stale lock file is encountered on a filesystem where `fcntl` is unavailable (network mounts), fall back to deleting the lock file after confirming via `tbd_meta` that no migration is in progress.
+
+The strict ordering for every move is:
 
 ```
 acquire migration.lock
@@ -314,9 +318,11 @@ For each worktree owned by the repo, **step 0 runs outside the lock** (so a skip
 **Steps 1–5 — under the lock** (same numbering as the lock-sequence box):
 
 1. **Write the journal entry** (`{worktree_id, old_path, new_path, started_at}`) to `~/.tbd/migration-journal.json`.
-2. **Move the directory** with `FileManager.moveItem(at:to:)`. On the same volume this resolves to `rename(2)`, whose final inode flip is atomic. Cross-volume falls back to copy-then-delete and is **not atomic**; the journal from step 1 is what makes it recoverable.
+2. **Move the directory** with `FileManager.moveItem(at:to:)`. On the same volume this resolves to `rename(2)`, whose final inode flip is atomic. Cross-volume falls back to copy-then-delete and is **not atomic**; the journal from step 1 is what makes it recoverable across crashes. **If `moveItem` throws inline (e.g. `ENOSPC`, `EPERM`) without crashing the daemon**, the filesystem state is unchanged from before step 1: `old_path` still exists and `new_path` does not. Inline behavior: delete the journal entry (safe — no filesystem change occurred), log at `error` level, mark this worktree `.failed` (both in memory and persist to `worktree.status` in the DB), release the lock, and **continue the batch** to the next worktree. Without this explicit handling, a leftover journal entry would block every subsequent worktree in the same sweep.
 3. **Repair git's bookkeeping** with `git -C <new-worktree-path> worktree repair`. This rewrites both `<main-repo>/.git/worktrees/<wt-name>/gitdir` (absolute path to the worktree's `.git` file) and `<worktree-path>/.git` (which contains `gitdir: <main-repo>/.git/worktrees/<wt-name>`). Verify with `git worktree list` from the main repo.
 4. **Update `state.db`** in a transaction: `UPDATE worktree SET path = ? WHERE id = ?`. If the transaction fails, **do not attempt inline recovery** — at this point `old_path` no longer exists on disk (Step 2 moved it) and git's metadata already points to `new_path` (Step 3 repaired it), so a `git worktree repair` from the old path would fail. The journal entry from Step 1 still describes the in-flight move, and the on-disk state matches the "only `new_path` exists" case in §5b's recovery routine: on next daemon startup, recovery re-runs Steps 3–5 idempotently. Inline behavior: log at `error` level (`os.Logger`, category `migration`), mark this worktree `.failed` in memory for the rest of the current sweep so nothing else touches it, and **continue the batch** to the next worktree. Do not abort the sweep — one DB write failure shouldn't strand every other worktree.
+
+   **Failed-step-4-recovery edge case:** if the same DB issue persists across reboots, recovery's own attempt to re-run step 4 fails again, and the journal stays on disk indefinitely (each boot retries and fails). To avoid an infinite recovery loop: after **3 consecutive boot attempts** (track via a `retry_count` field in the journal entry), recovery deletes the journal entry, accepts the on-disk state (`new_path`) as authoritative, and emits a loud `error`-level log instructing the user to run `tbd worktree repair --reconcile` (or whatever the equivalent command becomes) to manually update the DB row. The user's worktree is *physically intact* at the new location — only the DB pointer is stale, and reconcile (§4a code-change surface) can rebuild that from the dual-prefix scan.
 5. **Delete the journal entry**, then **sweep the old `<repo>/.tbd/worktrees/` directory** if it's now empty. Leave `<repo>/.tbd/` alone in case the user has other files there.
 
 ### Failure recovery
