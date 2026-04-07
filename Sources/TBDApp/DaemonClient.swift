@@ -10,7 +10,7 @@ import os
 private let daemonClientLogger = Logger(subsystem: "com.tbd.app", category: "DaemonClient")
 
 /// Errors from the DaemonClient.
-enum DaemonClientError: Error, CustomStringConvertible, Sendable {
+enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable {
     case daemonNotRunning
     case connectionFailed(String)
     case sendFailed(String)
@@ -34,6 +34,8 @@ enum DaemonClientError: Error, CustomStringConvertible, Sendable {
             return "RPC error: \(msg)"
         }
     }
+
+    var errorDescription: String? { description }
 }
 
 /// Actor that communicates with the TBD daemon over a Unix domain socket.
@@ -227,7 +229,18 @@ actor DaemonClient {
             while true {
                 let bytesRead = recv(fd, buffer, bufferSize, 0)
                 if bytesRead < 0 {
-                    throw DaemonClientError.receiveFailed("recv failed with errno \(errno)")
+                    let savedErrno = errno
+                    // Retry transient interruptions. Blocking recv on a Unix
+                    // socket can be kicked out with EINTR when the app process
+                    // services signals (GCD timers, Combine, etc.) during a
+                    // long handler like claudeToken.add where the daemon is
+                    // itself waiting on a network round-trip to Anthropic.
+                    if savedErrno == EINTR || savedErrno == EAGAIN {
+                        continue
+                    }
+                    throw DaemonClientError.receiveFailed(
+                        "recv failed with errno \(savedErrno) (\(String(cString: strerror(savedErrno))))"
+                    )
                 }
                 if bytesRead == 0 {
                     break

@@ -37,7 +37,7 @@ private struct ClaudeTokenMenuContent: View {
             if appState.globalDefaultClaudeTokenID == nil {
                 Label("Default (logged in)          —", systemImage: "checkmark")
             } else {
-                Text("Default (logged in)          —")
+                Text("Default (logged in)")
             }
         }
 
@@ -67,15 +67,10 @@ private struct ClaudeTokenMenuContent: View {
         }
     }
 
-    /// Format a token row as `name  5h NN% · 7d NN%`. Returns `—` placeholder
-    /// when usage is nil or the token is an api_key (no usage available).
+    /// Format a token row. Usage display is currently disabled (the
+    /// `/api/oauth/usage` endpoint requires a `user:profile` scope that
+    /// `claude setup-token` does not grant), so we render the bare name.
     private static func formatRow(entry: ClaudeTokenWithUsage) -> String {
-        let name = entry.token.name
-        guard entry.token.kind == .oauth, let usage = entry.usage else {
-            return "\(name)          —"
-        }
-        let five = usage.fiveHourPct.map { String(format: "5h %2.0f%%", $0 * 100) } ?? "5h —"
-        let seven = usage.sevenDayPct.map { String(format: "7d %2.0f%%", $0 * 100) } ?? "7d —"
-        return "\(name)  \(five) · \(seven)"
+        entry.token.name
     }
 }

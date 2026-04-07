@@ -109,9 +109,6 @@ struct ClaudeTokenRow: View {
             nameView
             kindBadge
             Spacer()
-            statusBadges
-            usageView
-            timestampView
             menuButton
         }
         .contentShape(Rectangle())
@@ -160,21 +157,25 @@ struct ClaudeTokenRow: View {
 
     @ViewBuilder
     private var statusBadges: some View {
-        if usage?.lastStatus == "http_401" {
-            Text("Invalid")
-                .font(.caption2).bold()
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(Color.red.opacity(0.2))
-                .foregroundColor(.red)
-                .clipShape(Capsule())
-        } else if usage?.lastStatus == "http_429" {
-            Text("Stale")
-                .font(.caption2).bold()
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(Color.orange.opacity(0.2))
-                .foregroundColor(.orange)
-                .clipShape(Capsule())
+        switch usage?.lastStatus {
+        case "http_401", "http401":
+            badge("Invalid", color: .red)
+        case "http_429", "http429":
+            badge("Stale", color: .orange)
+        case "network_error", "decode_error":
+            badge("Unverified", color: .orange)
+        default:
+            EmptyView()
         }
+    }
+
+    private func badge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption2).bold()
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(color.opacity(0.2))
+            .foregroundColor(color)
+            .clipShape(Capsule())
     }
 
     @ViewBuilder
@@ -327,10 +328,11 @@ struct AddClaudeTokenSheet: View {
                     appState.alertMessage = priorAlert
                     return
                 }
-                if let warning {
-                    errorMessage = warning
-                    return
-                }
+                // Token was saved. A non-nil `warning` means the daemon could
+                // not verify the token's quota with Anthropic but stored it
+                // anyway — surface that to the user via the row's status
+                // badge, not as a red error in this modal. Dismiss either way.
+                _ = warning
                 dismiss()
             }
         }

@@ -247,31 +247,16 @@ private struct TabBarItem: View {
         }
     }
 
-    private func formatPct(_ value: Double?) -> String? {
-        guard let value else { return nil }
-        return "\(Int(value.rounded()))%"
-    }
-
     private func formatTokenHeader(_ tokenID: UUID?) -> String {
         guard let tokenID else { return "Token: Default (logged in)" }
         guard let entry = appState.claudeTokens.first(where: { $0.token.id == tokenID }) else {
             return "Token: (missing)"
         }
-        if let usage = entry.usage,
-           let fiveH = formatPct(usage.fiveHourPct),
-           let sevenD = formatPct(usage.sevenDayPct) {
-            return "Token: \(entry.token.name) · 5h \(fiveH) · 7d \(sevenD)"
-        }
         return "Token: \(entry.token.name)"
     }
 
     private func formatTokenSubmenuLabel(_ entry: ClaudeTokenWithUsage) -> String {
-        if let usage = entry.usage,
-           let fiveH = formatPct(usage.fiveHourPct),
-           let sevenD = formatPct(usage.sevenDayPct) {
-            return "\(entry.token.name)  5h \(fiveH) · 7d \(sevenD)"
-        }
-        return entry.token.name
+        entry.token.name
     }
 
     @ViewBuilder
