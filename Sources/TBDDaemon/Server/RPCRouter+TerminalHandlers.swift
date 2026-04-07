@@ -30,6 +30,37 @@ extension RPCRouter {
         var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
         env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
 
+        // Codex branch: minimal launch with isolated CODEX_HOME. No session
+        // tracking, no system prompt injection, no token resolution. Session
+        // resume / state detection / hooks are tracked as follow-up issues.
+        if params.type == .codex {
+            let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
+            env["CODEX_HOME"] = codexHome.path
+
+            let window = try await tmux.createWindow(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                shellCommand: "codex --full-auto",
+                env: env
+            )
+
+            let terminal = try await db.terminals.create(
+                worktreeID: params.worktreeID,
+                tmuxWindowID: window.windowID,
+                tmuxPaneID: window.paneID,
+                label: "Codex",
+                claudeSessionID: nil,
+                claudeTokenID: nil
+            )
+
+            subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
+                terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
+            )))
+
+            return try RPCResponse(result: terminal)
+        }
+
         let isClaudeType = params.type == .claude || params.resumeSessionID != nil
         let claudeSessionID: String?
         let label: String?

@@ -341,6 +341,7 @@ public struct WorktreeReorderParams: Codable, Sendable {
 public enum TerminalCreateType: String, Codable, Sendable {
     case shell
     case claude
+    case codex
 }
 
 public struct TerminalCreateParams: Codable, Sendable {

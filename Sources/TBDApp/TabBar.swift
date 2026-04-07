@@ -10,6 +10,7 @@ struct TabBar: View {
     @Binding var activeTabIndex: Int
     var onAddShell: () -> Void = {}
     var onAddClaude: () -> Void = {}
+    var onAddCodex: () -> Void = {}
     var onAddNote: () -> Void = {}
     var onCloseTab: (Int) -> Void
     var terminalForTab: (UUID) -> Terminal? = { _ in nil }
@@ -48,6 +49,7 @@ struct TabBar: View {
             AddTabButton(
                 onAddShell: onAddShell,
                 onAddClaude: onAddClaude,
+                onAddCodex: onAddCodex,
                 onAddNote: onAddNote
             )
             Spacer()
@@ -66,6 +68,7 @@ struct TabBar: View {
 private struct AddTabButton: View {
     let onAddShell: () -> Void
     let onAddClaude: () -> Void
+    let onAddCodex: () -> Void
     let onAddNote: () -> Void
     @State private var isHovering = false
 
@@ -103,6 +106,10 @@ private struct AddTabButton: View {
         claudeItem.image = claudeImage
         menu.addItem(claudeItem)
 
+        let codexItem = NSMenuItem(title: "Codex", action: nil, keyEquivalent: "")
+        codexItem.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: nil)
+        menu.addItem(codexItem)
+
         menu.addItem(.separator())
 
         let noteItem = NSMenuItem(title: "Note", action: nil, keyEquivalent: "")
@@ -111,12 +118,14 @@ private struct AddTabButton: View {
 
         // Use a coordinator to handle menu item actions via closures
         let coordinator = MenuCoordinator(
-            onShell: onAddShell, onClaude: onAddClaude, onNote: onAddNote
+            onShell: onAddShell, onClaude: onAddClaude, onCodex: onAddCodex, onNote: onAddNote
         )
         shellItem.target = coordinator
         shellItem.action = #selector(MenuCoordinator.addShell)
         claudeItem.target = coordinator
         claudeItem.action = #selector(MenuCoordinator.addClaude)
+        codexItem.target = coordinator
+        codexItem.action = #selector(MenuCoordinator.addCodex)
         noteItem.target = coordinator
         noteItem.action = #selector(MenuCoordinator.addNote)
 
@@ -132,16 +141,19 @@ private struct AddTabButton: View {
 private class MenuCoordinator: NSObject {
     let onShell: () -> Void
     let onClaude: () -> Void
+    let onCodex: () -> Void
     let onNote: () -> Void
 
-    init(onShell: @escaping () -> Void, onClaude: @escaping () -> Void, onNote: @escaping () -> Void) {
+    init(onShell: @escaping () -> Void, onClaude: @escaping () -> Void, onCodex: @escaping () -> Void, onNote: @escaping () -> Void) {
         self.onShell = onShell
         self.onClaude = onClaude
+        self.onCodex = onCodex
         self.onNote = onNote
     }
 
     @objc func addShell() { onShell() }
     @objc func addClaude() { onClaude() }
+    @objc func addCodex() { onCodex() }
     @objc func addNote() { onNote() }
 }
 
