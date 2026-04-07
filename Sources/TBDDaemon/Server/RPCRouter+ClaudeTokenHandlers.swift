@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeTokenHandlers")
 
 extension RPCRouter {
 
@@ -120,7 +123,14 @@ extension RPCRouter {
         // Running terminals keep the env var that was injected at spawn time;
         // mutating their stored token id would mislead the UI about what the
         // already-running claude process is actually using.
-        try? ClaudeTokenKeychain.delete(id: params.id.uuidString)
+        // DB row deletion is the source of truth — don't fail the RPC if the
+        // on-disk token file delete fails (permission, missing, disk error).
+        // Log so an orphan file isn't completely silent.
+        do {
+            try ClaudeTokenKeychain.delete(id: params.id.uuidString)
+        } catch {
+            logger.warning("Failed to delete token file for \(params.id): \(error.localizedDescription, privacy: .public)")
+        }
 
         return .ok()
     }
