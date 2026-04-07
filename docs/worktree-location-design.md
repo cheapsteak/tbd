@@ -1,6 +1,6 @@
 # Worktree Location Design
 
-Status: **Proposal v3** — review round 2 folded in (table names, slot collision policy, dual-prefix reconcile, journal lock ordering, residual editor risk).
+Status: **Proposal v4** — simplified auto-migrate now that we've confirmed there's only one user (the author) and editor state is acceptable to lose. Pre-flight is minimal; no notification; move everything.
 Author: Claude (design pass, 2026-04-07)
 
 ## Decisions locked in (round 1)
@@ -193,40 +193,19 @@ You asked what could go wrong with auto-migrate-on-upgrade. Here's the honest li
 
 ### Strategy that the failure list implies
 
-Auto-migrate is desirable, but **only when we can prove it's safe**. The right shape is "auto-migrate at startup, conservatively, with eager skipping and a hands-off fallback":
+Given that the only current user has explicitly accepted editor-state loss as a non-issue ("editors are easy to reopen"), we **move everything** on first post-upgrade startup. The failure list above remains valid as a record of what we're consciously accepting, not a list of cases we defend against.
 
-- **Auto-migrate runs once on daemon startup after an upgrade**, gated by a `layout_version` row in a TBD-owned table (orthogonal to GRDB's `grdb_migrations` — don't conflate the two). It does not run on every launch.
-- **It only migrates worktrees that pass a strict pre-flight**:
-  - Status is `.ready`.
-  - No TBD terminal (`terminal` table) has this worktree as its CWD.
-  - No conductor process is running against it (check `conductors/` PID files).
-  - `git status --porcelain` is clean.
-  - `lsof +D <worktree-path>` returns no foreign processes (best-effort; skip if `lsof` is slow).
-  - The destination is on the same volume as `~/.tbd/` (skip cross-volume; force it via the manual command).
-  - The repo's main path still exists and is a git repo (otherwise this whole repo is in `.missing` state — see §4b below — and can't migrate until `tbd repo relocate` runs).
-- **Worktrees that fail pre-flight are skipped, not failed.** They stay in their old location and continue working. The daemon logs a one-line reason per skip and surfaces a notification: *"3 worktrees couldn't be auto-migrated (open editor / dirty / running build). Run `tbd repo migrate-worktrees` after closing them."*
-- **Residual risk that pre-flight cannot fully eliminate.** `lsof +D` reliably catches processes that hold file descriptors *under* the worktree, but modern editors often don't:
-  - VS Code uses FSEvents-based file watching; it may hold no descriptors on the worktree directory at all, only on individually opened files (and not always those).
-  - Xcode primarily holds descriptors on `.xcodeproj` package internals, not the worktree root.
-  - JetBrains IDEs hold a `.idea/` lock but the path can vary.
-
-  This means a worktree with **unsaved buffers in an editor can pass pre-flight and still get moved**, with the editor potentially flushing the buffer back to a stale cached path. We mitigate but cannot fully prevent this:
-  1. Add cheap heuristic skips on top of `lsof`: presence of `.idea/`, `.vscode/.lock`, `*.swp`, or any file modified within the last 5 minutes → skip.
-  2. **Surface a one-time notification before auto-migrate runs**: *"TBD will reorganize worktrees on disk. Close any editors with unsaved changes in TBD worktrees first. Migration begins in 30 seconds — click to defer."*
-  3. Document in user-visible release notes that the safe move is to quit editors before the first post-upgrade launch.
-
-  This is honest residual risk, not a hole the design can fully close. The alternative — "never auto-migrate, always manual" — pushes the same risk onto every user instead of just the few with live editor sessions.
+- **Auto-migrate runs once on daemon startup after an upgrade**, gated by a `layout_version` row in a TBD-owned table (orthogonal to GRDB's `grdb_migrations`). It does not run on every launch. No countdown, no user prompt — the user knows it's coming.
+- **Minimal pre-flight per worktree** (not for safety, but to avoid moving things that are demonstrably broken or in-flight):
+  - Status is `.ready` (skip `.creating`/`.error`/`.archived`).
+  - No TBD terminal in the `terminal` table has this worktree as its CWD. If one does, the daemon detaches/closes it before the move and the user reopens it post-migration. (TBD-owned terminals are TBD's problem.)
+  - The repo's main path still exists and is a git repo. If not, the repo is in `.missing` state (§4b) and `tbd repo relocate` is required before migration can proceed for that repo's worktrees.
+- **Cross-volume moves are allowed**, since `~/.tbd/` and the repos are realistically all on the boot volume for the current user. The journal (§5b) covers the not-atomic case if the daemon crashes mid-copy.
 - **A two-phase journal** (see §5b) makes every individual move recoverable.
-- **A startup mutex** via `tbdd.pid` + a `migration.lock` file prevents two daemons from racing.
-- **Never block daemon startup on migration.** The daemon starts, serves requests, and runs migration in the background. Worst case: a worktree appears at its old path until the user closes their editor, then it auto-moves on the next launch.
+- **A `migration.lock` file** prevents two daemon processes from racing.
+- **Block daemon startup on migration.** With one user and a small number of worktrees, there's no benefit to background migration — and a foreground migration is simpler to reason about (no "is the daemon ready yet?" race for RPC clients).
 
-The manual `tbd repo migrate-worktrees [--force] [--dry-run] [<repo>]` command remains for:
-- Migrating worktrees the auto-pass skipped (after the user closes their editor).
-- Cross-volume moves.
-- Forcing through a dirty worktree (with `--force`).
-- Inspecting what *would* happen (`--dry-run`).
-
-This gives you the "ideal" auto-migrate experience for the 90% case without the risk of corrupting an open editor's state.
+The manual `tbd repo migrate-worktrees [--dry-run] [<repo>]` command stays around for the rare follow-up case (e.g., a worktree that was `.creating` during the auto-pass and finished afterward) and for inspection (`--dry-run`).
 
 ## 4b. Fixing `repos.path` silent breakage
 
@@ -283,14 +262,11 @@ The lock is held only for the duration of one move, then released so other RPCs 
 
 For each worktree owned by the repo (one at a time, under the lock):
 
-1. **Pre-flight checks** (skip this worktree if any fail; do not abort the whole batch — see §5a for the auto-migrate skip philosophy):
-   - Worktree status is `.ready` (not `.creating`, not `.error`).
-   - No uncommitted changes (`git status --porcelain` empty) — *or* `--force` was passed.
-   - No TBD terminal/conductor has this worktree as its CWD (check `state.db`).
-   - `lsof +D <path>` returns no foreign processes (with timeout; see §5a for the residual-risk caveat about editors).
-   - Destination is on the same volume as the source (if not, skip auto, require `--force` for manual).
+1. **Pre-flight** (skip this worktree if any fail; do not abort the batch):
+   - Worktree status is `.ready`.
+   - Any TBD terminal with this worktree as its CWD has been closed/detached.
    - Destination path does not already exist.
-2. **Move the directory** with `FileManager.moveItem(at:to:)`. On the same volume this resolves to `rename(2)`, whose final inode flip is atomic — but the *operation as a whole* is only safe because there's no copy step. Cross-volume falls back to copy-then-delete and is **not atomic**; the journal in step 1 is what makes it recoverable, and `--force` is required to opt in.
+2. **Move the directory** with `FileManager.moveItem(at:to:)`. On the same volume this resolves to `rename(2)`, whose final inode flip is atomic. Cross-volume falls back to copy-then-delete and is **not atomic**; the journal in step 1 is what makes it recoverable.
 3. **Repair git's bookkeeping.** A worktree has two pointers to fix:
    - `<main-repo>/.git/worktrees/<wt-name>/gitdir` contains the absolute path to the worktree's `.git` file.
    - `<worktree-path>/.git` contains `gitdir: <main-repo>/.git/worktrees/<wt-name>`.
@@ -316,11 +292,8 @@ The migration refuses. The repo is in `.missing` state (§4b) and the user must 
 
 ## 6. Remaining open questions
 
-Round 2 locked in the slot-collision policy (only newcomer gets suffixed), the schema delta, the dual-prefix reconcile helper, and the lock/journal ordering. Still open:
+Round 3 simplified auto-migrate (move everything, no editor heuristics, no notification). Still open:
 
-1. **`lsof +D` timeout.** It can take seconds on large worktrees. Recommendation: 2 s timeout, skip-on-timeout during background auto-migrate; no timeout for the manual command.
-2. **Disambiguator length.** 4 hex chars (65 k) or 6 (16 M)? Both are essentially free. Recommendation: 4, bump to 6 only if we ever see a real collision.
-3. **Editor heuristic strictness.** §5a proposes skipping if `.idea/`, `.vscode/.lock`, `*.swp`, or any file modified in the last 5 min is present. Too strict (most active worktrees get skipped) or about right? The 5-min mtime check in particular will skip a worktree the user is actively editing even without an open IDE.
-4. **`repo.status = .missing` UX.** Should missing repos appear in `tbd worktree list` (dimmed) or be hidden until relocated? App-side definitely dimmed; CLI preference?
-5. **Origin URL mismatch on relocate.** Warn + `--force`, or hard-refuse? Recommendation: warn + `--force`, since users legitimately re-fork and re-clone.
-6. **Pre-upgrade notification timing.** §5a proposes a 30-second countdown notification before auto-migrate runs. Too short? Should we also block migration until the notification is acknowledged (opt-in rather than opt-out)?
+1. **Disambiguator length.** 4 hex chars (65 k) or 6 (16 M)? Recommendation: 4, bump only if we ever see a real collision.
+2. **`repo.status = .missing` UX in CLI.** App-side missing repos are dimmed in the sidebar with a "Locate…" affordance — uncontroversial. For `tbd worktree list` and `tbd repo list`, do missing repos appear (dimmed/marked) or hidden until relocated?
+3. **Origin URL mismatch on relocate.** Warn + `--force`, or hard-refuse? Recommendation: warn + `--force`, since users legitimately re-fork and re-clone.
