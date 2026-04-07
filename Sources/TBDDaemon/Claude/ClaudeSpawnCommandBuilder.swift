@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeSpawn")
 
 /// Builds the shell command string for spawning (or respawning) a claude terminal.
 ///
@@ -51,12 +54,12 @@ enum ClaudeSpawnCommandBuilder {
         }
 
         guard let secret = tokenSecret else { return base }
-        precondition(
-            secret.allSatisfy { ch in
-                ch.isLetter || ch.isNumber || ch == "-" || ch == "_"
-            },
-            "Claude token contains unexpected characters; refusing to inject"
-        )
+        guard secret.allSatisfy({ ch in
+            ch.isLetter || ch.isNumber || ch == "-" || ch == "_"
+        }) else {
+            logger.error("Claude token contains unexpected characters; falling back to keychain login without env injection")
+            return base
+        }
         // Defensive single-quote escape; tokens never contain `'`.
         let escaped = secret.replacingOccurrences(of: "'", with: "'\\''")
         let envVar = tokenKind == .apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"
