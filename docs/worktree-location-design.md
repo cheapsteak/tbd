@@ -140,7 +140,15 @@ ALTER TABLE repo ADD COLUMN worktree_root TEXT;                       -- NULL = 
 ALTER TABLE repo ADD COLUMN status        TEXT NOT NULL DEFAULT 'ok'; -- 'ok' | 'missing'
 ```
 
-Plus a **new `WorktreeStatus` case** in `Sources/TBDShared/Models.swift:27-29`:
+Plus **a new `RepoStatus` enum** in `Sources/TBDShared/Models.swift` alongside the `Repo` model, matching the `status` column:
+
+```swift
+public enum RepoStatus: String, Codable, Sendable {
+    case ok, missing
+}
+```
+
+And a **new `WorktreeStatus` case** in `Sources/TBDShared/Models.swift:27-29`:
 
 ```swift
 public enum WorktreeStatus: String, Codable, Sendable {
