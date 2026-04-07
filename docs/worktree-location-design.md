@@ -1,6 +1,6 @@
 # Worktree Location Design
 
-Status: **Proposal v11** — bot review round 4: `retry_count` write-before-attempt protocol, recovery bound covers step 3 *and* step 4, backfill collision uses an explicit in-memory set, `--force` flag removed.
+Status: **Proposal v12** — post-approval polish: collision error explains slot-frozen invariant, empty `<repo>/.tbd/` is also swept, `RepoStatus` enum named, `git worktree repair` failure in relocate handled symmetrically with §5b.
 Author: Claude (design pass, 2026-04-07)
 
 ## Decisions locked in (round 1)
@@ -215,7 +215,7 @@ The latent bug (§2 / §3): TBD identifies repos by absolute filesystem path, wi
    - Validates `<new-path>` exists and is a git repo. That's it — no origin URL check (§6 explains why).
    - Updates `repo.path`.
    - Updates every `worktree.path` row whose old absolute path was inside the old repo path **only for legacy worktrees still living under the old `<repo>/.tbd/worktrees/`**. New-layout worktrees in `~/.tbd/worktrees/<slot>/` are unaffected — that's another argument for the new layout.
-   - Runs `git worktree repair` for each worktree from the new repo path so git's metadata picks up the new location.
+   - Runs `git worktree repair` for each worktree from the new repo path so git's metadata picks up the new location. If `repair` fails for a given worktree (e.g. the main repo's `.git/worktrees/<name>/` was pruned or corrupted), mark that worktree `.failed` and continue to the next one — do not abort the relocate. The user can re-run `git worktree repair` manually or `tbd worktree forget` + re-discover the orphan.
    - Sets `repo.status = .ok`.
 5. **App UI:** missing repos are dimmed in the sidebar with a "Locate…" affordance that opens an `NSOpenPanel`. CLI (`tbd repo list`, `tbd worktree list`) shows them with a `[missing]` tag. No silent failures, no hiding.
 
