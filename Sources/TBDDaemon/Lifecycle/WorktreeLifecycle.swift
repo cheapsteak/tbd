@@ -9,6 +9,8 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible {
     case worktreeAlreadyActive(UUID)
     case createFailed(String)
     case invalidOperation(String)
+    case worktreePathAlreadyExists(String)
+    case worktreeAlreadyRegistered(String)
 
     public var description: String {
         switch self {
@@ -24,6 +26,10 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible {
             return "Failed to create worktree: \(reason)"
         case .invalidOperation(let detail):
             return detail
+        case .worktreePathAlreadyExists(let path):
+            return "Cannot revive worktree: a file or directory already exists at \(path). Remove or move it and try again."
+        case .worktreeAlreadyRegistered(let path):
+            return "Cannot revive worktree: git already has a worktree registered at \(path). Run `git worktree remove \(path)` (or `git worktree prune`) from the main repo and try again."
         }
     }
 }

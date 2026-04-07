@@ -114,6 +114,17 @@ extension WorktreeLifecycle {
             withIntermediateDirectories: true
         )
 
+        // Preflight: ensure nothing exists at the target path on disk.
+        if FileManager.default.fileExists(atPath: worktree.path) {
+            throw WorktreeLifecycleError.worktreePathAlreadyExists(worktree.path)
+        }
+
+        // Preflight: ensure git does not already have a worktree registered at this path.
+        let existing = (try? await git.worktreeList(repoPath: repo.path)) ?? []
+        if existing.contains(where: { $0.path == worktree.path }) {
+            throw WorktreeLifecycleError.worktreeAlreadyRegistered(worktree.path)
+        }
+
         // Re-add the git worktree using the existing branch
         try await git.worktreeAddExisting(
             repoPath: repo.path,

@@ -187,6 +187,41 @@ private func makeTestRepo(
     }
 }
 
+@Test func testReviveFailsWhenPathAlreadyExists() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+
+    // Re-create a stray directory where the worktree used to live.
+    try FileManager.default.createDirectory(
+        atPath: wt.path, withIntermediateDirectories: true
+    )
+    try "stray".write(
+        toFile: (wt.path as NSString).appendingPathComponent("file.txt"),
+        atomically: true, encoding: .utf8
+    )
+
+    await #expect(throws: WorktreeLifecycleError.self) {
+        try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: true)
+    }
+
+    // TODO: add a test for `worktreeAlreadyRegistered` — requires desyncing
+    // the on-disk path from git's worktree list, which is awkward to set up.
+}
+
 @Test func testArchivePreservesClaudeSessions() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
