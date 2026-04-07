@@ -96,10 +96,7 @@ final class AppState: ObservableObject {
     @Published var conductorHeight: CGFloat = 0 {
         didSet { UserDefaults.standard.set(Double(conductorHeight), forKey: Self.conductorHeightKey) }
     }
-    /// Remembers selected tab index per worktree so switching back restores the tab.
-    @Published var selectedTabIndex: [UUID: Int] = [:]
-
-    /// Terminal IDs currently being recreated — prevents duplicate RPC calls.
+/// Terminal IDs currently being recreated — prevents duplicate RPC calls.
     var recreatingTerminalIDs: Set<UUID> = []
 
     // Alert state for user feedback
