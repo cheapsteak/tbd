@@ -80,7 +80,7 @@ extension RPCRouter {
             label = nil
         }
 
-        let shellCommand = ClaudeSpawnCommandBuilder.build(
+        let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: params.resumeSessionID,
             freshSessionID: freshSessionID,
             appendSystemPrompt: appendSystemPrompt,
@@ -95,8 +95,9 @@ extension RPCRouter {
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
-            shellCommand: shellCommand,
-            env: env
+            shellCommand: spawn.command,
+            env: env,
+            sensitiveEnv: spawn.sensitiveEnv
         )
 
         let terminal = try await db.terminals.create(
@@ -352,7 +353,7 @@ extension RPCRouter {
         var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
 
-        let shellCommand = ClaudeSpawnCommandBuilder.build(
+        let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
             appendSystemPrompt: nil,
@@ -367,8 +368,9 @@ extension RPCRouter {
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
-            shellCommand: shellCommand,
-            env: env
+            shellCommand: spawn.command,
+            env: env,
+            sensitiveEnv: spawn.sensitiveEnv
         )
 
         let newTerminal = try await db.terminals.create(

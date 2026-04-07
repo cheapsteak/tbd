@@ -56,7 +56,7 @@ public struct TmuxManager: Sendable {
         ["-L", server, "has-session", "-t", session]
     }
 
-    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:]) -> [String] {
+    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:]) -> [String] {
         // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
         // -i keeps it interactive (loads .zshrc), -c runs the command
         // After the command exits, the pane closes (tmux default behavior)
@@ -67,7 +67,18 @@ public struct TmuxManager: Sendable {
             envPrefix += "export \(key)='\(escaped)'; "
         }
         let fullCommand = envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
-        return ["-L", server, "new-window", "-t", session, "-c", cwd, "-PF", "#{window_id} #{pane_id}", userShell, "-ic", fullCommand]
+        // Sensitive env vars use tmux's -e KEY=VALUE flag so the secret is set in
+        // the spawned window's environment directly, NOT inlined into the shell
+        // command argv. This keeps the secret out of `ps aux` for the
+        // long-running shell/claude process. (The secret still appears briefly
+        // in the tmux invocation's own argv during fork/exec, but tmux re-execs
+        // and its server process does not retain the original argv visibly.)
+        var eFlags: [String] = []
+        for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
+            eFlags.append("-e")
+            eFlags.append("\(key)=\(value)")
+        }
+        return ["-L", server, "new-window", "-t", session, "-c", cwd] + eFlags + ["-PF", "#{window_id} #{pane_id}", userShell, "-ic", fullCommand]
     }
 
     public static func killWindowCommand(server: String, windowID: String) -> [String] {
@@ -151,14 +162,14 @@ public struct TmuxManager: Sendable {
         try await runTmux(["-L", server, "kill-server"])
     }
 
-    public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:]) async throws -> (windowID: String, paneID: String) {
+    public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:]) async throws -> (windowID: String, paneID: String) {
         if dryRun {
-            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env)
+            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv)
             dryRunRecorder?(args)
             let n = counter.next()
             return (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
         }
-        let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env)
+        let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv)
         let output = try await runTmux(args)
         let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         guard parts.count == 2 else {

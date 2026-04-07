@@ -19,6 +19,12 @@ struct ClaudeTokenSpawnTests {
             _calls.append(args)
         }
         var joinedAll: String { calls.map { $0.joined(separator: " ") }.joined(separator: "\n") }
+        /// Concatenation of just the shell-command bodies (last argv element of
+        /// each new-window call). Used to assert that secrets do NOT leak into
+        /// the long-running shell process arg.
+        var shellBodies: String {
+            calls.compactMap { $0.last }.joined(separator: "\n")
+        }
     }
 
     private func makeFixture() -> (RPCRouter, TBDDatabase, TmuxRecorder) {
@@ -101,7 +107,11 @@ struct ClaudeTokenSpawnTests {
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.claudeTokenID == tok.id)
-        #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN='\(secret)'"))
+        // Token must be passed via tmux -e flag, never inlined in shell body.
+        #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)"))
+        #expect(!recorder.shellBodies.contains(secret),
+                "secret leaked into shell body")
+        #expect(!recorder.shellBodies.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
     // MARK: - Spawn: repo override beats default
@@ -126,8 +136,10 @@ struct ClaudeTokenSpawnTests {
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.claudeTokenID == b.id)
-        #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN='\(secretB)'"))
+        #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secretB)"))
         #expect(!recorder.joinedAll.contains(secretA))
+        #expect(!recorder.shellBodies.contains(secretB),
+                "secret leaked into shell body")
     }
 
     // MARK: - Spawn: non-claude type ignores token
@@ -198,9 +210,16 @@ struct ClaudeTokenSpawnTests {
         let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
         #expect(!joined.contains("C-c"))
         #expect(!joined.contains("send-keys"))
-        // The new tab was spawned with B's secret + --resume <oldSessionID>
-        #expect(joined.contains("CLAUDE_CODE_OAUTH_TOKEN='\(secretB)' claude --resume \(oldSessionID!)"))
+        // The new tab was spawned with B's secret via tmux -e (NOT inlined),
+        // and the shell body contains --resume <oldSessionID>.
+        #expect(joined.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secretB)"))
+        #expect(joined.contains("claude --resume \(oldSessionID!)"))
         #expect(joined.contains("--dangerously-skip-permissions"))
+        // Negative: secret must NOT appear in any shell body of post-swap calls.
+        let postBodies = postSwap.compactMap { $0.last }.joined(separator: "\n")
+        #expect(!postBodies.contains(secretB),
+                "secret leaked into shell body: \(postBodies)")
+        #expect(!postBodies.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
     // MARK: - Swap: to nil

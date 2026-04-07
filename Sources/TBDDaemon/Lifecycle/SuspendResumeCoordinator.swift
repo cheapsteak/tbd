@@ -381,7 +381,7 @@ public actor SuspendResumeCoordinator {
             }
         }
 
-        let resumeCommand = ClaudeSpawnCommandBuilder.build(
+        let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
             appendSystemPrompt: nil,
@@ -394,7 +394,8 @@ public actor SuspendResumeCoordinator {
         do {
             let window = try await tmux.createWindow(
                 server: server, session: "main",
-                cwd: worktree.path, shellCommand: resumeCommand
+                cwd: worktree.path, shellCommand: spawn.command,
+                sensitiveEnv: spawn.sensitiveEnv
             )
             try await db.terminals.updateTmuxIDs(
                 id: terminal.id, windowID: window.windowID, paneID: window.paneID

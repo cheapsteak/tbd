@@ -149,12 +149,19 @@ struct SuspendResumeCoordinatorTests {
         #expect(after?.suspendedAt == nil)
 
         // Find the createWindow invocation (it's the only dryRun call recorded here).
-        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-        let resumeArg = joined.first { $0.contains("claude --resume") }
-        #expect(resumeArg != nil, "expected a createWindow call containing claude --resume")
-        #expect(resumeArg?.contains("CLAUDE_CODE_OAUTH_TOKEN='\(secret)'") == true,
-                "expected token env var injected; got: \(resumeArg ?? "nil")")
-        #expect(resumeArg?.contains("claude --resume session-abc") == true)
+        let snap = recorded.snapshot()
+        let resumeCall = snap.first { $0.joined(separator: " ").contains("claude --resume") }
+        #expect(resumeCall != nil, "expected a createWindow call containing claude --resume")
+        // Token must be passed via tmux -e flag, NOT inlined in the shell command argv.
+        #expect(resumeCall?.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)") == true,
+                "expected token in tmux -e flag; got: \(resumeCall ?? [])")
+        // The shell command body (last arg, after -ic) must NOT contain the secret.
+        let shellBody = resumeCall?.last ?? ""
+        #expect(!shellBody.contains(secret),
+                "secret leaked into shell command body: \(shellBody)")
+        #expect(!shellBody.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+                "env var name leaked into shell command body: \(shellBody)")
+        #expect(shellBody.contains("claude --resume session-abc"))
     }
 
     @Test func resumeOmitsTokenWhenResolverNil() async throws {

@@ -367,11 +367,20 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
     )
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
 
-    // (a) Captured shell command for the Claude window contains the env var injection.
-    let joined = recorded.snapshot().map { $0.joined(separator: " ") }
-    let claudeCmd = joined.first { $0.contains("CLAUDE_CODE_OAUTH_TOKEN='\(secret)'") }
-    #expect(claudeCmd != nil,
-            "expected createWindow call with CLAUDE_CODE_OAUTH_TOKEN injected; got: \(joined)")
+    // (a) Token must be passed via tmux -e flag, NOT inlined into the shell command body.
+    let snap = recorded.snapshot()
+    let claudeCall = snap.first { call in
+        let body = call.last ?? ""
+        return body.contains("claude --session-id")
+    }
+    #expect(claudeCall != nil, "expected a createWindow call spawning claude")
+    #expect(claudeCall?.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)") == true,
+            "expected token in tmux -e flag; got: \(claudeCall ?? [])")
+    let shellBody = claudeCall?.last ?? ""
+    #expect(!shellBody.contains(secret),
+            "secret leaked into shell command body: \(shellBody)")
+    #expect(!shellBody.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+            "env var name leaked into shell command body: \(shellBody)")
 
     // (b) Persisted terminal row has claudeTokenID set to the known token UUID.
     let terminals = try await db.terminals.list(worktreeID: wt.id)

@@ -16,15 +16,23 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeSpawn"
 /// - Otherwise → `cmd` if set, else `shellFallback`.
 ///
 /// If `tokenSecret` is non-nil AND we built a claude command (resume or fresh),
-/// the command is prefixed with `CLAUDE_CODE_OAUTH_TOKEN='<value>' `. The token is
-/// asserted to be alphanumeric / `-` / `_` only — Claude OAuth tokens and Anthropic
-/// API keys both fit this charset, so a value with anything else indicates a bug
-/// or corrupted entry and traps loudly rather than producing a broken shell line.
-/// The token is single-quoted defensively even though it cannot contain quotes.
+/// the token is returned in `sensitiveEnv` keyed by `CLAUDE_CODE_OAUTH_TOKEN`
+/// (oauth) or `ANTHROPIC_API_KEY` (api key). The token is **never** embedded in
+/// the returned `command` string — callers must pass `sensitiveEnv` through
+/// `TmuxManager.createWindow(sensitiveEnv:)` so tmux's `-e KEY=VALUE` flag puts
+/// it directly into the spawned window's environment without ever appearing in
+/// the long-running shell command's `ps` argv.
 ///
-/// The token is **not** injected when the resolved path is `cmd` or `shellFallback`,
-/// since those branches are for non-claude shells.
+/// The token is **not** returned when the resolved path is `cmd` or
+/// `shellFallback`, since those branches are for non-claude shells.
 enum ClaudeSpawnCommandBuilder {
+    struct Result: Equatable {
+        let command: String
+        /// Env vars containing secrets. MUST be passed to tmux via `-e KEY=VALUE`,
+        /// never inlined into the shell command (would leak via `ps`).
+        let sensitiveEnv: [String: String]
+    }
+
     static func build(
         resumeID: String?,
         freshSessionID: String?,
@@ -34,7 +42,7 @@ enum ClaudeSpawnCommandBuilder {
         tokenKind: ClaudeTokenKind? = nil,
         cmd: String?,
         shellFallback: String
-    ) -> String {
+    ) -> Result {
         let base: String
         if let resumeID {
             base = "claude --resume \(resumeID) --dangerously-skip-permissions"
@@ -48,21 +56,21 @@ enum ClaudeSpawnCommandBuilder {
             }
             base = b
         } else if let cmd {
-            return cmd
+            return Result(command: cmd, sensitiveEnv: [:])
         } else {
-            return shellFallback
+            return Result(command: shellFallback, sensitiveEnv: [:])
         }
 
-        guard let secret = tokenSecret else { return base }
+        guard let secret = tokenSecret else {
+            return Result(command: base, sensitiveEnv: [:])
+        }
         guard secret.allSatisfy({ ch in
             ch.isLetter || ch.isNumber || ch == "-" || ch == "_"
         }) else {
             logger.error("Claude token contains unexpected characters; falling back to keychain login without env injection")
-            return base
+            return Result(command: base, sensitiveEnv: [:])
         }
-        // Defensive single-quote escape; tokens never contain `'`.
-        let escaped = secret.replacingOccurrences(of: "'", with: "'\\''")
         let envVar = tokenKind == .apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"
-        return "\(envVar)='\(escaped)' \(base)"
+        return Result(command: base, sensitiveEnv: [envVar: secret])
     }
 }

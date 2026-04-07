@@ -206,10 +206,12 @@ extension WorktreeLifecycle {
 
         // Create terminal 1: claude (or shell if skipClaude)
         let claudeCommand: String
+        let claudeSensitiveEnv: [String: String]
         let claudeSessionID: String?
         let claudeTokenID: UUID?
         if skipClaude {
             claudeCommand = defaultShell
+            claudeSensitiveEnv = [:]
             claudeSessionID = nil
             claudeTokenID = nil
         } else {
@@ -217,7 +219,7 @@ extension WorktreeLifecycle {
             claudeSessionID = sessionUUID
             let isResume = archivedClaudeSessions?.first != nil
             let appendPrompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: isResume)
-            claudeCommand = ClaudeSpawnCommandBuilder.build(
+            let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,
                 freshSessionID: sessionUUID,
                 appendSystemPrompt: appendPrompt,
@@ -227,13 +229,16 @@ extension WorktreeLifecycle {
                 cmd: nil,
                 shellFallback: defaultShell
             )
+            claudeCommand = spawn.command
+            claudeSensitiveEnv = spawn.sensitiveEnv
             claudeTokenID = resolvedToken?.tokenID
         }
         let window1 = try await tmux.createWindow(
             server: tmuxServer,
             session: "main",
             cwd: worktreePath,
-            shellCommand: claudeCommand
+            shellCommand: claudeCommand,
+            sensitiveEnv: claudeSensitiveEnv
         )
         _ = try await db.terminals.create(
             worktreeID: worktreeID,
@@ -267,7 +272,7 @@ extension WorktreeLifecycle {
         // Restore additional archived Claude sessions (beyond the first which was used above)
         if !skipClaude, let sessions = archivedClaudeSessions, sessions.count > 1 {
             for sessionID in sessions.dropFirst() {
-                let cmd = ClaudeSpawnCommandBuilder.build(
+                let spawn = ClaudeSpawnCommandBuilder.build(
                     resumeID: nil,
                     freshSessionID: sessionID,
                     appendSystemPrompt: nil,
@@ -281,7 +286,8 @@ extension WorktreeLifecycle {
                     server: tmuxServer,
                     session: "main",
                     cwd: worktreePath,
-                    shellCommand: cmd
+                    shellCommand: spawn.command,
+                    sensitiveEnv: spawn.sensitiveEnv
                 )
                 _ = try await db.terminals.create(
                     worktreeID: worktreeID,
