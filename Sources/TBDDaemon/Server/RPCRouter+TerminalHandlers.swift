@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "terminalHandlers")
 
 extension RPCRouter {
 
@@ -42,9 +45,7 @@ extension RPCRouter {
                     resolvedToken = try await claudeTokenResolver.resolve(repoID: worktree.repoID)
                 }
             } catch {
-                FileHandle.standardError.write(Data(
-                    "[RPCRouter] warning: claude token resolution failed; falling back to keychain login\n".utf8
-                ))
+                logger.warning("claude token resolution failed; falling back to keychain login")
                 resolvedToken = nil
             }
         }

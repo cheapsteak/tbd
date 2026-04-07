@@ -369,14 +369,10 @@ public actor SuspendResumeCoordinator {
             do {
                 resolvedToken = try await resolver.loadByID(tokenID)
                 if resolvedToken == nil {
-                    FileHandle.standardError.write(Data(
-                        "[SuspendResumeCoordinator] warning: claude token \(tokenID) for terminal \(terminal.id) is missing; falling back to keychain login\n".utf8
-                    ))
+                    logger.warning("claude token \(tokenID) for terminal \(terminal.id) is missing; falling back to keychain login")
                 }
             } catch {
-                FileHandle.standardError.write(Data(
-                    "[SuspendResumeCoordinator] warning: claude token lookup failed for terminal \(terminal.id); falling back to keychain login: \(error)\n".utf8
-                ))
+                logger.warning("claude token lookup failed for terminal \(terminal.id); falling back to keychain login: \(error.localizedDescription, privacy: .public)")
                 resolvedToken = nil
             }
         }

@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeLifecycle")
 
 extension WorktreeLifecycle {
     // MARK: - Create
@@ -197,9 +200,7 @@ extension WorktreeLifecycle {
             do {
                 resolvedToken = try await resolver.resolve(repoID: repo.id)
             } catch {
-                FileHandle.standardError.write(Data(
-                    "[WorktreeLifecycle] warning: claude token resolution failed; falling back to keychain login\n".utf8
-                ))
+                logger.warning("claude token resolution failed; falling back to keychain login")
                 resolvedToken = nil
             }
         }

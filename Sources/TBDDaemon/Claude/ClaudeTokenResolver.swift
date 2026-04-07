@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeTokenResolver")
 
 public struct ResolvedClaudeToken: Sendable, Equatable {
     public let tokenID: UUID
@@ -52,9 +55,7 @@ public struct ClaudeTokenResolver: Sendable {
             if let resolved = try await loadResolved(id: overrideID) {
                 return resolved
             }
-            FileHandle.standardError.write(Data(
-                "[ClaudeTokenResolver] warning: claude token override \(overrideID) for repo \(repoID) is missing; falling back to global default\n".utf8
-            ))
+            logger.warning("claude token override \(overrideID) for repo \(repoID) is missing; falling back to global default")
         }
 
         // Step 2: global default
@@ -62,9 +63,7 @@ public struct ClaudeTokenResolver: Sendable {
             if let resolved = try await loadResolved(id: defaultID) {
                 return resolved
             }
-            FileHandle.standardError.write(Data(
-                "[ClaudeTokenResolver] warning: global default claude token \(defaultID) is missing; no token will be injected\n".utf8
-            ))
+            logger.warning("global default claude token \(defaultID) is missing; no token will be injected")
             return nil
         }
 
