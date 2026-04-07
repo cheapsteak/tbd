@@ -1,6 +1,6 @@
 # Worktree Location Design
 
-Status: **Proposal v6** — review round 3 folded in: backfill algorithm for existing repos, missing-repo-never-blocks-startup, recovery never refuses startup, progress logging, terminal close is an action not a check.
+Status: **Proposal v7** — review round 4 folded in: §4b moved before §5, schema column count corrected, backfill is idempotent on resume, recovery re-queues, dual-prefix exit criterion, `worktree_root` honored during migration.
 Author: Claude (design pass, 2026-04-07)
 
 ## Decisions locked in (round 1)
@@ -128,7 +128,7 @@ Properties:
 
 ### Full schema delta (one GRDB migration `vN`)
 
-The `repo` table (singular — `Database.swift:53`) gains five columns in one migration:
+The `repo` table (singular — `Database.swift:53`) gains three columns in one migration:
 
 ```sql
 ALTER TABLE repo ADD COLUMN worktree_slot TEXT UNIQUE;                -- sanitized display name, frozen at add
@@ -150,6 +150,8 @@ The GRDB migration must populate `worktree_slot` for every pre-existing row in `
 
 ```
 for each existing repo, ordered by createdAt ASC (stable):
+    if repo.worktree_slot IS NOT NULL:
+        continue   # already assigned (resumed run); don't re-suffix
     base = sanitize(repo.displayName)
     if base is empty, ".", "..", or starts with ".":
         base = "repo-\(repo.id.uuidString.prefix(6))"   # always-valid fallback
@@ -172,11 +174,30 @@ Properties:
 
 - New helper `WorktreeLayout` in `TBDDaemon` (or `TBDShared`) with two methods:
   - `basePath(for: Repo) -> String` — the *canonical* (new) base path for fresh worktree creation.
-  - `legacyAndCanonicalPrefixes(for: Repo) -> [String]` — returns both `~/.tbd/worktrees/<slot>/` **and** `<repo.path>/.tbd/worktrees/` so that reconciliation can adopt worktrees from either layout. This is critical: §5a's pre-flight legitimately *skips* unsafe worktrees, leaving them in the legacy location indefinitely. If reconcile only knows about the new prefix, those skipped worktrees become invisible and get reaped on the next reconcile pass. The dual-prefix view stays in place permanently — there's no flag day, only a long tail.
+  - `legacyAndCanonicalPrefixes(for: Repo) -> [String]` — returns both `~/.tbd/worktrees/<slot>/` **and** `<repo.path>/.tbd/worktrees/` so that reconciliation can adopt worktrees from either layout. This is critical: §5a's pre-flight legitimately *skips* unsafe worktrees, leaving them in the legacy location indefinitely. If reconcile only knows about the new prefix, those skipped worktrees become invisible and get reaped on the next reconcile pass. The dual-prefix view stays in place until the user confirms full migration via `tbd repo migrate-worktrees --dry-run` reporting zero legacy paths across all repos; at that point a future TBD release can drop the legacy branch from `WorktreeLayout` and the `WorktreeLifecycle+Reconcile.swift` filter. There's no flag day — the dual-prefix path is cheap and can stay indefinitely if needed.
 - Replace the two hardcoded sites in `WorktreeLifecycle+Create.swift` (use `basePath(for:)`) and the filter in `WorktreeLifecycle+Reconcile.swift:108-112` (use `legacyAndCanonicalPrefixes(for:)` and match against either).
 - Update tests that currently grep for `.tbd/worktrees/` — they should call the same helper, or a test-only override sets `worktree_root` to a tmpdir.
 - Add `tbd repo set-worktree-root <repo> <path>` CLI command (and matching RPC) for the override.
 - Ensure the per-repo dir is created lazily on first worktree creation, not on repo add (so users who never create worktrees don't get empty dirs).
+
+## 4b. Fixing `repo.path` silent breakage
+
+The latent bug (§2 / §3): TBD identifies repos by absolute filesystem path, with no detection or recovery if the user moves the directory. The new layout doesn't make this worse, but it surfaces it during auto-migrate (§5a) and we said we'd fix it. Concretely:
+
+1. **Add a `repo.status` column** with values `.ok`, `.missing`. Default `.ok`. (Already in §4a's schema delta.)
+2. **On daemon startup and on every reconcile**, validate each repo: does `repo.path` exist, is it a git repo, does its `HEAD` resolve? If any check fails → `.missing`.
+3. **Every RPC handler that takes a repo ID** checks status first. `.missing` repos return a structured error (`.repoMissing(repoId, lastKnownPath)`) that the app surfaces with a "Locate…" button instead of a generic failure.
+4. **`tbd repo relocate <id-or-name> <new-path>`** (CLI + RPC):
+   - Validates `<new-path>` exists and is a git repo. That's it — no origin URL check (§6 explains why).
+   - Updates `repo.path`.
+   - Updates every `worktree.path` row whose old absolute path was inside the old repo path **only for legacy worktrees still living under the old `<repo>/.tbd/worktrees/`**. New-layout worktrees in `~/.tbd/worktrees/<slot>/` are unaffected — that's another argument for the new layout.
+   - Runs `git worktree repair` for each worktree from the new repo path so git's metadata picks up the new location.
+   - Sets `repo.status = .ok`.
+5. **App UI:** missing repos are dimmed in the sidebar with a "Locate…" affordance that opens an `NSOpenPanel`. CLI (`tbd repo list`, `tbd worktree list`) shows them with a `[missing]` tag. No silent failures, no hiding.
+
+### Why this matters for *this* design
+
+The new layout makes the relocate problem dramatically simpler: once a worktree lives at `~/.tbd/worktrees/<slot>/<wt-name>/`, it doesn't care where the main repo is on disk. Relocating the repo only needs to update `repo.path` and run `git worktree repair`. Today (legacy layout), relocating a repo would require moving every worktree directory too, which is exactly the pain we're getting rid of.
 
 ## 5. Migration plan
 
@@ -217,31 +238,13 @@ Given that the only current user has explicitly accepted editor-state loss as a 
   - The repo's main path still exists and is a git repo. **If not, the repo is marked `.missing` (§4b) and its worktrees are *skipped*, not failed.** The legacy worktrees stay where they are and remain reachable via the dual-prefix reconcile view (§4a code-change surface). When the user later runs `tbd repo relocate`, the next startup sweep (or manual `tbd repo migrate-worktrees`) picks them up.
   - **Crucially: a missing repo must never block daemon startup.** Migration iterates repos in isolation — one missing repo skips that repo only, the daemon continues, and the user can invoke `tbd repo relocate` via RPC the moment startup finishes. Without this, the daemon would be unbootable any time a repo directory has moved, with no recovery path (relocate is an RPC that requires a running daemon).
 - **Cross-volume moves are allowed**, since `~/.tbd/` and the repos are realistically all on the boot volume for the current user. The journal (§5b) covers the not-atomic case if the daemon crashes mid-copy.
+- **`worktree_root` override is honored.** If a repo has a non-NULL `worktree_root`, migration moves its worktrees to `<worktree_root>/<wt-name>/` instead of `~/.tbd/worktrees/<slot>/<wt-name>/`. On first post-upgrade migration this is a no-op (all existing rows are NULL), but future manual re-runs of `tbd repo migrate-worktrees` after a user sets an override need the behavior to be defined.
 - **Progress is logged per worktree** via `os.Logger` (category: `migration`). A single cross-volume copy can take minutes for a large worktree, and the daemon will appear unresponsive to app/CLI clients during that window. Document the expectation in release notes; stream with `log stream --level debug --predicate 'category == "migration"'` to watch progress live. This is not a correctness fix — it's preventing future-you from debugging "frozen app on first boot after upgrade" as a bug.
 - **A two-phase journal** (see §5b) makes every individual move recoverable.
 - **A `migration.lock` file** prevents two daemon processes from racing.
 - **Block daemon startup on migration.** With one user and a small number of worktrees, there's no benefit to background migration — and a foreground migration is simpler to reason about (no "is the daemon ready yet?" race for RPC clients).
 
 The manual `tbd repo migrate-worktrees [--dry-run] [<repo>]` command stays around for the rare follow-up case (e.g., a worktree that was `.creating` during the auto-pass and finished afterward) and for inspection (`--dry-run`).
-
-## 4b. Fixing `repos.path` silent breakage
-
-You said this needs fixing, not just flagging. Concretely:
-
-1. **Add a `repo.status` column** with values `.ok`, `.missing`. Default `.ok`.
-2. **On daemon startup and on every reconcile**, validate each repo: does `repo.path` exist, is it a git repo, does its `HEAD` resolve? If any check fails → `.missing`.
-3. **Every RPC handler that takes a repo ID** checks status first. `.missing` repos return a structured error (`.repoMissing(repoId, lastKnownPath)`) that the app surfaces with a "Locate…" button instead of a generic failure.
-4. **`tbd repo relocate <id-or-name> <new-path>`** (CLI + RPC):
-   - Validates `<new-path>` exists and is a git repo. That's it — no origin URL check (§6 explains why).
-   - Updates `repo.path`.
-   - Updates every `worktree.path` row whose old absolute path was inside the old repo path **only for legacy worktrees still living under the old `<repo>/.tbd/worktrees/`**. New-layout worktrees in `~/.tbd/worktrees/<slot>/` are unaffected — that's another argument for the new layout.
-   - Runs `git worktree repair` for each worktree from the new repo path so git's metadata picks up the new location.
-   - Sets `repo.status = .ok`.
-5. **App UI:** missing repos are dimmed in the sidebar with a "Locate…" affordance that opens an `NSOpenPanel`. CLI (`tbd repo list`, `tbd worktree list`) shows them with a `[missing]` tag. No silent failures, no hiding.
-
-### Why this matters for *this* design
-
-The new layout makes the relocate problem dramatically simpler: once a worktree lives at `~/.tbd/worktrees/<slot>/<wt-name>/`, it doesn't care where the main repo is on disk. Relocating the repo only needs to update `repo.path` and run `git worktree repair`. Today (legacy layout), relocating a repo would require moving every worktree directory too, which is exactly the pain we're getting rid of.
 
 ## 5b. Migration mechanics
 
@@ -297,7 +300,7 @@ The dangerous moment is between step 2 (directory moved) and step 4 (DB updated)
 - The journal is written *before* step 2 and deleted *after* step 4, so a daemon crash anywhere in the danger window leaves exactly one journal entry on disk.
 - **On daemon startup**, before running any new migrations, check `migration.lock` and `migration-journal.json`. If a journal entry exists, run recovery:
   - Only `new_path` exists → step 2 succeeded; finish steps 3–5.
-  - Only `old_path` exists → step 2 failed or was rolled back; delete the journal entry and treat as "never started."
+  - Only `old_path` exists → step 2 failed or was rolled back; delete the journal entry and **re-queue the worktree into the current startup sweep** so it retries this boot. (Without re-queue, the iteration that started this attempt has already moved on, and the worktree would stay in legacy until the user manually runs `tbd repo migrate-worktrees`.)
   - Both `old_path` and `new_path` exist → ambiguous (something recreated the old path). Mark the worktree `.error`, leave both directories in place, log loudly (`os.Logger` at `error` level, category `migration`), and **continue startup**. The user investigates manually — `tbd worktree forget` + re-reconcile is the normal recovery. Refusing to start would strand the user with no RPCs available.
   - Neither exists → catastrophic. Mark the worktree `.error` in the DB, delete the journal entry, continue startup.
 
