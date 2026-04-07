@@ -386,6 +386,25 @@ extension RPCRouter {
             terminalID: newTerminal.id, worktreeID: newTerminal.worktreeID, label: newTerminal.label
         )))
 
+        // `claude --resume <oldID>` forks the conversation into a NEW session
+        // file with a fresh UUID. The DB row currently stores the OLD ID, so
+        // any later read (handleTerminalConversation) or suspend/resume cycle
+        // would point at the wrong JSONL. Mirror SuspendResumeCoordinator's
+        // post-resume pattern: wait ~5s for Claude to settle, then capture the
+        // new session ID from the pane and persist it.
+        let newTerminalID = newTerminal.id
+        let newPaneID = window.paneID
+        let server = worktree.tmuxServer
+        let tmuxRef = self.tmux
+        let dbRef = self.db
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            let detector = ClaudeStateDetector(tmux: tmuxRef)
+            if let recaptured = await detector.captureSessionID(server: server, paneID: newPaneID) {
+                try? await dbRef.terminals.updateSessionID(id: newTerminalID, sessionID: recaptured)
+            }
+        }
+
         guard let updated = try await db.terminals.get(id: newTerminal.id) else {
             return RPCResponse(error: "Terminal vanished after swap")
         }
