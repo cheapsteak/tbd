@@ -1,6 +1,6 @@
 # Worktree Location Design
 
-Status: **Proposal v4** — simplified auto-migrate now that we've confirmed there's only one user (the author) and editor state is acceptable to lose. Pre-flight is minimal; no notification; move everything.
+Status: **Proposal v5** — slot is the sanitized display name, no disambiguator. Collisions are refused at `repo add`. Auto-migrate moves everything.
 Author: Claude (design pass, 2026-04-07)
 
 ## Decisions locked in (round 1)
@@ -77,7 +77,7 @@ Rationale:
    - Users who *want* sibling-dir layout for muscle memory.
    - Tests and CI that need a tmpdir.
 4. **Discoverability** is acceptable: `tbd worktree list` already prints absolute paths, and we can add `tbd worktree reveal <name>` (open in Finder) if users complain. The hidden-dir cost is real but small.
-5. **`~/.tbd/worktrees/` is shallow enough** that `git worktree repair` and manual recovery work fine. Each `<repo-uuid>/` subdirectory is self-contained.
+5. **`~/.tbd/worktrees/` is shallow enough** that `git worktree repair` and manual recovery work fine. Each `<slot>/` subdirectory is self-contained.
 
 ### Resulting layout
 
@@ -89,65 +89,55 @@ Rationale:
   port
   conductors/
   worktrees/
-    tbd/                          # repo basename, when unique
+    tbd/
       20260407-negative-crane/
       20260321-fuzzy-penguin/
     longeye-app/
       20260315-tame-otter/
-    app-7c3f/                     # basename + 4-char disambiguator
-    app-91ae/                     #   when two repos share a basename
 ```
 
 See §4a for exactly how the per-repo directory name is chosen.
 
-## 4a. Per-repo directory naming (no UUIDs)
+## 4a. Per-repo directory naming
 
-`Sources/TBDShared/NameGenerator.swift:7-16` already gives us pleasant worktree names like `20260407-negative-crane`. Burying those under `1f3a...c2/` would defeat the readability win.
+`Sources/TBDShared/NameGenerator.swift:7-16` already gives us pleasant worktree names like `20260407-negative-crane`. The per-repo directory should be equally readable.
 
-**Scheme:** the per-repo directory is named after the **repo's filesystem basename**, with a short disambiguator suffix only when needed.
+**Scheme:** the per-repo directory is the **sanitized repo display name**, frozen at `tbd repo add` time. Collisions are refused.
 
 ```
-slot = sanitize(basename(repo.path))               # e.g. "tbd", "longeye-app"
-if no other repo claims `slot`:
-    dir = slot
+slot = sanitize(repo.displayName)                  # e.g. "tbd", "longeye-app"
+if any existing repo has worktree_slot == slot:
+    refuse `tbd repo add` with: "slot 'X' is already used by repo Y; rename one before adding"
 else:
-    dir = "\(slot)-\(shortHash(repo.id))"          # 4 hex chars of repo UUID
+    repo.worktree_slot = slot
 ```
 
 Properties:
 
-- **Readable.** `cd ~/.tbd/worktrees/tbd/20260407-negative-crane` is the common case.
-- **Stable across renames and moves.** The slot is chosen at repo-add time and persisted in a new `repos.worktree_slot` column. Renaming or moving the repo on disk does **not** change the slot — that's the whole point of persisting it.
-- **Collision-proof, without touching the existing repo.** When a second repo would claim a slot already in use, **only the newcomer gets the suffix**. The existing repo keeps its bare slot.
-  1. At `tbd repo add`, look up any existing repo with `worktree_slot = <slot>`.
-  2. If found, the new repo's slot is `<slot>-<hash>` (4 hex chars of its UUID).
-  3. If not found, the new repo gets the bare `<slot>`.
-
-  **Why not rewrite both** (the v2 proposal): repo-add is a foreground user action, and the existing repo may have an open editor, a running build, or live TBD terminals. Rewriting it would require either (a) blocking `repo add` on §5a's safety pre-flight — bad UX — or (b) forcing the move and risking the corruption cases §5a exists to prevent. Asymmetry is a small consistency cost (the user sees `app` and `app-7c3f` instead of `app-1a2b` and `app-7c3f`); never moving a working repo on an unrelated `repo add` is worth it.
-  - Cosmetic asymmetry can be cleaned up later by a manual `tbd repo rename-slot` command if anyone cares.
-- **Sanitization.** Lowercase, replace anything outside `[a-z0-9._-]` with `-`, collapse runs, trim leading/trailing `-`, fall back to `repo` if the result is empty. Reserved names (`.`, `..`, names that begin with `.`) get the suffix treatment unconditionally.
-- **Hash source.** First 4 hex chars of the repo UUID (already a primary key, never changes). 4 chars = 65 k slots, fine for disambiguating a handful of same-named repos. We don't need cryptographic strength.
+- **Readable.** `cd ~/.tbd/worktrees/tbd/20260407-negative-crane` — no hashes anywhere.
+- **User-controlled.** TBD already exposes display names in the UI and `tbd worktree rename` (which also renames repos). The directory name is whatever the user chose. No magic.
+- **Frozen at add time.** The slot is persisted to `repo.worktree_slot` and **does not change when the user later renames the repo's display name.** Slot and display name diverge after the first rename, and that's fine — the slot is an on-disk detail, surfaced only when the user `cd`s into `~/.tbd/worktrees/`. If they care enough to rename the on-disk slot, that's a separate `tbd repo rename-slot` operation (not in this design's scope; add later if anyone asks).
+- **Stable across repo moves.** Moving the repo on disk doesn't touch the slot. Same property the v3/v4 design had.
+- **Collision policy.** At `tbd repo add`, if the sanitized display name is already taken, refuse the add and tell the user to pick a different display name (`--name <new-name>` flag, or rename the existing repo first). This is cheap to implement, can never silently overwrite anyone's data, and matches how the user already thinks about repos (display names are the human identifier).
+- **Sanitization.** Lowercase, replace anything outside `[a-z0-9._-]` with `-`, collapse runs of `-`, trim leading/trailing `-`. Reject (force user to rename) if the result is empty, `.`, `..`, or starts with `.`. The UNIQUE constraint on `worktree_slot` enforces collisions at the DB level as a backstop.
 
 ### Full schema delta (one GRDB migration `vN`)
 
 The `repo` table (singular — `Database.swift:53`) gains five columns in one migration:
 
 ```sql
-ALTER TABLE repo ADD COLUMN worktree_slot   TEXT;                       -- e.g. "tbd" or "app-7c3f"
-ALTER TABLE repo ADD COLUMN worktree_root   TEXT;                       -- NULL = default; absolute override
-ALTER TABLE repo ADD COLUMN status          TEXT NOT NULL DEFAULT 'ok'; -- 'ok' | 'missing'
-ALTER TABLE repo ADD COLUMN origin_url      TEXT;                       -- cached at add-time, used by relocate
-ALTER TABLE repo ADD COLUMN first_commit_sha TEXT;                      -- cached at add-time, used by relocate
+ALTER TABLE repo ADD COLUMN worktree_slot TEXT UNIQUE;                -- sanitized display name, frozen at add
+ALTER TABLE repo ADD COLUMN worktree_root TEXT;                       -- NULL = default; absolute override
+ALTER TABLE repo ADD COLUMN status        TEXT NOT NULL DEFAULT 'ok'; -- 'ok' | 'missing'
 ```
 
 Field roles:
 
-- **`worktree_slot`** — source of truth for the per-repo directory name. Set at repo-add time, never changes (except via slot-collision rewrite, see below).
+- **`worktree_slot`** — source of truth for the per-repo directory name. Sanitized display name at add-time. UNIQUE-constrained. Never auto-changes.
 - **`worktree_root`** — power-user override. When non-NULL, bypasses the slot mechanism entirely.
 - **`status`** — `ok` or `missing` (§4b). Validated on startup and reconcile.
-- **`origin_url`, `first_commit_sha`** — cached at add-time so `tbd repo relocate` can sanity-check that the user pointed it at the same repo. **Both are NULL for repos that existed before this migration**; relocate must tolerate NULL and degrade to "warn, no cross-check" for those rows.
 
-The `Repo` Codable model in `Sources/TBDShared/Models.swift` gains matching optional fields (`worktreeSlot`, `worktreeRoot`, `status`, `originURL`, `firstCommitSHA`) so old rows decode.
+The `Repo` Codable model in `Sources/TBDShared/Models.swift` gains matching optional fields (`worktreeSlot`, `worktreeRoot`, `status`) so old rows decode.
 
 ### Schema change
 
@@ -215,14 +205,12 @@ You said this needs fixing, not just flagging. Concretely:
 2. **On daemon startup and on every reconcile**, validate each repo: does `repo.path` exist, is it a git repo, does its `HEAD` resolve? If any check fails → `.missing`.
 3. **Every RPC handler that takes a repo ID** checks status first. `.missing` repos return a structured error (`.repoMissing(repoId, lastKnownPath)`) that the app surfaces with a "Locate…" button instead of a generic failure.
 4. **`tbd repo relocate <id-or-name> <new-path>`** (CLI + RPC):
-   - Validates `<new-path>` exists and is a git repo.
-   - Optionally validates it's the *same* repo (compare `git config --get remote.origin.url`, or the first commit hash, against the old value if we have it cached). Mismatch → require `--force`.
+   - Validates `<new-path>` exists and is a git repo. That's it — no origin URL check (§6 explains why).
    - Updates `repo.path`.
    - Updates every `worktree.path` row whose old absolute path was inside the old repo path **only for legacy worktrees still living under the old `<repo>/.tbd/worktrees/`**. New-layout worktrees in `~/.tbd/worktrees/<slot>/` are unaffected — that's another argument for the new layout.
    - Runs `git worktree repair` for each worktree from the new repo path so git's metadata picks up the new location.
    - Sets `repo.status = .ok`.
-5. **Cache the origin URL and first-commit hash in `repos`** at add-time, so future `relocate` calls can sanity-check.
-6. **App UI:** missing repos are dimmed in the sidebar with a "Locate…" affordance that opens an `NSOpenPanel`. No silent failures.
+5. **App UI:** missing repos are dimmed in the sidebar with a "Locate…" affordance that opens an `NSOpenPanel`. CLI (`tbd repo list`, `tbd worktree list`) shows them with a `[missing]` tag. No silent failures, no hiding.
 
 ### Why this matters for *this* design
 
@@ -292,8 +280,22 @@ The migration refuses. The repo is in `.missing` state (§4b) and the user must 
 
 ## 6. Remaining open questions
 
-Round 3 simplified auto-migrate (move everything, no editor heuristics, no notification). Still open:
+Round 4 (slot = sanitized display name, no disambiguator) and round 5 (decisions below) closed all the prior open questions. None remain.
 
-1. **Disambiguator length.** 4 hex chars (65 k) or 6 (16 M)? Recommendation: 4, bump only if we ever see a real collision.
-2. **`repo.status = .missing` UX in CLI.** App-side missing repos are dimmed in the sidebar with a "Locate…" affordance — uncontroversial. For `tbd worktree list` and `tbd repo list`, do missing repos appear (dimmed/marked) or hidden until relocated?
-3. **Origin URL mismatch on relocate.** Warn + `--force`, or hard-refuse? Recommendation: warn + `--force`, since users legitimately re-fork and re-clone.
+### Decisions locked in (round 5)
+
+- **Missing repo UX.** Both app and CLI show missing repos but **dimmed/marked**. App: dimmed sidebar entry with "Locate…" button. CLI (`tbd repo list`, `tbd worktree list`): show with a `[missing]` tag, exit code unchanged. Hiding them would make the user think they were silently dropped, which is exactly the bug we're fixing.
+- **Origin URL mismatch on relocate: drop the check entirely.** See note below — it doesn't earn its complexity.
+
+### Why the origin-URL check is gone
+
+Earlier drafts proposed caching `remote.origin.url` and `first_commit_sha` at `tbd repo add` so that `tbd repo relocate <new-path>` could verify the new path is "the same repo." Walking through the actual cases:
+
+- **Repos with no remote at all** (local-only experiments, scratch repos, this very TBD worktree if it weren't pushed). `origin_url` is empty. Check is a no-op.
+- **Repos whose remote has changed legitimately** (renamed GitHub repo, migrated from GitHub to a self-hosted gitea, switched from HTTPS to SSH URL — `https://github.com/x/y` → `git@github.com:x/y.git`). The URL string differs but it's the same repo. The check would false-positive constantly and we'd end up requiring `--force` every time, which means the check teaches the user to ignore it.
+- **The case it would actually catch** — user runs `tbd repo relocate /path/to/totally-unrelated-repo` by accident — is also caught, more directly, by the user noticing the worktree branches and history are wrong the moment they open it.
+- **`first_commit_sha`** is more stable but has the same problem with shallow clones, force-pushed root commits (rare but real), and repos that have been rewritten via `git filter-repo`.
+
+The cost of the check: two extra columns, add-time work to populate them, NULL-tolerance code in relocate, and a `--force` flag the user will reflexively pass. The benefit: catches a rare user error that the user will notice within seconds anyway.
+
+**Drop both `origin_url` and `first_commit_sha` from the schema delta.** Relocate becomes: validate the new path is a git repo, update `repo.path`, run `git worktree repair`, set status to `.ok`. Done.
