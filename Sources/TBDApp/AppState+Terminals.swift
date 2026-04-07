@@ -94,11 +94,12 @@ extension AppState {
     }
 
     /// Fork a Claude terminal by resuming from an existing session ID.
-    func forkClaudeTerminal(worktreeID: UUID, sessionID: String) async {
+    func forkClaudeTerminal(worktreeID: UUID, sessionID: String, tokenID: UUID? = nil) async {
         do {
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
-                resumeSessionID: sessionID
+                resumeSessionID: sessionID,
+                overrideTokenID: tokenID
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))

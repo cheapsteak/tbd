@@ -389,10 +389,10 @@ actor DaemonClient {
     }
 
     /// Create a terminal in a worktree.
-    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil) throws -> Terminal {
+    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideTokenID: UUID? = nil) throws -> Terminal {
         return try call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideTokenID: overrideTokenID),
             resultType: Terminal.self
         )
     }

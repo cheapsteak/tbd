@@ -330,8 +330,10 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let resumeSessionID: String?
     /// Initial prompt to send to the Claude session (only used with type: .claude).
     public let prompt: String?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil) {
-        self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt
+    /// Pin a specific token ID for this terminal, bypassing resolve(repoID:).
+    public let overrideTokenID: UUID?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideTokenID: UUID? = nil) {
+        self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideTokenID = overrideTokenID
     }
 }
 

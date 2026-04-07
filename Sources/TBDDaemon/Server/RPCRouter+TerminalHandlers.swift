@@ -36,7 +36,11 @@ extension RPCRouter {
         var resolvedToken: ResolvedClaudeToken? = nil
         if isClaudeType {
             do {
-                resolvedToken = try await claudeTokenResolver.resolve(repoID: worktree.repoID)
+                if let overrideID = params.overrideTokenID {
+                    resolvedToken = try await claudeTokenResolver.loadByID(overrideID)
+                } else {
+                    resolvedToken = try await claudeTokenResolver.resolve(repoID: worktree.repoID)
+                }
             } catch {
                 FileHandle.standardError.write(Data(
                     "[RPCRouter] warning: claude token resolution failed; falling back to keychain login\n".utf8
