@@ -102,7 +102,7 @@ extension AppState {
                 type: .codex
             )
             terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: terminal.label)
             tabs[worktreeID, default: []].append(tab)
         } catch {
             logger.error("Failed to create Codex terminal: \(error)")
