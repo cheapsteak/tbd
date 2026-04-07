@@ -55,7 +55,7 @@ extension RPCRouter {
                 return RPCResponse(error: "Token invalid")
             case .http429:
                 warning = "Could not verify token with Anthropic; saved anyway"
-                freshStatus = "http429"
+                freshStatus = "http_429"
             case .networkError:
                 warning = "Could not verify token with Anthropic; saved anyway"
                 freshStatus = "network_error"

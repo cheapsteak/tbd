@@ -158,9 +158,9 @@ struct ClaudeTokenRow: View {
     @ViewBuilder
     private var statusBadges: some View {
         switch usage?.lastStatus {
-        case "http_401", "http401":
+        case "http_401":
             badge("Invalid", color: .red)
-        case "http_429", "http429":
+        case "http_429":
             badge("Stale", color: .orange)
         case "network_error", "decode_error":
             badge("Unverified", color: .orange)
