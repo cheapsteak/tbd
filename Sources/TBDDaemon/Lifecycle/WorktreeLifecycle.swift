@@ -38,17 +38,26 @@ public struct WorktreeLifecycle: Sendable {
     public let tmux: TmuxManager
     public let hooks: HookResolver
     public let subscriptions: StateSubscriptionManager?
+    public let claudeTokenResolver: ClaudeTokenResolver?
 
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
     }
 
-    public init(db: TBDDatabase, git: GitManager, tmux: TmuxManager, hooks: HookResolver, subscriptions: StateSubscriptionManager? = nil) {
+    public init(
+        db: TBDDatabase,
+        git: GitManager,
+        tmux: TmuxManager,
+        hooks: HookResolver,
+        subscriptions: StateSubscriptionManager? = nil,
+        claudeTokenResolver: ClaudeTokenResolver? = nil
+    ) {
         self.db = db
         self.git = git
         self.tmux = tmux
         self.hooks = hooks
         self.subscriptions = subscriptions
+        self.claudeTokenResolver = claudeTokenResolver
     }
 }

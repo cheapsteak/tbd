@@ -38,7 +38,7 @@ let package = Package(
                 "TBDDaemonLib",
             ],
             path: "Sources/TBDDaemon",
-            exclude: ["Database", "Git", "Hooks", "Tmux", "Lifecycle", "Server", "SSH", "PR", "Conductor", "Daemon.swift", "PIDFile.swift"],
+            exclude: ["Database", "Git", "Hooks", "Tmux", "Lifecycle", "Server", "SSH", "PR", "Conductor", "Keychain", "Claude", "Daemon.swift", "PIDFile.swift"],
             sources: ["main.swift"]
         ),
         .executableTarget(

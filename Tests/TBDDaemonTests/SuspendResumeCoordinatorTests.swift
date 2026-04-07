@@ -107,6 +107,88 @@ struct SuspendResumeCoordinatorTests {
         #expect(result == .notSuspended)
     }
 
+    @Test func resumeInjectsTokenWhenResolverProvided() async throws {
+        // Build DB with a token row + suspended terminal referencing it.
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test-repo", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt",
+            branch: "main", path: "/tmp/test-repo",
+            tmuxServer: "tbd-test"
+        )
+        let token = try await db.claudeTokens.create(name: "test-token", kind: .oauth)
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            label: "claude-1", claudeSessionID: "session-abc",
+            claudeTokenID: token.id
+        )
+        try await db.terminals.setSuspended(
+            id: terminal.id, sessionID: "session-abc", snapshot: nil
+        )
+
+        // Stub keychain closure returns a known secret only for this token.
+        let secret = "sk-ant-oat01-FAKETOKEN_value"
+        let resolver = ClaudeTokenResolver(
+            tokens: db.claudeTokens,
+            repos: db.repos,
+            config: db.config,
+            keychain: { id in id == token.id.uuidString ? secret : nil }
+        )
+
+        // Recorder to capture the createWindow shellCommand argument.
+        let recorded = RecordedCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+            recorded.append(args)
+        })
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, claudeTokenResolver: resolver)
+
+        await coordinator.selectionChanged(to: [wt.id], suspendEnabled: false)
+        try await Task.sleep(for: .seconds(5))
+
+        let after = try await db.terminals.get(id: terminal.id)
+        #expect(after?.suspendedAt == nil)
+
+        // Find the createWindow invocation (it's the only dryRun call recorded here).
+        let snap = recorded.snapshot()
+        let resumeCall = snap.first { $0.joined(separator: " ").contains("claude --resume") }
+        #expect(resumeCall != nil, "expected a createWindow call containing claude --resume")
+        // Token must be passed via tmux -e flag, NOT inlined in the shell command argv.
+        #expect(resumeCall?.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)") == true,
+                "expected token in tmux -e flag; got: \(resumeCall ?? [])")
+        // The shell command body (last arg, after -ic) must NOT contain the secret.
+        let shellBody = resumeCall?.last ?? ""
+        #expect(!shellBody.contains(secret),
+                "secret leaked into shell command body: \(shellBody)")
+        #expect(!shellBody.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+                "env var name leaked into shell command body: \(shellBody)")
+        #expect(shellBody.contains("claude --resume session-abc"))
+    }
+
+    @Test func resumeOmitsTokenWhenResolverNil() async throws {
+        let (db, worktreeID, terminalID) = try await setupSuspendedTerminal()
+
+        let recorded = RecordedCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+            recorded.append(args)
+        })
+        // No resolver supplied — fallback branch.
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, claudeTokenResolver: nil)
+
+        await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: false)
+        try await Task.sleep(for: .seconds(5))
+
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.suspendedAt == nil)
+
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        let resumeArg = joined.first { $0.contains("claude --resume") }
+        #expect(resumeArg != nil, "expected a createWindow call containing claude --resume")
+        #expect(resumeArg?.contains("CLAUDE_CODE_OAUTH_TOKEN") == false,
+                "fallback branch must not inject CLAUDE_CODE_OAUTH_TOKEN; got: \(resumeArg ?? "nil")")
+        #expect(resumeArg?.contains("ANTHROPIC_API_KEY") == false)
+        #expect(resumeArg?.contains("claude --resume session-abc") == true)
+    }
+
     @Test func suspendSkippedWhenDisabled() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/test-repo", displayName: "test", defaultBranch: "main")
@@ -135,5 +217,21 @@ struct SuspendResumeCoordinatorTests {
 
         let after = try await db.terminals.get(id: terminal.id)
         #expect(after?.suspendedAt == nil, "Terminal should NOT be suspended when suspendEnabled is false")
+    }
+}
+
+/// Thread-safe collector for TmuxManager dryRun recorded args.
+private final class RecordedCommands: @unchecked Sendable {
+    private let lock = NSLock()
+    private var commands: [[String]] = []
+
+    func append(_ args: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        commands.append(args)
+    }
+
+    func snapshot() -> [[String]] {
+        lock.lock(); defer { lock.unlock() }
+        return commands
     }
 }

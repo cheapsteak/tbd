@@ -50,6 +50,7 @@ public actor SuspendResumeCoordinator {
     private let db: TBDDatabase
     private let tmux: TmuxManager
     private let detector: ClaudeStateDetector
+    private let claudeTokenResolver: ClaudeTokenResolver?
     private var inFlight: [UUID: Task<Void, Never>] = [:]
     private var lastKnownSelection: Set<UUID> = []
     /// Tracks whether each worktree has received a response_complete since last
@@ -57,10 +58,16 @@ public actor SuspendResumeCoordinator {
     /// this signal AND capture-pane confirmation.
     private var worktreeIdleFromHook: Set<UUID> = []
 
-    public init(db: TBDDatabase, tmux: TmuxManager) {
+    /// The user's default shell (from $SHELL, falls back to /bin/zsh).
+    private var defaultShell: String {
+        ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    }
+
+    public init(db: TBDDatabase, tmux: TmuxManager, claudeTokenResolver: ClaudeTokenResolver? = nil) {
         self.db = db
         self.tmux = tmux
         self.detector = ClaudeStateDetector(tmux: tmux)
+        self.claudeTokenResolver = claudeTokenResolver
     }
 
     /// Called when the daemon receives a response_complete notification for a worktree.
@@ -353,11 +360,38 @@ public actor SuspendResumeCoordinator {
             return
         }
 
-        let resumeCommand = "claude --resume \(sessionID) --dangerously-skip-permissions"
+        // Honor per-terminal claude token. We use loadByID (NOT resolve(repoID:))
+        // to load the EXACT token persisted on this terminal — a re-resolution
+        // could pick a different override if the user changed defaults since
+        // suspend. Failures degrade gracefully to keychain login.
+        var resolvedToken: ResolvedClaudeToken? = nil
+        if let tokenID = terminal.claudeTokenID, let resolver = claudeTokenResolver {
+            do {
+                resolvedToken = try await resolver.loadByID(tokenID)
+                if resolvedToken == nil {
+                    logger.warning("claude token \(tokenID) for terminal \(terminal.id) is missing; falling back to keychain login")
+                }
+            } catch {
+                logger.warning("claude token lookup failed for terminal \(terminal.id); falling back to keychain login: \(error.localizedDescription, privacy: .public)")
+                resolvedToken = nil
+            }
+        }
+
+        let spawn = ClaudeSpawnCommandBuilder.build(
+            resumeID: sessionID,
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            tokenSecret: resolvedToken?.secret,
+            tokenKind: resolvedToken?.kind,
+            cmd: nil,
+            shellFallback: defaultShell
+        )
         do {
             let window = try await tmux.createWindow(
                 server: server, session: "main",
-                cwd: worktree.path, shellCommand: resumeCommand
+                cwd: worktree.path, shellCommand: spawn.command,
+                sensitiveEnv: spawn.sensitiveEnv
             )
             try await db.terminals.updateTmuxIDs(
                 id: terminal.id, windowID: window.windowID, paneID: window.paneID

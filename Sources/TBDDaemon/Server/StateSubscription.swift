@@ -44,6 +44,11 @@ public final class StateSubscriptionManager: @unchecked Sendable {
         return subscribers.count
     }
 
+    /// Convenience: broadcast a Claude token usage update.
+    public func broadcastClaudeTokenUsage(_ usage: ClaudeTokenUsage) {
+        broadcast(delta: .claudeTokenUsageUpdated(usage))
+    }
+
     /// Broadcast a delta event to all subscribers.
     ///
     /// Encodes the delta as JSON and sends it to each subscriber callback.

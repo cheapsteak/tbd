@@ -161,6 +161,7 @@ private struct TabBarItem: View {
     @State private var isHovering = false
     @State private var isHoveringClose = false
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
+    @EnvironmentObject private var appState: AppState
 
     private var showClose: Bool {
         isSelected || isHovering
@@ -246,9 +247,48 @@ private struct TabBarItem: View {
         }
     }
 
+    private func formatTokenHeader(_ tokenID: UUID?) -> String {
+        guard let tokenID else { return "Token: Default (logged in)" }
+        guard let entry = appState.claudeTokens.first(where: { $0.token.id == tokenID }) else {
+            return "Token: (missing)"
+        }
+        return "Token: \(entry.token.name)"
+    }
+
+    private func formatTokenSubmenuLabel(_ entry: ClaudeTokenWithUsage) -> String {
+        entry.token.name
+    }
+
     @ViewBuilder
     private var contextMenuContent: some View {
         if isClaudeTerminal {
+            Button(formatTokenHeader(terminal?.claudeTokenID)) {}
+                .disabled(true)
+
+            Menu("Swap token") {
+                Button {
+                    guard let terminalID = terminal?.id else { return }
+                    Task { await appState.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: nil) }
+                } label: {
+                    let prefix = terminal?.claudeTokenID == nil ? "● " : "  "
+                    Text("\(prefix)Default (logged in)")
+                }
+
+                Divider()
+
+                ForEach(appState.claudeTokens, id: \.token.id) { entry in
+                    Button {
+                        guard let terminalID = terminal?.id else { return }
+                        Task { await appState.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: entry.token.id) }
+                    } label: {
+                        let prefix = terminal?.claudeTokenID == entry.token.id ? "● " : "  "
+                        Text("\(prefix)\(formatTokenSubmenuLabel(entry))")
+                    }
+                }
+            }
+
+            Divider()
+
             Button(action: onFork) {
                 Label("Fork Session", systemImage: "arrow.triangle.branch")
             }
@@ -307,7 +347,31 @@ private struct TabBarItem: View {
         }
         switch tab.content {
         case .terminal:
-            return "Terminal \(index + 1)"
+            if isClaudeTerminal, let tokenID = terminal?.claudeTokenID,
+               let entry = appState.claudeTokens.first(where: { $0.token.id == tokenID }) {
+                let name = entry.token.name
+                let worktreeID = terminal!.worktreeID
+                let allTabs = appState.tabs[worktreeID] ?? []
+                let allTerminals = appState.terminals[worktreeID] ?? []
+                let sameTokenTerminalIDs = Set(
+                    allTerminals
+                        .filter { $0.claudeTokenID == tokenID }
+                        .map { $0.id }
+                )
+                let sameTokenTabs = allTabs.filter { tab in
+                    if case .terminal(let tID) = tab.content {
+                        return sameTokenTerminalIDs.contains(tID)
+                    }
+                    return false
+                }
+                let myTerminalID = terminal!.id
+                let position = (sameTokenTabs.firstIndex { tab in
+                    if case .terminal(let tID) = tab.content { return tID == myTerminalID }
+                    return false
+                } ?? 0) + 1
+                return "\(name) \(position)"
+            }
+            return isClaudeTerminal ? "Claude" : "Terminal \(index + 1)"
         case .webview(_, let url):
             return url.host ?? "Web"
         case .codeViewer(_, let path):

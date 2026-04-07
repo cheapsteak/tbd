@@ -81,6 +81,8 @@ final class AppState: ObservableObject {
     @Published var editingWorktreeID: UUID? = nil
     @Published var isRenamingWorktree = false
     @Published var prStatuses: [UUID: PRStatus] = [:]
+    @Published var claudeTokens: [ClaudeTokenWithUsage] = []
+    @Published var globalDefaultClaudeTokenID: UUID? = nil
 
     /// Conductor for each repo (wildcard conductors expanded across all repos).
     @Published var conductorsByRepo: [UUID: Conductor] = [:]
@@ -94,10 +96,7 @@ final class AppState: ObservableObject {
     @Published var conductorHeight: CGFloat = 0 {
         didSet { UserDefaults.standard.set(Double(conductorHeight), forKey: Self.conductorHeightKey) }
     }
-    /// Remembers selected tab index per worktree so switching back restores the tab.
-    @Published var selectedTabIndex: [UUID: Int] = [:]
-
-    /// Terminal IDs currently being recreated — prevents duplicate RPC calls.
+/// Terminal IDs currently being recreated — prevents duplicate RPC calls.
     var recreatingTerminalIDs: Set<UUID> = []
 
     // Alert state for user feedback
@@ -117,6 +116,7 @@ final class AppState: ObservableObject {
     private static let conductorHeightKey = "com.tbd.app.conductorHeight"
 
     private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var focusObservers: [NSObjectProtocol] = []
 
     init() {
         restoreLayouts()
@@ -127,10 +127,55 @@ final class AppState: ObservableObject {
             conductorHeight = max(100, min(800, CGFloat(savedHeight)))
         }
         startMemoryPressureMonitor()
+        registerFocusObservers()
         Task {
             await connectAndLoadInitialState()
             startPolling()
         }
+    }
+
+    // Note: AppState is singleton-lifetime in this app, so we deliberately
+    // omit a deinit that removes the focus observers — Swift 6 concurrency
+    // would require Sendable on the observer tokens to touch them from a
+    // nonisolated deinit, and the leak is bounded by app lifetime.
+
+    /// Forward macOS app focus changes to the daemon. The daemon uses this to
+    /// pause/resume the Claude usage poller while the app is in the background.
+    /// `NotificationCenter.addObserver` does not require a bundle ID, so this
+    /// is safe to call from an unbundled SPM executable.
+    private func registerFocusObservers() {
+        let center = NotificationCenter.default
+        let active = center.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.daemonClient.setAppForegroundState(isForeground: true)
+                } catch {
+                    logger.warning("setAppForegroundState(true) failed: \(error)")
+                }
+            }
+        }
+        let resigned = center.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    try await self.daemonClient.setAppForegroundState(isForeground: false)
+                } catch {
+                    logger.warning("setAppForegroundState(false) failed: \(error)")
+                }
+            }
+        }
+        focusObservers = [active, resigned]
     }
 
     /// Respond to system memory pressure by purging purgeable caches.
@@ -197,13 +242,27 @@ final class AppState: ObservableObject {
         subscriptionTask = nil
     }
 
-    private func handleDelta(_ delta: StateDelta) {
+    func handleDelta(_ delta: StateDelta) {
         switch delta {
         case .notificationReceived(let notification):
             handleNotificationDelta(notification)
+        case .claudeTokenUsageUpdated(let usage):
+            applyClaudeTokenUsageDelta(usage)
+        case .claudeTokensChanged:
+            Task { [weak self] in await self?.refreshClaudeTokens() }
         default:
             break
         }
+    }
+
+    /// Update the in-place usage entry for a single Claude token. If no match,
+    /// silently ignore — the next full refresh will pick it up.
+    private func applyClaudeTokenUsageDelta(_ usage: ClaudeTokenUsage) {
+        guard let idx = claudeTokens.firstIndex(where: { $0.token.id == usage.tokenID }) else {
+            return
+        }
+        let existing = claudeTokens[idx]
+        claudeTokens[idx] = ClaudeTokenWithUsage(token: existing.token, usage: usage)
     }
 
     private func handleNotificationDelta(_ notification: NotificationDelta) {
@@ -262,6 +321,7 @@ final class AppState: ObservableObject {
         isConnected = didConnect
         if didConnect {
             await refreshAll()
+            await refreshClaudeTokens()
             startSubscription()
             await refreshPRStatuses()
             Task {

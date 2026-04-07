@@ -121,6 +121,102 @@ public enum RPCMethod {
     public static let conductorClearSuggestion = "conductor.clearSuggestion"
     public static let terminalConversation = "terminal.conversation"
     public static let repoUpdateInstructions = "repo.updateInstructions"
+    public static let claudeTokenList = "claudeToken.list"
+    public static let claudeTokenAdd = "claudeToken.add"
+    public static let claudeTokenDelete = "claudeToken.delete"
+    public static let claudeTokenRename = "claudeToken.rename"
+    public static let claudeTokenSetGlobalDefault = "claudeToken.setGlobalDefault"
+    public static let claudeTokenSetRepoOverride = "claudeToken.setRepoOverride"
+    public static let claudeTokenFetchUsage = "claudeToken.fetchUsage"
+    public static let terminalSwapClaudeToken = "terminal.swapClaudeToken"
+    public static let appSetForegroundState = "app.setForegroundState"
+}
+
+public struct AppSetForegroundStateParams: Codable, Sendable {
+    public let isForeground: Bool
+    public init(isForeground: Bool) { self.isForeground = isForeground }
+}
+
+// MARK: - Terminal Swap Claude Token
+
+public struct TerminalSwapClaudeTokenParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let newTokenID: UUID?
+    public init(terminalID: UUID, newTokenID: UUID?) {
+        self.terminalID = terminalID
+        self.newTokenID = newTokenID
+    }
+}
+
+// MARK: - Claude Token RPC
+
+public struct ClaudeTokenAddParams: Codable, Sendable {
+    public let name: String
+    public let token: String
+    public init(name: String, token: String) {
+        self.name = name
+        self.token = token
+    }
+}
+
+public struct ClaudeTokenAddResult: Codable, Sendable {
+    public let token: ClaudeToken
+    public let warning: String?
+    public init(token: ClaudeToken, warning: String? = nil) {
+        self.token = token
+        self.warning = warning
+    }
+}
+
+public struct ClaudeTokenDeleteParams: Codable, Sendable {
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+}
+
+public struct ClaudeTokenRenameParams: Codable, Sendable {
+    public let id: UUID
+    public let name: String
+    public init(id: UUID, name: String) {
+        self.id = id; self.name = name
+    }
+}
+
+public struct ClaudeTokenSetGlobalDefaultParams: Codable, Sendable {
+    public let id: UUID?
+    public init(id: UUID?) { self.id = id }
+}
+
+public struct ClaudeTokenSetRepoOverrideParams: Codable, Sendable {
+    public let repoID: UUID
+    public let tokenID: UUID?
+    public init(repoID: UUID, tokenID: UUID?) {
+        self.repoID = repoID; self.tokenID = tokenID
+    }
+}
+
+public struct ClaudeTokenFetchUsageParams: Codable, Sendable {
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+}
+
+public struct ClaudeTokenListResult: Codable, Sendable {
+    public let tokens: [ClaudeTokenWithUsage]
+    public let defaultID: UUID?
+    public init(tokens: [ClaudeTokenWithUsage], defaultID: UUID? = nil) {
+        self.tokens = tokens
+        self.defaultID = defaultID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tokens = try c.decode([ClaudeTokenWithUsage].self, forKey: .tokens)
+        defaultID = try c.decodeIfPresent(UUID.self, forKey: .defaultID)
+    }
+}
+
+public struct ClaudeTokenFetchUsageResult: Codable, Sendable {
+    public let usage: ClaudeTokenUsage
+    public init(usage: ClaudeTokenUsage) { self.usage = usage }
 }
 
 public struct NotificationsListResult: Codable, Sendable {
@@ -234,8 +330,10 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let resumeSessionID: String?
     /// Initial prompt to send to the Claude session (only used with type: .claude).
     public let prompt: String?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil) {
-        self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt
+    /// Pin a specific token ID for this terminal, bypassing resolve(repoID:).
+    public let overrideTokenID: UUID?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideTokenID: UUID? = nil) {
+        self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideTokenID = overrideTokenID
     }
 }
 

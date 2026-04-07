@@ -13,6 +13,9 @@ public final class RPCRouter: Sendable {
     public let prManager: PRStatusManager
     public let suspendResumeCoordinator: SuspendResumeCoordinator
     public let conductorManager: ConductorManager
+    public let usageFetcher: ClaudeUsageFetcher
+    public let claudeTokenResolver: ClaudeTokenResolver
+    public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -25,7 +28,9 @@ public final class RPCRouter: Sendable {
         startTime: Date = Date(),
         subscriptions: StateSubscriptionManager = StateSubscriptionManager(),
         prManager: PRStatusManager = PRStatusManager(),
-        conductorManager: ConductorManager? = nil
+        conductorManager: ConductorManager? = nil,
+        usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
+        claudeTokenResolver: ClaudeTokenResolver? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -34,8 +39,17 @@ public final class RPCRouter: Sendable {
         self.startTime = startTime
         self.subscriptions = subscriptions
         self.prManager = prManager
-        self.suspendResumeCoordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
+        let resolvedClaudeTokenResolver = claudeTokenResolver ?? ClaudeTokenResolver(
+            tokens: db.claudeTokens,
+            repos: db.repos,
+            config: db.config
+        )
+        self.claudeTokenResolver = resolvedClaudeTokenResolver
+        self.suspendResumeCoordinator = SuspendResumeCoordinator(
+            db: db, tmux: tmux, claudeTokenResolver: resolvedClaudeTokenResolver
+        )
         self.conductorManager = conductorManager ?? ConductorManager(db: db, tmux: tmux)
+        self.usageFetcher = usageFetcher
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -83,6 +97,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalDelete(request.paramsData)
             case RPCMethod.terminalSetPin:
                 return try await handleTerminalSetPin(request.paramsData)
+            case RPCMethod.terminalSwapClaudeToken:
+                return try await handleTerminalSwapClaudeToken(request.paramsData)
             case RPCMethod.notify:
                 return try await handleNotify(request.paramsData)
             case RPCMethod.daemonStatus:
@@ -141,6 +157,24 @@ public final class RPCRouter: Sendable {
                 return try await handleConductorSuggest(request.paramsData)
             case RPCMethod.conductorClearSuggestion:
                 return try await handleConductorClearSuggestion(request.paramsData)
+            case RPCMethod.claudeTokenList:
+                return try await handleClaudeTokenList()
+            case RPCMethod.claudeTokenAdd:
+                return try await handleClaudeTokenAdd(request.paramsData)
+            case RPCMethod.claudeTokenDelete:
+                return try await handleClaudeTokenDelete(request.paramsData)
+            case RPCMethod.claudeTokenRename:
+                return try await handleClaudeTokenRename(request.paramsData)
+            case RPCMethod.claudeTokenSetGlobalDefault:
+                return try await handleClaudeTokenSetGlobalDefault(request.paramsData)
+            case RPCMethod.claudeTokenSetRepoOverride:
+                return try await handleClaudeTokenSetRepoOverride(request.paramsData)
+            case RPCMethod.claudeTokenFetchUsage:
+                return try await handleClaudeTokenFetchUsage(request.paramsData)
+            case RPCMethod.appSetForegroundState:
+                let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
+                await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)
+                return .ok()
             case RPCMethod.stateSubscribe:
                 return RPCResponse(error: "state.subscribe must be handled by SocketServer")
             default:

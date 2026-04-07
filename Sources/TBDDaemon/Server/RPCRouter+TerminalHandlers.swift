@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "terminalHandlers")
 
 extension RPCRouter {
 
@@ -29,48 +32,73 @@ extension RPCRouter {
 
         let isClaudeType = params.type == .claude || params.resumeSessionID != nil
         let claudeSessionID: String?
-        let shellCommand: String
         let label: String?
 
+        // Resolve claude token (repo override → global default → none).
+        // Failure here must NOT break terminal spawn — fall back to keychain login.
+        var resolvedToken: ResolvedClaudeToken? = nil
+        if isClaudeType {
+            do {
+                if let overrideID = params.overrideTokenID {
+                    resolvedToken = try await claudeTokenResolver.loadByID(overrideID)
+                } else {
+                    resolvedToken = try await claudeTokenResolver.resolve(repoID: worktree.repoID)
+                }
+            } catch {
+                logger.warning("claude token resolution failed; falling back to keychain login")
+                resolvedToken = nil
+            }
+        }
+
+        // Build the spawn command via the pure helper.
+        let appendSystemPrompt: String?
+        let freshSessionID: String?
         if let resumeID = params.resumeSessionID {
-            // Fork: resume from an existing session (creates a new session that shares context)
             claudeSessionID = resumeID
-            shellCommand = "claude --resume \(resumeID) --dangerously-skip-permissions"
+            freshSessionID = nil
+            appendSystemPrompt = nil
             label = "claude"
         } else if isClaudeType {
             let sessionID = UUID().uuidString
             claudeSessionID = sessionID
-            var cmd = "claude --session-id \(sessionID) --dangerously-skip-permissions"
-
-            // Inject per-repo system prompt for new Claude sessions
+            freshSessionID = sessionID
             if let repo,
                let prompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false) {
-                cmd += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
+                appendSystemPrompt = prompt
+            } else {
+                appendSystemPrompt = nil
             }
-
-            // Pass initial prompt as positional arg (starts interactive session with this message)
-            if let initialPrompt = params.prompt, !initialPrompt.isEmpty {
-                cmd += " \(SystemPromptBuilder.shellEscape(initialPrompt))"
-            }
-
-            shellCommand = cmd
             label = "Claude Code"
         } else if let cmd = params.cmd {
             claudeSessionID = nil
-            shellCommand = cmd
+            freshSessionID = nil
+            appendSystemPrompt = nil
             label = cmd
         } else {
             claudeSessionID = nil
-            shellCommand = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            freshSessionID = nil
+            appendSystemPrompt = nil
             label = nil
         }
+
+        let spawn = ClaudeSpawnCommandBuilder.build(
+            resumeID: params.resumeSessionID,
+            freshSessionID: freshSessionID,
+            appendSystemPrompt: appendSystemPrompt,
+            initialPrompt: params.prompt,
+            tokenSecret: resolvedToken?.secret,
+            tokenKind: resolvedToken?.kind,
+            cmd: params.cmd,
+            shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        )
 
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
-            shellCommand: shellCommand,
-            env: env
+            shellCommand: spawn.command,
+            env: env,
+            sensitiveEnv: spawn.sensitiveEnv
         )
 
         let terminal = try await db.terminals.create(
@@ -78,7 +106,8 @@ extension RPCRouter {
             tmuxWindowID: window.windowID,
             tmuxPaneID: window.paneID,
             label: label,
-            claudeSessionID: claudeSessionID
+            claudeSessionID: claudeSessionID,
+            claudeTokenID: resolvedToken?.tokenID
         )
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -284,6 +313,103 @@ extension RPCRouter {
         }
 
         return Array(allMessages.suffix(count))
+    }
+
+    // MARK: - Swap Claude Token (mid-conversation)
+
+    func handleTerminalSwapClaudeToken(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSwapClaudeTokenParams.self, from: paramsData)
+
+        guard let oldTerminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+        guard let sessionID = oldTerminal.claudeSessionID else {
+            return RPCResponse(error: "Terminal \(params.terminalID) is not a Claude terminal")
+        }
+        guard let worktree = try await db.worktrees.get(id: oldTerminal.worktreeID) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+
+        // Resolve the requested token (nil = no override; keychain login).
+        // We do NOT touch the old terminal — both tabs coexist after the swap.
+        let resolved: ResolvedClaudeToken?
+        if let newID = params.newTokenID {
+            do {
+                resolved = try await claudeTokenResolver.loadByID(newID)
+            } catch {
+                return RPCResponse(error: "Failed to load token")
+            }
+            if resolved == nil {
+                return RPCResponse(error: "Token not found or unreadable")
+            }
+        } else {
+            resolved = nil
+        }
+
+        // Spawn a NEW window in the same worktree, resuming the same session
+        // ID. `claude --resume` forks the conversation history into a fresh
+        // session file, so the two panes can coexist without JSONL conflicts.
+        // The new pane gets the new env prefix; the old pane is untouched.
+        let repo = try await db.repos.get(id: worktree.repoID)
+        var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
+        env["TBD_WORKTREE_ID"] = worktree.id.uuidString
+
+        let spawn = ClaudeSpawnCommandBuilder.build(
+            resumeID: sessionID,
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            tokenSecret: resolved?.secret,
+            tokenKind: resolved?.kind,
+            cmd: nil,
+            shellFallback: ""
+        )
+
+        let window = try await tmux.createWindow(
+            server: worktree.tmuxServer,
+            session: "main",
+            cwd: worktree.path,
+            shellCommand: spawn.command,
+            env: env,
+            sensitiveEnv: spawn.sensitiveEnv
+        )
+
+        let newTerminal = try await db.terminals.create(
+            worktreeID: worktree.id,
+            tmuxWindowID: window.windowID,
+            tmuxPaneID: window.paneID,
+            label: "claude",
+            claudeSessionID: sessionID,
+            claudeTokenID: resolved?.tokenID
+        )
+
+        subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
+            terminalID: newTerminal.id, worktreeID: newTerminal.worktreeID, label: newTerminal.label
+        )))
+
+        // `claude --resume <oldID>` forks the conversation into a NEW session
+        // file with a fresh UUID. The DB row currently stores the OLD ID, so
+        // any later read (handleTerminalConversation) or suspend/resume cycle
+        // would point at the wrong JSONL. Mirror SuspendResumeCoordinator's
+        // post-resume pattern: wait ~5s for Claude to settle, then capture the
+        // new session ID from the pane and persist it.
+        let newTerminalID = newTerminal.id
+        let newPaneID = window.paneID
+        let server = worktree.tmuxServer
+        let tmuxRef = self.tmux
+        let dbRef = self.db
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            let detector = ClaudeStateDetector(tmux: tmuxRef)
+            if let recaptured = await detector.captureSessionID(server: server, paneID: newPaneID) {
+                try? await dbRef.terminals.updateSessionID(id: newTerminalID, sessionID: recaptured)
+            }
+        }
+
+        guard let updated = try await db.terminals.get(id: newTerminal.id) else {
+            return RPCResponse(error: "Terminal vanished after swap")
+        }
+        return try RPCResponse(result: updated)
     }
 
     func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {
