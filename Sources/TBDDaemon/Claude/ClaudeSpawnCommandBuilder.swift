@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// Builds the shell command string for spawning (or respawning) a claude terminal.
 ///
@@ -27,6 +28,7 @@ enum ClaudeSpawnCommandBuilder {
         appendSystemPrompt: String?,
         initialPrompt: String?,
         tokenSecret: String?,
+        tokenKind: ClaudeTokenKind? = nil,
         cmd: String?,
         shellFallback: String
     ) -> String {
@@ -55,8 +57,9 @@ enum ClaudeSpawnCommandBuilder {
             },
             "Claude token contains unexpected characters; refusing to inject"
         )
-        // Defensive single-quote escape; OAuth tokens never contain `'`.
+        // Defensive single-quote escape; tokens never contain `'`.
         let escaped = secret.replacingOccurrences(of: "'", with: "'\\''")
-        return "CLAUDE_CODE_OAUTH_TOKEN='\(escaped)' \(base)"
+        let envVar = tokenKind == .apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"
+        return "\(envVar)='\(escaped)' \(base)"
     }
 }

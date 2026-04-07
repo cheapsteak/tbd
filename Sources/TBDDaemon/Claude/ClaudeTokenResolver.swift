@@ -36,6 +36,7 @@ public struct ClaudeTokenResolver: Sendable {
     private func loadResolved(id: UUID) async throws -> ResolvedClaudeToken? {
         guard let row = try await tokens.get(id: id) else { return nil }
         guard let secret = try keychain(id.uuidString), !secret.isEmpty else { return nil }
+        try await tokens.touchLastUsed(id: row.id)
         return ResolvedClaudeToken(
             tokenID: row.id,
             name: row.name,

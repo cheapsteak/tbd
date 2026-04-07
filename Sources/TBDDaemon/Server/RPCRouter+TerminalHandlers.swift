@@ -86,6 +86,7 @@ extension RPCRouter {
             appendSystemPrompt: appendSystemPrompt,
             initialPrompt: params.prompt,
             tokenSecret: resolvedToken?.secret,
+            tokenKind: resolvedToken?.kind,
             cmd: params.cmd,
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         )
@@ -357,6 +358,7 @@ extension RPCRouter {
             appendSystemPrompt: nil,
             initialPrompt: nil,
             tokenSecret: resolved?.secret,
+            tokenKind: resolved?.kind,
             cmd: nil,
             shellFallback: ""
         )
