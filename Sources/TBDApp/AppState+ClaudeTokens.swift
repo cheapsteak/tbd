@@ -94,9 +94,16 @@ extension AppState {
     }
 
     /// Swap the Claude token associated with a running terminal.
+    /// The daemon forks a new tmux tab; this method adds the new terminal and tab to local state
+    /// and selects it so the UI switches immediately.
     func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?) async {
         do {
-            try await daemonClient.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: newTokenID)
+            let newTerminal = try await daemonClient.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: newTokenID)
+            let worktreeID = newTerminal.worktreeID
+            terminals[worktreeID, default: []].append(newTerminal)
+            let newTab = Tab(id: newTerminal.id, content: .terminal(terminalID: newTerminal.id))
+            tabs[worktreeID, default: []].append(newTab)
+            selectedTabIndex[worktreeID] = (tabs[worktreeID]?.count ?? 1) - 1
         } catch {
             logger.error("Failed to swap Claude token on terminal: \(error)")
             showAlert("Failed to swap Claude token: \(error.localizedDescription)", isError: true)
