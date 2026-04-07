@@ -50,7 +50,6 @@ public struct ClaudeTokenResolver: Sendable {
         if let repoID, let repo = try await repos.get(id: repoID),
            let overrideID = repo.claudeTokenOverrideID {
             if let resolved = try await loadResolved(id: overrideID) {
-                try await tokens.touchLastUsed(id: resolved.tokenID)
                 return resolved
             }
             FileHandle.standardError.write(Data(
@@ -61,7 +60,6 @@ public struct ClaudeTokenResolver: Sendable {
         // Step 2: global default
         if let defaultID = try await config.get().defaultClaudeTokenID {
             if let resolved = try await loadResolved(id: defaultID) {
-                try await tokens.touchLastUsed(id: resolved.tokenID)
                 return resolved
             }
             return nil
