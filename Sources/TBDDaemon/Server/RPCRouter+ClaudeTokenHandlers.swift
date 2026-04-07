@@ -28,6 +28,13 @@ extension RPCRouter {
             return RPCResponse(error: "Name cannot be empty")
         }
 
+        // Tokens are passed through tmux's `-e KEY=VALUE` argv (no shell), so
+        // most printables are safe. Reject only chars that would break a
+        // single-line tmux arg: newlines, carriage returns, NULL bytes.
+        if trimmed.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\0" }) {
+            return RPCResponse(error: "Token contains invalid characters (newlines or NULL bytes are not allowed)")
+        }
+
         let kind: ClaudeTokenKind
         if trimmed.hasPrefix("sk-ant-oat01-") {
             kind = .oauth

@@ -1,8 +1,5 @@
 import Foundation
-import os
 import TBDShared
-
-private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeSpawn")
 
 /// Builds the shell command string for spawning (or respawning) a claude terminal.
 ///
@@ -64,12 +61,10 @@ enum ClaudeSpawnCommandBuilder {
         guard let secret = tokenSecret else {
             return Result(command: base, sensitiveEnv: [:])
         }
-        guard secret.allSatisfy({ ch in
-            ch.isLetter || ch.isNumber || ch == "-" || ch == "_"
-        }) else {
-            logger.error("Claude token contains unexpected characters; falling back to keychain login without env injection")
-            return Result(command: base, sensitiveEnv: [:])
-        }
+        // Tokens flow through tmux's `-e KEY=VALUE` (argv, no shell parsing),
+        // so we don't need shell-escape allowlists here. Storage-time validation
+        // (handleClaudeTokenAdd) rejects newlines / NULL bytes that would break
+        // tmux's single-line arg parsing.
         let envVar = tokenKind == .apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"
         return Result(command: base, sensitiveEnv: [envVar: secret])
     }

@@ -157,6 +157,18 @@ struct ClaudeTokenRPCTests {
         #expect(try await db.claudeTokens.list().isEmpty)
     }
 
+    @Test("add: token with embedded newline rejected at storage")
+    func addRejectsNewline() async throws {
+        let (router, db, _) = makeRouter()
+        let bad = Self.oauthPrefix + "abc\ndef"
+        let req = try RPCRequest(method: RPCMethod.claudeTokenAdd,
+                                 params: ClaudeTokenAddParams(name: "Bad", token: bad))
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error?.contains("invalid characters") == true)
+        #expect(try await db.claudeTokens.list().isEmpty)
+    }
+
     @Test("add: duplicate name rejected")
     func addDuplicateName() async throws {
         let stub = StubClaudeUsageFetcher(responses: [.ok(sampleUsage())])
