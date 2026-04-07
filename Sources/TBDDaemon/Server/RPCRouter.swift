@@ -39,14 +39,17 @@ public final class RPCRouter: Sendable {
         self.startTime = startTime
         self.subscriptions = subscriptions
         self.prManager = prManager
-        self.suspendResumeCoordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
-        self.conductorManager = conductorManager ?? ConductorManager(db: db, tmux: tmux)
-        self.usageFetcher = usageFetcher
-        self.claudeTokenResolver = claudeTokenResolver ?? ClaudeTokenResolver(
+        let resolvedClaudeTokenResolver = claudeTokenResolver ?? ClaudeTokenResolver(
             tokens: db.claudeTokens,
             repos: db.repos,
             config: db.config
         )
+        self.claudeTokenResolver = resolvedClaudeTokenResolver
+        self.suspendResumeCoordinator = SuspendResumeCoordinator(
+            db: db, tmux: tmux, claudeTokenResolver: resolvedClaudeTokenResolver
+        )
+        self.conductorManager = conductorManager ?? ConductorManager(db: db, tmux: tmux)
+        self.usageFetcher = usageFetcher
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
