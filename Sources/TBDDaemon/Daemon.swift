@@ -99,7 +99,8 @@ public final class Daemon: Sendable {
             git: git,
             startTime: startTime,
             subscriptions: subs,
-            prManager: prManager
+            prManager: prManager,
+            claudeTokenResolver: claudeTokenResolver
         )
         self.router = rpcRouter
 
