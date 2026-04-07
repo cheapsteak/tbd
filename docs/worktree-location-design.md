@@ -1,7 +1,15 @@
 # Worktree Location Design
 
-Status: **Proposal** — awaiting user decision before implementation.
+Status: **Proposal v2** — answers folded in from review round 1.
 Author: Claude (design pass, 2026-04-07)
+
+## Decisions locked in (round 1)
+
+1. Default location: **`~/.tbd/worktrees/...`** (not Application Support).
+2. **No UUIDs in paths.** See §4a for the new naming scheme.
+3. **Ship `tbd repo relocate`** in the same change, plus startup validation that surfaces missing repos instead of silently breaking.
+4. Tests get routed through a `WorktreeLayout` helper.
+5. Auto-migrate on upgrade is the goal — see §5a for the failure-case analysis that shapes how we do it safely.
 
 ## 1. Current behavior
 
@@ -81,12 +89,55 @@ Rationale:
   port
   conductors/
   worktrees/
-    1f3a...c2/                  # repo UUID
+    tbd/                          # repo basename, when unique
       20260407-negative-crane/
       20260321-fuzzy-penguin/
-    9b8e...44/
+    longeye-app/
       20260315-tame-otter/
+    app-7c3f/                     # basename + 4-char disambiguator
+    app-91ae/                     #   when two repos share a basename
 ```
+
+See §4a for exactly how the per-repo directory name is chosen.
+
+## 4a. Per-repo directory naming (no UUIDs)
+
+`Sources/TBDShared/NameGenerator.swift:7-16` already gives us pleasant worktree names like `20260407-negative-crane`. Burying those under `1f3a...c2/` would defeat the readability win.
+
+**Scheme:** the per-repo directory is named after the **repo's filesystem basename**, with a short disambiguator suffix only when needed.
+
+```
+slot = sanitize(basename(repo.path))               # e.g. "tbd", "longeye-app"
+if no other repo claims `slot`:
+    dir = slot
+else:
+    dir = "\(slot)-\(shortHash(repo.id))"          # 4 hex chars of repo UUID
+```
+
+Properties:
+
+- **Readable.** `cd ~/.tbd/worktrees/tbd/20260407-negative-crane` is the common case.
+- **Stable across renames and moves.** The slot is chosen at repo-add time and persisted in a new `repos.worktree_slot` column. Renaming or moving the repo on disk does **not** change the slot — that's the whole point of persisting it.
+- **Collision-proof.** When a second repo would claim the same slot, *both* repos get rewritten to the suffixed form. This is a one-time mutation triggered at repo-add time:
+  1. Look up any existing repo with `worktree_slot = <slot>`.
+  2. If found and it doesn't already have a suffix, migrate it to `<slot>-<hash>` (move directory, update DB, in the same journaled flow as §5).
+  3. Insert the new repo with its own `<slot>-<hash>`.
+  This is rare (most users don't have two repos with the same basename) and uses the same migration machinery as §5, so there's no extra failure surface.
+- **Sanitization.** Lowercase, replace anything outside `[a-z0-9._-]` with `-`, collapse runs, trim leading/trailing `-`, fall back to `repo` if the result is empty. Reserved names (`.`, `..`, names that begin with `.`) get the suffix treatment unconditionally.
+- **Hash source.** First 4 hex chars of the repo UUID (already a primary key, never changes). 4 chars = 65 k slots, fine for disambiguating a handful of same-named repos. We don't need cryptographic strength.
+
+### Schema delta vs §4
+
+Replace the proposed `worktree_root` column with **two** columns:
+
+```sql
+ALTER TABLE repo ADD COLUMN worktree_slot TEXT;   -- e.g. "tbd" or "app-7c3f"
+ALTER TABLE repo ADD COLUMN worktree_root TEXT;   -- NULL = default; absolute override
+```
+
+`worktree_slot` is set at repo-add time and is the source of truth for the per-repo directory name. `worktree_root` remains the power-user override and, when non-NULL, bypasses the slot mechanism entirely.
+
+The `Repo` Codable model gains `worktreeSlot: String?` and `worktreeRoot: String?` (both optional so existing rows decode).
 
 ### Schema change
 
@@ -110,16 +161,87 @@ When `NULL`, the daemon computes `Constants.configDir / "worktrees" / repo.id.uu
 
 Existing installs have worktrees at `<repo>/.tbd/worktrees/<name>/` with absolute paths persisted in `state.db`. We need to move the directories *and* update the DB without leaving git's `.git/worktrees/<name>/gitdir` files pointing into space.
 
-### Strategy: opt-in migration command, grandfather by default
+## 5a. Auto-migrate failure cases (the question that decides the strategy)
 
-On daemon upgrade we do **not** auto-move anything. New worktrees go to the new location; old worktrees stay where they are and continue to work because their absolute path is in the DB. Both layouts coexist indefinitely.
+You asked what could go wrong with auto-migrate-on-upgrade. Here's the honest list, grouped by how dangerous each is:
 
-A new CLI command performs the migration explicitly:
+### Dangerous — can destroy work or corrupt state
+
+1. **A TBD terminal/Claude session is currently attached to the worktree.** Its shell has CWD inside the directory we're about to move. On macOS, `mv` succeeds (the inode is unchanged), but the shell's `$PWD` becomes a stale string. New commands using relative paths still work (kernel tracks the inode), but anything that re-resolves `$PWD` (prompts, `pwd -P`, build tools that re-canonicalize) breaks. If the user `cd .`s, they're in limbo.
+2. **An editor (VS Code, Xcode, Cursor) has the worktree open with unsaved buffers.** macOS file watchers (FSEvents) re-resolve paths after a move; behavior varies wildly. Xcode in particular will sometimes write the unsaved buffer back to the *old* path it cached at open time, creating a ghost file outside the new worktree. Lost work.
+3. **A build is running** (`swift build`, `xcodebuild`, `npm run`, conductor-launched script). Build systems with absolute-path artifact databases (DerivedData, `.build/`, `node_modules/.cache`) get poisoned. At minimum the build fails halfway; at worst the next build appears to succeed but links against stale objects.
+4. **Cross-volume move.** `~/.tbd/` is on the boot volume; the repo might be on an external SSD. `FileManager.moveItem` falls back to copy-then-delete, which is **not atomic** — interrupt it (daemon crash, machine sleep, power loss) and you have two half-copies and no journal to tell you which is canonical.
+5. **The repo itself has been moved/deleted on disk** (`repos.path` is stale). We can't run `git worktree repair` because there's no main `.git/worktrees/<name>/` to fix up. The worktree's `.git` file becomes a dangling pointer. Today this is a latent bug; auto-migrate would surface it as a hard failure on upgrade.
+6. **Daemon crash mid-batch.** With `--all`, we're migrating N repos × M worktrees each. If we crash on item 17 of 200, we need to know exactly where we were.
+7. **Two daemons racing.** If a stale `tbdd` is still running from a previous install while the new one starts up, they both try to migrate the same DB rows. The PID file in `~/.tbd/tbdd.pid` should prevent this, but only if we check it.
+
+### Annoying — won't lose data but will surprise the user
+
+8. **Symlinks pointing into the old path** from elsewhere on disk (a `~/work/current → .../old-worktree` shortcut, an IDE workspace file, a CI runner config). Silently break.
+9. **External hooks/scripts hardcoded to the old path** — a user's `~/.zshrc` alias, a launchd job, a tmux popup script.
+10. **`.gitignore` rules in the main repo that mention `.tbd/`** — harmless but now dead.
+11. **Disk full** in `~/.tbd/`. Cross-volume copy fails partway through. Same recovery story as case 4.
+12. **Permission denied** writing to `~/.tbd/worktrees/<slot>/` (unusual but possible if the user has chowned `~/.tbd/`).
+13. **`git worktree repair` itself fails** — happens if the main repo's `.git/worktrees/` was manually edited or pruned.
+14. **Slot collision migration cascading.** If we're also rewriting an existing repo's directory because a same-basename repo was added, that's two move operations in one transaction.
+
+### Strategy that the failure list implies
+
+Auto-migrate is desirable, but **only when we can prove it's safe**. The right shape is "auto-migrate at startup, conservatively, with eager skipping and a hands-off fallback":
+
+- **Auto-migrate runs once on daemon startup after an upgrade**, gated by a `schema_version` / `layout_version` row in `state.db`. It does not run on every launch.
+- **It only migrates worktrees that pass a strict pre-flight**:
+  - Status is `.ready`.
+  - No TBD terminal (`terminal` table) has this worktree as its CWD.
+  - No conductor process is running against it (check `conductors/` PID files).
+  - `git status --porcelain` is clean.
+  - `lsof +D <worktree-path>` returns no foreign processes (best-effort; skip if `lsof` is slow).
+  - The destination is on the same volume as `~/.tbd/` (skip cross-volume; force it via the manual command).
+  - The repo's main path still exists and is a git repo (otherwise this whole repo is in `.missing` state — see §4b below — and can't migrate until `tbd repo relocate` runs).
+- **Worktrees that fail pre-flight are skipped, not failed.** They stay in their old location and continue working. The daemon logs a one-line reason per skip and surfaces a notification: *"3 worktrees couldn't be auto-migrated (open editor / dirty / running build). Run `tbd repo migrate-worktrees` after closing them."*
+- **A two-phase journal** (see §5b) makes every individual move recoverable.
+- **A startup mutex** via `tbdd.pid` + a `migration.lock` file prevents two daemons from racing.
+- **Never block daemon startup on migration.** The daemon starts, serves requests, and runs migration in the background. Worst case: a worktree appears at its old path until the user closes their editor, then it auto-moves on the next launch.
+
+The manual `tbd repo migrate-worktrees [--force] [--dry-run] [<repo>]` command remains for:
+- Migrating worktrees the auto-pass skipped (after the user closes their editor).
+- Cross-volume moves.
+- Forcing through a dirty worktree (with `--force`).
+- Inspecting what *would* happen (`--dry-run`).
+
+This gives you the "ideal" auto-migrate experience for the 90% case without the risk of corrupting an open editor's state.
+
+## 4b. Fixing `repos.path` silent breakage
+
+You said this needs fixing, not just flagging. Concretely:
+
+1. **Add a `repo.status` column** with values `.ok`, `.missing`. Default `.ok`.
+2. **On daemon startup and on every reconcile**, validate each repo: does `repo.path` exist, is it a git repo, does its `HEAD` resolve? If any check fails → `.missing`.
+3. **Every RPC handler that takes a repo ID** checks status first. `.missing` repos return a structured error (`.repoMissing(repoId, lastKnownPath)`) that the app surfaces with a "Locate…" button instead of a generic failure.
+4. **`tbd repo relocate <id-or-name> <new-path>`** (CLI + RPC):
+   - Validates `<new-path>` exists and is a git repo.
+   - Optionally validates it's the *same* repo (compare `git config --get remote.origin.url`, or the first commit hash, against the old value if we have it cached). Mismatch → require `--force`.
+   - Updates `repo.path`.
+   - Updates every `worktree.path` row whose old absolute path was inside the old repo path **only for legacy worktrees still living under the old `<repo>/.tbd/worktrees/`**. New-layout worktrees in `~/.tbd/worktrees/<slot>/` are unaffected — that's another argument for the new layout.
+   - Runs `git worktree repair` for each worktree from the new repo path so git's metadata picks up the new location.
+   - Sets `repo.status = .ok`.
+5. **Cache the origin URL and first-commit hash in `repos`** at add-time, so future `relocate` calls can sanity-check.
+6. **App UI:** missing repos are dimmed in the sidebar with a "Locate…" affordance that opens an `NSOpenPanel`. No silent failures.
+
+### Why this matters for *this* design
+
+The new layout makes the relocate problem dramatically simpler: once a worktree lives at `~/.tbd/worktrees/<slot>/<wt-name>/`, it doesn't care where the main repo is on disk. Relocating the repo only needs to update `repo.path` and run `git worktree repair`. Today (legacy layout), relocating a repo would require moving every worktree directory too, which is exactly the pain we're getting rid of.
+
+## 5b. Migration mechanics
+
+### Strategy
+
+Auto-migrate at startup for the safe cases (§5a), with a manual `tbd repo migrate-worktrees` for everything else. Both paths share the same per-worktree machinery and the same journal.
 
 ```
-tbd repo migrate-worktrees <repo>          # one repo
-tbd repo migrate-worktrees --all           # everything
-tbd repo migrate-worktrees --dry-run ...   # show what would happen
+tbd repo migrate-worktrees [<repo>]   # default: all repos
+                          [--dry-run]
+                          [--force]    # bypass dirty/lsof checks
 ```
 
 ### Per-worktree migration steps
@@ -149,13 +271,14 @@ The dangerous moment is between step 2 (directory moved) and step 4 (DB updated)
 
 ### What if the repo itself can't be located anymore?
 
-If the repo's `repos.path` is stale (user moved the repo), migration cannot run because step 3 needs the main repo's `.git/worktrees/` directory. The migration command should detect this, refuse, and tell the user to run `tbd repo relocate <repo> <new-path>` (a new command that updates `repos.path`). That command is a prerequisite, not part of this design — note it as a follow-up.
+The migration refuses. The repo is in `.missing` state (§4b) and the user must run `tbd repo relocate <repo> <new-path>` first. After relocate, migration can proceed normally because `git worktree repair` now has a valid main `.git/worktrees/` to talk to.
 
-## 6. Open questions for the user
+## 6. Remaining open questions
 
-1. **Default location.** Confirm `~/.tbd/worktrees/<repo-uuid>/<wt-name>/`, or do you prefer `~/Library/Application Support/TBD/worktrees/...` (more Mac-correct, inconsistent with current `~/.tbd/`)?
-2. **Auto-migration vs opt-in.** This proposal grandfathers existing worktrees and requires `tbd repo migrate-worktrees` to move them. Would you rather auto-migrate on daemon upgrade (riskier, but no manual step)?
-3. **Should the per-repo override (`worktree_root`) ship in the same change**, or land as a follow-up once the default works? Shipping it together costs little and makes tests easier (they can set a tmpdir override instead of relying on path-substring asserts).
-4. **Display name vs UUID in the path.** UUIDs are ugly when a user `cd`s into the dir. Alternative: `~/.tbd/worktrees/<sanitized-display-name>-<uuid-prefix>/<wt-name>/` — readable *and* collision-proof. Slightly more code. Worth it?
-5. **`tbd repo relocate`** for the moved-repo case — in scope here, or a separate ticket? It's a real bug today and this design surfaces it but doesn't fix it.
-6. **Tests.** ~40 tests assert the literal `.tbd/worktrees/` substring. Are you OK with a one-time sweep to route them through `WorktreeLayout.basePath(for:)`, or would you rather keep the substring as a backwards-compat assertion against the *old* layout while the new layout is tested separately?
+Round 1 resolved the big questions. These are the small ones left:
+
+1. **`lsof +D` in pre-flight.** It's the most reliable way to detect "something has this directory open", but it can take seconds on large worktrees. Acceptable to run during background auto-migrate, or should we skip it and rely only on the TBD-internal checks (terminals, conductors)? Recommendation: run it with a 2 s timeout, skip-on-timeout.
+2. **Disambiguator length.** 4 hex chars (65 k slots) feels right for "two repos named `app`"; bumping to 6 (16 M) is essentially free. Preference?
+3. **Slot rewrite for collisions.** When repo B claims a slot that repo A already has unsuffixed, we rewrite *A* too so both are suffixed. Alternative: leave A alone and only suffix B (`app` and `app-7c3f` coexist). The first is more consistent; the second avoids touching a working repo. Recommendation: rewrite both, since the migration machinery exists anyway and consistency aids debugging.
+4. **`repo.status = .missing` UX.** Should missing repos still appear in `tbd worktree list` output (dimmed) or be hidden until relocated? App-side this is clearer (dimmed sidebar entry); CLI-side either works.
+5. **Origin URL sanity check on relocate.** If the cached `remote.origin.url` doesn't match the new path's origin, do we hard-refuse or just warn? Recommendation: warn + require `--force`, since users legitimately re-fork and re-clone.
