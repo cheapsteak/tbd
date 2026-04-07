@@ -364,15 +364,12 @@ private struct TabBarItem: View {
                     }
                     return false
                 }
-                if sameTokenTabs.count > 1 {
-                    let myTerminalID = terminal!.id
-                    let position = (sameTokenTabs.firstIndex { tab in
-                        if case .terminal(let tID) = tab.content { return tID == myTerminalID }
-                        return false
-                    } ?? 0) + 1
-                    return "\(name) \(position)"
-                }
-                return name
+                let myTerminalID = terminal!.id
+                let position = (sameTokenTabs.firstIndex { tab in
+                    if case .terminal(let tID) = tab.content { return tID == myTerminalID }
+                    return false
+                } ?? 0) + 1
+                return "\(name) \(position)"
             }
             return "Terminal \(index + 1)"
         case .webview(_, let url):
