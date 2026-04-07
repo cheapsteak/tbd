@@ -371,7 +371,7 @@ private struct TabBarItem: View {
                 } ?? 0) + 1
                 return "\(name) \(position)"
             }
-            return "Terminal \(index + 1)"
+            return isClaudeTerminal ? "Claude" : "Terminal \(index + 1)"
         case .webview(_, let url):
             return url.host ?? "Web"
         case .codeViewer(_, let path):
