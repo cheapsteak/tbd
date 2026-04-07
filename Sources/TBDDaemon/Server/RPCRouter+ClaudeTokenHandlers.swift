@@ -168,7 +168,7 @@ extension RPCRouter {
         do {
             bytes = try ClaudeTokenKeychain.load(id: params.id.uuidString)
         } catch {
-            return RPCResponse(error: "Failed to read token from keychain")
+            return RPCResponse(error: "Failed to read token: \(error)")
         }
         guard let token = bytes else {
             return RPCResponse(error: "Token missing from keychain")
