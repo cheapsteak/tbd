@@ -154,7 +154,7 @@ struct ClaudeTokenSpawnTests {
 
     // MARK: - Swap: to a different token
 
-    @Test("swap: to different token updates row + sends respawn with new prefix")
+    @Test("swap: forks into a new tab with the new token, leaves old tab alone")
     func swapToDifferentToken() async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
@@ -165,36 +165,47 @@ struct ClaudeTokenSpawnTests {
         let b = try await seedToken(db, name: "B", secret: secretB)
         try await db.config.setDefaultClaudeTokenID(a.id)
 
-        // Spawn a claude terminal with token A
+        // Spawn original claude terminal with token A
         let createResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
         ))
         #expect(createResp.success)
-        let term = try createResp.decodeResult(Terminal.self)
-        #expect(term.claudeTokenID == a.id)
+        let oldTerm = try createResp.decodeResult(Terminal.self)
+        #expect(oldTerm.claudeTokenID == a.id)
+        let oldSessionID = oldTerm.claudeSessionID
 
-        // Swap to B
+        let beforeSwap = recorder.calls.count
+
+        // Swap to B → returns a NEW terminal row, old one untouched
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapClaudeToken,
-            params: TerminalSwapClaudeTokenParams(terminalID: term.id, newTokenID: b.id)
+            params: TerminalSwapClaudeTokenParams(terminalID: oldTerm.id, newTokenID: b.id)
         ))
         #expect(swapResp.success)
-        let updated = try swapResp.decodeResult(Terminal.self)
-        #expect(updated.claudeTokenID == b.id)
+        let newTerm = try swapResp.decodeResult(Terminal.self)
+        #expect(newTerm.id != oldTerm.id)
+        #expect(newTerm.claudeTokenID == b.id)
+        // New terminal resumes the same session id (claude --resume forks history)
+        #expect(newTerm.claudeSessionID == oldSessionID)
 
-        let joined = recorder.joinedAll
-        #expect(joined.contains("send-keys"))
-        // C-c was sent
-        #expect(recorder.calls.contains { $0.contains("C-c") })
-        // Respawn command contains B's secret
-        #expect(joined.contains("CLAUDE_CODE_OAUTH_TOKEN='\(secretB)' claude --resume"))
+        // Old terminal row is unchanged
+        let oldAfter = try await db.terminals.get(id: oldTerm.id)
+        #expect(oldAfter?.claudeTokenID == a.id)
+
+        // Daemon did NOT send C-c or send-keys to the old pane
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
+        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(!joined.contains("C-c"))
+        #expect(!joined.contains("send-keys"))
+        // The new tab was spawned with B's secret + --resume <oldSessionID>
+        #expect(joined.contains("CLAUDE_CODE_OAUTH_TOKEN='\(secretB)' claude --resume \(oldSessionID!)"))
         #expect(joined.contains("--dangerously-skip-permissions"))
     }
 
     // MARK: - Swap: to nil
 
-    @Test("swap: to nil clears token + no env prefix")
+    @Test("swap: to nil forks new tab with no env prefix; old tab untouched")
     func swapToNil() async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
@@ -207,23 +218,28 @@ struct ClaudeTokenSpawnTests {
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
         ))
-        let term = try createResp.decodeResult(Terminal.self)
+        let oldTerm = try createResp.decodeResult(Terminal.self)
+        #expect(oldTerm.claudeTokenID == a.id)
 
-        // Clear recorder of spawn commands so we only inspect swap output
         let beforeSwap = recorder.calls.count
 
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapClaudeToken,
-            params: TerminalSwapClaudeTokenParams(terminalID: term.id, newTokenID: nil)
+            params: TerminalSwapClaudeTokenParams(terminalID: oldTerm.id, newTokenID: nil)
         ))
         #expect(swapResp.success)
-        let updated = try swapResp.decodeResult(Terminal.self)
-        #expect(updated.claudeTokenID == nil)
+        let newTerm = try swapResp.decodeResult(Terminal.self)
+        #expect(newTerm.id != oldTerm.id)
+        #expect(newTerm.claudeTokenID == nil)
+        // Old terminal still has its original token
+        let oldAfter = try await db.terminals.get(id: oldTerm.id)
+        #expect(oldAfter?.claudeTokenID == a.id)
 
         let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
         let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
         #expect(joined.contains("claude --resume"))
         #expect(!joined.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(!joined.contains("C-c"))
     }
 
     // MARK: - Swap: non-claude terminal errors

@@ -313,17 +313,18 @@ extension RPCRouter {
     func handleTerminalSwapClaudeToken(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSwapClaudeTokenParams.self, from: paramsData)
 
-        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+        guard let oldTerminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
-        guard let sessionID = terminal.claudeSessionID else {
+        guard let sessionID = oldTerminal.claudeSessionID else {
             return RPCResponse(error: "Terminal \(params.terminalID) is not a Claude terminal")
         }
-        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+        guard let worktree = try await db.worktrees.get(id: oldTerminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
-        // Resolve the requested token (nil = clear; fall back to keychain login).
+        // Resolve the requested token (nil = no override; keychain login).
+        // We do NOT touch the old terminal — both tabs coexist after the swap.
         let resolved: ResolvedClaudeToken?
         if let newID = params.newTokenID {
             do {
@@ -338,16 +339,15 @@ extension RPCRouter {
             resolved = nil
         }
 
-        // 1. Interrupt the running claude process.
-        try await tmux.sendKey(
-            server: worktree.tmuxServer,
-            paneID: terminal.tmuxPaneID,
-            key: "C-c"
-        )
-        try await Task.sleep(nanoseconds: 500_000_000)
+        // Spawn a NEW window in the same worktree, resuming the same session
+        // ID. `claude --resume` forks the conversation history into a fresh
+        // session file, so the two panes can coexist without JSONL conflicts.
+        // The new pane gets the new env prefix; the old pane is untouched.
+        let repo = try await db.repos.get(id: worktree.repoID)
+        var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
+        env["TBD_WORKTREE_ID"] = worktree.id.uuidString
 
-        // 2. Build the respawn command (resume the same session, new env).
-        let respawn = ClaudeSpawnCommandBuilder.build(
+        let shellCommand = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
             appendSystemPrompt: nil,
@@ -357,39 +357,28 @@ extension RPCRouter {
             shellFallback: ""
         )
 
-        // 3. Type the command into the existing pane and submit.
-        try await tmux.sendCommand(
+        let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
-            paneID: terminal.tmuxPaneID,
-            command: respawn
+            session: "main",
+            cwd: worktree.path,
+            shellCommand: shellCommand,
+            env: env
         )
 
-        // 4. Persist the new token id on the terminal.
-        try await db.terminals.setClaudeTokenID(id: terminal.id, tokenID: resolved?.tokenID)
+        let newTerminal = try await db.terminals.create(
+            worktreeID: worktree.id,
+            tmuxWindowID: window.windowID,
+            tmuxPaneID: window.paneID,
+            label: "claude",
+            claudeSessionID: sessionID,
+            claudeTokenID: resolved?.tokenID
+        )
 
-        // 5. Fire-and-forget usage refresh for the new token.
-        if let newID = resolved?.tokenID {
-            let fetcher = self.usageFetcher
-            let database = self.db
-            Task.detached {
-                guard let secret = (try? ClaudeTokenKeychain.load(id: newID.uuidString)) ?? nil else { return }
-                let status = await fetcher.fetchUsage(token: secret)
-                if case .ok(let usage) = status {
-                    let row = ClaudeTokenUsage(
-                        tokenID: newID,
-                        fiveHourPct: usage.fiveHourPct,
-                        sevenDayPct: usage.sevenDayPct,
-                        fiveHourResetsAt: usage.fiveHourResetsAt,
-                        sevenDayResetsAt: usage.sevenDayResetsAt,
-                        fetchedAt: Date(),
-                        lastStatus: "ok"
-                    )
-                    try? await database.claudeTokenUsage.upsert(row)
-                }
-            }
-        }
+        subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
+            terminalID: newTerminal.id, worktreeID: newTerminal.worktreeID, label: newTerminal.label
+        )))
 
-        guard let updated = try await db.terminals.get(id: terminal.id) else {
+        guard let updated = try await db.terminals.get(id: newTerminal.id) else {
             return RPCResponse(error: "Terminal vanished after swap")
         }
         return try RPCResponse(result: updated)
