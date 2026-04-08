@@ -77,7 +77,17 @@ extension RPCRouter {
             if wt.path.hasPrefix(oldLegacyPrefix) {
                 let suffix = String(wt.path.dropFirst(oldLegacyPrefix.count))
                 rewrittenPath = newLegacyPrefix + suffix
-                try? await db.worktrees.updatePath(id: wt.id, path: rewrittenPath)
+                do {
+                    try await db.worktrees.updatePath(id: wt.id, path: rewrittenPath)
+                } catch {
+                    // If we can't persist the new path, don't run git worktree
+                    // repair against it — that would leave git metadata pointing
+                    // at the new location while the DB still says the old one,
+                    // which the next reconcile would have to clean up.
+                    logger.error("Failed to update legacy worktree path for \(wt.name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    worktreesFailed.append(wt.id)
+                    continue
+                }
             }
 
             let repairedOK = await runGitWorktreeRepair(worktreePath: rewrittenPath, logger: logger)
