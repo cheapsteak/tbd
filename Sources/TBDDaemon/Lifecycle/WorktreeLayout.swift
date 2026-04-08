@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "WorktreeLayout")
 
 /// Single source of truth for where TBD stores worktree directories on disk.
 ///
@@ -59,13 +62,20 @@ public struct WorktreeLayout: Sendable {
     /// - Returns `repo.worktreeRoot` verbatim if the override is set.
     /// - Otherwise returns `~/tbd/worktrees/<slot>`.
     public func basePath(for repo: Repo) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
         if let override = repo.worktreeRoot, !override.isEmpty {
             return override
         }
-        let slot = repo.worktreeSlot ?? ""
-        precondition(!slot.isEmpty, "Repo \(repo.id) has neither worktreeRoot nor worktreeSlot")
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/tbd/worktrees/\(slot)"
+        if let slot = repo.worktreeSlot, !slot.isEmpty {
+            return "\(home)/tbd/worktrees/\(slot)"
+        }
+        // Should never happen — v14 backfills worktree_slot for every existing
+        // row and RepoStore.create always assigns one. But a precondition in a
+        // long-running daemon is a hard kill, so log loudly and fall back to a
+        // UUID-derived path instead.
+        logger.fault("Repo \(repo.id, privacy: .public) has neither worktreeRoot nor worktreeSlot — falling back to UUID-derived path")
+        let fallbackSlot = "repo-\(repo.id.uuidString.replacingOccurrences(of: "-", with: "").prefix(8))"
+        return "\(home)/tbd/worktrees/\(fallbackSlot)"
     }
 
     // LEGACY-WORKTREE-LOCATION: remove after 2026-06-01
