@@ -89,7 +89,7 @@ extension WorktreeLifecycle {
             do {
                 try await db.worktrees.updateTmuxServer(id: wt.id, tmuxServer: correctTmuxServer)
             } catch {
-                print("[TBD] reconcile: failed to update tmux server for worktree \(wt.id): \(error)")
+                logger.warning("reconcile: failed to update tmux server for worktree \(wt.id, privacy: .public): \(error, privacy: .public)")
             }
         }
         // Re-fetch with corrected names
@@ -108,7 +108,7 @@ extension WorktreeLifecycle {
                         windowID: terminal.tmuxWindowID
                     )
                 } catch {
-                    print("[TBD] reconcile: failed to kill window \(terminal.tmuxWindowID): \(error)")
+                    logger.warning("reconcile: failed to kill window \(terminal.tmuxWindowID, privacy: .public): \(error, privacy: .public)")
                 }
             }
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
@@ -159,7 +159,7 @@ extension WorktreeLifecycle {
                         try await recreateAfterReboot(terminal: terminal, worktree: wt)
                         logger.info("Reboot recovery: recreated terminal \(terminal.id, privacy: .public) in worktree \(wt.id, privacy: .public)")
                     } catch {
-                        logger.error("Reboot recovery: failed to recreate terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        logger.error("Reboot recovery: failed to recreate terminal \(terminal.id, privacy: .public): \(error, privacy: .public)")
                     }
                 }
             }
@@ -175,7 +175,7 @@ extension WorktreeLifecycle {
             do {
                 try await tmux.killServer(server: tmuxServer)
             } catch {
-                print("[TBD] reconcile: failed to kill tmux server \(tmuxServer): \(error)")
+                logger.warning("reconcile: failed to kill tmux server \(tmuxServer, privacy: .public): \(error, privacy: .public)")
             }
         } else {
             // Collect all tracked window IDs (active + main worktrees)
@@ -194,11 +194,11 @@ extension WorktreeLifecycle {
                     do {
                         try await tmux.killWindow(server: tmuxServer, windowID: window.windowID)
                     } catch {
-                        print("[TBD] reconcile: failed to kill orphaned window \(window.windowID): \(error)")
+                        logger.warning("reconcile: failed to kill orphaned window \(window.windowID, privacy: .public): \(error, privacy: .public)")
                     }
                 }
             } catch {
-                print("[TBD] reconcile: failed to list tmux windows for server \(tmuxServer): \(error)")
+                logger.warning("reconcile: failed to list tmux windows for server \(tmuxServer, privacy: .public): \(error, privacy: .public)")
             }
         }
 
