@@ -63,6 +63,11 @@ struct RepoSettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+
+                    Divider()
+                        .padding(.vertical, 4)
+
+                    RepoHooksSettingsView(repoID: repoID)
                 }
                 .padding()
             }

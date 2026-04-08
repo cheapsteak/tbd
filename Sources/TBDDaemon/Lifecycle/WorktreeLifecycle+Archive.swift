@@ -54,7 +54,7 @@ extension WorktreeLifecycle {
             let archiveHookPath = hooks.resolve(
                 event: .archive,
                 repoPath: worktree.path,
-                appHookPath: nil
+                appHookPath: TBDConstants.hookPath(repoID: worktree.repoID, eventName: HookEvent.archive.rawValue)
             )
             if let hookPath = archiveHookPath {
                 _ = try? await hooks.execute(

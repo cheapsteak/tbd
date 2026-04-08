@@ -269,7 +269,7 @@ extension WorktreeLifecycle {
         let setupHookPath = hooks.resolve(
             event: .setup,
             repoPath: worktreePath,
-            appHookPath: nil
+            appHookPath: TBDConstants.hookPath(repoID: worktree.repoID, eventName: HookEvent.setup.rawValue)
         )
         let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
         let window2 = try await tmux.createWindow(

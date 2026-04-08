@@ -9,6 +9,15 @@ public enum TBDConstants {
     public static let pidFilePath = configDir.appendingPathComponent("tbdd.pid").path
     public static let portFilePath = configDir.appendingPathComponent("port").path
     public static let conductorsDir = configDir.appendingPathComponent("conductors")
+    public static let reposDir = configDir.appendingPathComponent("repos")
+
+    public static func hookPath(repoID: UUID, eventName: String) -> String {
+        reposDir
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent("hooks")
+            .appendingPathComponent(eventName)
+            .path
+    }
     public static let conductorsTmuxServer = "tbd-conductor"
     /// Well-known UUID for the synthetic "conductors" pseudo-repo.
     /// Inserted by migration v9. Used as repoID for all conductor worktrees.
