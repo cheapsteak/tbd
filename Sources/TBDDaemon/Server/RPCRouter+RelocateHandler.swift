@@ -95,7 +95,11 @@ extension RPCRouter {
                 worktreesRepaired.append(wt.id)
             } else {
                 logger.error("git worktree repair failed for \(wt.name, privacy: .public) at \(rewrittenPath, privacy: .public); marking .failed")
-                try? await db.worktrees.updateStatus(id: wt.id, status: .failed)
+                do {
+                    try await db.worktrees.updateStatus(id: wt.id, status: .failed)
+                } catch {
+                    logger.error("Also failed to persist .failed status for \(wt.name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
                 worktreesFailed.append(wt.id)
             }
         }
