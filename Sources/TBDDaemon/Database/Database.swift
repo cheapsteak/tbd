@@ -250,11 +250,9 @@ public final class TBDDatabase: Sendable {
             }
         }
 
-        // NOTE: We use a name-suffixed migration ID rather than a sequential
-        // version number because origin/main already shipped its own "v13"
-        // (Claude token switcher). GRDB tracks migrations by name, so a bare
-        // "v14" would still risk colliding with a parallel in-flight branch.
-        // The "_worktree_location" suffix makes the slot unambiguous.
+        // Suffixed migration name avoids collisions with parallel in-flight
+        // branches that may also be adding a "v14" — GRDB tracks migrations by
+        // name, so a descriptive suffix is unambiguous.
         migrator.registerMigration("v14_worktree_location") { db in
             try db.alter(table: "repo") { t in
                 t.add(column: "worktree_slot", .text)
