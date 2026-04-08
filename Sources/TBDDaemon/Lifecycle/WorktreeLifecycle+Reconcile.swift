@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 
 extension WorktreeLifecycle {
     // MARK: - Git Status
@@ -195,7 +198,11 @@ extension WorktreeLifecycle {
         let validator = RepoHealthValidator(git: git)
         let observed = await validator.validate(repo: repo)
         if observed != repo.status {
-            try? await db.repos.updateStatus(id: repo.id, status: observed)
+            do {
+                try await db.repos.updateStatus(id: repo.id, status: observed)
+            } catch {
+                logger.error("Failed to persist health transition for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
             // Broadcast a coarse refresh so the sidebar dims/un-dims immediately
             // when reconcile is triggered via an RPC (e.g. cleanup) with active
             // subscribers. .repoAdded is the existing coarse signal — see the
