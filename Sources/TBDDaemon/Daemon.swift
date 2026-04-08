@@ -174,7 +174,9 @@ public final class Daemon: Sendable {
             // Run once immediately (cold recovery), then every 10s
             while !Task.isCancelled {
                 let allRepos = (try? await database.repos.list()) ?? []
-                for repo in allRepos {
+                // Skip .missing repos to match gitFetchTask — running git
+                // against a stale path produces quiet 10s-cadence noise.
+                for repo in allRepos where repo.status != .missing {
                     await lifecycle.refreshGitStatuses(repoID: repo.id)
                 }
                 try? await Task.sleep(for: .seconds(10))
