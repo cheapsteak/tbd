@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 
 extension WorktreeLifecycle {
     // MARK: - Git Status
@@ -152,7 +155,12 @@ extension WorktreeLifecycle {
                         try? await db.terminals.delete(id: terminal.id)
                     }
                 } else {
-                    try? await recreateAfterReboot(terminal: terminal, worktree: wt)
+                    do {
+                        try await recreateAfterReboot(terminal: terminal, worktree: wt)
+                        logger.info("Reboot recovery: recreated terminal \(terminal.id, privacy: .public) in worktree \(wt.id, privacy: .public)")
+                    } catch {
+                        logger.error("Reboot recovery: failed to recreate terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
                 }
             }
         }
@@ -216,7 +224,9 @@ extension WorktreeLifecycle {
     /// Recreates a tmux window for a terminal record after the tmux server has been lost
     /// (e.g. machine reboot). Updates the terminal's stored window/pane IDs in the DB.
     private func recreateAfterReboot(terminal: Terminal, worktree: Worktree) async throws {
-        _ = try await tmux.ensureServer(server: worktree.tmuxServer, session: "main", cwd: worktree.path)
+        if let bootstrapWindowID = try await tmux.ensureServer(server: worktree.tmuxServer, session: "main", cwd: worktree.path) {
+            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: bootstrapWindowID)
+        }
 
         let spawn: ClaudeSpawnCommandBuilder.Result
         var env: [String: String] = [:]
@@ -238,7 +248,8 @@ extension WorktreeLifecycle {
                 shellFallback: defaultShell
             )
         } else if terminal.label == "Codex" {
-            // Codex terminal — restore with isolated home
+            // Codex terminal — detected by label "Codex" (set during terminal creation).
+            // No structured type field exists; label matching is the only discriminator available.
             let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
             env["TBD_WORKTREE_ID"] = worktree.id.uuidString
             env["CODEX_HOME"] = codexHome.path
@@ -252,7 +263,8 @@ extension WorktreeLifecycle {
                 shellFallback: defaultShell
             )
         } else {
-            // Shell terminal (plain shell or custom cmd stored in label)
+            // Shell or custom-cmd terminal. Plain shell terminals have label nil or "shell";
+            // custom-cmd terminals store the command string directly in label.
             let cmd = (terminal.label == "shell" || terminal.label == nil) ? nil : terminal.label
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,
