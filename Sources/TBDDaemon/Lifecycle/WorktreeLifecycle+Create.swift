@@ -42,6 +42,13 @@ extension WorktreeLifecycle {
         try? FileManager.default.createDirectory(
             atPath: canonicalBase, withIntermediateDirectories: true
         )
+        // try? above swallows both "already exists" (fine) and permission
+        // errors (not fine). Verify the dir actually exists so a permission
+        // failure surfaces here instead of as a misleading `git worktree add`
+        // error downstream.
+        if !FileManager.default.fileExists(atPath: canonicalBase) {
+            logger.error("Failed to create worktree base dir \(canonicalBase, privacy: .public)")
+        }
         let worktreePath = (canonicalBase as NSString).appendingPathComponent(name)
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
 
