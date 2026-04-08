@@ -142,7 +142,9 @@ public final class Daemon: Sendable {
                 try? await Task.sleep(for: .seconds(60))
                 guard !Task.isCancelled else { break }
                 let allRepos = (try? await database.repos.list()) ?? []
-                for repo in allRepos {
+                // Skip .missing repos so we don't spam errors against stale paths
+                // until the user relocates them.
+                for repo in allRepos where repo.status != .missing {
                     do {
                         try await git.fetch(repoPath: repo.path, branch: repo.defaultBranch)
                     } catch {
