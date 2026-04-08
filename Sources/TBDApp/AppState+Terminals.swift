@@ -93,6 +93,23 @@ extension AppState {
         }
     }
 
+    /// Create a Codex terminal in a worktree and add a new tab for it.
+    func createCodexTerminal(worktreeID: UUID) async {
+        do {
+            let terminal = try await daemonClient.createTerminal(
+                worktreeID: worktreeID,
+                cmd: nil,
+                type: .codex
+            )
+            terminals[worktreeID, default: []].append(terminal)
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: terminal.label)
+            tabs[worktreeID, default: []].append(tab)
+        } catch {
+            logger.error("Failed to create Codex terminal: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
     /// Fork a Claude terminal by resuming from an existing session ID.
     func forkClaudeTerminal(worktreeID: UUID, sessionID: String, tokenID: UUID? = nil) async {
         do {

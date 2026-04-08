@@ -30,6 +30,45 @@ extension RPCRouter {
         var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
         env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
 
+        // Codex branch: minimal launch with isolated CODEX_HOME. No session
+        // tracking, no system prompt injection, no token resolution. Session
+        // resume / state detection / hooks are tracked as follow-up issues.
+        //
+        // Build env independently — do NOT inherit the Claude-shaped
+        // TBD_PROMPT_CONTEXT / TBD_PROMPT_RENAME / TBD_PROMPT_INSTRUCTIONS
+        // vars from SystemPromptBuilder.promptLayers; those describe TBD as
+        // a Claude-centric host and would be misleading noise inside a
+        // Codex pane.
+        if params.type == .codex {
+            let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
+            var codexEnv: [String: String] = [:]
+            codexEnv["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
+            codexEnv["CODEX_HOME"] = codexHome.path
+
+            let window = try await tmux.createWindow(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                shellCommand: "codex --full-auto",
+                env: codexEnv
+            )
+
+            let terminal = try await db.terminals.create(
+                worktreeID: params.worktreeID,
+                tmuxWindowID: window.windowID,
+                tmuxPaneID: window.paneID,
+                label: "Codex",
+                claudeSessionID: nil,
+                claudeTokenID: nil
+            )
+
+            subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
+                terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
+            )))
+
+            return try RPCResponse(result: terminal)
+        }
+
         let isClaudeType = params.type == .claude || params.resumeSessionID != nil
         let claudeSessionID: String?
         let label: String?

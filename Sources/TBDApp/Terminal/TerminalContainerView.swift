@@ -116,6 +116,12 @@ private struct SingleWorktreeView: View {
                                 selectLastTab()
                             }
                         },
+                        onAddCodex: {
+                            Task {
+                                await appState.createCodexTerminal(worktreeID: worktreeID)
+                                selectLastTab()
+                            }
+                        },
                         onAddNote: {
                             Task {
                                 await appState.createNote(worktreeID: worktreeID)
