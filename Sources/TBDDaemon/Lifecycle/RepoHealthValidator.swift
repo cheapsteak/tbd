@@ -33,6 +33,10 @@ public struct RepoHealthValidator: Sendable {
             logger.debug("Repo \(repo.displayName, privacy: .public) at \(repo.path, privacy: .public) exists but is not a git repo")
             return .missing
         }
+        // We use detectDefaultBranch as a HEAD-resolution probe — the result
+        // is discarded, we only care that the command succeeds (i.e. the repo
+        // is readable and HEAD is valid). If this ever grows network calls
+        // (e.g. ls-remote), swap to a purpose-built local-only health probe.
         do {
             _ = try await git.detectDefaultBranch(repoPath: repo.path)
         } catch {
