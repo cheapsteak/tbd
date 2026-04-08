@@ -62,7 +62,13 @@ extension RPCRouter {
             // git worktree dir. No `git worktree repair` needed.
             if wt.status == .main {
                 if wt.path == oldPath {
-                    try? await db.worktrees.updatePath(id: wt.id, path: newPath)
+                    do {
+                        try await db.worktrees.updatePath(id: wt.id, path: newPath)
+                        worktreesRepaired.append(wt.id)
+                    } catch {
+                        logger.error("Failed to update synthetic main worktree path for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        worktreesFailed.append(wt.id)
+                    }
                 }
                 continue
             }
