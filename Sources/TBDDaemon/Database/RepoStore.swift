@@ -61,13 +61,17 @@ public struct RepoStore: Sendable {
     }
 
     /// Create a new repo and return it.
+    ///
+    /// Slot allocation and insert run in a single transaction so a concurrent
+    /// `create` can't pick the same slot and trip the `idx_repo_worktree_slot`
+    /// unique partial index with an unfriendly GRDB crash.
     public func create(
         path: String,
         displayName: String,
         defaultBranch: String,
         remoteURL: String? = nil
     ) async throws -> Repo {
-        let slot = try await writer.write { db -> String in
+        try await writer.write { db -> Repo in
             let existing = try String.fetchAll(
                 db,
                 sql: "SELECT worktree_slot FROM repo WHERE worktree_slot IS NOT NULL"
@@ -86,20 +90,16 @@ public struct RepoStore: Sendable {
                 slot = "\(base)-\(n)"
                 n += 1
             }
-            return slot
+            var repo = Repo(
+                path: path,
+                remoteURL: remoteURL,
+                displayName: displayName,
+                defaultBranch: defaultBranch
+            )
+            repo.worktreeSlot = slot
+            try RepoRecord(from: repo).insert(db)
+            return repo
         }
-        var repo = Repo(
-            path: path,
-            remoteURL: remoteURL,
-            displayName: displayName,
-            defaultBranch: defaultBranch
-        )
-        repo.worktreeSlot = slot
-        let record = RepoRecord(from: repo)
-        try await writer.write { db in
-            try record.insert(db)
-        }
-        return repo
     }
 
     /// List all repos, excluding the synthetic conductors pseudo-repo.
