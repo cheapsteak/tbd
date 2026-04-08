@@ -46,9 +46,20 @@ public struct WorktreeLayout: Sendable {
                 out.append("-")
             }
         }
-        while out.contains("--") {
-            out = out.replacingOccurrences(of: "--", with: "-")
+        // Collapse runs of dashes in a single pass.
+        var collapsed = ""
+        collapsed.reserveCapacity(out.count)
+        var lastWasDash = false
+        for c in out {
+            if c == "-" {
+                if !lastWasDash { collapsed.append(c) }
+                lastWasDash = true
+            } else {
+                collapsed.append(c)
+                lastWasDash = false
+            }
         }
+        out = collapsed
         while out.hasPrefix("-") { out.removeFirst() }
         while out.hasSuffix("-") { out.removeLast() }
         if out == "." || out == ".." || out.hasPrefix(".") {
