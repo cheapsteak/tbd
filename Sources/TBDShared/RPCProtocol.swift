@@ -130,6 +130,7 @@ public enum RPCMethod {
     public static let claudeTokenFetchUsage = "claudeToken.fetchUsage"
     public static let terminalSwapClaudeToken = "terminal.swapClaudeToken"
     public static let appSetForegroundState = "app.setForegroundState"
+    public static let repoRelocate = "repo.relocate"
 }
 
 public struct AppSetForegroundStateParams: Codable, Sendable {
@@ -267,6 +268,26 @@ public struct RepoUpdateInstructionsParams: Codable, Sendable {
         self.repoID = repoID
         self.renamePrompt = renamePrompt
         self.customInstructions = customInstructions
+    }
+}
+
+public struct RepoRelocateParams: Codable, Sendable {
+    public let repoID: UUID
+    public let newPath: String
+    public init(repoID: UUID, newPath: String) {
+        self.repoID = repoID
+        self.newPath = newPath
+    }
+}
+
+public struct RepoRelocateResult: Codable, Sendable {
+    public let repo: Repo
+    public let worktreesRepaired: [UUID]
+    public let worktreesFailed: [UUID]
+    public init(repo: Repo, worktreesRepaired: [UUID], worktreesFailed: [UUID]) {
+        self.repo = repo
+        self.worktreesRepaired = worktreesRepaired
+        self.worktreesFailed = worktreesFailed
     }
 }
 

@@ -15,6 +15,9 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var renamePrompt: String?
     var customInstructions: String?
     var claude_token_override_id: String?
+    var worktree_slot: String?
+    var worktree_root: String?
+    var status: String
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -26,6 +29,9 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.renamePrompt = repo.renamePrompt
         self.customInstructions = repo.customInstructions
         self.claude_token_override_id = repo.claudeTokenOverrideID?.uuidString
+        self.worktree_slot = repo.worktreeSlot
+        self.worktree_root = repo.worktreeRoot
+        self.status = repo.status.rawValue
     }
 
     func toModel() -> Repo {
@@ -38,7 +44,10 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             createdAt: createdAt,
             renamePrompt: renamePrompt,
             customInstructions: customInstructions,
-            claudeTokenOverrideID: claude_token_override_id.flatMap(UUID.init(uuidString:))
+            claudeTokenOverrideID: claude_token_override_id.flatMap(UUID.init(uuidString:)),
+            worktreeSlot: worktree_slot,
+            worktreeRoot: worktree_root,
+            status: RepoStatus(rawValue: status) ?? .ok
         )
     }
 }
@@ -52,23 +61,45 @@ public struct RepoStore: Sendable {
     }
 
     /// Create a new repo and return it.
+    ///
+    /// Slot allocation and insert run in a single transaction so a concurrent
+    /// `create` can't pick the same slot and trip the `idx_repo_worktree_slot`
+    /// unique partial index with an unfriendly GRDB crash.
     public func create(
         path: String,
         displayName: String,
         defaultBranch: String,
         remoteURL: String? = nil
     ) async throws -> Repo {
-        let repo = Repo(
-            path: path,
-            remoteURL: remoteURL,
-            displayName: displayName,
-            defaultBranch: defaultBranch
-        )
-        let record = RepoRecord(from: repo)
-        try await writer.write { db in
-            try record.insert(db)
+        try await writer.write { db -> Repo in
+            let existing = try String.fetchAll(
+                db,
+                sql: "SELECT worktree_slot FROM repo WHERE worktree_slot IS NOT NULL"
+            )
+            let assigned = Set(existing)
+            var base = WorktreeLayout.sanitize(displayName)
+            if base.isEmpty {
+                let prefix = UUID().uuidString
+                    .replacingOccurrences(of: "-", with: "")
+                    .prefix(6)
+                base = "repo-\(prefix)"
+            }
+            var slot = base
+            var n = 2
+            while assigned.contains(slot) {
+                slot = "\(base)-\(n)"
+                n += 1
+            }
+            var repo = Repo(
+                path: path,
+                remoteURL: remoteURL,
+                displayName: displayName,
+                defaultBranch: defaultBranch
+            )
+            repo.worktreeSlot = slot
+            try RepoRecord(from: repo).insert(db)
+            return repo
         }
-        return repo
     }
 
     /// List all repos, excluding the synthetic conductors pseudo-repo.
@@ -121,6 +152,38 @@ public struct RepoStore: Sendable {
             try db.execute(
                 sql: "UPDATE repo SET claude_token_override_id = NULL WHERE claude_token_override_id = ?",
                 arguments: [tokenID.uuidString]
+            )
+        }
+    }
+
+    /// Update a repo's health status.
+    public func updateStatus(id: UUID, status: RepoStatus) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET status = ? WHERE id = ?",
+                arguments: [status.rawValue, id.uuidString]
+            )
+        }
+    }
+
+    /// Update a repo's filesystem path. Used by `tbd repo relocate`.
+    public func updatePath(id: UUID, path: String) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET path = ? WHERE id = ?",
+                arguments: [path, id.uuidString]
+            )
+        }
+    }
+
+    /// Override the canonical worktree base directory for a repo. Pass `nil`
+    /// to clear the override and fall back to `~/tbd/worktrees/<slot>`.
+    /// Primarily used by tests to redirect a repo's worktrees into a tmp dir.
+    public func updateWorktreeRoot(id: UUID, path: String?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET worktree_root = ? WHERE id = ?",
+                arguments: [path, id.uuidString]
             )
         }
     }

@@ -228,3 +228,45 @@ import Testing
     #expect(decoded.repoID == repoID)
     #expect(decoded.worktreeID == nil)
 }
+
+@Test func repoStatusRoundTrips() throws {
+    let ok = RepoStatus.ok
+    let missing = RepoStatus.missing
+    #expect(ok.rawValue == "ok")
+    #expect(missing.rawValue == "missing")
+    #expect(RepoStatus(rawValue: "ok") == .ok)
+    #expect(RepoStatus(rawValue: "missing") == .missing)
+}
+
+@Test func worktreeStatusHasFailedCase() {
+    #expect(WorktreeStatus(rawValue: "failed") == .failed)
+    #expect(WorktreeStatus.failed.rawValue == "failed")
+}
+
+@Test func repoDecodesLegacyJSONWithoutNewFields() throws {
+    let legacy = #"""
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "path": "/tmp/r",
+      "displayName": "r",
+      "defaultBranch": "main",
+      "createdAt": 0
+    }
+    """#
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .secondsSince1970
+    let repo = try decoder.decode(Repo.self, from: Data(legacy.utf8))
+    #expect(repo.worktreeSlot == nil)
+    #expect(repo.worktreeRoot == nil)
+    #expect(repo.status == .ok)
+}
+
+@Test func repoEncodesNewFields() throws {
+    var repo = Repo(path: "/tmp/r", displayName: "r")
+    repo.worktreeSlot = "r"
+    repo.status = .missing
+    let data = try JSONEncoder().encode(repo)
+    let s = String(decoding: data, as: UTF8.self)
+    #expect(s.contains("\"worktreeSlot\":\"r\""))
+    #expect(s.contains("\"status\":\"missing\""))
+}

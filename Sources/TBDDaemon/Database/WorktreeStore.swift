@@ -232,6 +232,17 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Update the filesystem path for a worktree.
+    public func updatePath(id: UUID, path: String) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.path = path
+            try record.update(db)
+        }
+    }
+
     /// Update the branch name for a worktree.
     public func updateBranch(id: UUID, branch: String) async throws {
         try await writer.write { db in

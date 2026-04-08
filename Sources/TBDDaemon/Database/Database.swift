@@ -18,6 +18,7 @@ public final class TBDDatabase: Sendable {
     public let claudeTokens: ClaudeTokenStore
     public let claudeTokenUsage: ClaudeTokenUsageStore
     public let config: ConfigStore
+    public let meta: TBDMetaStore
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
     public init(path: String) throws {
@@ -38,6 +39,7 @@ public final class TBDDatabase: Sendable {
         self.claudeTokens = ClaudeTokenStore(writer: pool)
         self.claudeTokenUsage = ClaudeTokenUsageStore(writer: pool)
         self.config = ConfigStore(writer: pool)
+        self.meta = TBDMetaStore(writer: pool)
         try Self.migrate(writer: pool)
     }
 
@@ -55,6 +57,7 @@ public final class TBDDatabase: Sendable {
         self.claudeTokens = ClaudeTokenStore(writer: queue)
         self.claudeTokenUsage = ClaudeTokenUsageStore(writer: queue)
         self.config = ConfigStore(writer: queue)
+        self.meta = TBDMetaStore(writer: queue)
         try Self.migrate(writer: queue)
     }
 
@@ -244,6 +247,58 @@ public final class TBDDatabase: Sendable {
 
             try db.alter(table: "terminal") { t in
                 t.add(column: "claude_token_id", .text)
+            }
+        }
+
+        // Suffixed migration name avoids collisions with parallel in-flight
+        // branches that may also be adding a "v14" — GRDB tracks migrations by
+        // name, so a descriptive suffix is unambiguous.
+        migrator.registerMigration("v14_worktree_location") { db in
+            try db.alter(table: "repo") { t in
+                t.add(column: "worktree_slot", .text)
+                t.add(column: "worktree_root", .text)
+                t.add(column: "status", .text).notNull().defaults(to: "ok")
+            }
+            // SQLite ALTER TABLE ADD COLUMN can't add inline UNIQUE; use a partial
+            // index so pre-backfill NULLs coexist.
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_repo_worktree_slot
+                ON repo(worktree_slot)
+                WHERE worktree_slot IS NOT NULL
+            """)
+
+            try db.create(table: "tbd_meta") { t in
+                t.primaryKey("key", .text).notNull()
+                t.column("value", .text).notNull()
+            }
+
+            // Backfill worktree_slot for existing rows. Stable order
+            // (createdAt ASC, then id ASC) means older repos keep the bare
+            // slot; newer collisions get -2/-3/...
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT id, displayName FROM repo ORDER BY createdAt ASC, id ASC"
+            )
+            var assigned = Set<String>()
+            for row in rows {
+                let id: String = row["id"]
+                let displayName: String = row["displayName"]
+                var base = WorktreeLayout.sanitize(displayName)
+                if base.isEmpty {
+                    let prefix = String(id.replacingOccurrences(of: "-", with: "").prefix(6))
+                    base = "repo-\(prefix)"
+                }
+                var slot = base
+                var n = 2
+                while assigned.contains(slot) {
+                    slot = "\(base)-\(n)"
+                    n += 1
+                }
+                assigned.insert(slot)
+                try db.execute(
+                    sql: "UPDATE repo SET worktree_slot = ? WHERE id = ?",
+                    arguments: [slot, id]
+                )
             }
         }
 

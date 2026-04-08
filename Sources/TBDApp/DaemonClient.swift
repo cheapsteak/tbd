@@ -316,6 +316,15 @@ actor DaemonClient {
         )
     }
 
+    /// Relocate a repository to a new on-disk path.
+    func relocateRepo(repoID: UUID, newPath: String) throws -> RepoRelocateResult {
+        return try call(
+            method: RPCMethod.repoRelocate,
+            params: RepoRelocateParams(repoID: repoID, newPath: newPath),
+            resultType: RepoRelocateResult.self
+        )
+    }
+
     /// Update per-repo instruction fields.
     func repoUpdateInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) throws -> Repo {
         return try call(

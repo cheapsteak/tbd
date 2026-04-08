@@ -1,5 +1,10 @@
 import Foundation
 
+public enum RepoStatus: String, Codable, Sendable {
+    case ok
+    case missing
+}
+
 public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var path: String
@@ -10,11 +15,16 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public var renamePrompt: String?
     public var customInstructions: String?
     public var claudeTokenOverrideID: UUID?
+    public var worktreeSlot: String?
+    public var worktreeRoot: String?
+    public var status: RepoStatus
 
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
                 displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
                 renamePrompt: String? = nil, customInstructions: String? = nil,
-                claudeTokenOverrideID: UUID? = nil) {
+                claudeTokenOverrideID: UUID? = nil,
+                worktreeSlot: String? = nil, worktreeRoot: String? = nil,
+                status: RepoStatus = .ok) {
         self.id = id
         self.path = path
         self.remoteURL = remoteURL
@@ -24,6 +34,15 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         self.renamePrompt = renamePrompt
         self.customInstructions = customInstructions
         self.claudeTokenOverrideID = claudeTokenOverrideID
+        self.worktreeSlot = worktreeSlot
+        self.worktreeRoot = worktreeRoot
+        self.status = status
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, path, remoteURL, displayName, defaultBranch, createdAt
+        case renamePrompt, customInstructions, claudeTokenOverrideID
+        case worktreeSlot, worktreeRoot, status
     }
 
     public init(from decoder: Decoder) throws {
@@ -37,11 +56,14 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         renamePrompt = try c.decodeIfPresent(String.self, forKey: .renamePrompt)
         customInstructions = try c.decodeIfPresent(String.self, forKey: .customInstructions)
         claudeTokenOverrideID = try c.decodeIfPresent(UUID.self, forKey: .claudeTokenOverrideID)
+        worktreeSlot = try c.decodeIfPresent(String.self, forKey: .worktreeSlot)
+        worktreeRoot = try c.decodeIfPresent(String.self, forKey: .worktreeRoot)
+        status = try c.decodeIfPresent(RepoStatus.self, forKey: .status) ?? .ok
     }
 }
 
 public enum WorktreeStatus: String, Codable, Sendable {
-    case active, archived, main, creating, conductor
+    case active, archived, main, creating, conductor, failed
 }
 
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {

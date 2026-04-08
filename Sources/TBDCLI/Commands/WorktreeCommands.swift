@@ -153,6 +153,8 @@ struct WorktreeList: AsyncParsableCommand {
                 print("No worktrees found.")
                 return
             }
+            let repos: [Repo] = try client.call(method: RPCMethod.repoList, resultType: [Repo].self)
+            let missingRepoIDs = Set(repos.filter { $0.status == .missing }.map { $0.id })
             let header = String(format: "%-36s  %-24s  %-8s  %s", "ID", "NAME", "STATUS", "BRANCH")
             print(header)
             print(String(repeating: "-", count: 100))
@@ -162,7 +164,8 @@ struct WorktreeList: AsyncParsableCommand {
                     wt.displayName as NSString,
                     wt.status.rawValue as NSString,
                     wt.branch as NSString)
-                print(line)
+                let tag = missingRepoIDs.contains(wt.repoID) ? "  [missing]" : ""
+                print(line + tag)
             }
         }
     }

@@ -111,4 +111,28 @@ import TBDShared
         let repo2List = try await db.worktrees.list(repoID: repo2.id)
         #expect(repo2List.map(\.id) == [wt3.id])
     }
+
+    @Test func worktreeStoreUpdatesPath() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "feat",
+            path: "/tmp/old/w", tmuxServer: "srv"
+        )
+        try await db.worktrees.updatePath(id: wt.id, path: "/tmp/new/w")
+        let fetched = try await db.worktrees.get(id: wt.id)
+        #expect(fetched?.path == "/tmp/new/w")
+    }
+
+    @Test func worktreeStoreCanMarkFailed() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "feat",
+            path: "/tmp/r/.tbd/worktrees/w", tmuxServer: "srv"
+        )
+        try await db.worktrees.updateStatus(id: wt.id, status: .failed)
+        let fetched = try await db.worktrees.get(id: wt.id)
+        #expect(fetched?.status == .failed)
+    }
 }

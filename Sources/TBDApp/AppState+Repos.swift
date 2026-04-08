@@ -31,6 +31,26 @@ extension AppState {
         }
     }
 
+    /// Relocate a repository to a new on-disk path.
+    func relocateRepo(id: UUID, newPath: String) async {
+        do {
+            let result = try await daemonClient.relocateRepo(repoID: id, newPath: newPath)
+            if !result.worktreesFailed.isEmpty {
+                logger.warning("Relocate completed with \(result.worktreesFailed.count, privacy: .public) worktree(s) failed to repair")
+                alertMessage = "Relocated, but \(result.worktreesFailed.count) worktree(s) failed to repair. Check the daemon log for details."
+                alertIsError = true
+            }
+            await refreshRepos()
+        } catch {
+            logger.error("Failed to relocate repo: \(error)")
+            // Surface the failure so the user knows why the repo is still dimmed
+            // (e.g. they picked a directory that isn't a git repo).
+            alertMessage = "Couldn't relocate repo: \(error.localizedDescription)"
+            alertIsError = true
+            handleConnectionError(error)
+        }
+    }
+
     /// Update per-repo instruction fields. Returns true on success.
     @discardableResult
     func updateRepoInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async -> Bool {

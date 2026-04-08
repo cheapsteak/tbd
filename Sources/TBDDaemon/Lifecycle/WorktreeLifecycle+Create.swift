@@ -34,8 +34,22 @@ extension WorktreeLifecycle {
         // 2. Generate name and construct path
         let name = name ?? NameGenerator.generate()
         let branch = "tbd/\(name)"
-        let worktreePath = (repo.path as NSString)
-            .appendingPathComponent(".tbd/worktrees/\(name)")
+        let layout = WorktreeLayout()
+        let canonicalBase = layout.basePath(for: repo)
+        // Lazily create the canonical base directory for this slot.
+        // (Phase A's v14_worktree_location migration guarantees worktreeSlot is set
+        // for every repo, so basePath(for:) won't precondition-fail here.)
+        try? FileManager.default.createDirectory(
+            atPath: canonicalBase, withIntermediateDirectories: true
+        )
+        // try? above swallows both "already exists" (fine) and permission
+        // errors (not fine). Verify the dir actually exists so a permission
+        // failure surfaces here instead of as a misleading `git worktree add`
+        // error downstream.
+        if !FileManager.default.fileExists(atPath: canonicalBase) {
+            logger.error("Failed to create worktree base dir \(canonicalBase, privacy: .public)")
+        }
+        let worktreePath = (canonicalBase as NSString).appendingPathComponent(name)
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
 
         // 3. Insert DB row with status = .creating
@@ -79,8 +93,8 @@ extension WorktreeLifecycle {
 
             // 3. git worktree add
             let result = try await attemptWorktreeAdd(
-                repoPath: repo.path, name: worktree.name, branch: worktree.branch,
-                worktreePath: worktree.path, defaultBranch: repo.defaultBranch
+                repo: repo, name: worktree.name, branch: worktree.branch,
+                worktreePath: worktree.path
             )
 
             // 4. If the name changed due to collision, update the DB record
@@ -111,9 +125,11 @@ extension WorktreeLifecycle {
     /// Attempts to create a git worktree, trying origin/<default> then falling back
     /// to local <default> as the base branch. Retries once with a new name on collision.
     private func attemptWorktreeAdd(
-        repoPath: String, name: String, branch: String,
-        worktreePath: String, defaultBranch: String
+        repo: Repo, name: String, branch: String,
+        worktreePath: String
     ) async throws -> (name: String, branch: String, path: String) {
+        let repoPath = repo.path
+        let defaultBranch = repo.defaultBranch
         // Try with origin/<default> first, then local <default>
         let baseBranches = ["origin/\(defaultBranch)", defaultBranch]
 
@@ -135,11 +151,10 @@ extension WorktreeLifecycle {
         // Retry with a fresh name (branch collision case)
         let retryName = NameGenerator.generate()
         let retryBranch = "tbd/\(retryName)"
-        let retryPath = (repoPath as NSString)
-            .appendingPathComponent(".tbd/worktrees/\(retryName)")
-        let retryParentDir = (retryPath as NSString).deletingLastPathComponent
+        let retryCanonicalBase = WorktreeLayout().basePath(for: repo)
+        let retryPath = (retryCanonicalBase as NSString).appendingPathComponent(retryName)
         try FileManager.default.createDirectory(
-            atPath: retryParentDir,
+            atPath: retryCanonicalBase,
             withIntermediateDirectories: true
         )
 

@@ -68,6 +68,14 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.repoNotFound(repoID)
         }
 
+        // If the repo's filesystem path is gone, don't try to talk to git.
+        // The startup health validator will (or already has) flipped its status
+        // to .missing. Reconcile becomes a no-op until the user runs `tbd repo
+        // relocate`. The daemon must not crash or hang on stale paths.
+        if repo.status == .missing {
+            return
+        }
+
         let gitWorktrees = try await git.worktreeList(repoPath: repo.path)
         let correctTmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         var dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
@@ -104,12 +112,19 @@ extension WorktreeLifecycle {
             try await db.worktrees.archive(id: wt.id)
         }
 
-        // Add unknown worktrees (skip the main repo worktree)
-        let tbdWorktreePrefix = (repo.path as NSString)
-            .appendingPathComponent(".tbd/worktrees/")
+        // Add unknown worktrees (skip the main repo worktree).
+        // LEGACY-WORKTREE-LOCATION: remove after 2026-06-01
+        // Reads worktrees from <repo>/.tbd/worktrees/ for backward compatibility with
+        // worktrees created before the canonical-location switch. New worktrees are
+        // always created under ~/tbd/worktrees/<repo>/<name>. After 2026-06-01, all
+        // pre-switch worktrees will have archived naturally and this path can be deleted.
+        // Dual-prefix view: accept worktrees living under either the canonical
+        // (~/tbd/worktrees/<slot>/) or legacy (<repo>/.tbd/worktrees/) layout.
+        let layout = WorktreeLayout()
+        let acceptablePrefixes = layout.legacyAndCanonicalPrefixes(for: repo)
+            .map { $0.hasSuffix("/") ? $0 : $0 + "/" }
         for gitWt in gitWorktrees where !dbPaths.contains(gitWt.path) {
-            // Only track worktrees inside .tbd/worktrees/
-            guard gitWt.path.hasPrefix(tbdWorktreePrefix) else { continue }
+            guard acceptablePrefixes.contains(where: { gitWt.path.hasPrefix($0) }) else { continue }
 
             let name = (gitWt.path as NSString).lastPathComponent
             let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
@@ -172,6 +187,22 @@ extension WorktreeLifecycle {
             } catch {
                 print("[TBD] reconcile: failed to list tmux windows for server \(tmuxServer): \(error)")
             }
+        }
+
+        // Recompute health so the next call sees the right status. A repo that
+        // just transitioned ok→missing here would otherwise stay ok in memory
+        // until the next startup sweep.
+        let validator = RepoHealthValidator(git: git)
+        let observed = await validator.validate(repo: repo)
+        if observed != repo.status {
+            try? await db.repos.updateStatus(id: repo.id, status: observed)
+            // Broadcast a coarse refresh so the sidebar dims/un-dims immediately
+            // when reconcile is triggered via an RPC (e.g. cleanup) with active
+            // subscribers. .repoAdded is the existing coarse signal — see the
+            // matching call site in RPCRouter+RelocateHandler.
+            subscriptions?.broadcast(delta: .repoAdded(RepoDelta(
+                repoID: repo.id, path: repo.path, displayName: repo.displayName
+            )))
         }
     }
 }

@@ -7,10 +7,30 @@ import CoreText
 /// Returns the worktree name (without date prefix) if running from a worktree build, nil for main.
 func detectWorktreeName() -> String? {
     let path = ProcessInfo.processInfo.arguments[0]
-    guard let range = path.range(of: ".tbd/worktrees/") else { return nil }
-    let afterPrefix = path[range.upperBound...]
-    guard let slashIndex = afterPrefix.firstIndex(of: "/") else { return nil }
-    let name = String(afterPrefix[afterPrefix.startIndex..<slashIndex])
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    // Canonical lives under the user's home dir
+    // (~/tbd/worktrees/<slot>/<name>/...) so the worktree name is the SECOND
+    // path component after the marker.
+    let canonicalMarker = "\(home)/tbd/worktrees/"
+    let isCanonical: Bool
+    let afterPrefix: Substring
+    if let range = path.range(of: canonicalMarker) {
+        isCanonical = true
+        afterPrefix = path[range.upperBound...]
+    } else {
+        // LEGACY-WORKTREE-LOCATION: remove after 2026-06-01
+        // Reads worktrees from <repo>/.tbd/worktrees/ for backward compatibility with
+        // worktrees created before the canonical-location switch. New worktrees are
+        // always created under ~/tbd/worktrees/<repo>/<name>. After 2026-06-01, all
+        // pre-switch worktrees will have archived naturally and this path can be deleted.
+        guard let range = path.range(of: ".tbd/worktrees/") else { return nil }
+        isCanonical = false
+        afterPrefix = path[range.upperBound...]
+    }
+    let components = afterPrefix.split(separator: "/")
+    let nameIndex = isCanonical ? 1 : 0
+    guard components.count > nameIndex else { return nil }
+    let name = String(components[nameIndex])
     // Strip YYYYMMDD- date prefix: "20260323-familiar-sawfish" → "familiar-sawfish"
     if let dashIndex = name.firstIndex(of: "-"),
        name[name.startIndex..<dashIndex].allSatisfy(\.isNumber) {
