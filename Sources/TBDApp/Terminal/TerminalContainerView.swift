@@ -69,7 +69,10 @@ private struct SingleWorktreeView: View {
 
     private var activeTabIndex: Int {
         get { appState.activeTabIndices[worktreeID] ?? 0 }
-        nonmutating set { appState.activeTabIndices[worktreeID] = newValue }
+        nonmutating set {
+            appState.activeTabIndices[worktreeID] = newValue
+            appState.historyActiveWorktrees.remove(worktreeID)
+        }
     }
 
     private var worktree: Worktree? {
@@ -157,6 +160,10 @@ private struct SingleWorktreeView: View {
                                 await appState.forkClaudeTerminal(worktreeID: worktreeID, sessionID: sessionID, tokenID: terminal?.claudeTokenID)
                                 selectLastTab()
                             }
+                        },
+                        isHistorySelected: appState.historyActiveWorktrees.contains(worktreeID),
+                        onHistoryTab: {
+                            appState.toggleHistory(worktreeID: worktreeID)
                         }
                     )
 
@@ -182,7 +189,9 @@ private struct SingleWorktreeView: View {
 
     @ViewBuilder
     private func layoutContent(worktree: Worktree) -> some View {
-        if let tab = activeTab {
+        if appState.historyActiveWorktrees.contains(worktreeID) {
+            HistoryPaneView(worktreeID: worktreeID)
+        } else if let tab = activeTab {
             let layoutBinding = Binding<LayoutNode>(
                 get: { appState.layouts[tab.id] ?? .pane(tab.content) },
                 set: { appState.layouts[tab.id] = $0 }

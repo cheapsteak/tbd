@@ -305,3 +305,67 @@ public struct PRStatus: Codable, Sendable, Equatable {
         self.state = state
     }
 }
+
+// MARK: - SessionSummary
+
+public struct SessionSummary: Codable, Sendable, Identifiable {
+    public var id: String { sessionId }
+    public let sessionId: String
+    public let filePath: String
+    public let modifiedAt: Date
+    public let fileSize: Int64
+    public let lineCount: Int
+    public let firstUserMessage: String?
+    public let lastUserMessage: String?
+    public let cwd: String?
+    public let gitBranch: String?
+    /// Timestamp of the last message in the session (from JSONL), falls back to file mtime.
+    public let lastMessageAt: Date
+
+    public init(
+        sessionId: String,
+        filePath: String,
+        modifiedAt: Date,
+        fileSize: Int64,
+        lineCount: Int,
+        firstUserMessage: String?,
+        lastUserMessage: String?,
+        cwd: String?,
+        gitBranch: String?,
+        lastMessageAt: Date? = nil
+    ) {
+        self.sessionId = sessionId
+        self.filePath = filePath
+        self.modifiedAt = modifiedAt
+        self.fileSize = fileSize
+        self.lineCount = lineCount
+        self.firstUserMessage = firstUserMessage
+        self.lastUserMessage = lastUserMessage
+        self.cwd = cwd
+        self.gitBranch = gitBranch
+        self.lastMessageAt = lastMessageAt ?? modifiedAt
+    }
+}
+
+// MARK: - Chat Types
+
+public enum ChatRole: String, Codable, Sendable {
+    case user
+    case assistant
+}
+
+public struct ChatMessage: Codable, Sendable, Identifiable {
+    public let id: UUID
+    public let role: ChatRole
+    public let text: String
+    public let timestamp: Date?
+
+    public init(id: UUID = UUID(), role: ChatRole, text: String, timestamp: Date? = nil) {
+        self.id = id; self.role = role; self.text = text; self.timestamp = timestamp
+    }
+}
+
+public struct SessionMessagesParams: Codable, Sendable {
+    public let filePath: String
+    public init(filePath: String) { self.filePath = filePath }
+}

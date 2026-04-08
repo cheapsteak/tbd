@@ -83,6 +83,11 @@ final class AppState: ObservableObject {
     @Published var prStatuses: [UUID: PRStatus] = [:]
     @Published var claudeTokens: [ClaudeTokenWithUsage] = []
     @Published var globalDefaultClaudeTokenID: UUID? = nil
+    @Published var historyActiveWorktrees: Set<UUID> = []
+    @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
+    @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
+    @Published var sessionTranscripts: [String: [ChatMessage]] = [:]  // sessionId → messages
+    @Published var sessionTranscriptLoading: Set<String> = []
 
     /// Conductor for each repo (wildcard conductors expanded across all repos).
     @Published var conductorsByRepo: [UUID: Conductor] = [:]

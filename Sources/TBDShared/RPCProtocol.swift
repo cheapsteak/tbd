@@ -131,6 +131,8 @@ public enum RPCMethod {
     public static let terminalSwapClaudeToken = "terminal.swapClaudeToken"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
+    public static let sessionList = "session.list"
+    public static let sessionMessages = "session.messages"
 }
 
 public struct AppSetForegroundStateParams: Codable, Sendable {
@@ -464,6 +466,16 @@ public struct NoteDeleteParams: Codable, Sendable {
 public struct NoteListParams: Codable, Sendable {
     public let worktreeID: UUID?
     public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
+}
+
+// MARK: - Session Params
+
+public struct SessionListParams: Codable, Sendable {
+    public let worktreeID: UUID
+
+    public init(worktreeID: UUID) {
+        self.worktreeID = worktreeID
+    }
 }
 
 // MARK: - Result Structs

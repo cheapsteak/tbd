@@ -1,0 +1,401 @@
+import SwiftUI
+import TBDShared
+
+// MARK: - HistoryPaneView
+
+struct HistoryPaneView: View {
+    let worktreeID: UUID
+    @EnvironmentObject var appState: AppState
+
+    private var loadState: HistoryLoadState {
+        appState.historyLoadStates[worktreeID] ?? .idle
+    }
+
+    private var selectedSessionID: String? {
+        appState.selectedSessionIDs[worktreeID]
+    }
+
+    private var selectedSummary: SessionSummary? {
+        guard let sid = selectedSessionID else { return nil }
+        return loadState.currentSessions.first { $0.sessionId == sid }
+    }
+
+    @State private var listWidth: CGFloat = 290
+    @State private var dragStartWidth: CGFloat? = nil
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Left panel: session list
+            VStack(spacing: 0) {
+                HistoryHeaderRow(loadState: loadState, worktreeID: worktreeID)
+                Divider()
+                sessionList
+            }
+            .frame(width: listWidth)
+
+            // Draggable divider
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(width: 1)
+                .contentShape(Rectangle().inset(by: -3))
+                .cursor(.resizeLeftRight)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            if dragStartWidth == nil { dragStartWidth = listWidth }
+                            let newWidth = (dragStartWidth ?? listWidth) + value.translation.width
+                            listWidth = max(180, min(500, newWidth))
+                        }
+                        .onEnded { _ in dragStartWidth = nil }
+                )
+
+            // Right panel: transcript or empty state
+            if let summary = selectedSummary {
+                SessionTranscriptView(
+                    sessionId: summary.sessionId,
+                    worktreeID: worktreeID,
+                    summary: summary
+                )
+            } else {
+                emptyDetailState
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var sessionList: some View {
+        let sessions = loadState.currentSessions
+        if sessions.isEmpty && !loadState.isLoading {
+            VStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 32))
+                    .foregroundStyle(.tertiary)
+                Text("No sessions found")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List(sessions) { summary in
+                SessionRowView(summary: summary, isSelected: selectedSessionID == summary.sessionId)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        Task { await appState.selectSession(summary, worktreeID: worktreeID) }
+                    }
+                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                    .listRowBackground(
+                        selectedSessionID == summary.sessionId
+                            ? Color.accentColor.opacity(0.15)
+                            : Color.clear
+                    )
+            }
+            .listStyle(.plain)
+        }
+    }
+
+    private var emptyDetailState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "text.bubble")
+                .font(.system(size: 32))
+                .foregroundStyle(.tertiary)
+            Text("Select a session")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - HistoryHeaderRow
+
+/// Fixed-height header showing load state without shifting the list below.
+private struct HistoryHeaderRow: View {
+    let loadState: HistoryLoadState
+    let worktreeID: UUID
+    @EnvironmentObject var appState: AppState
+    @State private var statusMessage: String? = nil
+    @State private var statusClearTask: Task<Void, Never>? = nil
+
+    var body: some View {
+        ZStack {
+            Color.clear.frame(height: 28)
+            content
+        }
+        .onChange(of: loadState) { oldState, newState in
+            handleTransition(from: oldState, to: newState)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch loadState {
+        case .idle:
+            EmptyView()
+
+        case .loading:
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.6)
+                Text("Loading sessions…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+        case .loadingStale:
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.6)
+                Text("Checking for new sessions…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+        case .loaded:
+            if let msg = statusMessage {
+                Text(msg)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .transition(.opacity)
+            }
+
+        case .failed(let msg):
+            Button {
+                Task { await appState.fetchSessions(worktreeID: worktreeID) }
+            } label: {
+                Text("Failed to load — click to retry")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .help(msg)
+        }
+    }
+
+    private func handleTransition(from oldState: HistoryLoadState, to newState: HistoryLoadState) {
+        guard case .loaded(let fresh) = newState else { return }
+        // Only show "N new sessions" when refreshing existing data, not on first load.
+        let wasRefresh: Bool
+        switch oldState {
+        case .loadingStale: wasRefresh = true
+        default: wasRefresh = false
+        }
+        if wasRefresh {
+            let existingIDs = Set(oldState.currentSessions.map(\.sessionId))
+            let newCount = fresh.filter { !existingIDs.contains($0.sessionId) }.count
+            statusMessage = newCount > 0
+                ? "↑ \(newCount) new session\(newCount == 1 ? "" : "s")"
+                : "Up to date"
+        } else {
+            statusMessage = "Up to date"
+        }
+        statusClearTask?.cancel()
+        statusClearTask = Task {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            withAnimation { statusMessage = nil }
+        }
+    }
+}
+
+// MARK: - SessionRowView
+
+private struct SessionRowView: View {
+    let summary: SessionSummary
+    let isSelected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            // Headline: first user message
+            if let first = summary.firstUserMessage {
+                Text(first)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Subtitle: last user message (only if different)
+            if let last = summary.lastUserMessage, last != summary.firstUserMessage {
+                Text(last)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            // Metadata line (including hash inline)
+            metadataLine
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var metadataLine: some View {
+        HStack(spacing: 4) {
+            Text("\(summary.lineCount.formatted()) events")
+            separator
+            Text(summary.fileSize.formattedFileSize)
+            separator
+            Text(summary.lastMessageAt.smartFormatted)
+            if let branch = summary.gitBranch {
+                separator
+                Text(branch)
+                    .lineLimit(1)
+            }
+            separator
+            Text(String(summary.sessionId.prefix(8)))
+                .font(.system(.caption2, design: .monospaced))
+        }
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
+    }
+
+    private var separator: some View {
+        Text("·").foregroundStyle(.quaternary).font(.caption2)
+    }
+}
+
+// MARK: - SessionTranscriptView
+
+struct SessionTranscriptView: View {
+    let sessionId: String
+    let worktreeID: UUID
+    let summary: SessionSummary
+    @EnvironmentObject var appState: AppState
+
+    private var messages: [ChatMessage] {
+        appState.sessionTranscripts[sessionId] ?? []
+    }
+
+    private var isLoading: Bool {
+        appState.sessionTranscriptLoading.contains(sessionId)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Transcript header with Resume button
+            HStack {
+                if let first = summary.firstUserMessage {
+                    Text(first)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text(String(sessionId.prefix(8)))
+                        .font(.system(.subheadline, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Resume") {
+                    Task {
+                        await appState.resumeSession(worktreeID: worktreeID, sessionId: sessionId)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if messages.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.tertiary)
+                    Text("No messages found")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(messages) { message in
+                            ChatMessageView(message: message)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - ChatMessageView
+
+private struct ChatMessageView: View {
+    let message: ChatMessage
+
+    private var isUser: Bool { message.role == .user }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if isUser { Spacer(minLength: 52) }
+
+            VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
+                Text(isUser ? "You" : "Claude")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 4)
+
+                Text(message.text)
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 8)
+                    .background(
+                        isUser
+                            ? Color.accentColor.opacity(0.15)
+                            : Color(nsColor: .controlBackgroundColor)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+
+            if !isUser { Spacer(minLength: 52) }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Formatting Helpers
+
+private extension Int64 {
+    var formattedFileSize: String {
+        let bytes = Double(self)
+        if bytes < 1_024 { return "\(self) B" }
+        if bytes < 1_048_576 { return String(format: "%.1f KB", bytes / 1_024) }
+        return String(format: "%.1f MB", bytes / 1_048_576)
+    }
+}
+
+private extension Date {
+    /// "Today 3:42 PM", "Yesterday 5:12 PM", "Mon 3:42 PM", "Apr 6, 3:42 PM"
+    var smartFormatted: String {
+        let cal = Calendar.current
+        let now = Date()
+        let timeFmt = DateFormatter()
+        timeFmt.dateFormat = "h:mm a"
+        let timeStr = timeFmt.string(from: self)
+
+        if cal.isDateInToday(self) {
+            return "Today \(timeStr)"
+        } else if cal.isDateInYesterday(self) {
+            return "Yesterday \(timeStr)"
+        } else if let days = cal.dateComponents([.day], from: self, to: now).day, days < 7 {
+            let weekdayFmt = DateFormatter()
+            weekdayFmt.dateFormat = "EEE"
+            return "\(weekdayFmt.string(from: self)) \(timeStr)"
+        } else {
+            let dateFmt = DateFormatter()
+            dateFmt.dateFormat = "MMM d"
+            return "\(dateFmt.string(from: self)), \(timeStr)"
+        }
+    }
+}

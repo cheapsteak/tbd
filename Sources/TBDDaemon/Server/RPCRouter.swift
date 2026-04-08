@@ -177,6 +177,10 @@ public final class RPCRouter: Sendable {
                 let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
                 await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)
                 return .ok()
+            case RPCMethod.sessionList:
+                return try await handleSessionList(request.paramsData)
+            case RPCMethod.sessionMessages:
+                return try await handleSessionMessages(request.paramsData)
             case RPCMethod.stateSubscribe:
                 return RPCResponse(error: "state.subscribe must be handled by SocketServer")
             default:

@@ -1,0 +1,11 @@
+{"type":"permission-mode","sessionId":"abc123de-0000-0000-0000-000000000001","cwd":"/Users/test/project","gitBranch":"main","permissionMode":"auto"}
+{"type":"user","message":{"role":"user","content":"<system-reminder>You are Claude.</system-reminder>"},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"user","message":{"role":"user","content":"Hello, can you help me refactor this function?"},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"assistant","message":{"role":"assistant","content":"Of course! Please share the function."},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"result"}]},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<command-name>commit</command-name>"}]},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Now add unit tests for it."}]},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"assistant","message":{"role":"assistant","content":"Here are the tests..."},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"user","message":{"role":"user","content":"<tool_result>tool output here</tool_result>"},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"user","message":{"role":"user","content":"What does this error mean?"},"sessionId":"abc123de-0000-0000-0000-000000000001"}
+{"type":"file-history-snapshot","snapshot":{},"sessionId":"abc123de-0000-0000-0000-000000000001"}

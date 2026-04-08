@@ -763,6 +763,24 @@ actor DaemonClient {
         )
     }
 
+    /// List Claude session summaries for a worktree.
+    func listSessions(worktreeID: UUID) throws -> [SessionSummary] {
+        return try call(
+            method: RPCMethod.sessionList,
+            params: SessionListParams(worktreeID: worktreeID),
+            resultType: [SessionSummary].self
+        )
+    }
+
+    /// Load full chat messages for a session file.
+    func sessionMessages(filePath: String) throws -> [ChatMessage] {
+        return try call(
+            method: RPCMethod.sessionMessages,
+            params: SessionMessagesParams(filePath: filePath),
+            resultType: [ChatMessage].self
+        )
+    }
+
     /// Notify the daemon whether the app is in the foreground (drives usage poller).
     func setAppForegroundState(isForeground: Bool) throws {
         try callVoid(

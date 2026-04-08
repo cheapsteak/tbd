@@ -17,6 +17,8 @@ struct TabBar: View {
     var onSuspendTab: (UUID) -> Void = { _ in }
     var onResumeTab: (UUID) -> Void = { _ in }
     var onForkTab: (UUID) -> Void = { _ in }
+    var isHistorySelected: Bool = false
+    var onHistoryTab: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 0) {
@@ -53,6 +55,11 @@ struct TabBar: View {
                 onAddNote: onAddNote
             )
             Spacer()
+
+            HistoryTabButton(
+                isSelected: isHistorySelected,
+                action: onHistoryTab
+            )
         }
         .padding(.horizontal, 0)
         .frame(height: 30)
@@ -399,6 +406,34 @@ private struct TabBarItem: View {
         case .note:
             return "Note \(index + 1)"
         }
+    }
+}
+
+// MARK: - HistoryTabButton
+
+private struct HistoryTabButton: View {
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 10))
+                .foregroundStyle(
+                    isSelected
+                        ? AnyShapeStyle(.primary)
+                        : AnyShapeStyle(isHovering ? .secondary : .tertiary)
+                )
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(isSelected ? Color.primary.opacity(0.1) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help("Session History")
     }
 }
 
