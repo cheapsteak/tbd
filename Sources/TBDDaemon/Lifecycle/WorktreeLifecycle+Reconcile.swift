@@ -196,6 +196,13 @@ extension WorktreeLifecycle {
         let observed = await validator.validate(repo: repo)
         if observed != repo.status {
             try? await db.repos.updateStatus(id: repo.id, status: observed)
+            // Broadcast a coarse refresh so the sidebar dims/un-dims immediately
+            // when reconcile is triggered via an RPC (e.g. cleanup) with active
+            // subscribers. .repoAdded is the existing coarse signal — see the
+            // matching call site in RPCRouter+RelocateHandler.
+            subscriptions?.broadcast(delta: .repoAdded(RepoDelta(
+                repoID: repo.id, path: repo.path, displayName: repo.displayName
+            )))
         }
     }
 }
