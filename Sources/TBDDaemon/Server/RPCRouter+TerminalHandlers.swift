@@ -33,16 +33,24 @@ extension RPCRouter {
         // Codex branch: minimal launch with isolated CODEX_HOME. No session
         // tracking, no system prompt injection, no token resolution. Session
         // resume / state detection / hooks are tracked as follow-up issues.
+        //
+        // Build env independently — do NOT inherit the Claude-shaped
+        // TBD_PROMPT_CONTEXT / TBD_PROMPT_RENAME / TBD_PROMPT_INSTRUCTIONS
+        // vars from SystemPromptBuilder.promptLayers; those describe TBD as
+        // a Claude-centric host and would be misleading noise inside a
+        // Codex pane.
         if params.type == .codex {
             let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
-            env["CODEX_HOME"] = codexHome.path
+            var codexEnv: [String: String] = [:]
+            codexEnv["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
+            codexEnv["CODEX_HOME"] = codexHome.path
 
             let window = try await tmux.createWindow(
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
                 shellCommand: "codex --full-auto",
-                env: env
+                env: codexEnv
             )
 
             let terminal = try await db.terminals.create(
