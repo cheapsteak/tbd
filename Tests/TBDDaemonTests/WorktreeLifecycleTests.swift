@@ -473,6 +473,12 @@ private func createTestRepoResolvingSymlinks() async throws -> (tempDir: URL, re
 /// Alive server + alive windows: no terminals are deleted, window IDs unchanged.
 /// (dryRun makes serverExists → true and windowExists → true, so this exercises
 /// the "server alive, window alive → keep terminal" branch.)
+///
+/// This also serves as a regression guard for the dead-window deletion path: any
+/// bug that incorrectly triggers dead-window deletion would drop terminals here,
+/// because the setup is identical to what a "dead window" scenario looks like
+/// before the windowExists check. The dead-window path itself (windowExists → false)
+/// requires a non-dryRun integration test against a real tmux server with stale IDs.
 @Test func testReconcileAliveTerminalUntouched() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -552,47 +558,12 @@ private func createTestRepoResolvingSymlinks() async throws -> (tempDir: URL, re
     #expect(suspendedAfter?.claudeSessionID == fakeSessionID, "claudeSessionID must be preserved for suspended terminal")
 }
 
-/// Reconcile with dryRun (serverExists → true, windowExists → true) must NOT
-/// delete any terminals. This serves as a regression guard for the alive-window path.
-/// Note: the dead-window-deletion path (server alive, window dead) and the reboot
-/// recreation path (server gone) cannot be simulated with dryRun=true because both
-/// serverExists and windowExists always return true in dry-run mode. Those paths
-/// require a non-dryRun integration test against a real tmux server.
-@Test func testReconcileDeadWindowDeletedWhenServerAlive() async throws {
-    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
-    )
-
-    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-
-    // In dryRun mode, windowExists always returns true, so no terminals can be
-    // deleted via the dead-window path. This test verifies the positive case:
-    // all terminals survive reconcile when the server reports all windows alive.
-    let terminalsBefore = try await db.terminals.list(worktreeID: wt.id)
-    #expect(terminalsBefore.count == 2)
-
-    try await lifecycle.reconcile(repoID: repo.id)
-
-    let terminalsAfter = try await db.terminals.list(worktreeID: wt.id)
-    #expect(terminalsAfter.count == 2, "No terminals deleted when server alive and all windows alive")
-    // Dead-window deletion path (windowExists → false) requires a non-dryRun
-    // integration test with a real tmux server that has stale window IDs.
-}
-
 /// Server gone path (reboot): in dryRun mode serverExists → true, so this path
 /// cannot be directly triggered. Instead, this test seeds a stale windowID and
 /// verifies that when the server IS alive (dryRun), the stale window is treated
 /// as alive (windowExists → true in dryRun) and NOT deleted.
 /// This is the inverse regression guard: ensures dryRun never triggers reboot recreation.
-@Test func testReconcileRebootRecreatesTerminals() async throws {
+@Test func testReconcileDryRunDoesNotTriggerRebootRecreation() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
