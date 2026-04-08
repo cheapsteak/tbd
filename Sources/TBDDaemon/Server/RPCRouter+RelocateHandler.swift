@@ -2,6 +2,8 @@ import Foundation
 import os
 import TBDShared
 
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "repoRelocate")
+
 extension RPCRouter {
 
     /// Relocate a repo to a new on-disk path.
@@ -18,7 +20,6 @@ extension RPCRouter {
     /// 5. Set repo.status = .ok.
     /// 6. Broadcast a delta so the app refreshes the sidebar.
     func handleRepoRelocate(_ paramsData: Data) async throws -> RPCResponse {
-        let logger = Logger(subsystem: "com.tbd.daemon", category: "repoHealth")
         let params = try decoder.decode(RepoRelocateParams.self, from: paramsData)
 
         guard var repo = try await db.repos.get(id: params.repoID) else {
