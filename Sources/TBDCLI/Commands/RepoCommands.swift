@@ -6,7 +6,7 @@ struct RepoCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "repo",
         abstract: "Manage repositories",
-        subcommands: [RepoAdd.self, RepoRemove.self, RepoList.self]
+        subcommands: [RepoAdd.self, RepoRemove.self, RepoList.self, RepoRelocate.self]
     )
 }
 
@@ -103,15 +103,59 @@ struct RepoList: AsyncParsableCommand {
                 print("No repositories. Use 'tbd repo add <path>' to add one.")
                 return
             }
-            let header = String(format: "%-36s  %-20s  %s", "ID", "NAME", "PATH")
+            let header = String(format: "%-36s  %-20s  %-9s  %s", "ID", "NAME", "STATUS", "PATH")
             print(header)
-            print(String(repeating: "-", count: 80))
+            print(String(repeating: "-", count: 90))
             for repo in repos {
-                let line = String(format: "%-36s  %-20s  %s",
+                let tag = repo.status == .missing ? "[missing]" : "[ok]"
+                let line = String(format: "%-36s  %-20s  %-9s  %s",
                     repo.id.uuidString as NSString,
                     repo.displayName as NSString,
+                    tag as NSString,
                     repo.path as NSString)
                 print(line)
+            }
+        }
+    }
+}
+
+// MARK: - repo relocate
+
+struct RepoRelocate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "relocate",
+        abstract: "Update a repository's filesystem path after moving it on disk"
+    )
+
+    @Argument(help: "Repository ID")
+    var id: String
+
+    @Argument(help: "New path to the git repository")
+    var newPath: String
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let repoID = UUID(uuidString: id) else {
+            throw CLIError.invalidArgument("Invalid repository ID: \(id)")
+        }
+        let resolved = resolvePath(newPath)
+        let client = SocketClient()
+        let result: RepoRelocateResult = try client.call(
+            method: RPCMethod.repoRelocate,
+            params: RepoRelocateParams(repoID: repoID, newPath: resolved),
+            resultType: RepoRelocateResult.self
+        )
+        if json {
+            printJSON(result)
+        } else {
+            print("Relocated \(result.repo.displayName) → \(result.repo.path)")
+            if !result.worktreesRepaired.isEmpty {
+                print("  Repaired worktrees: \(result.worktreesRepaired.count)")
+            }
+            if !result.worktreesFailed.isEmpty {
+                print("  Failed worktrees:   \(result.worktreesFailed.count) (marked .failed; manual cleanup required)")
             }
         }
     }

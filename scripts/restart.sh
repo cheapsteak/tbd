@@ -38,22 +38,22 @@ fi
 
 if [ "$app_only" = false ]; then
     echo "Stopping daemon..."
-    if [ -f ~/.tbd/tbdd.pid ]; then
-        pid=$(cat ~/.tbd/tbdd.pid)
+    if [ -f ~/tbd/tbdd.pid ]; then
+        pid=$(cat ~/tbd/tbdd.pid)
         kill "$pid" 2>/dev/null && sleep 0.5 || true
     fi
     # Clean stale files
-    rm -f ~/.tbd/sock ~/.tbd/tbdd.pid ~/.tbd/port
+    rm -f ~/tbd/sock ~/tbd/tbdd.pid ~/tbd/port
 
     echo "Starting daemon..."
     "$BUILD_DIR/TBDDaemon" > /tmp/tbdd.log 2>&1 &
     # Wait for socket
     for i in $(seq 1 30); do
-        [ -S ~/.tbd/sock ] && break
+        [ -S ~/tbd/sock ] && break
         sleep 0.1
     done
-    if [ -S ~/.tbd/sock ]; then
-        echo "  Daemon ready (PID $(cat ~/.tbd/tbdd.pid 2>/dev/null))"
+    if [ -S ~/tbd/sock ]; then
+        echo "  Daemon ready (PID $(cat ~/tbd/tbdd.pid 2>/dev/null))"
     else
         echo "  WARNING: Daemon socket not found after 3s"
     fi

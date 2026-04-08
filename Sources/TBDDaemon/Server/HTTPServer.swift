@@ -8,7 +8,7 @@ import TBDShared
 ///
 /// Accepts POST requests to `/rpc` with a JSON body containing an `RPCRequest`.
 /// Routes through `RPCRouter` and returns JSON `RPCResponse`.
-/// The assigned port is written to `~/.tbd/port` for discovery.
+/// The assigned port is written to `~/tbd/port` for discovery.
 public final class HTTPServer: Sendable {
     private let router: RPCRouter
     private let portFilePath: String

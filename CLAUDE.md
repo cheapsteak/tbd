@@ -26,7 +26,7 @@ There should be exactly one `TBDDaemon` and one `TBDApp`, both from the worktree
 
 ## Critical Rules
 
-### NEVER delete ~/.tbd/state.db
+### NEVER delete ~/tbd/state.db
 The database stores worktree display names, custom config, and notification history. Deleting it orphans tmux servers (repo UUID changes → tmux server name changes → old sessions become unreachable). If you encounter DB issues, diagnose and fix the schema/code — don't wipe the DB.
 
 ### Database migrations must update the shared model

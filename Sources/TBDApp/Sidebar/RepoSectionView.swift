@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TBDShared
 
@@ -52,7 +53,22 @@ struct RepoSectionView: View {
 
             Text(repo.displayName)
                 .font(.headline)
-                .foregroundStyle(appState.selectedRepoID == repo.id ? .primary : .secondary)
+                .foregroundStyle(
+                    repo.status == .missing
+                        ? AnyShapeStyle(Color.secondary.opacity(0.5))
+                        : AnyShapeStyle(appState.selectedRepoID == repo.id ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
+                )
+
+            if repo.status == .missing {
+                Text("[missing]")
+                    .font(.caption)
+                    .foregroundStyle(.red.opacity(0.7))
+                Button("Locate…") {
+                    locateRepo()
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
 
             Spacer()
 
@@ -63,6 +79,7 @@ struct RepoSectionView: View {
             }
             .buttonStyle(HoverPressButtonStyle())
             .help("New worktree")
+            .disabled(repo.status == .missing)
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -90,5 +107,19 @@ struct RepoSectionView: View {
 
     private func createWorktree() {
         appState.createWorktree(repoID: repo.id)
+    }
+
+    private func locateRepo() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Select the new location of \(repo.displayName)"
+        panel.prompt = "Relocate"
+        if panel.runModal() == .OK, let url = panel.url {
+            Task {
+                await appState.relocateRepo(id: repo.id, newPath: url.path)
+            }
+        }
     }
 }

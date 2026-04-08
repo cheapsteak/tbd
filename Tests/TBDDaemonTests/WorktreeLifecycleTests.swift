@@ -46,6 +46,21 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
     return (tempDir: tempDir, repoDir: repoDir)
 }
 
+/// Creates a test repo row in the DB and overrides its `worktreeRoot` to a
+/// `.tbd/worktrees/` subdirectory of the test temp dir, so the canonical
+/// layout doesn't leak into the user's real `~/.tbd/worktrees/`. Returns the
+/// re-fetched repo with the override applied.
+private func makeTestRepo(
+    db: TBDDatabase, tempDir: URL, repoDir: URL
+) async throws -> Repo {
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+    let override = tempDir.appendingPathComponent(".tbd/worktrees").path
+    try await db.repos.updateWorktreeRoot(id: repo.id, path: override)
+    return try await db.repos.get(id: repo.id)!
+}
+
 @Test func testCreateWorktree() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -58,9 +73,7 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let result = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
     #expect(result.status == .active)
@@ -99,9 +112,7 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     #expect(FileManager.default.fileExists(atPath: wt.path))
 
@@ -142,9 +153,7 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
@@ -170,9 +179,7 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
     await #expect(throws: WorktreeLifecycleError.self) {
@@ -192,9 +199,7 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Create worktree with Claude (skipClaude: false creates a session ID)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
@@ -235,9 +240,7 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Create worktree without Claude
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -260,9 +263,7 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Create with Claude, archive, then revive with skipClaude
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
@@ -290,9 +291,7 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Create worktree with Claude
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
@@ -401,13 +400,12 @@ private func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
         hooks: HookResolver()
     )
 
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
-    // Path should be under <repo>/.tbd/worktrees/<name>/
-    #expect(wt.path.hasPrefix(repoDir.path))
+    // Path should be under the canonical layout (tempDir/.tbd/worktrees/<name>)
+    // because makeTestRepo overrides worktreeRoot to <tempDir>/.tbd/worktrees.
+    #expect(wt.path.hasPrefix(tempDir.path))
     #expect(wt.path.contains(".tbd/worktrees/"))
     #expect(wt.path.contains(wt.name))
 }

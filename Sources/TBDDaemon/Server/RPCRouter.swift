@@ -75,6 +75,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRepoList()
             case RPCMethod.repoUpdateInstructions:
                 return try await handleRepoUpdateInstructions(request.paramsData)
+            case RPCMethod.repoRelocate:
+                return try await handleRepoRelocate(request.paramsData)
             case RPCMethod.worktreeCreate:
                 return try await handleWorktreeCreate(request.paramsData)
             case RPCMethod.worktreeList:

@@ -26,7 +26,7 @@ public final class Daemon: Sendable {
     /// Start the daemon: create config directory, clean up stale state,
     /// initialize database and all managers, start servers, reconcile worktrees.
     public func start() async throws {
-        // 1. Create ~/.tbd/ directory if needed
+        // 1. Create ~/tbd/ directory if needed
         let configDir = TBDConstants.configDir.path
         let fm = FileManager.default
         if !fm.fileExists(atPath: configDir) {
@@ -128,6 +128,13 @@ public final class Daemon: Sendable {
         } catch {
             print("[Daemon] Warning: Failed to list repos for reconciliation: \(error)")
         }
+
+        // 11b. Validate repo health — flips repos with stale paths to .missing.
+        //      Must come *after* reconcile so newly-discovered worktrees see the
+        //      correct status, and *before* the periodic tasks so users get accurate
+        //      [missing] tags as soon as the daemon is up.
+        let healthValidator = RepoHealthValidator(git: git)
+        await healthValidator.validateAll(db: database)
 
         // 12. Start periodic git fetch for all repos (every 60s)
         self.gitFetchTask = Task {
