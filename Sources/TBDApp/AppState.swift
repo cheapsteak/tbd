@@ -78,6 +78,7 @@ final class AppState: ObservableObject {
     @Published var activeTabIndices: [UUID: Int] = [:]
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
+    @Published var suspendingTerminalIDs: Set<UUID> = []
     @Published var editingWorktreeID: UUID? = nil
     @Published var isRenamingWorktree = false
     @Published var prStatuses: [UUID: PRStatus] = [:]

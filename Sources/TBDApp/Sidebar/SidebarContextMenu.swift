@@ -37,9 +37,14 @@ struct SidebarContextMenu: View {
                 if hasUnsuspendedClaude {
                     Button("Suspend Claude") {
                         let wtID = worktree.id
+                        let claudeTerminalIDs = terminals
+                            .filter { $0.claudeSessionID != nil && $0.suspendedAt == nil }
+                            .map { $0.id }
                         Task {
+                            claudeTerminalIDs.forEach { appState.suspendingTerminalIDs.insert($0) }
                             try? await appState.daemonClient.worktreeSuspend(worktreeID: wtID)
                             await appState.refreshTerminals(worktreeID: wtID)
+                            claudeTerminalIDs.forEach { appState.suspendingTerminalIDs.remove($0) }
                         }
                     }
                 }

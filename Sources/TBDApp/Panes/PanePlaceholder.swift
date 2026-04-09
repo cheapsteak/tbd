@@ -223,6 +223,19 @@ struct PanePlaceholder: View {
                     .onHover { hovering in
                         if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                     }
+                } else if appState.suspendingTerminalIDs.contains(terminal.id) {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text("Suspending...")
+                    }
+                    .font(.caption2)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
+                    .padding(8)
                 }
             }
         } else {
