@@ -38,7 +38,7 @@ extension RPCRouter {
         }
 
         let claudeTerminals = terminals.filter {
-            $0.label?.hasPrefix("claude") == true && $0.suspendedAt == nil
+            $0.claudeSessionID != nil && $0.suspendedAt == nil
         }
 
         // Sequential — the coordinator is an actor so calls serialize anyway
@@ -56,7 +56,7 @@ extension RPCRouter {
         }
 
         let suspendedTerminals = terminals.filter {
-            $0.label?.hasPrefix("claude") == true && $0.suspendedAt != nil
+            $0.claudeSessionID != nil && $0.suspendedAt != nil
         }
 
         // Sequential — the coordinator is an actor so calls serialize anyway
