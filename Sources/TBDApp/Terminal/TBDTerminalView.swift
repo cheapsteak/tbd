@@ -51,6 +51,16 @@ class TBDTerminalView: TerminalView {
         return dims
     }
 
+    /// Capture the current visible terminal content as an NSImage.
+    /// Returns nil if the view has no dimensions yet.
+    func captureScreenshot() -> NSImage? {
+        guard bounds.width > 0 && bounds.height > 0 else { return nil }
+        guard let bitmapRep = bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+        cacheDisplay(in: bounds, to: bitmapRep)
+        guard let cgImage = bitmapRep.cgImage else { return nil }
+        return NSImage(cgImage: cgImage, size: bounds.size)
+    }
+
     /// Converts a window-coordinate point to terminal grid (col, row).
     func gridPosition(atWindowLocation windowPoint: CGPoint) -> (col: Int, row: Int)? {
         let localPoint = convert(windowPoint, from: nil)

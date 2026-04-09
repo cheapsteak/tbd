@@ -181,49 +181,18 @@ struct PanePlaceholder: View {
     @ViewBuilder
     private func terminalContent(terminalID: UUID) -> some View {
         if let terminal = terminal(for: terminalID) {
-            TerminalPanelView(
-                terminalID: terminalID,
-                tmuxServer: worktree.tmuxServer,
-                tmuxWindowID: terminal.tmuxWindowID,
-                tmuxBridge: appState.tmuxBridge,
-                worktreePath: worktree.path,
-                remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
-                onFilePathClicked: { path in
-                    let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                    layout = layout.splitPane(id: terminalID, direction: .horizontal, newContent: newContent)
-                },
-                onTerminalNotification: { title, body in
-                    debugLog("OSC 777: \(title) — \(body)")
-                },
-                onDeadWindow: {
-                    Task { await appState.recreateTerminalWindow(terminalID: terminalID) }
-                },
-                initialSnapshot: terminal.suspendedSnapshot,
-                isSuspendedSnapshot: terminal.suspendedAt != nil
-            )
-            .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
-            .overlay(alignment: .topTrailing) {
-                if terminal.suspendedAt != nil {
-                    Button {
-                        Task {
-                            try? await appState.daemonClient.terminalResume(terminalID: terminal.id)
-                            await appState.refreshTerminals(worktreeID: worktree.id)
-                        }
-                    } label: {
-                        Text("Click to resume session")
-                            .font(.caption2)
-                            .fontWeight(.medium)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
-                            .padding(8)
+            if appState.suspendingTerminalIDs.contains(terminal.id) {
+                // Show screenshot (or black fallback) — no live tmux connection
+                Group {
+                    if let screenshot = appState.suspendingSnapshots[terminal.id] {
+                        Image(nsImage: screenshot)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        Color.black
                     }
-                    .buttonStyle(.plain)
-                    .onHover { hovering in
-                        if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                    }
-                } else if appState.suspendingTerminalIDs.contains(terminal.id) {
+                }
+                .overlay(alignment: .topTrailing) {
                     HStack(spacing: 4) {
                         ProgressView()
                             .controlSize(.mini)
@@ -236,6 +205,54 @@ struct PanePlaceholder: View {
                     .padding(.vertical, 3)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
                     .padding(8)
+                }
+            } else {
+                TerminalPanelView(
+                    terminalID: terminalID,
+                    tmuxServer: worktree.tmuxServer,
+                    tmuxWindowID: terminal.tmuxWindowID,
+                    tmuxBridge: appState.tmuxBridge,
+                    worktreePath: worktree.path,
+                    remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
+                    onFilePathClicked: { path in
+                        let newContent = PaneContent.codeViewer(id: UUID(), path: path)
+                        layout = layout.splitPane(id: terminalID, direction: .horizontal, newContent: newContent)
+                    },
+                    onTerminalNotification: { title, body in
+                        debugLog("OSC 777: \(title) — \(body)")
+                    },
+                    onDeadWindow: {
+                        Task { await appState.recreateTerminalWindow(terminalID: terminalID) }
+                    },
+                    initialSnapshot: terminal.suspendedSnapshot,
+                    isSuspendedSnapshot: terminal.suspendedAt != nil
+                )
+                .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
+                .overlay(alignment: .topTrailing) {
+                    if terminal.suspendedAt != nil {
+                        Button {
+                            Task {
+                                try? await appState.daemonClient.terminalResume(terminalID: terminal.id)
+                                await appState.refreshTerminals(worktreeID: worktree.id)
+                            }
+                        } label: {
+                            Text("Click to resume session")
+                                .font(.caption2)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
+                                .padding(8)
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { hovering in
+                            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                        }
+                    }
+                }
+                .onDisappear {
+                    appState.snapshotProviders.removeValue(forKey: terminalID)
                 }
             }
         } else {

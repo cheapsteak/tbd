@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import TBDShared
@@ -79,6 +80,20 @@ final class AppState: ObservableObject {
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
     @Published var suspendingTerminalIDs: Set<UUID> = []
+    /// Closures registered by live TerminalPanelView instances to capture a screenshot.
+    /// Keyed by terminal UUID. Populated in makeNSView, cleared on view disappear.
+    var snapshotProviders: [UUID: () -> NSImage?] = [:]
+    /// Visual screenshots taken at suspend-click time, shown while daemon works.
+    /// Keyed by terminal UUID. Cleared when suspend completes.
+    @Published var suspendingSnapshots: [UUID: NSImage] = [:]
+
+    func setSuspendingSnapshot(_ image: NSImage, for id: UUID) {
+        suspendingSnapshots[id] = image
+    }
+
+    func removeSuspendingSnapshot(for id: UUID) {
+        suspendingSnapshots.removeValue(forKey: id)
+    }
     @Published var editingWorktreeID: UUID? = nil
     @Published var isRenamingWorktree = false
     @Published var prStatuses: [UUID: PRStatus] = [:]

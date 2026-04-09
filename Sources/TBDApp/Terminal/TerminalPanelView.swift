@@ -29,6 +29,7 @@ struct TerminalPanelView: NSViewRepresentable {
     var remoteURL: String?
     var onFilePathClicked: ((String) -> Void)?
     var onTerminalNotification: ((String, String) -> Void)?
+    @EnvironmentObject var appState: AppState
     /// Called when the tmux window is dead and needs recreation. The callback
     /// should ask the daemon to recreate the window and trigger a state refresh.
     var onDeadWindow: (() -> Void)?
@@ -97,6 +98,12 @@ struct TerminalPanelView: NSViewRepresentable {
                 windowID: tmuxWindowID,
                 panelID: terminalID
             )
+        }
+
+        // Register snapshot provider so SidebarContextMenu can capture this view
+        let captureID = terminalID
+        appState.snapshotProviders[captureID] = { [weak tv] in
+            tv?.captureScreenshot()
         }
 
         return tv

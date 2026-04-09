@@ -40,7 +40,13 @@ struct SidebarContextMenu: View {
                         let claudeTerminalIDs = terminals
                             .filter { $0.claudeSessionID != nil && $0.suspendedAt == nil }
                             .map { $0.id }
-                        // Set synchronously before any async work — pill appears immediately
+                        // Capture screenshot synchronously before any state change
+                        for id in claudeTerminalIDs {
+                            if let screenshot = appState.snapshotProviders[id]?() {
+                                appState.setSuspendingSnapshot(screenshot, for: id)
+                            }
+                        }
+                        // Now set suspending state (removes TerminalPanelView, shows screenshot)
                         claudeTerminalIDs.forEach { appState.suspendingTerminalIDs.insert($0) }
                         Task {
                             try? await appState.daemonClient.worktreeSuspend(worktreeID: wtID)
@@ -56,7 +62,10 @@ struct SidebarContextMenu: View {
                                 }
                                 try? await Task.sleep(for: .milliseconds(i < 10 ? 200 : 500))
                             }
-                            claudeTerminalIDs.forEach { appState.suspendingTerminalIDs.remove($0) }
+                            claudeTerminalIDs.forEach {
+                                appState.suspendingTerminalIDs.remove($0)
+                                appState.removeSuspendingSnapshot(for: $0)
+                            }
                         }
                     }
                 }
