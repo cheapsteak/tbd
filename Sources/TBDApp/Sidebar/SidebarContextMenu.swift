@@ -28,10 +28,10 @@ struct SidebarContextMenu: View {
 
                 let terminals = appState.terminals[worktree.id] ?? []
                 let hasUnsuspendedClaude = terminals.contains {
-                    $0.label?.hasPrefix("claude") == true && $0.suspendedAt == nil
+                    $0.claudeSessionID != nil && $0.suspendedAt == nil
                 }
                 let hasSuspendedClaude = terminals.contains {
-                    $0.label?.hasPrefix("claude") == true && $0.suspendedAt != nil
+                    $0.claudeSessionID != nil && $0.suspendedAt != nil
                 }
 
                 if hasUnsuspendedClaude {

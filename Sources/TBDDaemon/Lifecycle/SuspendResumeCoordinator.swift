@@ -84,14 +84,11 @@ public actor SuspendResumeCoordinator {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
-        guard terminal.label?.hasPrefix("claude") == true else {
+        guard let sessionID = terminal.claudeSessionID else {
             return .notClaudeTerminal
         }
         guard terminal.suspendedAt == nil else {
             return .alreadySuspended
-        }
-        guard let sessionID = terminal.claudeSessionID else {
-            return .notClaudeTerminal
         }
         guard let server = await worktreeServer(for: terminal.worktreeID) else {
             return .notFound
@@ -228,10 +225,9 @@ public actor SuspendResumeCoordinator {
         Task {
             guard let terminals = try? await db.terminals.list(worktreeID: worktreeID) else { return }
             for terminal in terminals {
-                guard terminal.label?.hasPrefix("claude") == true,
+                guard terminal.claudeSessionID != nil,
                       terminal.pinnedAt == nil,
-                      terminal.suspendedAt == nil,
-                      terminal.claudeSessionID != nil else { continue }
+                      terminal.suspendedAt == nil else { continue }
 
                 inFlight[terminal.id]?.cancel()
                 let task = Task<Void, Never> { await suspendTerminal(terminal) }
@@ -465,9 +461,8 @@ public actor SuspendResumeCoordinator {
         // This handles the case where the daemon restarts while Claude is sitting idle —
         // without this, the in-memory flag would be empty and suspend would never trigger.
         for terminal in allTerminals {
-            guard terminal.label?.hasPrefix("claude") == true,
-                  terminal.suspendedAt == nil,
-                  terminal.claudeSessionID != nil else { continue }
+            guard terminal.claudeSessionID != nil,
+                  terminal.suspendedAt == nil else { continue }
             guard let server = await worktreeServer(for: terminal.worktreeID) else { continue }
             if await detector.isIdle(server: server, paneID: terminal.tmuxPaneID) {
                 worktreeIdleFromHook.insert(terminal.worktreeID)
@@ -475,20 +470,6 @@ public actor SuspendResumeCoordinator {
             }
         }
 
-        // Backfill session IDs for pre-existing Claude terminals that lack one.
-        // These were created before --session-id was added at terminal creation.
-        for terminal in allTerminals {
-            guard terminal.claudeSessionID == nil,
-                  terminal.label?.hasPrefix("claude") == true,
-                  terminal.suspendedAt == nil else { continue }
-            guard let server = await worktreeServer(for: terminal.worktreeID) else { continue }
-            let alive = await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID)
-            guard alive else { continue }
-            if let sessionID = await detector.captureSessionID(server: server, paneID: terminal.tmuxPaneID) {
-                try? await db.terminals.updateSessionID(id: terminal.id, sessionID: sessionID)
-                logger.info("Startup: backfilled session ID for terminal \(terminal.id): \(sessionID)")
-            }
-        }
     }
 
     // MARK: - Helpers
