@@ -201,7 +201,7 @@ actor DaemonClient {
     /// Wrapped in autoreleasepool to ensure ObjC-bridged objects (from JSON coding,
     /// FileManager, etc.) are freed immediately — prevents accumulation across
     /// the 2-second polling cycle.
-    private func sendRaw(_ request: RPCRequest) throws -> RPCResponse {
+    private nonisolated func sendRaw(_ request: RPCRequest) throws -> RPCResponse {
         try autoreleasepool {
             let fd = try makeConnectedSocket()
             defer { close(fd) }
@@ -296,12 +296,49 @@ actor DaemonClient {
         return try response.decodeResult(resultType)
     }
 
+    // MARK: - Async RPC helpers (dispatch blocking recv off the cooperative thread pool)
+
+    /// Wraps the blocking `sendRaw` in a detached task so it runs on a background thread.
+    private func sendRawAsync(_ request: RPCRequest) async throws -> RPCResponse {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try self.sendRaw(request)
+        }.value
+    }
+
+    private func callVoidAsync<P: Encodable>(method: String, params: P) async throws {
+        let request = try RPCRequest(method: method, params: params)
+        let response = try await sendRawAsync(request)
+        guard response.success else {
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+        }
+    }
+
+    private func callAsync<P: Encodable, R: Decodable>(
+        method: String, params: P, resultType: R.Type
+    ) async throws -> R {
+        let request = try RPCRequest(method: method, params: params)
+        let response = try await sendRawAsync(request)
+        guard response.success else {
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+        }
+        return try response.decodeResult(resultType)
+    }
+
+    private func callNoParamsAsync<R: Decodable>(method: String, resultType: R.Type) async throws -> R {
+        let request = RPCRequest(method: method)
+        let response = try await sendRawAsync(request)
+        guard response.success else {
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+        }
+        return try response.decodeResult(resultType)
+    }
+
     // MARK: - Typed RPC Methods
 
     /// Add a repository by path.
-    func addRepo(path: String) throws -> Repo {
+    func addRepo(path: String) async throws -> Repo {
         connected = true
-        return try call(
+        return try await callAsync(
             method: RPCMethod.repoAdd,
             params: RepoAddParams(path: path),
             resultType: Repo.self
@@ -309,16 +346,16 @@ actor DaemonClient {
     }
 
     /// Remove a repository.
-    func removeRepo(repoID: UUID, force: Bool = false) throws {
-        try callVoid(
+    func removeRepo(repoID: UUID, force: Bool = false) async throws {
+        try await callVoidAsync(
             method: RPCMethod.repoRemove,
             params: RepoRemoveParams(repoID: repoID, force: force)
         )
     }
 
     /// Relocate a repository to a new on-disk path.
-    func relocateRepo(repoID: UUID, newPath: String) throws -> RepoRelocateResult {
-        return try call(
+    func relocateRepo(repoID: UUID, newPath: String) async throws -> RepoRelocateResult {
+        return try await callAsync(
             method: RPCMethod.repoRelocate,
             params: RepoRelocateParams(repoID: repoID, newPath: newPath),
             resultType: RepoRelocateResult.self
@@ -326,8 +363,8 @@ actor DaemonClient {
     }
 
     /// Update per-repo instruction fields.
-    func repoUpdateInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) throws -> Repo {
-        return try call(
+    func repoUpdateInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async throws -> Repo {
+        return try await callAsync(
             method: RPCMethod.repoUpdateInstructions,
             params: RepoUpdateInstructionsParams(repoID: repoID, renamePrompt: renamePrompt, customInstructions: customInstructions),
             resultType: Repo.self
@@ -335,13 +372,13 @@ actor DaemonClient {
     }
 
     /// List all repositories.
-    func listRepos() throws -> [Repo] {
-        return try callNoParams(method: RPCMethod.repoList, resultType: [Repo].self)
+    func listRepos() async throws -> [Repo] {
+        return try await callNoParamsAsync(method: RPCMethod.repoList, resultType: [Repo].self)
     }
 
     /// Create a new worktree in a repo.
-    func createWorktree(repoID: UUID, name: String? = nil) throws -> Worktree {
-        return try call(
+    func createWorktree(repoID: UUID, name: String? = nil) async throws -> Worktree {
+        return try await callAsync(
             method: RPCMethod.worktreeCreate,
             params: WorktreeCreateParams(repoID: repoID, name: name),
             resultType: Worktree.self
@@ -349,8 +386,8 @@ actor DaemonClient {
     }
 
     /// List worktrees, optionally filtered by repo and/or status.
-    func listWorktrees(repoID: UUID? = nil, status: WorktreeStatus? = nil) throws -> [Worktree] {
-        return try call(
+    func listWorktrees(repoID: UUID? = nil, status: WorktreeStatus? = nil) async throws -> [Worktree] {
+        return try await callAsync(
             method: RPCMethod.worktreeList,
             params: WorktreeListParams(repoID: repoID, status: status),
             resultType: [Worktree].self
@@ -358,48 +395,48 @@ actor DaemonClient {
     }
 
     /// Archive a worktree.
-    func archiveWorktree(id: UUID, force: Bool = false) throws {
-        try callVoid(
+    func archiveWorktree(id: UUID, force: Bool = false) async throws {
+        try await callVoidAsync(
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: id, force: force)
         )
     }
 
     /// Revive an archived worktree.
-    func reviveWorktree(id: UUID) throws {
-        try callVoid(
+    func reviveWorktree(id: UUID) async throws {
+        try await callVoidAsync(
             method: RPCMethod.worktreeRevive,
             params: WorktreeReviveParams(worktreeID: id)
         )
     }
 
     /// Rename a worktree's display name.
-    func renameWorktree(id: UUID, displayName: String) throws {
-        try callVoid(
+    func renameWorktree(id: UUID, displayName: String) async throws {
+        try await callVoidAsync(
             method: RPCMethod.worktreeRename,
             params: WorktreeRenameParams(worktreeID: id, displayName: displayName)
         )
     }
 
     /// Reorder worktrees within a repo.
-    func reorderWorktrees(repoID: UUID, worktreeIDs: [UUID]) throws {
-        try callVoid(
+    func reorderWorktrees(repoID: UUID, worktreeIDs: [UUID]) async throws {
+        try await callVoidAsync(
             method: RPCMethod.worktreeReorder,
             params: WorktreeReorderParams(repoID: repoID, worktreeIDs: worktreeIDs)
         )
     }
 
     /// Set or clear the pin on a terminal.
-    func setTerminalPin(id: UUID, pinned: Bool) throws {
-        try callVoid(
+    func setTerminalPin(id: UUID, pinned: Bool) async throws {
+        try await callVoidAsync(
             method: RPCMethod.terminalSetPin,
             params: TerminalSetPinParams(terminalID: id, pinned: pinned)
         )
     }
 
     /// Create a terminal in a worktree.
-    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideTokenID: UUID? = nil) throws -> Terminal {
-        return try call(
+    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideTokenID: UUID? = nil) async throws -> Terminal {
+        return try await callAsync(
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideTokenID: overrideTokenID),
             resultType: Terminal.self
@@ -407,8 +444,8 @@ actor DaemonClient {
     }
 
     /// List terminals, optionally filtered by worktree.
-    func listTerminals(worktreeID: UUID? = nil) throws -> [Terminal] {
-        return try call(
+    func listTerminals(worktreeID: UUID? = nil) async throws -> [Terminal] {
+        return try await callAsync(
             method: RPCMethod.terminalList,
             params: TerminalListParams(worktreeID: worktreeID),
             resultType: [Terminal].self
@@ -416,8 +453,8 @@ actor DaemonClient {
     }
 
     /// Recreate a dead tmux window for an existing terminal (preserves terminal ID).
-    func recreateTerminalWindow(terminalID: UUID) throws -> Terminal {
-        return try call(
+    func recreateTerminalWindow(terminalID: UUID) async throws -> Terminal {
+        return try await callAsync(
             method: RPCMethod.terminalRecreateWindow,
             params: TerminalRecreateWindowParams(terminalID: terminalID),
             resultType: Terminal.self
@@ -425,37 +462,37 @@ actor DaemonClient {
     }
 
     /// Delete a terminal (kills tmux window and removes DB record).
-    func deleteTerminal(terminalID: UUID) throws {
-        try callVoid(
+    func deleteTerminal(terminalID: UUID) async throws {
+        try await callVoidAsync(
             method: RPCMethod.terminalDelete,
             params: TerminalDeleteParams(terminalID: terminalID)
         )
     }
 
     /// Send text to a terminal.
-    func sendToTerminal(terminalID: UUID, text: String) throws {
-        try callVoid(
+    func sendToTerminal(terminalID: UUID, text: String) async throws {
+        try await callVoidAsync(
             method: RPCMethod.terminalSend,
             params: TerminalSendParams(terminalID: terminalID, text: text)
         )
     }
 
     /// Send a notification.
-    func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil) throws {
-        try callVoid(
+    func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil) async throws {
+        try await callVoidAsync(
             method: RPCMethod.notify,
             params: NotifyParams(worktreeID: worktreeID, type: type, message: message)
         )
     }
 
     /// Get daemon status.
-    func daemonStatus() throws -> DaemonStatusResult {
-        return try callNoParams(method: RPCMethod.daemonStatus, resultType: DaemonStatusResult.self)
+    func daemonStatus() async throws -> DaemonStatusResult {
+        return try await callNoParamsAsync(method: RPCMethod.daemonStatus, resultType: DaemonStatusResult.self)
     }
 
     /// Resolve a filesystem path to a repo/worktree.
-    func resolvePath(_ path: String) throws -> ResolvedPathResult {
-        return try call(
+    func resolvePath(_ path: String) async throws -> ResolvedPathResult {
+        return try await callAsync(
             method: RPCMethod.resolvePath,
             params: ResolvePathParams(path: path),
             resultType: ResolvedPathResult.self
@@ -463,60 +500,60 @@ actor DaemonClient {
     }
 
     /// List unread notifications grouped by worktree (highest severity per worktree).
-    func listNotifications() throws -> [UUID: NotificationType] {
-        let result = try callNoParams(method: RPCMethod.notificationsList, resultType: NotificationsListResult.self)
+    func listNotifications() async throws -> [UUID: NotificationType] {
+        let result = try await callNoParamsAsync(method: RPCMethod.notificationsList, resultType: NotificationsListResult.self)
         return result.notifications
     }
 
     /// Mark notifications as read for a worktree.
-    func markNotificationsRead(worktreeID: UUID) throws {
-        try callVoid(
+    func markNotificationsRead(worktreeID: UUID) async throws {
+        try await callVoidAsync(
             method: RPCMethod.notificationsMarkRead,
             params: NotificationsMarkReadParams(worktreeID: worktreeID)
         )
     }
 
     /// Fetch all cached PR statuses from the daemon.
-    func listPRStatuses() throws -> [UUID: PRStatus] {
-        let result = try callNoParams(method: RPCMethod.prList, resultType: PRListResult.self)
+    func listPRStatuses() async throws -> [UUID: PRStatus] {
+        let result = try await callNoParamsAsync(method: RPCMethod.prList, resultType: PRListResult.self)
         return result.statuses
     }
 
     /// Notify the daemon which worktrees are currently selected in the app.
-    func worktreeSelectionChanged(selectedWorktreeIDs: Set<UUID>, suspendEnabled: Bool = true) throws {
-        try callVoid(
+    func worktreeSelectionChanged(selectedWorktreeIDs: Set<UUID>, suspendEnabled: Bool = true) async throws {
+        try await callVoidAsync(
             method: RPCMethod.worktreeSelectionChanged,
             params: WorktreeSelectionChangedParams(selectedWorktreeIDs: Array(selectedWorktreeIDs), suspendEnabled: suspendEnabled)
         )
     }
 
     /// Manually suspend a single Claude terminal.
-    func terminalSuspend(terminalID: UUID) throws {
-        try callVoid(
+    func terminalSuspend(terminalID: UUID) async throws {
+        try await callVoidAsync(
             method: RPCMethod.terminalSuspend,
             params: TerminalSuspendParams(terminalID: terminalID)
         )
     }
 
     /// Manually resume a single suspended terminal.
-    func terminalResume(terminalID: UUID) throws {
-        try callVoid(
+    func terminalResume(terminalID: UUID) async throws {
+        try await callVoidAsync(
             method: RPCMethod.terminalResume,
             params: TerminalResumeParams(terminalID: terminalID)
         )
     }
 
     /// Suspend all Claude terminals in a worktree.
-    func worktreeSuspend(worktreeID: UUID) throws {
-        try callVoid(
+    func worktreeSuspend(worktreeID: UUID) async throws {
+        try await callVoidAsync(
             method: RPCMethod.worktreeSuspend,
             params: WorktreeSuspendParams(worktreeID: worktreeID)
         )
     }
 
     /// Resume all suspended terminals in a worktree.
-    func worktreeResume(worktreeID: UUID) throws {
-        try callVoid(
+    func worktreeResume(worktreeID: UUID) async throws {
+        try await callVoidAsync(
             method: RPCMethod.worktreeResume,
             params: WorktreeResumeParams(worktreeID: worktreeID)
         )
@@ -524,8 +561,8 @@ actor DaemonClient {
 
     /// Trigger an immediate PR status refresh for one worktree.
     /// Returns nil if no PR exists for the worktree's branch.
-    func refreshPRStatus(worktreeID: UUID) throws -> PRStatus? {
-        let result = try call(
+    func refreshPRStatus(worktreeID: UUID) async throws -> PRStatus? {
+        let result = try await callAsync(
             method: RPCMethod.prRefresh,
             params: PRRefreshParams(worktreeID: worktreeID),
             resultType: PRRefreshResult.self
@@ -598,8 +635,8 @@ actor DaemonClient {
     // MARK: - Notes
 
     /// Create a new note in a worktree.
-    func createNote(worktreeID: UUID) throws -> Note {
-        return try call(
+    func createNote(worktreeID: UUID) async throws -> Note {
+        return try await callAsync(
             method: RPCMethod.noteCreate,
             params: NoteCreateParams(worktreeID: worktreeID),
             resultType: Note.self
@@ -607,8 +644,8 @@ actor DaemonClient {
     }
 
     /// Get a note by ID.
-    func getNote(noteID: UUID) throws -> Note {
-        return try call(
+    func getNote(noteID: UUID) async throws -> Note {
+        return try await callAsync(
             method: RPCMethod.noteGet,
             params: NoteGetParams(noteID: noteID),
             resultType: Note.self
@@ -616,8 +653,8 @@ actor DaemonClient {
     }
 
     /// Update a note's title and/or content.
-    func updateNote(noteID: UUID, title: String? = nil, content: String? = nil) throws -> Note {
-        return try call(
+    func updateNote(noteID: UUID, title: String? = nil, content: String? = nil) async throws -> Note {
+        return try await callAsync(
             method: RPCMethod.noteUpdate,
             params: NoteUpdateParams(noteID: noteID, title: title, content: content),
             resultType: Note.self
@@ -625,16 +662,16 @@ actor DaemonClient {
     }
 
     /// Delete a note.
-    func deleteNote(noteID: UUID) throws {
-        try callVoid(
+    func deleteNote(noteID: UUID) async throws {
+        try await callVoidAsync(
             method: RPCMethod.noteDelete,
             params: NoteDeleteParams(noteID: noteID)
         )
     }
 
     /// List notes, optionally filtered by worktree.
-    func listNotes(worktreeID: UUID? = nil) throws -> [Note] {
-        return try call(
+    func listNotes(worktreeID: UUID? = nil) async throws -> [Note] {
+        return try await callAsync(
             method: RPCMethod.noteList,
             params: NoteListParams(worktreeID: worktreeID),
             resultType: [Note].self
@@ -644,14 +681,14 @@ actor DaemonClient {
     // MARK: - Conductors
 
     /// List all conductors.
-    func listConductors() throws -> [Conductor] {
-        let result = try callNoParams(method: RPCMethod.conductorList, resultType: ConductorListResult.self)
+    func listConductors() async throws -> [Conductor] {
+        let result = try await callNoParamsAsync(method: RPCMethod.conductorList, resultType: ConductorListResult.self)
         return result.conductors
     }
 
     /// Set up a new conductor with defaults.
-    func conductorSetup(name: String, repos: [String] = ["*"]) throws -> Conductor {
-        return try call(
+    func conductorSetup(name: String, repos: [String] = ["*"]) async throws -> Conductor {
+        return try await callAsync(
             method: RPCMethod.conductorSetup,
             params: ConductorSetupParams(name: name, repos: repos),
             resultType: Conductor.self
@@ -659,8 +696,8 @@ actor DaemonClient {
     }
 
     /// Start a conductor.
-    func conductorStart(name: String) throws -> Terminal {
-        return try call(
+    func conductorStart(name: String) async throws -> Terminal {
+        return try await callAsync(
             method: RPCMethod.conductorStart,
             params: ConductorNameParams(name: name),
             resultType: Terminal.self
@@ -668,24 +705,24 @@ actor DaemonClient {
     }
 
     /// Stop a conductor.
-    func conductorStop(name: String) throws {
-        try callVoid(
+    func conductorStop(name: String) async throws {
+        try await callVoidAsync(
             method: RPCMethod.conductorStop,
             params: ConductorNameParams(name: name)
         )
     }
 
     /// Teardown (remove) a conductor.
-    func conductorTeardown(name: String) throws {
-        try callVoid(
+    func conductorTeardown(name: String) async throws {
+        try await callVoidAsync(
             method: RPCMethod.conductorTeardown,
             params: ConductorNameParams(name: name)
         )
     }
 
     /// Clear the navigation suggestion for a conductor.
-    func conductorClearSuggestion(name: String) throws {
-        try callVoid(
+    func conductorClearSuggestion(name: String) async throws {
+        try await callVoidAsync(
             method: RPCMethod.conductorClearSuggestion,
             params: ConductorNameParams(name: name)
         )
@@ -698,13 +735,13 @@ actor DaemonClient {
     // process — keep it out of any logger / print statement.
 
     /// List all Claude tokens with cached usage and the global default ID.
-    func listClaudeTokens() throws -> ClaudeTokenListResult {
-        return try callNoParams(method: RPCMethod.claudeTokenList, resultType: ClaudeTokenListResult.self)
+    func listClaudeTokens() async throws -> ClaudeTokenListResult {
+        return try await callNoParamsAsync(method: RPCMethod.claudeTokenList, resultType: ClaudeTokenListResult.self)
     }
 
     /// Add a Claude token. The raw token string MUST NOT be logged.
-    func addClaudeToken(name: String, token: String) throws -> ClaudeTokenAddResult {
-        return try call(
+    func addClaudeToken(name: String, token: String) async throws -> ClaudeTokenAddResult {
+        return try await callAsync(
             method: RPCMethod.claudeTokenAdd,
             params: ClaudeTokenAddParams(name: name, token: token),
             resultType: ClaudeTokenAddResult.self
@@ -712,40 +749,40 @@ actor DaemonClient {
     }
 
     /// Delete a Claude token by ID.
-    func deleteClaudeToken(id: UUID) throws {
-        try callVoid(
+    func deleteClaudeToken(id: UUID) async throws {
+        try await callVoidAsync(
             method: RPCMethod.claudeTokenDelete,
             params: ClaudeTokenDeleteParams(id: id)
         )
     }
 
     /// Rename a Claude token.
-    func renameClaudeToken(id: UUID, name: String) throws {
-        try callVoid(
+    func renameClaudeToken(id: UUID, name: String) async throws {
+        try await callVoidAsync(
             method: RPCMethod.claudeTokenRename,
             params: ClaudeTokenRenameParams(id: id, name: name)
         )
     }
 
     /// Set or clear the global default Claude token.
-    func setGlobalDefaultClaudeToken(id: UUID?) throws {
-        try callVoid(
+    func setGlobalDefaultClaudeToken(id: UUID?) async throws {
+        try await callVoidAsync(
             method: RPCMethod.claudeTokenSetGlobalDefault,
             params: ClaudeTokenSetGlobalDefaultParams(id: id)
         )
     }
 
     /// Set or clear a per-repo Claude token override.
-    func setRepoClaudeTokenOverride(repoID: UUID, tokenID: UUID?) throws {
-        try callVoid(
+    func setRepoClaudeTokenOverride(repoID: UUID, tokenID: UUID?) async throws {
+        try await callVoidAsync(
             method: RPCMethod.claudeTokenSetRepoOverride,
             params: ClaudeTokenSetRepoOverrideParams(repoID: repoID, tokenID: tokenID)
         )
     }
 
     /// Fetch fresh usage for a single Claude token (60s server-side dedupe).
-    func fetchClaudeTokenUsage(id: UUID) throws -> ClaudeTokenUsage {
-        let result = try call(
+    func fetchClaudeTokenUsage(id: UUID) async throws -> ClaudeTokenUsage {
+        let result = try await callAsync(
             method: RPCMethod.claudeTokenFetchUsage,
             params: ClaudeTokenFetchUsageParams(id: id),
             resultType: ClaudeTokenFetchUsageResult.self
@@ -755,8 +792,8 @@ actor DaemonClient {
 
     /// Swap the Claude token associated with a running terminal.
     /// Returns the newly created Terminal (the daemon forks a new tab).
-    func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?) throws -> Terminal {
-        return try call(
+    func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?) async throws -> Terminal {
+        return try await callAsync(
             method: RPCMethod.terminalSwapClaudeToken,
             params: TerminalSwapClaudeTokenParams(terminalID: terminalID, newTokenID: newTokenID),
             resultType: Terminal.self
@@ -764,8 +801,8 @@ actor DaemonClient {
     }
 
     /// List Claude session summaries for a worktree.
-    func listSessions(worktreeID: UUID) throws -> [SessionSummary] {
-        return try call(
+    func listSessions(worktreeID: UUID) async throws -> [SessionSummary] {
+        return try await callAsync(
             method: RPCMethod.sessionList,
             params: SessionListParams(worktreeID: worktreeID),
             resultType: [SessionSummary].self
@@ -773,8 +810,8 @@ actor DaemonClient {
     }
 
     /// Load full chat messages for a session file.
-    func sessionMessages(filePath: String) throws -> [ChatMessage] {
-        return try call(
+    func sessionMessages(filePath: String) async throws -> [ChatMessage] {
+        return try await callAsync(
             method: RPCMethod.sessionMessages,
             params: SessionMessagesParams(filePath: filePath),
             resultType: [ChatMessage].self
@@ -782,8 +819,8 @@ actor DaemonClient {
     }
 
     /// Notify the daemon whether the app is in the foreground (drives usage poller).
-    func setAppForegroundState(isForeground: Bool) throws {
-        try callVoid(
+    func setAppForegroundState(isForeground: Bool) async throws {
+        try await callVoidAsync(
             method: RPCMethod.appSetForegroundState,
             params: AppSetForegroundStateParams(isForeground: isForeground)
         )
