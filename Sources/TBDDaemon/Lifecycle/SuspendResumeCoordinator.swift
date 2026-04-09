@@ -147,6 +147,15 @@ public actor SuspendResumeCoordinator {
                 return .notFound
             }
 
+            // Mark suspended immediately so the app switches to snapshot view
+            // without waiting for verify-exit polling.
+            do {
+                try await db.terminals.setSuspended(id: terminalID, sessionID: freshTerminal.claudeSessionID ?? sessionID, snapshot: snapshot)
+                self.worktreeIdleFromHook.remove(freshTerminal.worktreeID)
+            } catch {
+                suspendLog("MANUAL SUSPEND: failed to mark suspended for \(terminalID.uuidString.prefix(8))")
+            }
+
             // Verify exit: poll for up to 3s
             for _ in 0..<15 {
                 try? await Task.sleep(for: .milliseconds(200))
@@ -154,14 +163,6 @@ public actor SuspendResumeCoordinator {
                    !ClaudeStateDetector.isClaudeProcess(cmd) {
                     break
                 }
-            }
-
-            // Mark suspended
-            do {
-                try await db.terminals.setSuspended(id: terminalID, sessionID: freshTerminal.claudeSessionID ?? sessionID, snapshot: snapshot)
-                self.worktreeIdleFromHook.remove(freshTerminal.worktreeID)
-            } catch {
-                return .notFound
             }
 
             return .ok
@@ -214,8 +215,10 @@ public actor SuspendResumeCoordinator {
                 scheduleSuspend(worktreeID: worktreeID)
             }
         }
-        for worktreeID in arriving {
-            scheduleResume(worktreeID: worktreeID)
+        if suspendEnabled {
+            for worktreeID in arriving {
+                scheduleResume(worktreeID: worktreeID)
+            }
         }
     }
 
@@ -288,6 +291,16 @@ public actor SuspendResumeCoordinator {
             return
         }
 
+        // Mark suspended immediately so the app switches to snapshot view
+        // without waiting for verify-exit polling.
+        do {
+            try await db.terminals.setSuspended(id: terminal.id, sessionID: terminal.claudeSessionID!, snapshot: snapshot)
+            worktreeIdleFromHook.remove(terminal.worktreeID)
+            logger.info("Suspended terminal \(terminal.id)")
+        } catch {
+            logger.warning("Failed to mark terminal \(terminal.id) suspended: \(error)")
+        }
+
         // Verify exit: poll for up to 3s
         for _ in 0..<15 {
             try? await Task.sleep(for: .milliseconds(200))
@@ -295,15 +308,6 @@ public actor SuspendResumeCoordinator {
                !ClaudeStateDetector.isClaudeProcess(cmd) {
                 break
             }
-        }
-
-        // Always mark suspended after point of no return
-        do {
-            try await db.terminals.setSuspended(id: terminal.id, sessionID: terminal.claudeSessionID!, snapshot: snapshot)
-            worktreeIdleFromHook.remove(terminal.worktreeID)
-            logger.info("Suspended terminal \(terminal.id)")
-        } catch {
-            logger.warning("Failed to mark terminal \(terminal.id) suspended: \(error)")
         }
 
         inFlight[terminal.id] = nil

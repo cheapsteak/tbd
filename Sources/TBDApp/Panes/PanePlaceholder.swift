@@ -204,14 +204,25 @@ struct PanePlaceholder: View {
             .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
             .overlay(alignment: .topTrailing) {
                 if terminal.suspendedAt != nil {
-                    Text("Suspended")
-                        .font(.caption2)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
-                        .padding(8)
+                    Button {
+                        Task {
+                            try? await appState.daemonClient.terminalResume(terminalID: terminal.id)
+                            await appState.refreshTerminals(worktreeID: worktree.id)
+                        }
+                    } label: {
+                        Text("Click to resume session")
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
+                            .padding(8)
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    }
                 }
             }
         } else {
