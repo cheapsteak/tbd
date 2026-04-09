@@ -126,8 +126,7 @@ final class ExpandingRowPanel {
                 backing: .buffered,
                 defer: true
             )
-            p.isOpaque = false
-            p.backgroundColor = .clear
+            p.isOpaque = true
             p.level = .normal
             p.hasShadow = false
             p.hidesOnDeactivate = false
@@ -158,11 +157,17 @@ final class ExpandingRowPanel {
             height: screenFrame.height
         )
 
-        let bg = NSVisualEffectView(frame: NSRect(origin: .zero, size: panelFrame.size))
-        bg.material = .sidebar
-        bg.blendingMode = .behindWindow
-        bg.state = .active
+        let bg = NSView(frame: NSRect(origin: .zero, size: panelFrame.size))
         bg.wantsLayer = true
+        // windowBackgroundColor resolves to pure white in light mode, which is
+        // too bright for the sidebar's vibrancy-tinted gray. Use approximate
+        // sidebar background values instead.
+        let isDark = parentWindow.effectiveAppearance
+            .bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let bgColor = isDark
+            ? NSColor(white: 0.157, alpha: 1.0)   // ≈ #282828, macOS dark sidebar
+            : NSColor(white: 241.0 / 255.0, alpha: 1.0)   // ≈ #F1F1F1, measured via Digital Color Meter
+        bg.layer?.backgroundColor = bgColor.cgColor
         bg.layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
         bg.layer?.cornerRadius = 5
 
@@ -173,11 +178,8 @@ final class ExpandingRowPanel {
             height: panelFrame.height
         )
 
-        let container = NSView(frame: NSRect(origin: .zero, size: panelFrame.size))
-        container.addSubview(bg)
-        container.addSubview(hosting)
-
-        panel.contentView = container
+        bg.addSubview(hosting)
+        panel.contentView = bg
         panel.setFrame(panelFrame, display: true)
         currentPanelFrame = panelFrame
         currentOnClick = onClick

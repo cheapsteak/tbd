@@ -66,8 +66,15 @@ if [ "$daemon_only" = false ]; then
     pkill -f "$BUILD_DIR/TBDApp" 2>/dev/null && sleep 0.3 || true
 
     echo "Starting app..."
-    "$BUILD_DIR/TBDApp" > /dev/null 2>&1 &
-    echo "  App launched (PID $!)"
+    "$BUILD_DIR/TBDApp" > /tmp/tbdapp.log 2>&1 &
+    APP_PID=$!
+    echo "  App launched (PID $APP_PID) — logs: /tmp/tbdapp.log"
+    # Give it a moment and check it didn't immediately exit
+    sleep 0.5
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+        echo "  ERROR: App exited immediately. Last lines of /tmp/tbdapp.log:"
+        tail -20 /tmp/tbdapp.log
+    fi
 fi
 
 echo "Done. Tmux sessions preserved."
