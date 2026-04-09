@@ -57,53 +57,38 @@ struct OpenInEditorButton: View {
         if let primary = primaryEntry {
             HStack(spacing: 0) {
                 // Left segment — primary editor icon
-                Button {
-                    openInEditor(path: path, bundleID: primary.editor.bundleID)
-                } label: {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: primary.appURL.path))
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 16, height: 16)
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-                .background(
-                    isHoveringLeft
-                        ? Color.primary.opacity(0.08)
-                        : Color.clear
-                )
-                .onHover { isHoveringLeft = $0 }
-                .help("Open in \(primary.editor.name)")
-
-                // Divider
-                Rectangle()
-                    .fill(Color.primary.opacity(0.15))
-                    .frame(width: 1, height: 16)
+                Image(nsImage: NSWorkspace.shared.icon(forFile: primary.appURL.path))
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 16, height: 16)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(
+                        isHoveringLeft
+                            ? Color.primary.opacity(0.08)
+                            : Color.clear
+                    )
+                    .contentShape(Rectangle())
+                    .onHover { isHoveringLeft = $0 }
+                    .onTapGesture { openInEditor(path: path, bundleID: primary.editor.bundleID) }
+                    .help("Open in \(primary.editor.name)")
 
                 // Right segment — chevron dropdown
-                Button {
-                    showMenu(primary: primary)
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .frame(width: 14, height: 16)
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 4)
-                .background(
-                    isHoveringRight
-                        ? Color.primary.opacity(0.08)
-                        : Color.clear
-                )
-                .onHover { isHoveringRight = $0 }
-                .help("Choose editor")
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 14, height: 16)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
+                    .background(
+                        isHoveringRight
+                            ? Color.primary.opacity(0.08)
+                            : Color.clear
+                    )
+                    .contentShape(Rectangle())
+                    .onHover { isHoveringRight = $0 }
+                    .onTapGesture { showMenu(primary: primary) }
+                    .help("Choose editor")
             }
-            .overlay(
-                RoundedRectangle(cornerRadius: 5)
-                    .stroke(Color.primary.opacity(0.15), lineWidth: 1)
-            )
         }
     }
 
