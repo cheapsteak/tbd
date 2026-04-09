@@ -40,10 +40,22 @@ struct SidebarContextMenu: View {
                         let claudeTerminalIDs = terminals
                             .filter { $0.claudeSessionID != nil && $0.suspendedAt == nil }
                             .map { $0.id }
+                        // Set synchronously before any async work — pill appears immediately
+                        claudeTerminalIDs.forEach { appState.suspendingTerminalIDs.insert($0) }
                         Task {
-                            claudeTerminalIDs.forEach { appState.suspendingTerminalIDs.insert($0) }
                             try? await appState.daemonClient.worktreeSuspend(worktreeID: wtID)
-                            await appState.refreshTerminals(worktreeID: wtID)
+                            // Poll until all Claude terminals are suspended (daemon now async)
+                            // 200ms intervals for first 2s, 500ms after — up to 15s total
+                            for i in 0..<30 {
+                                await appState.refreshTerminals(worktreeID: wtID)
+                                let updated = appState.terminals[wtID] ?? []
+                                if claudeTerminalIDs.allSatisfy({ id in
+                                    updated.first(where: { $0.id == id })?.suspendedAt != nil
+                                }) {
+                                    break
+                                }
+                                try? await Task.sleep(for: .milliseconds(i < 10 ? 200 : 500))
+                            }
                             claudeTerminalIDs.forEach { appState.suspendingTerminalIDs.remove($0) }
                         }
                     }

@@ -41,9 +41,12 @@ extension RPCRouter {
             $0.claudeSessionID != nil && $0.suspendedAt == nil
         }
 
-        // Sequential — the coordinator is an actor so calls serialize anyway
-        for terminal in claudeTerminals {
-            _ = await suspendResumeCoordinator.manualSuspend(terminalID: terminal.id)
+        // Fire in background — RPC returns immediately so the app can show
+        // the suspending overlay while the daemon does its work.
+        Task {
+            for terminal in claudeTerminals {
+                _ = await suspendResumeCoordinator.manualSuspend(terminalID: terminal.id)
+            }
         }
 
         return .ok()
