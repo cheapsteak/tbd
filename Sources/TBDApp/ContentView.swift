@@ -65,12 +65,6 @@ struct ContentView: View {
             .toolbar(removing: .sidebarToggle)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    if appState.selectedWorktreeIDs.count == 1,
-                       let worktree = selectedWorktree, !worktree.path.isEmpty {
-                        OpenInEditorButton(path: worktree.path)
-                        Divider()
-                    }
-
                     Button {
                         autoSuspendClaude.toggle()
                     } label: {

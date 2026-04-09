@@ -30,93 +30,119 @@ private func openInEditor(path: String, bundleID: String) {
         return
     }
     guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
-    let fileURL = URL(fileURLWithPath: path)
-    NSWorkspace.shared.open([fileURL], withApplicationAt: appURL, configuration: .init(), completionHandler: nil)
+    NSWorkspace.shared.open([URL(fileURLWithPath: path)], withApplicationAt: appURL, configuration: .init(), completionHandler: nil)
+}
+
+private func recentKey(repoID: UUID) -> String { "openInEditor.recent.\(repoID)" }
+
+private func loadRecentBundleIDs(repoID: UUID) -> [String] {
+    guard let data = UserDefaults.standard.data(forKey: recentKey(repoID: repoID)),
+          let ids = try? JSONDecoder().decode([String].self, from: data) else {
+        return knownEditors.map(\.bundleID)
+    }
+    return ids
+}
+
+private func recordUsed(bundleID: String, repoID: UUID) {
+    var ids = loadRecentBundleIDs(repoID: repoID)
+    ids.removeAll { $0 == bundleID }
+    ids.insert(bundleID, at: 0)
+    if let data = try? JSONEncoder().encode(ids) {
+        UserDefaults.standard.set(data, forKey: recentKey(repoID: repoID))
+    }
 }
 
 struct OpenInEditorButton: View {
     let path: String
+    let repoID: UUID
 
-    @AppStorage("openInEditor.preferredBundleID") private var preferredBundleID: String = ""
-    @State private var isHoveringLeft = false
-    @State private var isHoveringRight = false
+    @State private var recentBundleIDs: [String] = []
+    @State private var hovering: String? = nil
 
-    private var available: [(editor: ExternalEditor, appURL: URL)] {
-        installedEditors()
+    private var available: [(editor: ExternalEditor, appURL: URL)] { installedEditors() }
+
+    private var pinnedEditors: [(editor: ExternalEditor, appURL: URL)] {
+        let byID = Dictionary(uniqueKeysWithValues: available.map { ($0.editor.bundleID, $0) })
+        var result: [(editor: ExternalEditor, appURL: URL)] = []
+        for bundleID in recentBundleIDs {
+            if let entry = byID[bundleID] {
+                result.append(entry)
+                if result.count == 3 { break }
+            }
+        }
+        if result.count < 3 {
+            let pinnedIDs = Set(result.map(\.editor.bundleID))
+            for entry in available where !pinnedIDs.contains(entry.editor.bundleID) {
+                result.append(entry)
+                if result.count == 3 { break }
+            }
+        }
+        return result
     }
 
-    private var primaryEntry: (editor: ExternalEditor, appURL: URL)? {
-        if !preferredBundleID.isEmpty,
-           let match = available.first(where: { $0.editor.bundleID == preferredBundleID }) {
-            return match
-        }
-        return available.first
+    private var overflowEditors: [(editor: ExternalEditor, appURL: URL)] {
+        let pinnedIDs = Set(pinnedEditors.map(\.editor.bundleID))
+        return available.filter { !pinnedIDs.contains($0.editor.bundleID) }
     }
 
     var body: some View {
-        if let primary = primaryEntry {
-            HStack(spacing: 0) {
-                // Left segment — primary editor icon
-                Image(nsImage: NSWorkspace.shared.icon(forFile: primary.appURL.path))
+        HStack(spacing: 2) {
+            ForEach(pinnedEditors, id: \.editor.bundleID) { entry in
+                Image(nsImage: NSWorkspace.shared.icon(forFile: entry.appURL.path))
                     .resizable()
                     .scaledToFit()
                     .frame(width: 16, height: 16)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 4)
+                    .padding(4)
                     .background(
-                        isHoveringLeft
-                            ? Color.primary.opacity(0.08)
-                            : Color.clear
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(hovering == entry.editor.bundleID ? Color.primary.opacity(0.08) : Color.clear)
                     )
                     .contentShape(Rectangle())
-                    .onHover { isHoveringLeft = $0 }
-                    .onTapGesture { openInEditor(path: path, bundleID: primary.editor.bundleID) }
-                    .help("Open in \(primary.editor.name)")
+                    .onHover { hovering = $0 ? entry.editor.bundleID : nil }
+                    .onTapGesture { open(entry: entry) }
+                    .help("Open in \(entry.editor.name)")
+            }
 
-                // Right segment — chevron dropdown
+            if !overflowEditors.isEmpty {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
-                    .frame(width: 14, height: 16)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 4)
+                    .frame(width: 12, height: 16)
+                    .padding(4)
                     .background(
-                        isHoveringRight
-                            ? Color.primary.opacity(0.08)
-                            : Color.clear
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(hovering == "__chevron" ? Color.primary.opacity(0.08) : Color.clear)
                     )
                     .contentShape(Rectangle())
-                    .onHover { isHoveringRight = $0 }
-                    .onTapGesture { showMenu(primary: primary) }
-                    .help("Choose editor")
+                    .onHover { hovering = $0 ? "__chevron" : nil }
+                    .onTapGesture { showOverflowMenu() }
+                    .help("More editors")
             }
         }
+        .onAppear { recentBundleIDs = loadRecentBundleIDs(repoID: repoID) }
+        .onChange(of: repoID) { _, _ in recentBundleIDs = loadRecentBundleIDs(repoID: repoID) }
     }
 
-    private func showMenu(primary: (editor: ExternalEditor, appURL: URL)) {
+    private func open(entry: (editor: ExternalEditor, appURL: URL)) {
+        openInEditor(path: path, bundleID: entry.editor.bundleID)
+        recordUsed(bundleID: entry.editor.bundleID, repoID: repoID)
+        recentBundleIDs = loadRecentBundleIDs(repoID: repoID)
+    }
+
+    private func showOverflowMenu() {
         let menu = NSMenu()
         let coordinator = EditorMenuCoordinator()
-
-        for entry in available {
+        for entry in overflowEditors {
             let item = NSMenuItem(title: entry.editor.name, action: nil, keyEquivalent: "")
             let icon = NSWorkspace.shared.icon(forFile: entry.appURL.path)
             icon.size = NSSize(width: 16, height: 16)
             item.image = icon
-
-            let bundleID = entry.editor.bundleID
-            let p = path
-            coordinator.actions[item] = {
-                openInEditor(path: p, bundleID: bundleID)
-                preferredBundleID = bundleID
-            }
+            coordinator.actions[item] = { open(entry: entry) }
             item.target = coordinator
             item.action = #selector(EditorMenuCoordinator.selectItem(_:))
             menu.addItem(item)
         }
-
         objc_setAssociatedObject(menu, "editorCoordinator", coordinator, .OBJC_ASSOCIATION_RETAIN)
-
-        let location = NSEvent.mouseLocation
-        menu.popUp(positioning: nil, at: location, in: nil)
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 }
 
