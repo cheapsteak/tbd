@@ -470,20 +470,6 @@ public actor SuspendResumeCoordinator {
             }
         }
 
-        // Backfill session IDs for pre-existing Claude terminals that lack one.
-        // These were created before --session-id was added at terminal creation.
-        for terminal in allTerminals {
-            guard terminal.claudeSessionID == nil,
-                  terminal.label?.lowercased().hasPrefix("claude") == true,
-                  terminal.suspendedAt == nil else { continue }
-            guard let server = await worktreeServer(for: terminal.worktreeID) else { continue }
-            let alive = await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID)
-            guard alive else { continue }
-            if let sessionID = await detector.captureSessionID(server: server, paneID: terminal.tmuxPaneID) {
-                try? await db.terminals.updateSessionID(id: terminal.id, sessionID: sessionID)
-                logger.info("Startup: backfilled session ID for terminal \(terminal.id): \(sessionID)")
-            }
-        }
     }
 
     // MARK: - Helpers
