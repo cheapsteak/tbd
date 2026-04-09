@@ -16,7 +16,7 @@ enum SystemPromptBuilder {
 
         Available CLI commands:
         - tbd worktree rename "<worktree-name>" "<display-name>" — rename the worktree display name
-        - tbd worktree create [--repo <path-or-id>] — create a new worktree (auto-named)
+        - tbd worktree create [--repo <path-or-id>] [--folder <dir>] [--branch <name>] [--name "<display>"] — create a new worktree
         - tbd worktree list [--repo <id>] — list worktrees
         - tbd terminal create <worktree> [--type claude|shell] [--cmd <command>] — create a new terminal tab
         - tbd terminal send --terminal <id> --text <text> [--submit] — send text to a terminal (--submit presses Enter)
@@ -31,10 +31,21 @@ enum SystemPromptBuilder {
         - TBD_PROMPT_RENAME — Worktree rename prompt (set if worktree hasn't been renamed yet)
 
         Spawning a new Claude tab in the current worktree:
-          tbd terminal create "$TBD_WORKTREE_ID" --type claude --prompt "your task here"
+          tbd terminal create "$TBD_WORKTREE_ID" --type claude --prompt-file - <<'EOF'
+          your task here
+          EOF
 
         Creating a new worktree with an initial task for its default Claude tab:
-          tbd worktree create --prompt "your task here"
+          tbd worktree create --prompt-file - <<'EOF'
+          your task here
+          EOF
+
+        When using --prompt or --prompt-file to spawn a new worktree or Claude tab, write a
+        thorough briefing — the new session starts with zero context from your conversation.
+        Include what you're trying to accomplish, what you've already learned or ruled out,
+        relevant file paths and line numbers, and enough surrounding context that the new
+        session can make judgment calls rather than follow narrow instructions. Use
+        --prompt-file - with a heredoc for multi-line prompts to avoid shell escaping issues.
 
         Using --cmd for full control (env vars expand in the new shell):
           tbd terminal create "$TBD_WORKTREE_ID" --cmd 'claude --append-system-prompt "$TBD_PROMPT_CONTEXT"'

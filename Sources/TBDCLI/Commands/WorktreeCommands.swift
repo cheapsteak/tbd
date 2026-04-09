@@ -24,11 +24,23 @@ struct WorktreeCreate: AsyncParsableCommand {
         abstract: "Create a new worktree (waits for git setup to complete)"
     )
 
+    @Option(name: .long, help: "Directory name for the worktree (default: auto-generated)")
+    var folder: String?
+
+    @Option(name: .long, help: "Full git branch name (default: tbd/<folder>)")
+    var branch: String?
+
+    @Option(name: .long, help: "Display name shown in TBD UI (default: same as folder)")
+    var name: String?
+
     @Option(name: .long, help: "Repository path or ID")
     var repo: String?
 
-    @Option(name: .long, help: "Initial prompt to send to the auto-created default Claude session")
+    @Option(name: .long, help: "Initial prompt for the auto-created Claude session")
     var prompt: String?
+
+    @Option(name: .long, help: "Read initial prompt from a file (use - for stdin)")
+    var promptFile: String?
 
     @Flag(name: .long, help: "Return immediately without waiting for the worktree to become active")
     var noWait = false
@@ -36,12 +48,28 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
+    mutating func validate() throws {
+        if let folder = folder {
+            if folder.isEmpty {
+                throw ValidationError("Folder name must not be empty.")
+            }
+            if folder == "." || folder == ".." {
+                throw ValidationError("Folder name cannot be '.' or '..'.")
+            }
+            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+            if folder.unicodeScalars.contains(where: { !allowed.contains($0) }) {
+                throw ValidationError(
+                    "Invalid folder name '\(folder)'. Use only letters, digits, hyphens, underscores, or dots."
+                )
+            }
+        }
+    }
+
     mutating func run() async throws {
         let client = SocketClient()
         let repoID: UUID
 
         if let repo = repo {
-            // Try as UUID first, then resolve as path
             if let id = UUID(uuidString: repo) {
                 repoID = id
             } else {
@@ -53,15 +81,14 @@ struct WorktreeCreate: AsyncParsableCommand {
             repoID = try resolver.resolveRepoID()
         }
 
+        let resolvedPrompt = try resolvePrompt(inline: prompt, file: promptFile)
+
         let pending: Worktree = try client.call(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID, prompt: prompt),
+            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: name, prompt: resolvedPrompt),
             resultType: Worktree.self
         )
 
-        // Poll until the worktree is active (git setup finished) or fails (deleted).
-        // The daemon's worktree create returns immediately with status = .creating
-        // while git operations + tmux setup run in a detached background task.
         let worktree: Worktree
         if noWait {
             worktree = pending
@@ -91,9 +118,7 @@ struct WorktreeCreate: AsyncParsableCommand {
                 if updated.status == .active || updated.status == .main {
                     return updated
                 }
-                // Still .creating — keep polling
             } else {
-                // Worktree disappeared from the list — creation failed and DB row was deleted
                 throw CLIError.invalidArgument("Worktree creation failed (see daemon logs)")
             }
             Thread.sleep(forTimeInterval: 0.2)

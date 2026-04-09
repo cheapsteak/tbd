@@ -243,6 +243,36 @@ import Testing
     #expect(WorktreeStatus.failed.rawValue == "failed")
 }
 
+@Test func testWorktreeCreateParamsRoundTripWithNewFields() throws {
+    let repoID = UUID()
+    let params = WorktreeCreateParams(
+        repoID: repoID,
+        folder: "my-folder",
+        branch: "feat/my-branch",
+        displayName: "My Display Name",
+        prompt: "Build the thing"
+    )
+    let data = try JSONEncoder().encode(params)
+    let decoded = try JSONDecoder().decode(WorktreeCreateParams.self, from: data)
+    #expect(decoded.repoID == repoID)
+    #expect(decoded.folder == "my-folder")
+    #expect(decoded.branch == "feat/my-branch")
+    #expect(decoded.displayName == "My Display Name")
+    #expect(decoded.prompt == "Build the thing")
+}
+
+@Test func testWorktreeCreateParamsRoundTripWithNilFields() throws {
+    let repoID = UUID()
+    let params = WorktreeCreateParams(repoID: repoID)
+    let data = try JSONEncoder().encode(params)
+    let decoded = try JSONDecoder().decode(WorktreeCreateParams.self, from: data)
+    #expect(decoded.repoID == repoID)
+    #expect(decoded.folder == nil)
+    #expect(decoded.branch == nil)
+    #expect(decoded.displayName == nil)
+    #expect(decoded.prompt == nil)
+}
+
 @Test func repoDecodesLegacyJSONWithoutNewFields() throws {
     let legacy = #"""
     {

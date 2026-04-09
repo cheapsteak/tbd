@@ -100,6 +100,127 @@ private func makeTestRepo(
     }
 }
 
+@Test func testCreateWithExplicitFolderAndBranch() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let result = try await lifecycle.createWorktree(
+        repoID: repo.id,
+        folder: "my-folder",
+        branch: "feat/custom-branch",
+        skipClaude: true
+    )
+
+    #expect(result.status == .active)
+    #expect(result.name == "my-folder")
+    #expect(result.branch == "feat/custom-branch")
+    #expect(result.path.hasSuffix("/my-folder"))
+}
+
+@Test func testCreateWithExplicitDisplayName() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let result = try await lifecycle.createWorktree(
+        repoID: repo.id,
+        displayName: "My Custom Display Name",
+        skipClaude: true
+    )
+
+    #expect(result.displayName == "My Custom Display Name")
+    // name should be auto-generated, not the displayName
+    #expect(result.name != "My Custom Display Name")
+}
+
+@Test func testCreateCollisionWithUserFolderFails() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    // Create a worktree that occupies a branch
+    _ = try await lifecycle.createWorktree(
+        repoID: repo.id,
+        folder: "first-folder",
+        branch: "feat/collision",
+        skipClaude: true
+    )
+
+    // Try to create another worktree with a DIFFERENT folder but same branch.
+    // With userSpecifiedFolder=true, the retry should NOT be attempted —
+    // it should fail immediately after git worktree add fails (branch exists).
+    await #expect(throws: WorktreeLifecycleError.self) {
+        try await lifecycle.createWorktree(
+            repoID: repo.id,
+            folder: "second-folder",
+            branch: "feat/collision",
+            skipClaude: true
+        )
+    }
+}
+
+@Test func testCreateCollisionWithUserBranchRetries() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    // Create a worktree that will occupy a branch
+    _ = try await lifecycle.createWorktree(
+        repoID: repo.id,
+        branch: "feat/shared-branch",
+        skipClaude: true
+    )
+
+    // Create another worktree with the same branch but auto-folder.
+    // This should retry with a new folder but keep the user's branch.
+    // Since the branch already exists in git, the retry will also fail
+    // because git worktree add doesn't allow the same branch in two worktrees.
+    // So this should ultimately throw — but importantly it should NOT throw
+    // with the "folder" error, it should attempt retry first.
+    await #expect(throws: WorktreeLifecycleError.self) {
+        try await lifecycle.createWorktree(
+            repoID: repo.id,
+            branch: "feat/shared-branch",
+            skipClaude: true
+        )
+    }
+}
+
 @Test func testArchiveWorktree() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }

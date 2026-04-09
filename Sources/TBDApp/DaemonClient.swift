@@ -377,10 +377,10 @@ actor DaemonClient {
     }
 
     /// Create a new worktree in a repo.
-    func createWorktree(repoID: UUID, name: String? = nil) async throws -> Worktree {
+    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil) async throws -> Worktree {
         return try await callAsync(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID, name: name),
+            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName),
             resultType: Worktree.self
         )
     }

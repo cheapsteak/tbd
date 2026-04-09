@@ -76,6 +76,7 @@ public struct WorktreeStore: Sendable {
     public func create(
         repoID: UUID,
         name: String,
+        displayName: String? = nil,
         branch: String,
         path: String,
         tmuxServer: String,
@@ -90,7 +91,7 @@ public struct WorktreeStore: Sendable {
             let wt = Worktree(
                 repoID: repoID,
                 name: name,
-                displayName: name,
+                displayName: displayName ?? name,
                 branch: branch,
                 path: path,
                 status: status,

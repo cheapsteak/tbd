@@ -9,15 +9,17 @@ extension RPCRouter {
         let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
 
         // Phase 1: Fast — insert DB row with status = .creating, return immediately
-        let pending = try await lifecycle.beginCreateWorktree(repoID: params.repoID, name: params.name)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: params.repoID, folder: params.folder, branch: params.branch, displayName: params.displayName)
 
         // Phase 2: Fire-and-forget — git operations + tmux setup in background
         let lifecycle = self.lifecycle
         let subs = self.subscriptions
         let initialPrompt = params.prompt
+        let userSpecifiedFolder = params.folder != nil
+        let userSpecifiedBranch = params.branch != nil
         Task.detached {
             do {
-                try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt)
+                try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch)
                 // Broadcast the completed worktree
                 subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
                     worktreeID: pending.id, repoID: pending.repoID,

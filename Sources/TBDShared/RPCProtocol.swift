@@ -295,11 +295,12 @@ public struct RepoRelocateResult: Codable, Sendable {
 
 public struct WorktreeCreateParams: Codable, Sendable {
     public let repoID: UUID
-    public let name: String?
-    /// Optional initial prompt to pass to the auto-created default Claude session.
+    public let folder: String?
+    public let branch: String?
+    public let displayName: String?
     public let prompt: String?
-    public init(repoID: UUID, name: String? = nil, prompt: String? = nil) {
-        self.repoID = repoID; self.name = name; self.prompt = prompt
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil) {
+        self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
     }
 }
 

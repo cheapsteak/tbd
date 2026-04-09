@@ -112,6 +112,35 @@ import TBDShared
         #expect(repo2List.map(\.id) == [wt3.id])
     }
 
+    @Test func createWithExplicitDisplayName() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "auto-name",
+            displayName: "My Custom Name",
+            branch: "b1",
+            path: "/tmp/wt-\(UUID())", tmuxServer: "srv"
+        )
+        #expect(wt.displayName == "My Custom Name")
+
+        // Verify persistence
+        let fetched = try await db.worktrees.get(id: wt.id)
+        #expect(fetched?.displayName == "My Custom Name")
+    }
+
+    @Test func createWithoutDisplayNameDefaultsToName() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "auto-name",
+            branch: "b1",
+            path: "/tmp/wt-\(UUID())", tmuxServer: "srv"
+        )
+        #expect(wt.displayName == "auto-name")
+    }
+
     @Test func worktreeStoreUpdatesPath() async throws {
         let db = try makeDB()
         let repo = try await createRepo(db: db)
