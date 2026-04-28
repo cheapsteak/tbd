@@ -2,7 +2,7 @@ import Foundation
 
 public enum RepoConstants {
     public static let defaultRenamePrompt = """
-        To do immediately, before any other work:
+        Only if `git branch --show-current` starts with `tbd/`:
 
         1. Rename the git branch to reflect the task:
            git branch -m <new-branch-name>
@@ -17,6 +17,6 @@ public enum RepoConstants {
           Branch: fix-login-timeout → Display: ⏱ Fix Login Timeout
           Branch: add-export-csv   → Display: 📊 Add Export CSV
 
-        Do this before reading files, using skills, or any other tools.
+        Do this immediately, before reading files, using skills, or any other tools.
         """
 }
