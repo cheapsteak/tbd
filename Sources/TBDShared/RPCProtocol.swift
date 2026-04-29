@@ -157,9 +157,14 @@ public struct AppSetForegroundStateParams: Codable, Sendable {
 public struct TerminalSwapClaudeTokenParams: Codable, Sendable {
     public let terminalID: UUID
     public let newTokenID: UUID?
-    public init(terminalID: UUID, newTokenID: UUID?) {
+    /// Initial tmux window size in cells (see WorktreeCreateParams).
+    public let cols: Int?
+    public let rows: Int?
+    public init(terminalID: UUID, newTokenID: UUID?, cols: Int? = nil, rows: Int? = nil) {
         self.terminalID = terminalID
         self.newTokenID = newTokenID
+        self.cols = cols
+        self.rows = rows
     }
 }
 

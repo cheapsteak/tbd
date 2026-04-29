@@ -422,13 +422,20 @@ extension RPCRouter {
             shellFallback: ""
         )
 
+        // Resolve initial size: caller-supplied → fallback to 220x50 to avoid
+        // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
+        let resolvedCols = params.cols ?? 220
+        let resolvedRows = params.rows ?? 50
+
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
             shellCommand: spawn.command,
             env: env,
-            sensitiveEnv: spawn.sensitiveEnv
+            sensitiveEnv: spawn.sensitiveEnv,
+            cols: resolvedCols,
+            rows: resolvedRows
         )
 
         let newTerminal = try await db.terminals.create(

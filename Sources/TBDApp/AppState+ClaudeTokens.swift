@@ -98,7 +98,8 @@ extension AppState {
     /// and selects it so the UI switches immediately.
     func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?) async {
         do {
-            let newTerminal = try await daemonClient.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: newTokenID)
+            let size = mainAreaTerminalSize()
+            let newTerminal = try await daemonClient.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: newTokenID, cols: size.cols, rows: size.rows)
             let worktreeID = newTerminal.worktreeID
             terminals[worktreeID, default: []].append(newTerminal)
             let newTab = Tab(id: newTerminal.id, content: .terminal(terminalID: newTerminal.id))

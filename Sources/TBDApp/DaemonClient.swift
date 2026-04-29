@@ -802,10 +802,10 @@ actor DaemonClient {
 
     /// Swap the Claude token associated with a running terminal.
     /// Returns the newly created Terminal (the daemon forks a new tab).
-    func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?) async throws -> Terminal {
+    func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalSwapClaudeToken,
-            params: TerminalSwapClaudeTokenParams(terminalID: terminalID, newTokenID: newTokenID),
+            params: TerminalSwapClaudeTokenParams(terminalID: terminalID, newTokenID: newTokenID, cols: cols, rows: rows),
             resultType: Terminal.self
         )
     }
