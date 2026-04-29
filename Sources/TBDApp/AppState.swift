@@ -103,6 +103,23 @@ final class AppState: ObservableObject {
     @Published var dockRatio: CGFloat = 0.3 {
         didSet { UserDefaults.standard.set(Double(dockRatio), forKey: Self.dockRatioKey) }
     }
+    /// Pixel size of the main terminal area (the SingleWorktreeView slot
+    /// inside DockSplitView, excluding the pinned dock and file panel).
+    /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
+    /// 800 tall window − toolbar (~24) ≈ 776. Conservative fallback for the
+    /// first RPC before the GeometryReader publishes a real value.
+    @Published var mainAreaSize: CGSize = CGSize(width: 1120, height: 776) {
+        didSet {
+            guard mainAreaSize != oldValue else { return }
+            scheduleMainAreaSizeBroadcast()
+        }
+    }
+    /// Debounce token for broadcasting `mainAreaSize` changes to the daemon.
+    /// Cancelled and re-scheduled on every change so we send one RPC per
+    /// resize gesture rather than per AppKit layout pass.
+    private var mainAreaSizeBroadcastTask: Task<Void, Never>?
+    private var lastBroadcastCols: Int = 0
+    private var lastBroadcastRows: Int = 0
     @Published var isConnected: Bool = false
     @Published var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
@@ -753,6 +770,38 @@ final class AppState: ObservableObject {
         let truncated = String(cleaned.prefix(64))
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         return truncated.isEmpty ? "conductor" : truncated
+    }
+
+    /// Convert the current `mainAreaSize` (pixels) into tmux cell dimensions
+    /// using SwiftTerm's font metrics. Floors at the tmux minimum (80x24) so
+    /// degenerate window sizes during launch never produce a too-small pane.
+    func mainAreaTerminalSize() -> (cols: Int, rows: Int) {
+        let cell = TBDTerminalView.cellDimensions(for: TBDTerminalView.defaultMonospaceFont)
+        guard cell.width > 0, cell.height > 0 else { return (80, 24) }
+        let cols = max(80, Int(mainAreaSize.width / cell.width))
+        let rows = max(24, Int(mainAreaSize.height / cell.height))
+        return (cols, rows)
+    }
+
+    /// Debounced RPC: tell the daemon the main area resized so it can resize
+    /// every tracked tmux window. Coalesces rapid resize events into a single
+    /// RPC ~300ms after the user stops dragging the window edge.
+    private func scheduleMainAreaSizeBroadcast() {
+        mainAreaSizeBroadcastTask?.cancel()
+        let (cols, rows) = mainAreaTerminalSize()
+        // Skip noop broadcasts: same cell dims as the previous send.
+        guard cols != lastBroadcastCols || rows != lastBroadcastRows else { return }
+        mainAreaSizeBroadcastTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000) // 300ms debounce
+            guard !Task.isCancelled, let self else { return }
+            do {
+                try await self.daemonClient.setMainAreaSize(cols: cols, rows: rows)
+                self.lastBroadcastCols = cols
+                self.lastBroadcastRows = rows
+            } catch {
+                logger.warning("setMainAreaSize broadcast failed: \(error)")
+            }
+        }
     }
 
     /// One-click conductor: setup (if needed) + start + show overlay.

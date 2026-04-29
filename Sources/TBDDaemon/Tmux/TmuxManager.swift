@@ -48,15 +48,39 @@ public struct TmuxManager: Sendable {
         return "tbd-\(hex)"
     }
 
-    public static func newServerCommand(server: String, session: String, cwd: String) -> [String] {
-        ["-L", server, "new-session", "-d", "-s", session, "-c", cwd, "-PF", "#{window_id}"]
+    /// Minimum sane terminal size. Smaller values are ignored — tmux's own
+    /// default (80x24) is preferable to a degenerate value.
+    public static let minCols: Int = 80
+    public static let minRows: Int = 24
+
+    /// Default pane size used when a caller does not supply explicit
+    /// dimensions. Larger than tmux's own 80x24 default so Claude doesn't
+    /// render into hard-wrapped scrollback that can't be reflowed once a
+    /// wider SwiftTerm view attaches.
+    public static let defaultCols: Int = 220
+    public static let defaultRows: Int = 50
+
+    /// Returns the explicit `-x N -y M` flags to pass to tmux when the caller
+    /// supplied a usable size. Returns an empty array when either dimension
+    /// is nil or below the minimum, leaving tmux to use its own default.
+    private static func sizeFlags(cols: Int?, rows: Int?) -> [String] {
+        guard let cols, let rows, cols >= minCols, rows >= minRows else { return [] }
+        return ["-x", "\(cols)", "-y", "\(rows)"]
+    }
+
+    public static func newServerCommand(server: String, session: String, cwd: String, cols: Int? = nil, rows: Int? = nil) -> [String] {
+        // Place size flags before -PF so the format spec stays last (consistent
+        // with tmux argument-order conventions).
+        ["-L", server, "new-session", "-d", "-s", session, "-c", cwd]
+            + sizeFlags(cols: cols, rows: rows)
+            + ["-PF", "#{window_id}"]
     }
 
     public static func hasSessionCommand(server: String, session: String) -> [String] {
         ["-L", server, "has-session", "-t", session]
     }
 
-    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:]) -> [String] {
+    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) -> [String] {
         // Use shell -ic so commands with arguments work (e.g. "claude --dangerously-skip-permissions")
         // -i keeps it interactive (loads .zshrc), -c runs the command
         // After the command exits, the pane closes (tmux default behavior)
@@ -78,7 +102,17 @@ public struct TmuxManager: Sendable {
             eFlags.append("-e")
             eFlags.append("\(key)=\(value)")
         }
-        return ["-L", server, "new-window", "-t", session, "-c", cwd] + eFlags + ["-PF", "#{window_id} #{pane_id}", userShell, "-ic", fullCommand]
+        // Place size flags after -c <cwd> (and after -e env flags) to keep the
+        // format-spec / shell command at the end where tmux expects them.
+        return ["-L", server, "new-window", "-t", session, "-c", cwd]
+            + eFlags
+            + sizeFlags(cols: cols, rows: rows)
+            + ["-PF", "#{window_id} #{pane_id}", userShell, "-ic", fullCommand]
+    }
+
+    /// Resize an existing tmux window to the given cell dimensions.
+    public static func resizeWindowCommand(server: String, windowID: String, cols: Int, rows: Int) -> [String] {
+        ["-L", server, "resize-window", "-t", windowID, "-x", "\(cols)", "-y", "\(rows)"]
     }
 
     public static func killWindowCommand(server: String, windowID: String) -> [String] {
@@ -126,8 +160,14 @@ public struct TmuxManager: Sendable {
     /// - Returns: The initial window ID if a new session was created (caller should kill it after
     ///   creating real windows), or `nil` if the session already existed.
     @discardableResult
-    public func ensureServer(server: String, session: String, cwd: String) async throws -> String? {
-        if dryRun { return nil }
+    public func ensureServer(server: String, session: String, cwd: String, cols: Int? = nil, rows: Int? = nil) async throws -> String? {
+        if dryRun {
+            // Even in dry-run, still record the new-session shape so tests can
+            // assert that size flags propagate.
+            let args = Self.newServerCommand(server: server, session: session, cwd: cwd, cols: cols, rows: rows)
+            dryRunRecorder?(args)
+            return nil
+        }
         // Check if the session already exists before creating
         let hasSessionArgs = Self.hasSessionCommand(server: server, session: session)
         do {
@@ -136,7 +176,7 @@ public struct TmuxManager: Sendable {
             return nil
         } catch {
             // Session does not exist, create it — capture the initial window ID
-            let args = Self.newServerCommand(server: server, session: session, cwd: cwd)
+            let args = Self.newServerCommand(server: server, session: session, cwd: cwd, cols: cols, rows: rows)
             let output = try await runTmux(args)
             // Hide tmux chrome globally — TBD app provides its own UI
             try? await runTmux(["-L", server, "set", "-g", "status", "off"])
@@ -162,14 +202,14 @@ public struct TmuxManager: Sendable {
         try await runTmux(["-L", server, "kill-server"])
     }
 
-    public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:]) async throws -> (windowID: String, paneID: String) {
+    public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) async throws -> (windowID: String, paneID: String) {
         if dryRun {
-            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv)
+            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
             dryRunRecorder?(args)
             let n = counter.next()
             return (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
         }
-        let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv)
+        let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
         let output = try await runTmux(args)
         let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
         guard parts.count == 2 else {
@@ -181,6 +221,19 @@ public struct TmuxManager: Sendable {
     public func killWindow(server: String, windowID: String) async throws {
         if dryRun { return }
         let args = Self.killWindowCommand(server: server, windowID: windowID)
+        try await runTmux(args)
+    }
+
+    /// Resize an existing tmux window. Used by the main-window resize broadcast
+    /// so detached panes retain a sensible cell size after the user changes
+    /// the app window dimensions; attached panes get overwritten by SwiftTerm's
+    /// own ioctl within milliseconds, so we don't bother filtering.
+    public func resizeWindow(server: String, windowID: String, cols: Int, rows: Int) async throws {
+        let args = Self.resizeWindowCommand(server: server, windowID: windowID, cols: cols, rows: rows)
+        if dryRun {
+            dryRunRecorder?(args)
+            return
+        }
         try await runTmux(args)
     }
 

@@ -11,9 +11,9 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil) async throws -> Worktree {
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil) async throws -> Worktree {
         let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude)
-        try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil)
+        try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows)
         guard let completed = try await db.worktrees.get(id: pending.id) else {
             throw WorktreeLifecycleError.worktreeNotFound(pending.id)
         }
@@ -68,7 +68,7 @@ extension WorktreeLifecycle {
 
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
     /// then updates status to `.active`. On failure, deletes the DB row.
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false) async throws {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil) async throws {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -112,7 +112,9 @@ extension WorktreeLifecycle {
                 worktree: worktree, repo: repo,
                 worktreePath: result.path,
                 skipClaude: skipClaude,
-                initialPrompt: initialPrompt
+                initialPrompt: initialPrompt,
+                cols: cols,
+                rows: rows
             )
 
             // 6. Update status to active
@@ -208,16 +210,26 @@ extension WorktreeLifecycle {
         worktree: Worktree, repo: Repo,
         worktreePath: String? = nil, skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil,
-        initialPrompt: String? = nil
+        initialPrompt: String? = nil,
+        cols: Int? = nil,
+        rows: Int? = nil
     ) async throws {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
         let worktreePath = worktreePath ?? worktree.path
+        // Resolve a usable size: prefer caller's value, otherwise fall back to
+        // TmuxManager's defaults. tmux's own 80x24 default would let Claude
+        // render into hard-wrapped scrollback that can never be reflowed when
+        // the user later attaches a wider SwiftTerm view.
+        let resolvedCols = cols ?? TmuxManager.defaultCols
+        let resolvedRows = rows ?? TmuxManager.defaultRows
         // Ensure tmux server exists — capture initial window ID to kill later
         let initialWindowID = try await tmux.ensureServer(
             server: tmuxServer,
             session: "main",
-            cwd: worktreePath
+            cwd: worktreePath,
+            cols: resolvedCols,
+            rows: resolvedRows
         )
 
         // Resolve claude token (repo override → global default → none).
@@ -266,7 +278,9 @@ extension WorktreeLifecycle {
             session: "main",
             cwd: worktreePath,
             shellCommand: claudeCommand,
-            sensitiveEnv: claudeSensitiveEnv
+            sensitiveEnv: claudeSensitiveEnv,
+            cols: resolvedCols,
+            rows: resolvedRows
         )
         _ = try await db.terminals.create(
             worktreeID: worktreeID,
@@ -288,7 +302,9 @@ extension WorktreeLifecycle {
             server: tmuxServer,
             session: "main",
             cwd: worktreePath,
-            shellCommand: setupCommand
+            shellCommand: setupCommand,
+            cols: resolvedCols,
+            rows: resolvedRows
         )
         _ = try await db.terminals.create(
             worktreeID: worktreeID,
@@ -315,7 +331,9 @@ extension WorktreeLifecycle {
                     session: "main",
                     cwd: worktreePath,
                     shellCommand: spawn.command,
-                    sensitiveEnv: spawn.sensitiveEnv
+                    sensitiveEnv: spawn.sensitiveEnv,
+                    cols: resolvedCols,
+                    rows: resolvedRows
                 )
                 _ = try await db.terminals.create(
                     worktreeID: worktreeID,

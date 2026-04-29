@@ -10,7 +10,8 @@ extension AppState {
     /// Create a terminal in a worktree and add a new tab for it.
     func createTerminal(worktreeID: UUID, cmd: String? = nil) async {
         do {
-            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cmd: cmd)
+            let size = mainAreaTerminalSize()
+            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cmd: cmd, cols: size.cols, rows: size.rows)
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
             tabs[worktreeID, default: []].append(tab)
@@ -25,7 +26,8 @@ extension AppState {
     /// the parent tab's layout tree, not as its own tab.
     func createTerminalForSplit(worktreeID: UUID) async -> Terminal? {
         do {
-            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID)
+            let size = mainAreaTerminalSize()
+            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cols: size.cols, rows: size.rows)
             terminals[worktreeID, default: []].append(terminal)
             return terminal
         } catch {
@@ -65,7 +67,8 @@ extension AppState {
         defer { recreatingTerminalIDs.remove(terminalID) }
 
         do {
-            let updated = try await daemonClient.recreateTerminalWindow(terminalID: terminalID)
+            let size = mainAreaTerminalSize()
+            let updated = try await daemonClient.recreateTerminalWindow(terminalID: terminalID, cols: size.cols, rows: size.rows)
             // Update local state so the view rebuilds with the new tmuxWindowID
             if let idx = terminals[updated.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
                 terminals[updated.worktreeID]?[idx] = updated
@@ -79,10 +82,13 @@ extension AppState {
     /// Create a Claude terminal in a worktree and add a new tab for it.
     func createClaudeTerminal(worktreeID: UUID) async {
         do {
+            let size = mainAreaTerminalSize()
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
                 cmd: nil,
-                type: .claude
+                type: .claude,
+                cols: size.cols,
+                rows: size.rows
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
@@ -96,10 +102,13 @@ extension AppState {
     /// Create a Codex terminal in a worktree and add a new tab for it.
     func createCodexTerminal(worktreeID: UUID) async {
         do {
+            let size = mainAreaTerminalSize()
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
                 cmd: nil,
-                type: .codex
+                type: .codex,
+                cols: size.cols,
+                rows: size.rows
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: terminal.label)
@@ -113,10 +122,13 @@ extension AppState {
     /// Fork a Claude terminal by resuming from an existing session ID.
     func forkClaudeTerminal(worktreeID: UUID, sessionID: String, tokenID: UUID? = nil) async {
         do {
+            let size = mainAreaTerminalSize()
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
                 resumeSessionID: sessionID,
-                overrideTokenID: tokenID
+                overrideTokenID: tokenID,
+                cols: size.cols,
+                rows: size.rows
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))

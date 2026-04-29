@@ -17,9 +17,11 @@ extension RPCRouter {
         let initialPrompt = params.prompt
         let userSpecifiedFolder = params.folder != nil
         let userSpecifiedBranch = params.branch != nil
+        let cols = params.cols
+        let rows = params.rows
         Task.detached {
             do {
-                try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch)
+                try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows)
                 // Broadcast the completed worktree
                 subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
                     worktreeID: pending.id, repoID: pending.repoID,
@@ -66,7 +68,7 @@ extension RPCRouter {
 
     func handleWorktreeRevive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeReviveParams.self, from: paramsData)
-        let worktree = try await lifecycle.reviveWorktree(worktreeID: params.worktreeID)
+        let worktree = try await lifecycle.reviveWorktree(worktreeID: params.worktreeID, cols: params.cols, rows: params.rows)
 
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: worktree.id, repoID: worktree.repoID,

@@ -164,3 +164,136 @@ import Testing
     let args = TmuxManager.sendCommandArgs(server: "tbd-test", paneID: "%42", command: "/exit")
     #expect(args == ["-L", "tbd-test", "send-keys", "-t", "%42", "/exit", "Enter"])
 }
+
+// MARK: - Initial Window Size (cols/rows flags)
+//
+// Each branch of the new size-emission conditional is exercised: explicit
+// size produces `-x N -y M`, nil/below-minimum size produces no flags. The
+// dryRun recorder tests confirm the flags reach the argv that would have
+// been passed to `tmux`, even though the process isn't spawned.
+
+@Test func testNewServerCommandWithExplicitSize() {
+    let args = TmuxManager.newServerCommand(
+        server: "tbd-a1b2c3d4", session: "main", cwd: "/tmp/repo",
+        cols: 220, rows: 50
+    )
+    #expect(args.contains("-x"))
+    #expect(args.contains("220"))
+    #expect(args.contains("-y"))
+    #expect(args.contains("50"))
+    // -PF must remain trailing so tmux's positional parsing still works.
+    #expect(args.last == "#{window_id}")
+    #expect(args[args.count - 2] == "-PF")
+}
+
+@Test func testNewServerCommandWithoutSize() {
+    let args = TmuxManager.newServerCommand(
+        server: "tbd-a1b2c3d4", session: "main", cwd: "/tmp/repo"
+    )
+    #expect(!args.contains("-x"))
+    #expect(!args.contains("-y"))
+}
+
+@Test func testNewServerCommandIgnoresBelowMinimumSize() {
+    // Floor at 80x24 — anything smaller is silently dropped so tmux uses its
+    // own default rather than a degenerate size.
+    let args = TmuxManager.newServerCommand(
+        server: "tbd-test", session: "main", cwd: "/tmp",
+        cols: 40, rows: 10
+    )
+    #expect(!args.contains("-x"))
+    #expect(!args.contains("-y"))
+}
+
+@Test func testNewWindowCommandWithExplicitSize() {
+    let args = TmuxManager.newWindowCommand(
+        server: "tbd-a1b2c3d4", session: "main", cwd: "/tmp/worktree",
+        shellCommand: "claude --dangerously-skip-permissions",
+        cols: 200, rows: 60
+    )
+    #expect(args.contains("-x"))
+    #expect(args.contains("200"))
+    #expect(args.contains("-y"))
+    #expect(args.contains("60"))
+    // The shell command must remain at the very end (tmux's last positional
+    // arg is the spawn command).
+    #expect(args.last == "claude --dangerously-skip-permissions")
+}
+
+@Test func testNewWindowCommandWithoutSize() {
+    let args = TmuxManager.newWindowCommand(
+        server: "tbd-a1b2c3d4", session: "main", cwd: "/tmp/worktree",
+        shellCommand: "echo hi"
+    )
+    #expect(!args.contains("-x"))
+    #expect(!args.contains("-y"))
+}
+
+@Test func testCreateWindowDryRunForwardsSize() async throws {
+    let recorded = LockedCommandRecorder()
+    let manager = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    _ = try await manager.createWindow(
+        server: "tbd-test", session: "main", cwd: "/tmp",
+        shellCommand: "echo hi", cols: 220, rows: 50
+    )
+    let calls = recorded.snapshot()
+    #expect(calls.count == 1)
+    let args = calls[0]
+    #expect(args.contains("-x"))
+    #expect(args.contains("220"))
+    #expect(args.contains("-y"))
+    #expect(args.contains("50"))
+}
+
+@Test func testEnsureServerDryRunForwardsSize() async throws {
+    let recorded = LockedCommandRecorder()
+    let manager = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    try await manager.ensureServer(
+        server: "tbd-test", session: "main", cwd: "/tmp",
+        cols: 220, rows: 50
+    )
+    let calls = recorded.snapshot()
+    #expect(calls.count == 1)
+    let args = calls[0]
+    #expect(args.contains("new-session"))
+    #expect(args.contains("-x"))
+    #expect(args.contains("220"))
+    #expect(args.contains("-y"))
+    #expect(args.contains("50"))
+}
+
+@Test func testResizeWindowCommand() {
+    let args = TmuxManager.resizeWindowCommand(
+        server: "tbd-test", windowID: "@5", cols: 240, rows: 80
+    )
+    #expect(args == ["-L", "tbd-test", "resize-window", "-t", "@5", "-x", "240", "-y", "80"])
+}
+
+@Test func testResizeWindowDryRunRecords() async throws {
+    let recorded = LockedCommandRecorder()
+    let manager = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    try await manager.resizeWindow(server: "tbd-test", windowID: "@5", cols: 240, rows: 80)
+    let calls = recorded.snapshot()
+    #expect(calls.count == 1)
+    #expect(calls[0] == ["-L", "tbd-test", "resize-window", "-t", "@5", "-x", "240", "-y", "80"])
+}
+
+/// Thread-safe recorder for dry-run argv captures used by the tests above.
+final class LockedCommandRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [[String]] = []
+    func append(_ args: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        calls.append(args)
+    }
+    func snapshot() -> [[String]] {
+        lock.lock(); defer { lock.unlock() }
+        return calls
+    }
+}

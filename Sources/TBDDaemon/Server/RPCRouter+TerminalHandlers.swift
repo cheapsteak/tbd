@@ -16,11 +16,18 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
 
+        // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
+        // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
+        let resolvedCols = params.cols ?? TmuxManager.defaultCols
+        let resolvedRows = params.rows ?? TmuxManager.defaultRows
+
         // Ensure tmux server exists before creating window
         _ = try await tmux.ensureServer(
             server: worktree.tmuxServer,
             session: "main",
-            cwd: worktree.path
+            cwd: worktree.path,
+            cols: resolvedCols,
+            rows: resolvedRows
         )
 
         // Look up repo once for system prompt env vars and Claude session setup
@@ -50,7 +57,9 @@ extension RPCRouter {
                 session: "main",
                 cwd: worktree.path,
                 shellCommand: "codex --full-auto",
-                env: codexEnv
+                env: codexEnv,
+                cols: resolvedCols,
+                rows: resolvedRows
             )
 
             let terminal = try await db.terminals.create(
@@ -137,7 +146,9 @@ extension RPCRouter {
             cwd: worktree.path,
             shellCommand: spawn.command,
             env: env,
-            sensitiveEnv: spawn.sensitiveEnv
+            sensitiveEnv: spawn.sensitiveEnv,
+            cols: resolvedCols,
+            rows: resolvedRows
         )
 
         let terminal = try await db.terminals.create(
@@ -209,11 +220,16 @@ extension RPCRouter {
         // Kill the old window if it still exists (avoids orphans)
         try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
 
+        let resolvedCols = params.cols ?? TmuxManager.defaultCols
+        let resolvedRows = params.rows ?? TmuxManager.defaultRows
+
         // Ensure tmux server exists
         _ = try await tmux.ensureServer(
             server: worktree.tmuxServer,
             session: "main",
-            cwd: worktree.path
+            cwd: worktree.path,
+            cols: resolvedCols,
+            rows: resolvedRows
         )
 
         // Create a new tmux window with a default shell.
@@ -224,7 +240,9 @@ extension RPCRouter {
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
-            shellCommand: shell
+            shellCommand: shell,
+            cols: resolvedCols,
+            rows: resolvedRows
         )
 
         // Update the terminal record with new window/pane IDs and clear stale
@@ -464,13 +482,20 @@ extension RPCRouter {
             scheduleRecapture = false
         }
 
+        // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
+        // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
+        let resolvedCols = params.cols ?? TmuxManager.defaultCols
+        let resolvedRows = params.rows ?? TmuxManager.defaultRows
+
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
             shellCommand: spawn.command,
             env: env,
-            sensitiveEnv: spawn.sensitiveEnv
+            sensitiveEnv: spawn.sensitiveEnv,
+            cols: resolvedCols,
+            rows: resolvedRows
         )
 
         let newTerminal = try await db.terminals.create(
@@ -538,6 +563,43 @@ extension RPCRouter {
             )
         }
 
+        return .ok()
+    }
+
+    // MARK: - Main Area Size Broadcast
+
+    /// Resize every known tmux window to the new cell dimensions. Called by
+    /// the app when its main terminal area resizes (debounced) so detached
+    /// panes don't keep stale dimensions; attached panes get overwritten by
+    /// SwiftTerm's TIOCSWINSZ within milliseconds.
+    func handleSetMainAreaSize(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(SetMainAreaSizeParams.self, from: paramsData)
+        guard params.cols >= TmuxManager.minCols, params.rows >= TmuxManager.minRows else {
+            // Silently ignore degenerate sizes — clients can race below the
+            // minimum during window setup; tmux handles it correctly when the
+            // next valid size comes in.
+            return .ok()
+        }
+
+        let allTerminals = try await db.terminals.list()
+        // Filter to active worktrees only — archived worktrees have had their
+        // tmux servers killed, so resizing windows there spawns dead `tmux
+        // resize-window` processes (errors swallowed by `try?`) on every
+        // resize-debounce tick during a window drag.
+        let worktrees = try await db.worktrees.list(status: .active)
+        let serverByWorktree = Dictionary(uniqueKeysWithValues: worktrees.map { ($0.id, $0.tmuxServer) })
+
+        logger.debug("setMainAreaSize \(params.cols, privacy: .public)x\(params.rows, privacy: .public) across \(allTerminals.count, privacy: .public) terminals")
+
+        for terminal in allTerminals {
+            guard let server = serverByWorktree[terminal.worktreeID] else { continue }
+            try? await tmux.resizeWindow(
+                server: server,
+                windowID: terminal.tmuxWindowID,
+                cols: params.cols,
+                rows: params.rows
+            )
+        }
         return .ok()
     }
 

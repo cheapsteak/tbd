@@ -133,6 +133,18 @@ public enum RPCMethod {
     public static let repoRelocate = "repo.relocate"
     public static let sessionList = "session.list"
     public static let sessionMessages = "session.messages"
+    public static let setMainAreaSize = "app.setMainAreaSize"
+}
+
+// MARK: - Main Area Size
+
+public struct SetMainAreaSizeParams: Codable, Sendable {
+    public let cols: Int
+    public let rows: Int
+    public init(cols: Int, rows: Int) {
+        self.cols = cols
+        self.rows = rows
+    }
 }
 
 public struct AppSetForegroundStateParams: Codable, Sendable {
@@ -145,9 +157,14 @@ public struct AppSetForegroundStateParams: Codable, Sendable {
 public struct TerminalSwapClaudeTokenParams: Codable, Sendable {
     public let terminalID: UUID
     public let newTokenID: UUID?
-    public init(terminalID: UUID, newTokenID: UUID?) {
+    /// Initial tmux window size in cells (see WorktreeCreateParams).
+    public let cols: Int?
+    public let rows: Int?
+    public init(terminalID: UUID, newTokenID: UUID?, cols: Int? = nil, rows: Int? = nil) {
         self.terminalID = terminalID
         self.newTokenID = newTokenID
+        self.cols = cols
+        self.rows = rows
     }
 }
 
@@ -299,8 +316,14 @@ public struct WorktreeCreateParams: Codable, Sendable {
     public let branch: String?
     public let displayName: String?
     public let prompt: String?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil) {
+    /// Initial tmux window size in cells. When nil, the daemon falls back to a
+    /// generous default (220x50) so Claude doesn't render at tmux's 80x24
+    /// default and produce hard-wrapped scrollback that can never be reflowed.
+    public let cols: Int?
+    public let rows: Int?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
+        self.cols = cols; self.rows = rows
     }
 }
 
@@ -322,7 +345,14 @@ public struct WorktreeArchiveParams: Codable, Sendable {
 
 public struct WorktreeReviveParams: Codable, Sendable {
     public let worktreeID: UUID
-    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+    /// Initial tmux window size in cells (see WorktreeCreateParams).
+    public let cols: Int?
+    public let rows: Int?
+    public init(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil) {
+        self.worktreeID = worktreeID
+        self.cols = cols
+        self.rows = rows
+    }
 }
 
 public struct WorktreeRenameParams: Codable, Sendable {
@@ -357,8 +387,12 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let prompt: String?
     /// Pin a specific token ID for this terminal, bypassing resolve(repoID:).
     public let overrideTokenID: UUID?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideTokenID: UUID? = nil) {
+    /// Initial tmux window size in cells (see WorktreeCreateParams).
+    public let cols: Int?
+    public let rows: Int?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideTokenID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideTokenID = overrideTokenID
+        self.cols = cols; self.rows = rows
     }
 }
 
@@ -437,7 +471,14 @@ public struct WorktreeResumeParams: Codable, Sendable {
 
 public struct TerminalRecreateWindowParams: Codable, Sendable {
     public let terminalID: UUID
-    public init(terminalID: UUID) { self.terminalID = terminalID }
+    /// Initial tmux window size in cells (see WorktreeCreateParams).
+    public let cols: Int?
+    public let rows: Int?
+    public init(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) {
+        self.terminalID = terminalID
+        self.cols = cols
+        self.rows = rows
+    }
 }
 
 public struct NoteCreateParams: Codable, Sendable {

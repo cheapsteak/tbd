@@ -377,10 +377,10 @@ actor DaemonClient {
     }
 
     /// Create a new worktree in a repo.
-    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil) async throws -> Worktree {
+    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil) async throws -> Worktree {
         return try await callAsync(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName),
+            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows),
             resultType: Worktree.self
         )
     }
@@ -403,10 +403,10 @@ actor DaemonClient {
     }
 
     /// Revive an archived worktree.
-    func reviveWorktree(id: UUID) async throws {
+    func reviveWorktree(id: UUID, cols: Int? = nil, rows: Int? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.worktreeRevive,
-            params: WorktreeReviveParams(worktreeID: id)
+            params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows)
         )
     }
 
@@ -435,10 +435,10 @@ actor DaemonClient {
     }
 
     /// Create a terminal in a worktree.
-    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideTokenID: UUID? = nil) async throws -> Terminal {
+    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideTokenID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideTokenID: overrideTokenID),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideTokenID: overrideTokenID, cols: cols, rows: rows),
             resultType: Terminal.self
         )
     }
@@ -453,11 +453,21 @@ actor DaemonClient {
     }
 
     /// Recreate a dead tmux window for an existing terminal (preserves terminal ID).
-    func recreateTerminalWindow(terminalID: UUID) async throws -> Terminal {
+    func recreateTerminalWindow(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalRecreateWindow,
-            params: TerminalRecreateWindowParams(terminalID: terminalID),
+            params: TerminalRecreateWindowParams(terminalID: terminalID, cols: cols, rows: rows),
             resultType: Terminal.self
+        )
+    }
+
+    /// Tell the daemon the app's main terminal area has been resized so it
+    /// can `tmux resize-window` every tracked window. Used to keep detached
+    /// panes' cell dims sane; attached panes get overwritten by SwiftTerm.
+    func setMainAreaSize(cols: Int, rows: Int) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.setMainAreaSize,
+            params: SetMainAreaSizeParams(cols: cols, rows: rows)
         )
     }
 
@@ -792,10 +802,10 @@ actor DaemonClient {
 
     /// Swap the Claude token associated with a running terminal.
     /// Returns the newly created Terminal (the daemon forks a new tab).
-    func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?) async throws -> Terminal {
+    func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalSwapClaudeToken,
-            params: TerminalSwapClaudeTokenParams(terminalID: terminalID, newTokenID: newTokenID),
+            params: TerminalSwapClaudeTokenParams(terminalID: terminalID, newTokenID: newTokenID, cols: cols, rows: rows),
             resultType: Terminal.self
         )
     }

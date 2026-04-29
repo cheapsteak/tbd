@@ -30,7 +30,8 @@ extension AppState {
         Task {
             defer { pendingWorktreeIDs.remove(placeholder.id) }
             do {
-                let wt = try await daemonClient.createWorktree(repoID: repoID)
+                let size = mainAreaTerminalSize()
+                let wt = try await daemonClient.createWorktree(repoID: repoID, cols: size.cols, rows: size.rows)
                 // Replace the placeholder with the real worktree
                 if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholder.id }) {
                     worktrees[repoID]?[idx] = wt
@@ -68,7 +69,8 @@ extension AppState {
         // Find the repo before reviving so we can refresh the archived list
         let repoID = archivedWorktrees.first(where: { $0.value.contains { $0.id == id } })?.key
         do {
-            try await daemonClient.reviveWorktree(id: id)
+            let size = mainAreaTerminalSize()
+            try await daemonClient.reviveWorktree(id: id, cols: size.cols, rows: size.rows)
             await refreshWorktrees()
             selectedWorktreeIDs = [id]
             if let repoID {
