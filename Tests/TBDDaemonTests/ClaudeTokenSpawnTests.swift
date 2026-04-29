@@ -166,7 +166,7 @@ struct ClaudeTokenSpawnTests {
 
     // MARK: - Swap: to a different token
 
-    @Test("swap: forks into a new tab with the new token, leaves old tab alone")
+    @Test("swap on blank session: forks into a new tab with a fresh session id and new token")
     func swapToDifferentToken() async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
@@ -177,7 +177,8 @@ struct ClaudeTokenSpawnTests {
         let b = try await seedToken(db, name: "B", secret: secretB)
         try await db.config.setDefaultClaudeTokenID(a.id)
 
-        // Spawn original claude terminal with token A
+        // Spawn original claude terminal with token A. The session is "blank" —
+        // no JSONL exists on disk for it — so swap should pick the fresh path.
         let createResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
@@ -198,8 +199,9 @@ struct ClaudeTokenSpawnTests {
         let newTerm = try swapResp.decodeResult(Terminal.self)
         #expect(newTerm.id != oldTerm.id)
         #expect(newTerm.claudeTokenID == b.id)
-        // New terminal resumes the same session id (claude --resume forks history)
-        #expect(newTerm.claudeSessionID == oldSessionID)
+        // Blank session → fresh spawn with a NEW session id (not a resume of the old one).
+        #expect(newTerm.claudeSessionID != nil)
+        #expect(newTerm.claudeSessionID != oldSessionID)
 
         // Old terminal row is unchanged
         let oldAfter = try await db.terminals.get(id: oldTerm.id)
@@ -211,9 +213,11 @@ struct ClaudeTokenSpawnTests {
         #expect(!joined.contains("C-c"))
         #expect(!joined.contains("send-keys"))
         // The new tab was spawned with B's secret via tmux -e (NOT inlined),
-        // and the shell body contains --resume <oldSessionID>.
+        // and the shell body contains --session-id <newSessionID> (fresh path),
+        // never --resume.
         #expect(joined.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secretB)"))
-        #expect(joined.contains("claude --resume \(oldSessionID!)"))
+        #expect(joined.contains("claude --session-id \(newTerm.claudeSessionID!)"))
+        #expect(!joined.contains("claude --resume"))
         #expect(joined.contains("--dangerously-skip-permissions"))
         // Negative: secret must NOT appear in any shell body of post-swap calls.
         let postBodies = postSwap.compactMap { $0.last }.joined(separator: "\n")
@@ -256,7 +260,9 @@ struct ClaudeTokenSpawnTests {
 
         let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
         let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
-        #expect(joined.contains("claude --resume"))
+        // Blank session → fresh --session-id, never --resume.
+        #expect(joined.contains("claude --session-id"))
+        #expect(!joined.contains("claude --resume"))
         #expect(!joined.contains("CLAUDE_CODE_OAUTH_TOKEN"))
         #expect(!joined.contains("C-c"))
     }
