@@ -46,6 +46,13 @@ TBDApp runs as a bare SPM executable, not a `.app` bundle. APIs that require a b
 
 Guard these with `Bundle.main.bundleIdentifier != nil` checks.
 
+### Deep links and TBD.app bundle
+
+`tbd://open?worktree=<uuid>` URL clicks reach the app via the `.app` bundle assembled by `scripts/restart.sh` at `.build/debug/TBD.app`. Two consequences:
+
+- **Bundled launch is required.** `swift run TBDApp` and direct execution of `.build/debug/TBDApp` produce a process with no surrounding `Info.plist`, so LaunchServices won't deliver `tbd://` URLs to it. Always launch via `scripts/restart.sh` when testing deep links.
+- **One worktree wins LaunchServices.** All TBD worktrees register the same `CFBundleIdentifier=com.tbd.app`, so whichever worktree most recently ran `restart.sh` becomes the `tbd://` handler. Restart the worktree you want to receive links — others stay built but inert for URL routing.
+
 ### NIO thread safety
 All `ChannelHandlerContext` property access (`context.channel`, `context.pipeline`) must happen on the channel's event loop. Accessing from any other thread triggers a precondition crash. Always wrap in `context.eventLoop.execute { ... }` — never use `context.channel.isActive` as a pre-check outside the event loop.
 
