@@ -18,6 +18,7 @@ enum SystemPromptBuilder {
         - tbd worktree rename "<worktree-name>" "<display-name>" — rename the worktree display name
         - tbd worktree create [--repo <path-or-id>] [--folder <dir>] [--branch <name>] [--name "<display>"] — create a new worktree
         - tbd worktree list [--repo <id>] — list worktrees
+        - tbd link [<worktree>] — print a tbd://open URL for a worktree (no arg = current); clicking opens TBD on that worktree, survives renames
         - tbd terminal create <worktree> [--type claude|shell] [--cmd <command>] — create a new terminal tab
         - tbd terminal send --terminal <id> --text <text> [--submit] — send text to a terminal (--submit presses Enter)
         - tbd terminal output <terminal-id> [--lines N] — read terminal output
