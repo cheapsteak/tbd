@@ -42,13 +42,25 @@ class TBDTerminalView: TerminalView {
 
     func cellDimensions() -> (width: CGFloat, height: CGFloat) {
         if let cached = cachedCellDimensions { return cached }
-        let font = self.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let activeFont = self.font ?? Self.defaultMonospaceFont
+        let dims = Self.cellDimensions(for: activeFont)
+        cachedCellDimensions = dims
+        return dims
+    }
+
+    /// The font SwiftTerm initializes a `TerminalView` with when no font is set.
+    /// AppState uses this for px → cells conversion before any live view exists.
+    static let defaultMonospaceFont: NSFont = NSFont.monospacedSystemFont(
+        ofSize: 13, weight: .regular
+    )
+
+    /// Pure font-metric calculation, exposed so AppState can compute cols/rows
+    /// for a px area without a live `TBDTerminalView` instance.
+    static func cellDimensions(for font: NSFont) -> (width: CGFloat, height: CGFloat) {
         let glyph = font.glyph(withName: "W")
         let cellWidth = font.advancement(forGlyph: glyph).width
         let cellHeight = ceil(CTFontGetAscent(font) + CTFontGetDescent(font) + CTFontGetLeading(font))
-        let dims = (cellWidth, cellHeight)
-        cachedCellDimensions = dims
-        return dims
+        return (cellWidth, cellHeight)
     }
 
     /// Capture the current visible terminal content as an NSImage.

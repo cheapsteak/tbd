@@ -30,7 +30,8 @@ extension AppState {
         Task {
             defer { pendingWorktreeIDs.remove(placeholder.id) }
             do {
-                let wt = try await daemonClient.createWorktree(repoID: repoID)
+                let size = mainAreaTerminalSize()
+                let wt = try await daemonClient.createWorktree(repoID: repoID, cols: size.cols, rows: size.rows)
                 // Replace the placeholder with the real worktree
                 if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholder.id }) {
                     worktrees[repoID]?[idx] = wt

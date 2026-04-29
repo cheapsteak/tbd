@@ -94,7 +94,7 @@ extension WorktreeLifecycle {
     ///   - worktreeID: The archived worktree to revive.
     ///   - skipClaude: If true, skip launching claude in the first terminal window.
     /// - Returns: The revived worktree.
-    public func reviveWorktree(worktreeID: UUID, skipClaude: Bool = false) async throws -> Worktree {
+    public func reviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil) async throws -> Worktree {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -135,7 +135,9 @@ extension WorktreeLifecycle {
         try await setupTerminals(
             worktree: worktree, repo: repo,
             skipClaude: skipClaude,
-            archivedClaudeSessions: worktree.archivedClaudeSessions
+            archivedClaudeSessions: worktree.archivedClaudeSessions,
+            cols: cols,
+            rows: rows
         )
 
         // Update status to active.
