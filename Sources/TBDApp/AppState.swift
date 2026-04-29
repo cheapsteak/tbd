@@ -44,6 +44,17 @@ final class AppState: ObservableObject {
     /// Archived worktrees keyed by repo ID, fetched on demand.
     @Published var archivedWorktrees: [UUID: [Worktree]] = [:]
 
+    /// Set briefly when a deep link lands on an archived worktree. The
+    /// ArchivedWorktreesView observes this and scrolls/flashes the matching
+    /// row, then clears the value after the flash animation completes.
+    @Published var highlightedArchivedWorktreeID: UUID?
+
+    /// Test seam: when set, replaces the daemon roundtrip for archived
+    /// lookups in `navigateToArchivedWorktree(_:)`. Production code leaves
+    /// this nil; tests assign a closure returning a deterministic worktree
+    /// list.
+    var archivedLookupOverride: ((UUID) async -> [Worktree])?
+
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
         guard let id = selectedWorktreeIDs.first else { return nil }

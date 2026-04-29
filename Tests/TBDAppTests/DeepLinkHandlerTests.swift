@@ -50,3 +50,29 @@ import TBDShared
 
     #expect(appState.selectedWorktreeIDs.isEmpty)
 }
+
+@MainActor
+@Test func handle_archivedUUID_opensArchivedPaneAndHighlightsRow() async {
+    let appState = AppState()
+    let repoID = UUID()
+    let archivedID = UUID()
+    let archivedWT = Worktree(
+        id: archivedID, repoID: repoID, name: "old", displayName: "Old",
+        branch: "tbd/old", path: "/tmp/old", status: .archived,
+        tmuxServer: "tbd-old"
+    )
+    // Test seam: short-circuit the daemon RPC.
+    appState.archivedLookupOverride = { _ in [archivedWT] }
+    appState.worktrees = [:] // active miss
+
+    let url = DeepLink.makeOpenWorktreeURL(archivedID)
+    DeepLinkHandler.handle(url, appState: appState)
+
+    // navigateToArchivedWorktree is async — wait for it to settle.
+    try? await Task.sleep(nanoseconds: 50_000_000)
+
+    #expect(appState.selectedRepoID == repoID)
+    #expect(appState.highlightedArchivedWorktreeID == archivedID)
+    #expect(appState.selectedWorktreeIDs.isEmpty)
+    #expect(appState.archivedWorktrees[repoID]?.contains(where: { $0.id == archivedID }) == true)
+}

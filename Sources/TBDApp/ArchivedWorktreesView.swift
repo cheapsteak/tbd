@@ -44,13 +44,28 @@ struct ArchivedWorktreesView: View {
                 Divider()
 
                 // List
-                ScrollView {
-                    LazyVStack(spacing: 1) {
-                        ForEach(archived) { worktree in
-                            ArchivedWorktreeRow(worktree: worktree)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 1) {
+                            ForEach(archived) { worktree in
+                                ArchivedWorktreeRow(worktree: worktree)
+                                    .id(worktree.id)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
+                    .onChange(of: appState.highlightedArchivedWorktreeID) { _, newValue in
+                        guard let id = newValue,
+                              archived.contains(where: { $0.id == id }) else { return }
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            proxy.scrollTo(id, anchor: .center)
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                            if appState.highlightedArchivedWorktreeID == id {
+                                appState.highlightedArchivedWorktreeID = nil
+                            }
                         }
                     }
-                    .padding(.vertical, 8)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -117,7 +132,13 @@ private struct ArchivedWorktreeRow: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
-        .background(Color.primary.opacity(0.03))
+        .background(
+            appState.highlightedArchivedWorktreeID == worktree.id
+                ? Color.accentColor.opacity(0.25)
+                : Color.primary.opacity(0.03)
+        )
+        .animation(.easeInOut(duration: 0.4),
+                   value: appState.highlightedArchivedWorktreeID)
         .cornerRadius(6)
         .padding(.horizontal, 12)
     }

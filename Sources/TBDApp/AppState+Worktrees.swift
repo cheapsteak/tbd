@@ -120,6 +120,54 @@ extension AppState {
         }
     }
 
+    /// Archived-worktree path for deep-link navigation. Async — issues an RPC
+    /// to find the worktree across all archived ones, then opens the
+    /// archived pane and flashes the row.
+    @MainActor
+    func navigateToArchivedWorktree(_ id: UUID) async {
+        let archived: [Worktree]
+        if let override = archivedLookupOverride {
+            archived = await override(id)
+        } else {
+            do {
+                archived = try await daemonClient.listWorktrees(
+                    repoID: nil, status: .archived
+                )
+            } catch {
+                logger.error("Deep-link archived lookup failed: \(error.localizedDescription)")
+                return
+            }
+        }
+
+        guard let wt = archived.first(where: { $0.id == id }) else {
+            logger.warning("Deep link references unknown worktree \(id.uuidString, privacy: .public)")
+            return
+        }
+
+        selectedWorktreeIDs = []
+        selectedRepoID = wt.repoID
+        archivedWorktrees[wt.repoID] = archived.filter { $0.repoID == wt.repoID }
+        highlightedArchivedWorktreeID = id
+        if NSApplication.shared.isRunning {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// Public entry point for deep-link navigation. Synchronous fast path
+    /// for active worktrees; falls through to the async archived path on a
+    /// miss.
+    @MainActor
+    func navigateToWorktree(_ id: UUID) {
+        let activeMatch = worktrees.values
+            .flatMap { $0 }
+            .contains(where: { $0.id == id })
+        if activeMatch {
+            navigateToActiveWorktree(id)
+        } else {
+            Task { await navigateToArchivedWorktree(id) }
+        }
+    }
+
     /// Select a repo to show its archived worktrees in the content pane.
     func selectRepo(id: UUID) {
         selectedWorktreeIDs = []
