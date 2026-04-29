@@ -34,13 +34,45 @@ final class AppState: ObservableObject {
             // Clear repo selection when a worktree is selected
             if !selectedWorktreeIDs.isEmpty {
                 selectedRepoID = nil
+                recordNavigation(.worktrees(selectionOrder))
             }
         }
     }
     /// Tracks the order of selected worktrees for split view rendering (cmd+click order).
     @Published var selectionOrder: [UUID] = []
     /// Selected repo ID — set when a repo header is clicked, shows archived worktrees in content pane.
-    @Published var selectedRepoID: UUID? = nil
+    @Published var selectedRepoID: UUID? = nil {
+        didSet {
+            guard selectedRepoID != oldValue, let id = selectedRepoID else { return }
+            recordNavigation(.repo(id))
+        }
+    }
+
+    // MARK: - Navigation history (back/forward)
+
+    /// Back/forward state. Mutated only by the helpers in `AppState+Navigation.swift` —
+    /// any change to `navigationIndex` or `navigationEntries` must be followed by
+    /// `updateNavigationFlags()` to keep the published toolbar flags in sync.
+
+    /// Published flags driving the toolbar back/forward buttons.
+    @Published private(set) var canGoBack: Bool = false
+    @Published private(set) var canGoForward: Bool = false
+    /// Recorded navigation entries (most recent at the end).
+    var navigationEntries: [NavigationEntry] = []
+    /// Index into `navigationEntries` of the currently-displayed view state, or -1 if none.
+    var navigationIndex: Int = -1
+    /// True while applying a back/forward entry, to suppress recording the resulting selection change.
+    var isNavigating: Bool = false
+
+    /// Refresh the @Published `canGoBack` / `canGoForward` flags from the index.
+    /// Lives in the same file as the @Published properties so the `private(set)`
+    /// setters are reachable.
+    func updateNavigationFlags() {
+        let back = navigationIndex > 0
+        let forward = navigationIndex >= 0 && navigationIndex < navigationEntries.count - 1
+        if back != canGoBack { canGoBack = back }
+        if forward != canGoForward { canGoForward = forward }
+    }
     /// Archived worktrees keyed by repo ID, fetched on demand.
     @Published var archivedWorktrees: [UUID: [Worktree]] = [:]
 

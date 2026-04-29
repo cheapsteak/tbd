@@ -64,6 +64,26 @@ struct ContentView: View {
             .navigationSplitViewStyle(.prominentDetail)
             .toolbar(removing: .sidebarToggle)
             .toolbar {
+                ToolbarItemGroup(placement: .navigation) {
+                    Button {
+                        appState.navigateBack()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .disabled(!appState.canGoBack)
+                    .help("Back")
+                    .keyboardShortcut("[", modifiers: .command)
+
+                    Button {
+                        appState.navigateForward()
+                    } label: {
+                        Image(systemName: "chevron.right")
+                    }
+                    .disabled(!appState.canGoForward)
+                    .help("Forward")
+                    .keyboardShortcut("]", modifiers: .command)
+                }
+
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button {
                         autoSuspendClaude.toggle()
