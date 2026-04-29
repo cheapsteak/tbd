@@ -25,11 +25,14 @@ import TBDShared
 @Test func handle_unknownUUID_doesNotMutateSelection() async {
     let appState = AppState()
     appState.worktrees = [:]
+    appState.archivedLookupOverride = { _ in [] }
     let url = DeepLink.makeOpenWorktreeURL(UUID())
 
     DeepLinkHandler.handle(url, appState: appState)
 
+    try? await Task.sleep(nanoseconds: 50_000_000)
     #expect(appState.selectedWorktreeIDs.isEmpty)
+    #expect(appState.selectedRepoID == nil)
 }
 
 @MainActor
