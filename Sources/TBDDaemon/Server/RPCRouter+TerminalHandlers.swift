@@ -521,7 +521,11 @@ extension RPCRouter {
         }
 
         let allTerminals = try await db.terminals.list()
-        let worktrees = try await db.worktrees.list()
+        // Filter to active worktrees only — archived worktrees have had their
+        // tmux servers killed, so resizing windows there spawns dead `tmux
+        // resize-window` processes (errors swallowed by `try?`) on every
+        // resize-debounce tick during a window drag.
+        let worktrees = try await db.worktrees.list(status: .active)
         let serverByWorktree = Dictionary(uniqueKeysWithValues: worktrees.map { ($0.id, $0.tmuxServer) })
 
         logger.debug("setMainAreaSize \(params.cols, privacy: .public)x\(params.rows, privacy: .public) across \(allTerminals.count, privacy: .public) terminals")
