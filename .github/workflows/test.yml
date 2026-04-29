@@ -25,7 +25,6 @@ jobs:
           path: |
             .build
             ~/Library/Caches/org.swift.swiftpm
-            ~/Library/org.swift.swiftpm
           key: spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
             spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}-
@@ -36,15 +35,3 @@ jobs:
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build
-
-      - name: TEMP — inspect cache path sizes
-        if: always()
-        run: |
-          echo "--- .build ---"
-          du -sh .build 2>/dev/null || echo "MISSING"
-          echo "--- ~/Library/Caches/org.swift.swiftpm ---"
-          du -sh ~/Library/Caches/org.swift.swiftpm 2>/dev/null || echo "MISSING"
-          echo "--- ~/Library/org.swift.swiftpm ---"
-          du -sh ~/Library/org.swift.swiftpm 2>/dev/null || echo "MISSING"
-          echo "--- ~/Library/org.swift.swiftpm contents (if exists) ---"
-          ls -la ~/Library/org.swift.swiftpm 2>/dev/null || echo "MISSING"
