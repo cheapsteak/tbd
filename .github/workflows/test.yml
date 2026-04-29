@@ -20,6 +20,7 @@ jobs:
         run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> $GITHUB_ENV
 
       - name: Cache SwiftPM
+        id: cache
         uses: actions/cache@v4
         with:
           path: |
@@ -29,6 +30,10 @@ jobs:
           restore-keys: |
             spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}-
             spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
+
+      - name: Restore .build mtimes (workaround for actions/cache + SwiftPM incremental)
+        if: steps.cache.outputs.cache-hit == 'true' || steps.cache.outputs.cache-matched-key != ''
+        run: find .build -exec touch {} +
 
       - name: Test
         run: swift test --parallel
