@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import TBDShared
 import os
@@ -106,6 +107,18 @@ extension AppState {
     }
 
     // MARK: - Archived Worktrees
+
+    /// Active-worktree path for deep-link navigation. Caller is responsible
+    /// for verifying the id exists in `self.worktrees` first.
+    @MainActor
+    func navigateToActiveWorktree(_ id: UUID) {
+        selectedWorktreeIDs = [id]
+        // Only foreground when the AppKit run loop is live — `NSApp` is nil
+        // under unit tests, which would crash on the implicit unwrap.
+        if NSApplication.shared.isRunning {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+    }
 
     /// Select a repo to show its archived worktrees in the content pane.
     func selectRepo(id: UUID) {

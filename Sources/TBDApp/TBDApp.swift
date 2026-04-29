@@ -20,6 +20,9 @@ struct TBDAppMain: App {
         Window("TBD", id: "main") {
             ContentView()
                 .environmentObject(appState)
+                .onOpenURL { url in
+                    DeepLinkHandler.handle(url, appState: appState)
+                }
         }
         .defaultSize(width: 1200, height: 800)
         .commands {
