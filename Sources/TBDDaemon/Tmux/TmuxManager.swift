@@ -53,6 +53,13 @@ public struct TmuxManager: Sendable {
     public static let minCols: Int = 80
     public static let minRows: Int = 24
 
+    /// Default pane size used when a caller does not supply explicit
+    /// dimensions. Larger than tmux's own 80x24 default so Claude doesn't
+    /// render into hard-wrapped scrollback that can't be reflowed once a
+    /// wider SwiftTerm view attaches.
+    public static let defaultCols: Int = 220
+    public static let defaultRows: Int = 50
+
     /// Returns the explicit `-x N -y M` flags to pass to tmux when the caller
     /// supplied a usable size. Returns an empty array when either dimension
     /// is nil or below the minimum, leaving tmux to use its own default.

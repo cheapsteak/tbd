@@ -16,10 +16,10 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
 
-        // Resolve initial size: caller-supplied → fallback to 220x50 to avoid
+        // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
-        let resolvedCols = params.cols ?? 220
-        let resolvedRows = params.rows ?? 50
+        let resolvedCols = params.cols ?? TmuxManager.defaultCols
+        let resolvedRows = params.rows ?? TmuxManager.defaultRows
 
         // Ensure tmux server exists before creating window
         _ = try await tmux.ensureServer(
@@ -220,8 +220,8 @@ extension RPCRouter {
         // Kill the old window if it still exists (avoids orphans)
         try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
 
-        let resolvedCols = params.cols ?? 220
-        let resolvedRows = params.rows ?? 50
+        let resolvedCols = params.cols ?? TmuxManager.defaultCols
+        let resolvedRows = params.rows ?? TmuxManager.defaultRows
 
         // Ensure tmux server exists
         _ = try await tmux.ensureServer(
@@ -422,10 +422,10 @@ extension RPCRouter {
             shellFallback: ""
         )
 
-        // Resolve initial size: caller-supplied → fallback to 220x50 to avoid
+        // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
-        let resolvedCols = params.cols ?? 220
-        let resolvedRows = params.rows ?? 50
+        let resolvedCols = params.cols ?? TmuxManager.defaultCols
+        let resolvedRows = params.rows ?? TmuxManager.defaultRows
 
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,

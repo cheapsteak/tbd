@@ -218,11 +218,11 @@ extension WorktreeLifecycle {
         let tmuxServer = worktree.tmuxServer
         let worktreePath = worktreePath ?? worktree.path
         // Resolve a usable size: prefer caller's value, otherwise fall back to
-        // 220x50. tmux's own 80x24 default would let Claude render into hard-
-        // wrapped scrollback that can never be reflowed when the user later
-        // attaches a wider SwiftTerm view.
-        let resolvedCols = cols ?? 220
-        let resolvedRows = rows ?? 50
+        // TmuxManager's defaults. tmux's own 80x24 default would let Claude
+        // render into hard-wrapped scrollback that can never be reflowed when
+        // the user later attaches a wider SwiftTerm view.
+        let resolvedCols = cols ?? TmuxManager.defaultCols
+        let resolvedRows = rows ?? TmuxManager.defaultRows
         // Ensure tmux server exists — capture initial window ID to kill later
         let initialWindowID = try await tmux.ensureServer(
             server: tmuxServer,
