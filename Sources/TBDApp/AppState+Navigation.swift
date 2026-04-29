@@ -3,7 +3,7 @@ import Foundation
 /// A single navigable view state — either a worktree selection (one or more)
 /// or a repo selection (showing archived worktrees in the detail pane).
 enum NavigationEntry: Equatable {
-    case worktrees(Set<UUID>)
+    case worktrees([UUID])
     case repo(UUID)
 }
 
@@ -67,7 +67,8 @@ extension AppState {
         switch entry {
         case .worktrees(let ids):
             selectedRepoID = nil
-            selectedWorktreeIDs = ids
+            selectedWorktreeIDs = Set(ids)
+            selectionOrder = ids
         case .repo(let id):
             selectedWorktreeIDs = []
             selectedRepoID = id

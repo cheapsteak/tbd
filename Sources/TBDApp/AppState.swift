@@ -34,7 +34,7 @@ final class AppState: ObservableObject {
             // Clear repo selection when a worktree is selected
             if !selectedWorktreeIDs.isEmpty {
                 selectedRepoID = nil
-                recordNavigation(.worktrees(selectedWorktreeIDs))
+                recordNavigation(.worktrees(selectionOrder))
             }
         }
     }
