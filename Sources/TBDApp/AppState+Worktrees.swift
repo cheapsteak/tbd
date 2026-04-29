@@ -112,6 +112,7 @@ extension AppState {
     /// for verifying the id exists in `self.worktrees` first.
     @MainActor
     func navigateToActiveWorktree(_ id: UUID) {
+        highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = [id]
         // Only foreground when the AppKit run loop is live — `NSApp` is nil
         // under unit tests, which would crash on the implicit unwrap.
@@ -170,6 +171,7 @@ extension AppState {
 
     /// Select a repo to show its archived worktrees in the content pane.
     func selectRepo(id: UUID) {
+        highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = id
         Task { await refreshArchivedWorktrees(repoID: id) }
