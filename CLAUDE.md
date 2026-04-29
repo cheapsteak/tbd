@@ -48,7 +48,19 @@ Guard these with `Bundle.main.bundleIdentifier != nil` checks.
 
 ### Deep links and TBD.app bundle
 
-`tbd://open?worktree=<uuid>` URL clicks reach the app via the `.app` bundle assembled by `scripts/restart.sh` at `.build/debug/TBD.app`. Two consequences:
+**Generating a link.** From any TBD-spawned terminal, `tbd link` prints a `tbd://open?worktree=<uuid>` URL for the current worktree. Pass a name or UUID to link to a specific one. The URL itself is always UUID-based, so renames don't break it. Example use cases: paste a link in your notes to jump back later, or pipe it (`tbd link | pbcopy`) to share with your future self in Slack/email.
+
+```
+$ tbd link
+tbd://open?worktree=8d3f1c2a-...
+
+$ tbd link awkward-fox            # by auto-generated dir name
+$ tbd link "🔗 Deep Link Terminals"  # by display name
+```
+
+Clicking such a URL focuses the TBD app on the worktree (or its archived row, with a brief flash). Stale or unknown UUIDs fail silently.
+
+**Constraints to know:**
 
 - **Bundled launch is required.** `swift run TBDApp` and direct execution of `.build/debug/TBDApp` produce a process with no surrounding `Info.plist`, so LaunchServices won't deliver `tbd://` URLs to it. Always launch via `scripts/restart.sh` when testing deep links.
 - **One worktree wins LaunchServices.** All TBD worktrees register the same `CFBundleIdentifier=com.tbd.app`, so whichever worktree most recently ran `restart.sh` becomes the `tbd://` handler. Restart the worktree you want to receive links — others stay built but inert for URL routing.
