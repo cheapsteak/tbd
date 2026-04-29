@@ -248,11 +248,10 @@ class TBDTerminalView: TerminalView {
             candidate = String(candidate[candidate.startIndex..<candidate.index(candidate.startIndex, offsetBy: match.range.location)])
         }
 
-        // Strip trailing sentence punctuation that the path-character word boundary may have absorbed
-        // from prose context (e.g., "see design.md." or "see (design.md)."). Only strip from the END
-        // — mid-path dots like "foo.md" must be preserved.
-        let trailingPunctuation: Set<Character> = [".", ",", ";", ":", "!", "?", ")", "]", "}", ">"]
-        while let last = candidate.last, trailingPunctuation.contains(last) {
+        // The path-character word boundary includes '.', so a trailing sentence period gets absorbed
+        // into the candidate (e.g., "see design.md."). Strip it before the existence check. Mid-path
+        // dots are preserved — only trailing.
+        while candidate.hasSuffix(".") {
             candidate.removeLast()
         }
 
