@@ -42,8 +42,7 @@ class TBDTerminalView: TerminalView {
 
     func cellDimensions() -> (width: CGFloat, height: CGFloat) {
         if let cached = cachedCellDimensions { return cached }
-        let activeFont = self.font ?? Self.defaultMonospaceFont
-        let dims = Self.cellDimensions(for: activeFont)
+        let dims = Self.cellDimensions(for: self.font)
         cachedCellDimensions = dims
         return dims
     }
