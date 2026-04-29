@@ -79,3 +79,19 @@ import TBDShared
     #expect(appState.selectedWorktreeIDs.isEmpty)
     #expect(appState.archivedWorktrees[repoID]?.contains(where: { $0.id == archivedID }) == true)
 }
+
+@MainActor
+@Test func navigateToActive_clearsArchivedHighlight() async {
+    let appState = AppState()
+    let id = UUID()
+    appState.worktrees = [
+        UUID(): [Worktree(id: id, repoID: UUID(), name: "x", displayName: "X",
+                          branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x")]
+    ]
+    appState.highlightedArchivedWorktreeID = UUID()  // stale highlight from a prior archived link
+
+    appState.navigateToActiveWorktree(id)
+
+    #expect(appState.highlightedArchivedWorktreeID == nil)
+    #expect(appState.selectedWorktreeIDs == [id])
+}
