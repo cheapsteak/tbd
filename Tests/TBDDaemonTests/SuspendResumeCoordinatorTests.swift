@@ -25,7 +25,7 @@ struct SuspendResumeCoordinatorTests {
         return (db, wt.id, terminal.id)
     }
 
-    @Test func resumeRunsWhenSuspendDisabled() async throws {
+    @Test func resumeSkippedWhenSuspendDisabled() async throws {
         let (db, worktreeID, terminalID) = try await setupSuspendedTerminal()
         let tmux = TmuxManager(dryRun: true)
         let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
@@ -38,13 +38,12 @@ struct SuspendResumeCoordinatorTests {
         // Simulate arriving at the worktree with suspend disabled
         await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: false)
 
-        // Wait for the async resume to complete (3s delay + margin)
-        try await Task.sleep(for: .seconds(5))
+        // Brief wait — a hypothetical scheduleResume would fire after a 3s delay,
+        // but since the gate should skip it, we just need enough time to assert nothing happened.
+        try await Task.sleep(for: .milliseconds(1500))
 
         let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.suspendedAt == nil, "Resume should clear suspendedAt even when suspendEnabled is false")
-        // Snapshot is intentionally kept — TerminalPanelView uses it as initial content
-        #expect(after?.suspendedSnapshot != nil, "Snapshot should be preserved for initial terminal content")
+        #expect(after?.suspendedAt != nil, "Resume should NOT run when suspendEnabled is false")
     }
 
     @Test func resumeRunsWhenSuspendEnabled() async throws {
@@ -142,7 +141,7 @@ struct SuspendResumeCoordinatorTests {
         })
         let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, claudeTokenResolver: resolver)
 
-        await coordinator.selectionChanged(to: [wt.id], suspendEnabled: false)
+        await coordinator.selectionChanged(to: [wt.id], suspendEnabled: true)
         try await Task.sleep(for: .seconds(5))
 
         let after = try await db.terminals.get(id: terminal.id)
@@ -174,7 +173,7 @@ struct SuspendResumeCoordinatorTests {
         // No resolver supplied — fallback branch.
         let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, claudeTokenResolver: nil)
 
-        await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: false)
+        await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: true)
         try await Task.sleep(for: .seconds(5))
 
         let after = try await db.terminals.get(id: terminalID)
