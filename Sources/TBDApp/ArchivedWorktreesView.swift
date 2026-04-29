@@ -54,7 +54,7 @@ struct ArchivedWorktreesView: View {
                         }
                         .padding(.vertical, 8)
                     }
-                    .onChange(of: appState.highlightedArchivedWorktreeID) { _, newValue in
+                    .onChange(of: appState.highlightedArchivedWorktreeID, initial: true) { _, newValue in
                         guard let id = newValue,
                               archived.contains(where: { $0.id == id }) else { return }
                         withAnimation(.easeInOut(duration: 0.3)) {
