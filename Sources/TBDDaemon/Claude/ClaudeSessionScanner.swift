@@ -200,6 +200,71 @@ enum ClaudeSessionScanner {
         )
     }
 
+    /// Returns true if the session JSONL for `sessionID` (resolved within the
+    /// per-worktree project dir) is missing, empty, or contains no
+    /// user/assistant entries with text content. Metadata-only files
+    /// (permission-mode, file-history-snapshot, etc.) are considered blank.
+    static func isSessionBlank(
+        sessionID: String,
+        worktreePath: String,
+        projectsBase: URL? = nil
+    ) -> Bool {
+        guard let projectDir = ClaudeProjectDirectory.resolve(
+            worktreePath: worktreePath,
+            projectsBase: projectsBase
+        ) else {
+            logger.debug("isSessionBlank: project dir unresolved for \(worktreePath, privacy: .public) — treating as blank")
+            return true
+        }
+        let file = projectDir.appendingPathComponent("\(sessionID).jsonl")
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            logger.debug("isSessionBlank: file missing \(file.path, privacy: .public)")
+            return true
+        }
+        guard let handle = FileHandle(forReadingAtPath: file.path) else { return true }
+        defer { try? handle.close() }
+
+        var buffer = Data()
+        var hasContent = false
+
+        func processLine(_ lineData: Data) {
+            guard !hasContent, !lineData.isEmpty,
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+            else { return }
+            let type = json["type"] as? String
+            guard type == "user" || type == "assistant" else { return }
+            guard let message = json["message"] as? [String: Any] else { return }
+            if let content = message["content"] as? String, !content.isEmpty {
+                hasContent = true
+                return
+            }
+            if let array = message["content"] as? [[String: Any]] {
+                for block in array {
+                    if let text = block["text"] as? String, !text.isEmpty {
+                        hasContent = true
+                        return
+                    }
+                }
+            }
+        }
+
+        let chunkSize = 65_536
+        while !hasContent {
+            let chunk = handle.readData(ofLength: chunkSize)
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+            while let nl = buffer.range(of: Data([0x0A])) {
+                let lineData = Data(buffer[buffer.startIndex..<nl.lowerBound])
+                buffer.removeSubrange(buffer.startIndex...nl.lowerBound)
+                processLine(lineData)
+                if hasContent { break }
+            }
+        }
+        if !hasContent && !buffer.isEmpty { processLine(buffer) }
+
+        return !hasContent
+    }
+
     /// Load all chat messages from a JSONL session file, in file order.
     static func loadMessages(filePath: String) -> [ChatMessage] {
         guard let handle = FileHandle(forReadingAtPath: filePath) else { return [] }

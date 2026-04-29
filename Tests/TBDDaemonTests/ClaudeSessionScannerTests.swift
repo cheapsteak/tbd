@@ -90,4 +90,100 @@ struct ClaudeSessionScannerTests {
         let resolved = ClaudeProjectDirectory.resolve(worktreePath: "/Users/test/myproject", projectsBase: tmp)
         #expect(resolved?.lastPathComponent == encoded)
     }
+
+    // MARK: - isSessionBlank
+
+    /// Build a tmp projects-base + per-worktree subdirectory so tests can
+    /// pass an explicit `projectsBase` to isSessionBlank (avoids racing on
+    /// the global ClaudeProjectDirectory cache during parallel test runs).
+    private func makeProjectDir(worktreePath: String) throws -> (base: URL, dir: URL) {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let encoded = worktreePath.map { "/." .contains($0) ? "-" : String($0) }.joined()
+        let dir = base.appendingPathComponent(encoded)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return (base, dir)
+    }
+
+    @Test("isSessionBlank: missing JSONL returns true")
+    func blankMissingFile() throws {
+        let wt = "/Users/test/blank-missing-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+        ClaudeProjectDirectory.clearCache()
+
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: "deadbeef", worktreePath: wt, projectsBase: layout.base
+        ) == true)
+    }
+
+    @Test("isSessionBlank: empty JSONL returns true")
+    func blankEmptyFile() throws {
+        let wt = "/Users/test/blank-empty-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+        ClaudeProjectDirectory.clearCache()
+
+        let sessionID = "abc"
+        try Data().write(to: layout.dir.appendingPathComponent("\(sessionID).jsonl"))
+
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: sessionID, worktreePath: wt, projectsBase: layout.base
+        ) == true)
+    }
+
+    @Test("isSessionBlank: only metadata lines returns true")
+    func blankMetadataOnly() throws {
+        let wt = "/Users/test/blank-meta-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+        ClaudeProjectDirectory.clearCache()
+
+        let sessionID = "metaonly"
+        let lines = """
+        {"type":"permission-mode","sessionId":"metaonly","cwd":"\(wt)","gitBranch":"main","permissionMode":"auto"}
+        {"type":"file-history-snapshot","snapshot":{},"sessionId":"metaonly"}
+        """
+        try lines.data(using: .utf8)!.write(to: layout.dir.appendingPathComponent("\(sessionID).jsonl"))
+
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: sessionID, worktreePath: wt, projectsBase: layout.base
+        ) == true)
+    }
+
+    @Test("isSessionBlank: real user content returns false")
+    func nonBlankWithContent() throws {
+        let wt = "/Users/test/nonblank-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+        ClaudeProjectDirectory.clearCache()
+
+        let sessionID = "real"
+        let lines = """
+        {"type":"permission-mode","sessionId":"real","cwd":"\(wt)","permissionMode":"auto"}
+        {"type":"user","message":{"role":"user","content":"Hello, please refactor this."},"sessionId":"real"}
+        """
+        try lines.data(using: .utf8)!.write(to: layout.dir.appendingPathComponent("\(sessionID).jsonl"))
+
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: sessionID, worktreePath: wt, projectsBase: layout.base
+        ) == false)
+    }
+
+    @Test("isSessionBlank: assistant text content returns false")
+    func nonBlankAssistant() throws {
+        let wt = "/Users/test/nonblank-asst-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+        ClaudeProjectDirectory.clearCache()
+
+        let sessionID = "asst"
+        let lines = """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sure thing."}]},"sessionId":"asst"}
+        """
+        try lines.data(using: .utf8)!.write(to: layout.dir.appendingPathComponent("\(sessionID).jsonl"))
+
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: sessionID, worktreePath: wt, projectsBase: layout.base
+        ) == false)
+    }
 }

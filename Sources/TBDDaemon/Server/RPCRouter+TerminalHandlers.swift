@@ -278,8 +278,16 @@ extension RPCRouter {
             return RPCResponse(error: "No Claude session ID for terminal \(params.terminalID)")
         }
 
+        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+
         let count = params.messages ?? 1
-        let messages = Self.readSessionMessages(sessionID: sessionID, count: count)
+        let messages = Self.readSessionMessages(
+            sessionID: sessionID,
+            worktreePath: worktree.path,
+            count: count
+        )
         return try RPCResponse(result: TerminalConversationResult(messages: messages, sessionID: sessionID))
     }
 
@@ -300,29 +308,24 @@ extension RPCRouter {
         let text: String?
     }
 
-    /// Search `~/.claude/projects/` for a session JSONL file matching the given session ID,
-    /// parse it, and return the last N assistant messages with text content.
-    static func readSessionMessages(sessionID: String, count: Int) -> [ConversationMessage] {
-        let claudeDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/projects")
-
+    /// Read the last N user/assistant text messages from the session JSONL,
+    /// scoped to the project directory belonging to `worktreePath`. Returns
+    /// `[]` if the session does not live under that worktree's project dir.
+    static func readSessionMessages(
+        sessionID: String,
+        worktreePath: String,
+        count: Int,
+        projectsBase: URL? = nil
+    ) -> [ConversationMessage] {
         let fm = FileManager.default
-        guard let projectDirs = try? fm.contentsOfDirectory(atPath: claudeDir.path) else {
+        guard let projectDir = ClaudeProjectDirectory.resolve(
+            worktreePath: worktreePath,
+            projectsBase: projectsBase
+        ) else {
             return []
         }
-
-        var sessionPath: URL?
-        for dir in projectDirs {
-            let candidate = claudeDir
-                .appendingPathComponent(dir)
-                .appendingPathComponent("\(sessionID).jsonl")
-            if fm.fileExists(atPath: candidate.path) {
-                sessionPath = candidate
-                break
-            }
-        }
-
-        guard let path = sessionPath,
+        let path = projectDir.appendingPathComponent("\(sessionID).jsonl")
+        guard fm.fileExists(atPath: path.path),
               let data = fm.contents(atPath: path.path),
               let content = String(data: data, encoding: .utf8) else {
             return []
@@ -356,6 +359,29 @@ extension RPCRouter {
 
     // MARK: - Swap Claude Token (mid-conversation)
 
+    /// Decision for how to spawn the new pane during a token swap.
+    /// Pure data — facilitates unit-testing the branch without spinning up tmux.
+    enum SwapSpawnPlan: Equatable {
+        /// Session has prior content — `claude --resume <id>` and recapture
+        /// the forked session ID after a brief delay.
+        case resume(sessionID: String)
+        /// Session JSONL is missing or has no conversation — start a new
+        /// session with the system prompt, no recapture needed.
+        case fresh(sessionID: String)
+    }
+
+    /// Choose between the resume and fresh-spawn paths for a token swap.
+    static func planTerminalSwap(
+        oldSessionID: String,
+        isBlank: Bool,
+        freshSessionIDProvider: () -> String = { UUID().uuidString }
+    ) -> SwapSpawnPlan {
+        if isBlank {
+            return .fresh(sessionID: freshSessionIDProvider())
+        }
+        return .resume(sessionID: oldSessionID)
+    }
+
     func handleTerminalSwapClaudeToken(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSwapClaudeTokenParams.self, from: paramsData)
 
@@ -385,24 +411,58 @@ extension RPCRouter {
             resolved = nil
         }
 
-        // Spawn a NEW window in the same worktree, resuming the same session
-        // ID. `claude --resume` forks the conversation history into a fresh
-        // session file, so the two panes can coexist without JSONL conflicts.
-        // The new pane gets the new env prefix; the old pane is untouched.
+        // Spawn a NEW window in the same worktree. If the existing session has
+        // any conversation content, `claude --resume` forks it into a fresh
+        // session file (we recapture the forked ID below). If the session is
+        // blank — JSONL never written or no real entries — resuming it would
+        // produce "no conversation found" and chaotic behavior, so we instead
+        // spawn a brand-new session and skip the recapture.
         let repo = try await db.repos.get(id: worktree.repoID)
         var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
 
-        let spawn = ClaudeSpawnCommandBuilder.build(
-            resumeID: sessionID,
-            freshSessionID: nil,
-            appendSystemPrompt: nil,
-            initialPrompt: nil,
-            tokenSecret: resolved?.secret,
-            tokenKind: resolved?.kind,
-            cmd: nil,
-            shellFallback: ""
+        let blank = ClaudeSessionScanner.isSessionBlank(
+            sessionID: sessionID,
+            worktreePath: worktree.path
         )
+        let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
+
+        let spawn: ClaudeSpawnCommandBuilder.Result
+        let storedSessionID: String
+        let scheduleRecapture: Bool
+        switch plan {
+        case .resume(let resumeID):
+            logger.debug("swap: resuming session \(resumeID, privacy: .public)")
+            spawn = ClaudeSpawnCommandBuilder.build(
+                resumeID: resumeID,
+                freshSessionID: nil,
+                appendSystemPrompt: nil,
+                initialPrompt: nil,
+                tokenSecret: resolved?.secret,
+                tokenKind: resolved?.kind,
+                cmd: nil,
+                shellFallback: ""
+            )
+            storedSessionID = resumeID
+            scheduleRecapture = true
+        case .fresh(let newSessionID):
+            logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
+            let appendPrompt = repo.flatMap {
+                SystemPromptBuilder.build(repo: $0, worktree: worktree, isResume: false)
+            }
+            spawn = ClaudeSpawnCommandBuilder.build(
+                resumeID: nil,
+                freshSessionID: newSessionID,
+                appendSystemPrompt: appendPrompt,
+                initialPrompt: nil,
+                tokenSecret: resolved?.secret,
+                tokenKind: resolved?.kind,
+                cmd: nil,
+                shellFallback: ""
+            )
+            storedSessionID = newSessionID
+            scheduleRecapture = false
+        }
 
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
@@ -418,7 +478,7 @@ extension RPCRouter {
             tmuxWindowID: window.windowID,
             tmuxPaneID: window.paneID,
             label: "claude",
-            claudeSessionID: sessionID,
+            claudeSessionID: storedSessionID,
             claudeTokenID: resolved?.tokenID
         )
 
@@ -426,22 +486,23 @@ extension RPCRouter {
             terminalID: newTerminal.id, worktreeID: newTerminal.worktreeID, label: newTerminal.label
         )))
 
-        // `claude --resume <oldID>` forks the conversation into a NEW session
-        // file with a fresh UUID. The DB row currently stores the OLD ID, so
-        // any later read (handleTerminalConversation) or suspend/resume cycle
-        // would point at the wrong JSONL. Mirror SuspendResumeCoordinator's
+        // For the resume path, `claude --resume <oldID>` forks the conversation
+        // into a NEW session file with a fresh UUID. Mirror SuspendResumeCoordinator's
         // post-resume pattern: wait ~5s for Claude to settle, then capture the
-        // new session ID from the pane and persist it.
-        let newTerminalID = newTerminal.id
-        let newPaneID = window.paneID
-        let server = worktree.tmuxServer
-        let tmuxRef = self.tmux
-        let dbRef = self.db
-        Task {
-            try? await Task.sleep(for: .seconds(5))
-            let detector = ClaudeStateDetector(tmux: tmuxRef)
-            if let recaptured = await detector.captureSessionID(server: server, paneID: newPaneID) {
-                try? await dbRef.terminals.updateSessionID(id: newTerminalID, sessionID: recaptured)
+        // new session ID from the pane and persist it. The fresh path already
+        // stored the correct ID, so no recapture is needed.
+        if scheduleRecapture {
+            let newTerminalID = newTerminal.id
+            let newPaneID = window.paneID
+            let server = worktree.tmuxServer
+            let tmuxRef = self.tmux
+            let dbRef = self.db
+            Task {
+                try? await Task.sleep(for: .seconds(5))
+                let detector = ClaudeStateDetector(tmux: tmuxRef)
+                if let recaptured = await detector.captureSessionID(server: server, paneID: newPaneID) {
+                    try? await dbRef.terminals.updateSessionID(id: newTerminalID, sessionID: recaptured)
+                }
             }
         }
 
