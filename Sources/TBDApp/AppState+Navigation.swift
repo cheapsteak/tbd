@@ -68,7 +68,7 @@ extension AppState {
         case .worktrees(let ids):
             selectedRepoID = nil
             selectedWorktreeIDs = Set(ids)
-            selectionOrder = ids
+            selectionOrder = ids // must come after; didSet above rebuilds from unordered Set
         case .repo(let id):
             selectedWorktreeIDs = []
             selectedRepoID = id

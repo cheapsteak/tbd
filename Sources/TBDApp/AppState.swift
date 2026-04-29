@@ -50,6 +50,10 @@ final class AppState: ObservableObject {
 
     // MARK: - Navigation history (back/forward)
 
+    /// Back/forward state. Mutated only by the helpers in `AppState+Navigation.swift` —
+    /// any change to `navigationIndex` or `navigationEntries` must be followed by
+    /// `updateNavigationFlags()` to keep the published toolbar flags in sync.
+
     /// Published flags driving the toolbar back/forward buttons.
     @Published private(set) var canGoBack: Bool = false
     @Published private(set) var canGoForward: Bool = false
