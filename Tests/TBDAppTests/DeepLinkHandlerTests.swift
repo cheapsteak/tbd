@@ -6,6 +6,7 @@ import TBDShared
 @MainActor
 @Test func handle_knownActiveUUID_selectsWorktree() async {
     let appState = AppState()
+    appState.isInitialStateLoaded = true
     let id = UUID()
     let repoID = UUID()
     appState.worktrees = [
@@ -24,6 +25,7 @@ import TBDShared
 @MainActor
 @Test func handle_unknownUUID_doesNotMutateSelection() async {
     let appState = AppState()
+    appState.isInitialStateLoaded = true
     appState.worktrees = [:]
     appState.archivedLookupOverride = { _ in [] }
     let url = DeepLink.makeOpenWorktreeURL(UUID())
@@ -38,6 +40,7 @@ import TBDShared
 @MainActor
 @Test func handle_malformedURL_doesNotMutateSelection() async {
     let appState = AppState()
+    appState.isInitialStateLoaded = true
     let id = UUID()
     let repoID = UUID()
     appState.worktrees = [
@@ -57,6 +60,7 @@ import TBDShared
 @MainActor
 @Test func handle_archivedUUID_opensArchivedPaneAndHighlightsRow() async {
     let appState = AppState()
+    appState.isInitialStateLoaded = true
     let repoID = UUID()
     let archivedID = UUID()
     let archivedWT = Worktree(
@@ -94,4 +98,32 @@ import TBDShared
 
     #expect(appState.highlightedArchivedWorktreeID == nil)
     #expect(appState.selectedWorktreeIDs == [id])
+}
+
+@MainActor
+@Test func navigateToWorktree_beforeInitialLoad_buffersID() async {
+    let appState = AppState()
+    let id = UUID()
+    // Default: isInitialStateLoaded == false on a fresh AppState.
+    appState.worktrees = [:]
+
+    appState.navigateToWorktree(id)
+
+    #expect(appState.pendingDeepLinkID == id)
+    #expect(appState.selectedWorktreeIDs.isEmpty)
+    #expect(appState.selectedRepoID == nil)
+}
+
+@MainActor
+@Test func navigateToWorktree_afterInitialLoad_doesNotBuffer() async {
+    let appState = AppState()
+    appState.isInitialStateLoaded = true
+    appState.archivedLookupOverride = { _ in [] }
+    appState.worktrees = [:]
+    let id = UUID()
+
+    appState.navigateToWorktree(id)
+
+    // No buffering once initial state is loaded.
+    #expect(appState.pendingDeepLinkID == nil)
 }

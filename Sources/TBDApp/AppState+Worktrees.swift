@@ -159,6 +159,15 @@ extension AppState {
     /// miss.
     @MainActor
     func navigateToWorktree(_ id: UUID) {
+        // Cold-start guard: a tbd:// click can arrive between AppState.init()
+        // and the daemon RPC populating `worktrees`. If we fall through to
+        // archived lookup now we'll miss real active worktrees. Buffer
+        // instead and let connectAndLoadInitialState drain at the end.
+        if !isInitialStateLoaded {
+            pendingDeepLinkID = id
+            return
+        }
+
         let activeMatch = worktrees.values
             .flatMap { $0 }
             .contains(where: { $0.id == id })

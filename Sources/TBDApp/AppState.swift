@@ -55,6 +55,18 @@ final class AppState: ObservableObject {
     /// list.
     var archivedLookupOverride: ((UUID) async -> [Worktree])?
 
+    /// True once `connectAndLoadInitialState()` has finished its initial
+    /// `refreshAll()` and the worktree list is populated. Used by
+    /// `navigateToWorktree(_:)` to detect cold-start clicks that arrive
+    /// before the daemon RPC has returned.
+    @Published var isInitialStateLoaded: Bool = false
+
+    /// Buffers a deep-link target UUID when `.onOpenURL` fires before the
+    /// initial state load completes. Drained at the end of
+    /// `connectAndLoadInitialState()`. Internal-only — never written from
+    /// outside the AppState extension that consumes it.
+    var pendingDeepLinkID: UUID?
+
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
         guard let id = selectedWorktreeIDs.first else { return nil }
@@ -363,6 +375,11 @@ final class AppState: ObservableObject {
             }
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
+        }
+        isInitialStateLoaded = true
+        if let pendingID = pendingDeepLinkID {
+            pendingDeepLinkID = nil
+            navigateToWorktree(pendingID)
         }
     }
 
