@@ -15,6 +15,10 @@ import TBDShared
 /// daemon-side resize broadcast.
 struct MainAreaSizeKey: PreferenceKey {
     nonisolated(unsafe) static var defaultValue: CGSize = .zero
+    /// Exactly one view in the hierarchy posts this key (TerminalContainerView's
+    /// background GeometryReader), so taking the latest value is fine. If a
+    /// second producer is ever added, this reduce will silently drop earlier
+    /// values — switch to `value = max(value, nextValue())` or similar.
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
 
