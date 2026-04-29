@@ -60,7 +60,8 @@ struct ArchivedWorktreesView: View {
                         withAnimation(.easeInOut(duration: 0.3)) {
                             proxy.scrollTo(id, anchor: .center)
                         }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(900))
                             if appState.highlightedArchivedWorktreeID == id {
                                 appState.highlightedArchivedWorktreeID = nil
                             }
