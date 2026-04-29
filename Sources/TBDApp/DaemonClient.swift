@@ -403,10 +403,10 @@ actor DaemonClient {
     }
 
     /// Revive an archived worktree.
-    func reviveWorktree(id: UUID) async throws {
+    func reviveWorktree(id: UUID, cols: Int? = nil, rows: Int? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.worktreeRevive,
-            params: WorktreeReviveParams(worktreeID: id)
+            params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows)
         )
     }
 

@@ -345,7 +345,14 @@ public struct WorktreeArchiveParams: Codable, Sendable {
 
 public struct WorktreeReviveParams: Codable, Sendable {
     public let worktreeID: UUID
-    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+    /// Initial tmux window size in cells (see WorktreeCreateParams).
+    public let cols: Int?
+    public let rows: Int?
+    public init(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil) {
+        self.worktreeID = worktreeID
+        self.cols = cols
+        self.rows = rows
+    }
 }
 
 public struct WorktreeRenameParams: Codable, Sendable {

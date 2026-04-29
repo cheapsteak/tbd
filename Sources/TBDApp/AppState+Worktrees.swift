@@ -69,7 +69,8 @@ extension AppState {
         // Find the repo before reviving so we can refresh the archived list
         let repoID = archivedWorktrees.first(where: { $0.value.contains { $0.id == id } })?.key
         do {
-            try await daemonClient.reviveWorktree(id: id)
+            let size = mainAreaTerminalSize()
+            try await daemonClient.reviveWorktree(id: id, cols: size.cols, rows: size.rows)
             await refreshWorktrees()
             selectedWorktreeIDs = [id]
             if let repoID {
