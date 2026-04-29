@@ -31,7 +31,7 @@ jobs:
             spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
 
       - name: Test
-        run: swift test
+        run: swift test --parallel
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
         run: swift build
