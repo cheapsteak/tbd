@@ -59,7 +59,7 @@ ln -sf "../../../TBDApp" "$BUNDLE_MACOS/TBDApp"
 # we never match unrelated processes whose command line happens to
 # contain the repo path or the string "TBDApp".
 APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUNDLE_MACOS/TBDApp")"
-APP_EXEC_PATTERN="$(printf '%s' "$APP_EXEC_PATH" | sed 's/\./\\./g')"
+APP_EXEC_PATTERN="$(printf '%s' "$APP_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
 
 # Copy the Info.plist if missing or older than the source.
 plist_changed=false
