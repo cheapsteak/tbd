@@ -42,15 +42,33 @@ When the OS hands `tbd://open?worktree=X` to TBDApp:
 
 1. Parse `URLComponents`. Validate scheme is `tbd`, host is `open`,
    `worktree` query item parses as a `UUID`. On any failure → log + no-op.
-2. Look up the worktree in `appState.worktrees`.
-   - If not found (unknown UUID, or worktree was deleted) → log a warning,
-     no UI side-effect, no error popup. Stale links should fail quietly.
-3. If found:
+2. **First lookup — active worktrees.** Search `appState.worktrees`. If
+   found:
    - Set `appState.selectedWorktreeIDs = [worktreeID]`
    - Bring the main window to front and activate the app
      (`NSApp.activate(ignoringOtherApps: true)`)
    - Default tab-selection behavior takes over for terminals — we do not
      touch `activeTabIndices`.
+3. **Second lookup — archived worktrees.** Active miss → fire an
+   `RPCMethod.worktreeList` RPC with `WorktreeListParams(repoID: nil,
+   status: .archived)`. The daemon returns all archived worktrees across
+   all repos; client finds the matching UUID. If found:
+   - Set `appState.selectedRepoID = worktree.repoID` (opens that repo's
+     archived pane in the content area — see `AppState.swift:42` and
+     `ArchivedWorktreesView`)
+   - Set `appState.highlightedArchivedWorktreeID = id` so
+     `ArchivedWorktreesView` can scroll the row into view and flash it
+     (see "Archived row highlight" below)
+   - Activate the app and bring main window to front
+   - Clear `selectedWorktreeIDs` (archived view replaces the active
+     worktree detail pane in this layout)
+4. **Both lookups miss** (truly deleted, or never existed) → log a warning
+   to `os.Logger`, no UI side-effect.
+
+This two-stage lookup runs on every deep-link click. The active-worktree
+path is synchronous against in-memory state; only the archived fallback
+involves a daemon roundtrip. Worst-case (truly stale link) is one
+roundtrip plus a log line — acceptable for a user-initiated action.
 
 If the app is not running when the link is clicked, macOS launches it via
 the bundled `.app` registration described below. SwiftUI's
@@ -182,27 +200,82 @@ to add `application(_:open urls:)` in `AppDelegate` that buffers URLs
 into an array, and drain the buffer once AppState is reachable. Not
 implemented in v1.
 
-### New AppState method
+### New AppState methods
 
 In `Sources/TBDApp/AppState+Worktrees.swift` (already the home for
 worktree-related extensions):
 
 ```swift
-func navigateToWorktree(_ id: UUID) {
-    guard worktrees.contains(where: { $0.id == id }) else {
-        // Logged at handler layer; this is a defensive guard.
-        return
-    }
+/// Active-worktree path. Synchronous; assumes id is in self.worktrees.
+private func navigateToActiveWorktree(_ id: UUID) {
     selectedWorktreeIDs = [id]
     NSApp.activate(ignoringOtherApps: true)
-    // Bring the main window to front. SwiftUI's window restoration
-    // handles re-showing if it was minimized.
+}
+
+/// Archived-worktree path. Async; issues an RPC to find the worktree
+/// across all archived ones, then opens the archived pane and flashes
+/// the row.
+private func navigateToArchivedWorktree(_ id: UUID) async {
+    let archived: [Worktree]
+    do {
+        archived = try await daemonClient.listWorktrees(
+            repoID: nil, status: .archived
+        )
+    } catch {
+        logger.error("Deep-link archived lookup failed: \(error)")
+        return
+    }
+    guard let wt = archived.first(where: { $0.id == id }) else {
+        // Final miss — truly stale link.
+        return
+    }
+    selectedWorktreeIDs = []
+    selectedRepoID = wt.repoID
+    archivedWorktrees[wt.repoID] = archived.filter { $0.repoID == wt.repoID }
+    highlightedArchivedWorktreeID = id
+    NSApp.activate(ignoringOtherApps: true)
+}
+
+/// Public entry point. Tries active first, falls through to archived.
+func navigateToWorktree(_ id: UUID) {
+    if worktrees.contains(where: { $0.id == id }) {
+        navigateToActiveWorktree(id)
+    } else {
+        Task { await navigateToArchivedWorktree(id) }
+    }
 }
 ```
 
 The existing `selectedWorktreeIDs` setter already maintains
 `selectionOrder` invariants (see `Sources/TBDApp/AppState.swift:16`), so
-nothing else needs to change.
+nothing else needs to change there.
+
+### New AppState property
+
+```swift
+/// Set briefly when a deep link lands on an archived worktree. The
+/// ArchivedWorktreesView observes this and scrolls/flashes the matching
+/// row, then clears the value after the flash animation completes.
+@Published var highlightedArchivedWorktreeID: UUID?
+```
+
+### Archived row highlight
+
+In `Sources/TBDApp/ArchivedWorktreesView.swift`:
+
+- Wrap the existing `ForEach(archived) { ... }` row list in a
+  `ScrollViewReader` so we can call `proxy.scrollTo(id, anchor: .center)`.
+- Add `.onChange(of: appState.highlightedArchivedWorktreeID)` on the
+  outer view: when it transitions to a non-nil value matching a row in
+  this repo's archived list, scroll to it and trigger a brief background
+  flash (e.g. 800ms `.background(...)` animation that fades from accent
+  color back to clear).
+- After the animation completes, set
+  `appState.highlightedArchivedWorktreeID = nil` so a re-click on the
+  same link re-triggers the flash.
+
+Use the project's existing animation/color conventions — no new
+dependencies.
 
 ## CLI-side implementation
 
@@ -267,10 +340,13 @@ In-scope test surface:
 - `DeepLink.parseOpenURL(_:)` rejects: wrong scheme, wrong host, missing
   query item, malformed UUID, extra unrelated query items (the last
   should still parse — extra params are forward-compatible).
-- `DeepLinkHandler.handle(_:appState:)` test against a stub `AppState`
-  populated with one worktree:
-  - Known UUID → `selectedWorktreeIDs` becomes `[id]`.
-  - Unknown UUID → no mutation to selection.
+- `DeepLinkHandler.handle(_:appState:)` test against a stub `AppState`:
+  - Known active UUID → `selectedWorktreeIDs` becomes `[id]`.
+  - Known archived UUID (stub daemon returns it) → `selectedRepoID` is
+    set to the worktree's repoID, `highlightedArchivedWorktreeID` is
+    set to the worktree id, `selectedWorktreeIDs` is cleared.
+  - Unknown UUID (active miss + archived miss) → no mutation to
+    selection or repo focus.
   - Malformed URL → no mutation.
 - CLI: zero-arg with no `TBD_WORKTREE_ID` exits non-zero with a
   recognizable message; with the env var set, prints the expected URL.
@@ -298,7 +374,12 @@ manual check after first build, but not automatable.
 
 - `scripts/restart.sh` — bundle creation, `lsregister`, launch via `open`
 - `Sources/TBDApp/TBDApp.swift` — `.onOpenURL` on the main Window scene
-- `Sources/TBDApp/AppState+Worktrees.swift` — `navigateToWorktree(_:)`
+- `Sources/TBDApp/AppState+Worktrees.swift` — `navigateToWorktree(_:)`,
+  `navigateToActiveWorktree(_:)`, `navigateToArchivedWorktree(_:)`
+- `Sources/TBDApp/AppState.swift` — new
+  `@Published var highlightedArchivedWorktreeID: UUID?`
+- `Sources/TBDApp/ArchivedWorktreesView.swift` — `ScrollViewReader`
+  wrapper, `.onChange` reaction, row flash animation
 - `Sources/TBDCLI/TBD.swift` — register the new `link` subcommand
 
 The `Resources/TBDApp.Info.plist` file is read by macOS at app launch
