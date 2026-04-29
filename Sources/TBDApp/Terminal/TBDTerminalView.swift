@@ -248,6 +248,13 @@ class TBDTerminalView: TerminalView {
             candidate = String(candidate[candidate.startIndex..<candidate.index(candidate.startIndex, offsetBy: match.range.location)])
         }
 
+        // The path-character word boundary includes '.', so a trailing sentence period gets absorbed
+        // into the candidate (e.g., "see design.md."). Strip it before the existence check. Mid-path
+        // dots are preserved — only trailing.
+        while candidate.hasSuffix(".") {
+            candidate.removeLast()
+        }
+
         guard !candidate.isEmpty else { return nil }
 
         // Resolve relative paths against worktreePath
