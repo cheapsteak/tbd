@@ -16,6 +16,7 @@ struct TBDCommand: AsyncParsableCommand {
             DaemonCommand.self,
             SetupHooksCommand.self,
             CleanupCommand.self,
+            LinkCommand.self,
         ]
     )
 }

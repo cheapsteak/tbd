@@ -296,7 +296,7 @@ struct WorktreeRename: AsyncParsableCommand {
 // MARK: - Helpers
 
 /// Try to parse as UUID first; if that fails, look up by name using worktree.list.
-private func resolveWorktreeNameOrID(_ nameOrID: String, client: SocketClient) throws -> UUID {
+func resolveWorktreeNameOrID(_ nameOrID: String, client: SocketClient) throws -> UUID {
     // Try UUID first
     if let id = UUID(uuidString: nameOrID) {
         return id
