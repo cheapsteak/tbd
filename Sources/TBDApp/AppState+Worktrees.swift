@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import TBDShared
 import os
@@ -109,8 +110,79 @@ extension AppState {
 
     // MARK: - Archived Worktrees
 
+    /// Active-worktree path for deep-link navigation. Caller is responsible
+    /// for verifying the id exists in `self.worktrees` first.
+    @MainActor
+    func navigateToActiveWorktree(_ id: UUID) {
+        highlightedArchivedWorktreeID = nil
+        selectedWorktreeIDs = [id]
+        // Only foreground when the AppKit run loop is live — `NSApp` is nil
+        // under unit tests, which would crash on the implicit unwrap.
+        if NSApplication.shared.isRunning {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// Archived-worktree path for deep-link navigation. Async — issues an RPC
+    /// to find the worktree across all archived ones, then opens the
+    /// archived pane and flashes the row.
+    @MainActor
+    func navigateToArchivedWorktree(_ id: UUID) async {
+        let archived: [Worktree]
+        if let override = archivedLookupOverride {
+            archived = await override(id)
+        } else {
+            do {
+                archived = try await daemonClient.listWorktrees(
+                    repoID: nil, status: .archived
+                )
+            } catch {
+                logger.error("Deep-link archived lookup failed: \(error.localizedDescription)")
+                return
+            }
+        }
+
+        guard let wt = archived.first(where: { $0.id == id }) else {
+            logger.warning("Deep link references unknown worktree \(id.uuidString, privacy: .public)")
+            return
+        }
+
+        selectedWorktreeIDs = []
+        selectedRepoID = wt.repoID
+        archivedWorktrees[wt.repoID] = archived.filter { $0.repoID == wt.repoID }
+        highlightedArchivedWorktreeID = id
+        if NSApplication.shared.isRunning {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+    }
+
+    /// Public entry point for deep-link navigation. Synchronous fast path
+    /// for active worktrees; falls through to the async archived path on a
+    /// miss.
+    @MainActor
+    func navigateToWorktree(_ id: UUID) {
+        // Cold-start guard: a tbd:// click can arrive between AppState.init()
+        // and the daemon RPC populating `worktrees`. If we fall through to
+        // archived lookup now we'll miss real active worktrees. Buffer
+        // instead and let connectAndLoadInitialState drain at the end.
+        if !isInitialStateLoaded {
+            pendingDeepLinkID = id
+            return
+        }
+
+        let activeMatch = worktrees.values
+            .flatMap { $0 }
+            .contains(where: { $0.id == id })
+        if activeMatch {
+            navigateToActiveWorktree(id)
+        } else {
+            Task { await navigateToArchivedWorktree(id) }
+        }
+    }
+
     /// Select a repo to show its archived worktrees in the content pane.
     func selectRepo(id: UUID) {
+        highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = id
         Task { await refreshArchivedWorktrees(repoID: id) }

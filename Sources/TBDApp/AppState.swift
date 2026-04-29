@@ -76,6 +76,29 @@ final class AppState: ObservableObject {
     /// Archived worktrees keyed by repo ID, fetched on demand.
     @Published var archivedWorktrees: [UUID: [Worktree]] = [:]
 
+    /// Set briefly when a deep link lands on an archived worktree. The
+    /// ArchivedWorktreesView observes this and scrolls/flashes the matching
+    /// row, then clears the value after the flash animation completes.
+    @Published var highlightedArchivedWorktreeID: UUID?
+
+    /// Test seam: when set, replaces the daemon roundtrip for archived
+    /// lookups in `navigateToArchivedWorktree(_:)`. Production code leaves
+    /// this nil; tests assign a closure returning a deterministic worktree
+    /// list.
+    var archivedLookupOverride: ((UUID) async -> [Worktree])?
+
+    /// True once `connectAndLoadInitialState()` has finished its initial
+    /// `refreshAll()` and the worktree list is populated. Used by
+    /// `navigateToWorktree(_:)` to detect cold-start clicks that arrive
+    /// before the daemon RPC has returned.
+    @Published var isInitialStateLoaded: Bool = false
+
+    /// Buffers a deep-link target UUID when `.onOpenURL` fires before the
+    /// initial state load completes. Drained at the end of
+    /// `connectAndLoadInitialState()`. Internal-only — never written from
+    /// outside the AppState extension that consumes it.
+    var pendingDeepLinkID: UUID?
+
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
         guard let id = selectedWorktreeIDs.first else { return nil }
@@ -401,6 +424,11 @@ final class AppState: ObservableObject {
             }
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
+        }
+        isInitialStateLoaded = true
+        if let pendingID = pendingDeepLinkID {
+            pendingDeepLinkID = nil
+            navigateToWorktree(pendingID)
         }
     }
 

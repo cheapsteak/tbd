@@ -34,6 +34,49 @@ if [ "$skip_build" = false ]; then
     echo "  Build: $((SECONDS - t0))s"
 fi
 
+# MARK: - Assemble TBD.app bundle
+#
+# macOS resolves tbd:// URLs via LaunchServices, which requires a
+# CFBundleURLTypes entry in an Info.plist inside a .app bundle. We assemble
+# a minimal bundle in .build/debug/TBD.app whose binary is a symlink to
+# .build/debug/TBDApp, so swift build continues to update it directly.
+
+BUNDLE_DIR="$BUILD_DIR/TBD.app"
+BUNDLE_MACOS="$BUNDLE_DIR/Contents/MacOS"
+BUNDLE_PLIST="$BUNDLE_DIR/Contents/Info.plist"
+SOURCE_PLIST="$REPO_ROOT/Resources/TBDApp.Info.plist"
+
+mkdir -p "$BUNDLE_MACOS"
+
+# Symlink the binary (idempotent).
+# Path is relative to $BUNDLE_MACOS (.build/debug/TBD.app/Contents/MacOS),
+# so three "..") gets us back to .build/debug/.
+ln -sf "../../../TBDApp" "$BUNDLE_MACOS/TBDApp"
+
+# Resolve the symlink to the absolute real path the OS will exec (open(1)
+# resolves symlinks before exec, so the running TBDApp's command line will
+# contain this exact path). We use it as the pgrep/pkill match target so
+# we never match unrelated processes whose command line happens to
+# contain the repo path or the string "TBDApp".
+APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUNDLE_MACOS/TBDApp")"
+APP_EXEC_PATTERN="$(printf '%s' "$APP_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
+
+# Copy the Info.plist if missing or older than the source.
+plist_changed=false
+if [ ! -f "$BUNDLE_PLIST" ] || [ "$SOURCE_PLIST" -nt "$BUNDLE_PLIST" ]; then
+    cp "$SOURCE_PLIST" "$BUNDLE_PLIST"
+    plist_changed=true
+fi
+
+# Re-register with LaunchServices when the plist changes (URL scheme update).
+if [ "$plist_changed" = true ]; then
+    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+    if [ -x "$LSREGISTER" ]; then
+        "$LSREGISTER" -f "$BUNDLE_DIR" >/dev/null 2>&1 || true
+        echo "  Registered tbd:// URL scheme"
+    fi
+fi
+
 # MARK: - Restart Daemon
 
 if [ "$app_only" = false ]; then
@@ -63,16 +106,21 @@ fi
 
 if [ "$daemon_only" = false ]; then
     echo "Stopping app..."
-    pkill -f "$BUILD_DIR/TBDApp" 2>/dev/null && sleep 0.3 || true
+    # Match end-anchored against the resolved exec path so we only ever
+    # affect THIS worktree's running TBDApp — never swift build subprocesses,
+    # editors, or sibling worktrees whose command line contains "TBDApp".
+    pkill -f "^${APP_EXEC_PATTERN}\$" 2>/dev/null && sleep 0.3 || true
 
     echo "Starting app..."
-    "$BUILD_DIR/TBDApp" > /tmp/tbdapp.log 2>&1 &
-    APP_PID=$!
-    echo "  App launched (PID $APP_PID) — logs: /tmp/tbdapp.log"
-    # Give it a moment and check it didn't immediately exit
+    open "$BUNDLE_DIR" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
+    # `open` returns immediately after asking LaunchServices to spawn the app.
+    # Give it a moment, then verify the process is alive.
     sleep 0.5
-    if ! kill -0 "$APP_PID" 2>/dev/null; then
-        echo "  ERROR: App exited immediately. Last lines of /tmp/tbdapp.log:"
+    if pgrep -f "^${APP_EXEC_PATTERN}\$" >/dev/null; then
+        APP_PID=$(pgrep -f "^${APP_EXEC_PATTERN}\$" | head -1)
+        echo "  App launched (PID $APP_PID) — logs: /tmp/tbdapp.log"
+    else
+        echo "  ERROR: App failed to launch. Last lines of /tmp/tbdapp.log:"
         tail -20 /tmp/tbdapp.log
     fi
 fi
