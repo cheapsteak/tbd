@@ -70,6 +70,9 @@ extension AppState {
     /// visible with a status pill until the user navigates away, instead
     /// of yanking them into the now-active worktree.
     func reviveWorktree(id: UUID) async {
+        // Idempotency: see `reviveWithSession`. Concurrent invocations
+        // would race the `.done` state to nil on the second call's error.
+        guard revivingArchived[id] == nil else { return }
         guard let snapshot = archivedWorktrees.values
             .flatMap({ $0 })
             .first(where: { $0.id == id })

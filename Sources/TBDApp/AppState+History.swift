@@ -111,6 +111,10 @@ extension AppState {
     /// Marks the row as `inFlight` immediately so the archived view can show
     /// a status pill, then flips to `.done` on success or clears on failure.
     func reviveWithSession(worktreeID: UUID, sessionId: String) async {
+        // Idempotency: ignore re-entrant calls (e.g. rapid double-click)
+        // so a concurrent invocation can't overwrite the .done state with
+        // an "already active" error.
+        guard revivingArchived[worktreeID] == nil else { return }
         // Find the snapshot in archivedWorktrees so we can keep the row visible
         // after the daemon reconciles the worktree out of the archived list.
         guard let snapshot = archivedWorktrees.values
