@@ -19,12 +19,24 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(action: addRepo) {
-                    Label("Add Repository", systemImage: "plus.rectangle")
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                HStack {
+                    Button(action: addRepo) {
+                        Label("Add Repository", systemImage: "plus.rectangle")
+                            .font(.subheadline)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    Spacer()
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
             }
+            .background(.bar)
+        }
+        .toolbar {
             ToolbarItem(placement: .automatic) {
                 Picker("Filter", selection: $appState.repoFilter) {
                     Text("All Repos").tag(UUID?.none)
