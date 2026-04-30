@@ -7,13 +7,14 @@ struct ArchivedWorktreesView: View {
 
     @State private var listWidth: CGFloat = 280
     @State private var dragStartWidth: CGFloat? = nil
+    @AppStorage("archived.hideEmpty") private var hideEmpty: Bool = true
 
-    /// Display rows = archived worktrees ∪ lingering revive snapshots,
-    /// deduped by id, sorted by archivedAt desc.
-    private var rows: [ArchivedRow] {
+    /// All archived rows for this repo (∪ lingering revive snapshots), unfiltered.
+    /// Used for the unfiltered count and to back the filter visibility decision.
+    private var allRows: [ArchivedRow] {
         let archived = (appState.archivedWorktrees[repoID] ?? [])
         let lingering = appState.revivingArchived
-            .compactMap { (id, state) -> Worktree? in
+            .compactMap { (_, state) -> Worktree? in
                 guard state.snapshot.repoID == repoID else { return nil }
                 return state.snapshot
             }
@@ -27,12 +28,22 @@ struct ArchivedWorktreesView: View {
             }
     }
 
+    /// Visible rows after applying the current filter. Lingering revives
+    /// always pass through so a just-revived row doesn't vanish mid-flight.
+    private var rows: [ArchivedRow] {
+        guard hideEmpty else { return allRows }
+        return allRows.filter { row in
+            row.reviveState != nil
+                || row.worktree.archivedClaudeSessions?.isEmpty == false
+        }
+    }
+
     private var selectedID: UUID? {
         appState.selectedArchivedWorktreeIDs[repoID]
     }
 
     var body: some View {
-        if rows.isEmpty {
+        if allRows.isEmpty {
             emptyState
         } else {
             HStack(spacing: 0) {
@@ -49,14 +60,32 @@ struct ArchivedWorktreesView: View {
 
     private var leftRail: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("Archived")
                     .font(.title3)
                     .fontWeight(.medium)
                 Spacer()
-                Text("\(rows.count)")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                if hideEmpty && rows.count < allRows.count {
+                    Text("\(rows.count) of \(allRows.count)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("\(rows.count)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Menu {
+                    Toggle("Hide worktrees with no conversations", isOn: $hideEmpty)
+                } label: {
+                    Image(systemName: hideEmpty
+                          ? "line.3.horizontal.decrease.circle.fill"
+                          : "line.3.horizontal.decrease.circle")
+                        .foregroundStyle(hideEmpty ? Color.accentColor : .secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Filter")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -64,7 +93,20 @@ struct ArchivedWorktreesView: View {
             Divider()
 
             ScrollViewReader { proxy in
-                List(rows) { row in
+                if rows.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "line.3.horizontal.decrease.circle")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.tertiary)
+                        Text("No matches")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Button("Show all") { hideEmpty = false }
+                            .buttonStyle(.link)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(rows) { row in
                     ArchivedWorktreeRow(
                         row: row,
                         isSelected: selectedID == row.id
@@ -83,30 +125,38 @@ struct ArchivedWorktreesView: View {
                         }
                     }
                 }
-                .listStyle(.plain)
-                .onChange(of: appState.highlightedArchivedWorktreeID, initial: true) { _, newValue in
-                    guard let id = newValue, rows.contains(where: { $0.id == id }) else { return }
-                    withAnimation(.easeInOut(duration: 0.3)) {
-                        proxy.scrollTo(id, anchor: .center)
-                    }
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(900))
-                        if appState.highlightedArchivedWorktreeID == id {
-                            appState.highlightedArchivedWorktreeID = nil
+                    .listStyle(.plain)
+                    .onChange(of: appState.highlightedArchivedWorktreeID, initial: true) { _, newValue in
+                        guard let id = newValue, rows.contains(where: { $0.id == id }) else { return }
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            proxy.scrollTo(id, anchor: .center)
+                        }
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(900))
+                            if appState.highlightedArchivedWorktreeID == id {
+                                appState.highlightedArchivedWorktreeID = nil
+                            }
                         }
                     }
                 }
             }
         }
-        .onAppear {
-            // Trigger initial selection if nothing is set yet. The async refresh
-            // path also calls into `ensureArchivedSelectionValid`, but on
-            // re-appearances (cached `archivedWorktrees`) we still need this.
-            if selectedID == nil,
-               let first = rows.first(where: { $0.reviveState == nil })?.worktree {
-                appState.selectedArchivedWorktreeIDs[repoID] = first.id
-                Task { await appState.fetchSessions(worktreeID: first.id) }
-            }
+        .onAppear { reconcileSelection() }
+        .onChange(of: hideEmpty) { _, _ in reconcileSelection() }
+    }
+
+    /// Make sure `selectedArchivedWorktreeIDs[repoID]` points to a row that
+    /// is currently visible. Picks the first non-lingering visible row when
+    /// unset or stale; clears when nothing is visible. Triggers a session
+    /// fetch for any newly-selected row.
+    private func reconcileSelection() {
+        let visibleIDs = Set(rows.map(\.id))
+        if let current = selectedID, visibleIDs.contains(current) { return }
+        if let first = rows.first(where: { $0.reviveState == nil })?.worktree {
+            appState.selectedArchivedWorktreeIDs[repoID] = first.id
+            Task { await appState.fetchSessions(worktreeID: first.id) }
+        } else {
+            appState.selectedArchivedWorktreeIDs.removeValue(forKey: repoID)
         }
     }
 
