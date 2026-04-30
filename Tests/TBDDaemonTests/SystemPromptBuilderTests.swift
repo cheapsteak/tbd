@@ -60,7 +60,7 @@ struct SystemPromptBuilderTests {
 
         let result = SystemPromptBuilder.build(repo: repo, worktree: wt, isResume: false)
         #expect(result != nil)
-        #expect(result!.contains("To do immediately"))
+        #expect(result!.contains("Rename the git branch"))
         #expect(result!.contains("git branch -m"))
         #expect(result!.contains("tbd worktree rename"))
     }
@@ -74,7 +74,7 @@ struct SystemPromptBuilderTests {
 
         let result = SystemPromptBuilder.build(repo: repo, worktree: wt, isResume: false)
         #expect(result != nil)
-        #expect(!result!.contains("To do immediately"))
+        #expect(!result!.contains("Rename the git branch"))
         #expect(result!.contains("TBD-managed worktree"))
     }
 
@@ -88,7 +88,7 @@ struct SystemPromptBuilderTests {
 
         let result = SystemPromptBuilder.build(repo: repo, worktree: wt, isResume: false)
         #expect(result != nil)
-        #expect(!result!.contains("To do immediately"))
+        #expect(!result!.contains("Rename the git branch"))
         #expect(result!.contains("TBD-managed worktree"))
     }
 
