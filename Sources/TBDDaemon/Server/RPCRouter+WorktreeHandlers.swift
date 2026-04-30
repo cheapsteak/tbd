@@ -68,7 +68,12 @@ extension RPCRouter {
 
     func handleWorktreeRevive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeReviveParams.self, from: paramsData)
-        let worktree = try await lifecycle.reviveWorktree(worktreeID: params.worktreeID, cols: params.cols, rows: params.rows)
+        let worktree = try await lifecycle.reviveWorktree(
+            worktreeID: params.worktreeID,
+            cols: params.cols,
+            rows: params.rows,
+            preferredSessionID: params.preferredSessionID
+        )
 
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: worktree.id, repoID: worktree.repoID,

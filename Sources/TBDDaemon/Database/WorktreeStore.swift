@@ -211,6 +211,18 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Replace the archivedClaudeSessions list with `sessions` (re-encoded as JSON).
+    /// Used by the revive path when a `preferredSessionID` is supplied so the
+    /// last-resumed-first ordering is persisted across re-archive.
+    public func setArchivedClaudeSessions(id: UUID, sessions: [String]) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else { return }
+            let json = try String(data: JSONEncoder().encode(sessions), encoding: .utf8) ?? "[]"
+            record.archivedClaudeSessions = json
+            try record.update(db)
+        }
+    }
+
     /// Rename a worktree's display name.
     public func rename(id: UUID, displayName: String) async throws {
         try await writer.write { db in

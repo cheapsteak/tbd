@@ -1,6 +1,14 @@
 import Foundation
 import TBDShared
 
+/// Reorders `stored` so `preferred` is first, preserving the relative order of
+/// the rest. Returns `stored` unchanged when `preferred` is nil, when `stored`
+/// is nil, or when `stored` does not contain `preferred`.
+internal func reorderSessions(stored: [String]?, preferred: String?) -> [String]? {
+    guard let preferred, let stored, stored.contains(preferred) else { return stored }
+    return [preferred] + stored.filter { $0 != preferred }
+}
+
 extension WorktreeLifecycle {
     // MARK: - Archive
 
@@ -94,7 +102,7 @@ extension WorktreeLifecycle {
     ///   - worktreeID: The archived worktree to revive.
     ///   - skipClaude: If true, skip launching claude in the first terminal window.
     /// - Returns: The revived worktree.
-    public func reviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil) async throws -> Worktree {
+    public func reviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> Worktree {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -132,10 +140,21 @@ extension WorktreeLifecycle {
             branch: worktree.branch
         )
 
+        // If the caller asked to prefer a specific session, float it to the
+        // front of the stored list and persist the new order so a subsequent
+        // re-archive preserves last-resumed-first ordering.
+        let sessions = reorderSessions(
+            stored: worktree.archivedClaudeSessions,
+            preferred: preferredSessionID
+        )
+        if let sessions, sessions != worktree.archivedClaudeSessions {
+            try await db.worktrees.setArchivedClaudeSessions(id: worktreeID, sessions: sessions)
+        }
+
         try await setupTerminals(
             worktree: worktree, repo: repo,
             skipClaude: skipClaude,
-            archivedClaudeSessions: worktree.archivedClaudeSessions,
+            archivedClaudeSessions: sessions,
             cols: cols,
             rows: rows
         )
