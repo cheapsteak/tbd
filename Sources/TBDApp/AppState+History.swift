@@ -62,6 +62,11 @@ extension AppState {
         do {
             let fresh = try await daemonClient.listSessions(worktreeID: worktreeID)
             historyLoadStates[worktreeID] = .loaded(fresh)
+            // Auto-select the first session on initial load if nothing is selected yet.
+            // Applies to both active and archived worktrees.
+            if selectedSessionIDs[worktreeID] == nil, let first = fresh.first {
+                await selectSession(first, worktreeID: worktreeID)
+            }
         } catch {
             historyLoadStates[worktreeID] = .failed(error.localizedDescription)
         }
