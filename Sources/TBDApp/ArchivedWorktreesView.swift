@@ -64,19 +64,25 @@ struct ArchivedWorktreesView: View {
             Divider()
 
             ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 1) {
-                        ForEach(rows) { row in
-                            ArchivedWorktreeRow(
-                                row: row,
-                                isSelected: selectedID == row.id,
-                                onSelect: { select(row) }
-                            )
-                            .id(row.id)
+                List(rows) { row in
+                    ArchivedWorktreeRow(
+                        row: row,
+                        isSelected: selectedID == row.id
+                    )
+                    .id(row.id)
+                    .contentShape(Rectangle())
+                    .onTapGesture { select(row) }
+                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                    .listRowBackground(rowBackground(for: row))
+                    .contextMenu {
+                        if row.reviveState == nil {
+                            Button("Revive") {
+                                Task { await appState.reviveWorktree(id: row.worktree.id) }
+                            }
                         }
                     }
-                    .padding(.vertical, 6)
                 }
+                .listStyle(.plain)
                 .onChange(of: appState.highlightedArchivedWorktreeID, initial: true) { _, newValue in
                     guard let id = newValue, rows.contains(where: { $0.id == id }) else { return }
                     withAnimation(.easeInOut(duration: 0.3)) {
@@ -180,6 +186,16 @@ struct ArchivedWorktreesView: View {
         appState.selectedArchivedWorktreeIDs[repoID] = row.id
         Task { await appState.fetchSessions(worktreeID: row.id) }
     }
+
+    private func rowBackground(for row: ArchivedRow) -> Color {
+        if appState.highlightedArchivedWorktreeID == row.id {
+            return Color.accentColor.opacity(0.25)
+        }
+        if selectedID == row.id {
+            return Color.accentColor.opacity(0.15)
+        }
+        return Color.clear
+    }
 }
 
 // MARK: - Row model
@@ -195,55 +211,42 @@ private struct ArchivedRow: Identifiable {
 private struct ArchivedWorktreeRow: View {
     let row: ArchivedRow
     let isSelected: Bool
-    let onSelect: () -> Void
-    @EnvironmentObject var appState: AppState
 
     private var hasClaudeSessions: Bool {
         row.worktree.archivedClaudeSessions?.isEmpty == false
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(row.worktree.displayName)
-                        .fontWeight(.medium)
-                        .lineLimit(1)
-                    statusPill
-                }
-                HStack(spacing: 6) {
-                    Label(row.worktree.branch, systemImage: "arrow.triangle.branch")
-                        .lineLimit(1)
-                    if let archivedAt = row.worktree.archivedAt, row.reviveState == nil {
-                        Text("·")
-                        Text(archivedAt, format: .relative(presentation: .named))
-                    }
-                    if hasClaudeSessions, row.reviveState == nil {
-                        let count = row.worktree.archivedClaudeSessions?.count ?? 0
-                        Text("·")
-                        Text("\(count) session\(count == 1 ? "" : "s")")
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(row.worktree.displayName)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                statusPill
             }
-            Spacer(minLength: 0)
+            HStack(spacing: 4) {
+                Text(row.worktree.branch)
+                    .lineLimit(1)
+                if let archivedAt = row.worktree.archivedAt, row.reviveState == nil {
+                    separator
+                    Text(archivedAt, format: .relative(presentation: .named))
+                }
+                if hasClaudeSessions, row.reviveState == nil {
+                    let count = row.worktree.archivedClaudeSessions?.count ?? 0
+                    separator
+                    Text("\(count) session\(count == 1 ? "" : "s")")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .background(rowBackground)
-        .cornerRadius(6)
-        .padding(.horizontal, 8)
-        .onTapGesture { onSelect() }
-        .contextMenu {
-            if row.reviveState == nil {
-                Button("Revive") {
-                    Task { await appState.reviveWorktree(id: row.worktree.id) }
-                }
-            }
-        }
+        .padding(.vertical, 3)
+    }
+
+    private var separator: some View {
+        Text("·").foregroundStyle(.quaternary).font(.caption2)
     }
 
     @ViewBuilder
@@ -268,13 +271,4 @@ private struct ArchivedWorktreeRow: View {
         }
     }
 
-    private var rowBackground: Color {
-        if appState.highlightedArchivedWorktreeID == row.worktree.id {
-            return Color.accentColor.opacity(0.25)
-        }
-        if isSelected {
-            return Color.accentColor.opacity(0.18)
-        }
-        return Color.primary.opacity(0.03)
-    }
 }
