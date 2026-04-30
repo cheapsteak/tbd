@@ -9,16 +9,17 @@ import TBDShared
 ///   for the active tab's layout.
 /// - Multi-select (Cmd-click): Auto-grid layout, one panel per selected worktree
 ///   showing its primary terminal. No tab bar.
-/// Preference key carrying the px size of the main terminal area (the slot
-/// inside DockSplitView's `mainContent`, excluding the pinned dock and any
-/// file panel). AppState reads this via `.onPreferenceChange` to drive the
-/// daemon-side resize broadcast.
+/// Preference key carrying the px size of the actual terminal-rendering area
+/// — the SplitLayoutView slot inside SingleWorktreeView, or the grid inside
+/// MultiWorktreeView. Excludes the tab bar, divider, dock, and any file
+/// panel. AppState reads this via `.onPreferenceChange` to drive the
+/// daemon-side resize broadcast so tmux pane dimensions match what SwiftTerm
+/// actually renders.
 struct MainAreaSizeKey: PreferenceKey {
     nonisolated(unsafe) static var defaultValue: CGSize = .zero
-    /// Exactly one view in the hierarchy posts this key (TerminalContainerView's
-    /// background GeometryReader), so taking the latest value is fine. If a
-    /// second producer is ever added, this reduce will silently drop earlier
-    /// values — switch to `value = max(value, nextValue())` or similar.
+    /// Two views in the hierarchy can post this key — SingleWorktreeView's
+    /// layoutContent or MultiWorktreeView's grid — but only one is rendered
+    /// at a time, so taking the latest value is fine.
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
 }
 
@@ -58,10 +59,10 @@ struct TerminalContainerView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .background(GeometryReader { geometry in
-            Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
-        })
         .onPreferenceChange(MainAreaSizeKey.self) { newSize in
+            // The producing GeometryReader lives deeper, in
+            // SingleWorktreeView.layoutContent or MultiWorktreeView's grid,
+            // so the measurement excludes the tab bar / divider chrome.
             // SwiftUI fires .onPreferenceChange with .zero in some early
             // layout passes; ignore those so we don't broadcast a degenerate
             // size to the daemon.
@@ -193,8 +194,14 @@ private struct SingleWorktreeView: View {
                     Divider()
                 }
 
-                // Split layout view for the active tab's layout
+                // Split layout view for the active tab's layout. Publish its
+                // measured size to MainAreaSizeKey so the daemon-side tmux
+                // resize matches the actual SwiftTerm pane area (tab bar +
+                // divider above are excluded).
                 layoutContent(worktree: worktree)
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
+                    })
             }
             // TmuxBridge sessions are created on-demand by TerminalPanelView
             .task(id: worktreeID) {
@@ -333,6 +340,10 @@ private struct MultiWorktreeView: View {
                 }
             }
             .background(Color(nsColor: .separatorColor))
+            // No tab bar in multi-select mode, so the GeometryReader's size
+            // is already the actual rendering area. Publish it for the
+            // daemon-side tmux resize.
+            .preference(key: MainAreaSizeKey.self, value: geometry.size)
         }
     }
 }
