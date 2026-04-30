@@ -22,58 +22,44 @@ struct ContentView: View {
             NavigationSplitView {
                 SidebarView()
             } detail: {
-                Group {
-                    if !appState.isConnected {
-                        disconnectedView
-                    } else if appState.repos.isEmpty {
-                        emptyStateView
-                    } else if let repoID = appState.selectedRepoID {
-                        RepoDetailView(repoID: repoID)
-                    } else if appState.selectedWorktreeIDs.isEmpty {
-                        Text("Select a worktree or click + to create one")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        HStack(spacing: 0) {
-                            TerminalContainerView()
-                            if showFilePanel, let worktree = selectedWorktree, !worktree.path.isEmpty {
-                                FilePanelDivider(panelWidth: Binding(
-                                    get: { CGFloat(filePanelWidth) },
-                                    set: { filePanelWidth = Double($0) }
-                                ))
-                                FileViewerPanel(worktree: worktree)
-                                    .frame(width: CGFloat(filePanelWidth))
-                                    .id(worktree.id)
-                            }
+                if !appState.isConnected {
+                    disconnectedView
+                } else if appState.repos.isEmpty {
+                    emptyStateView
+                } else if let repoID = appState.selectedRepoID {
+                    RepoDetailView(repoID: repoID)
+                } else if appState.selectedWorktreeIDs.isEmpty {
+                    Text("Select a worktree or click + to create one")
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack(spacing: 0) {
+                        TerminalContainerView()
+                        if showFilePanel, let worktree = selectedWorktree, !worktree.path.isEmpty {
+                            FilePanelDivider(panelWidth: Binding(
+                                get: { CGFloat(filePanelWidth) },
+                                set: { filePanelWidth = Double($0) }
+                            ))
+                            FileViewerPanel(worktree: worktree)
+                                .frame(width: CGFloat(filePanelWidth))
+                                .id(worktree.id)
                         }
-                        .background(GeometryReader { geometry in
-                            Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
-                        })
-                        .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
-                        .overlay(alignment: .top) {
-                            if let terminal = appState.currentConductorTerminal {
-                                ConductorOverlayView(
-                                    terminal: terminal,
-                                    tmuxServer: TBDConstants.conductorsTmuxServer,
-                                    parentHeight: contentAreaHeight
-                                )
-                                .opacity(appState.showConductor ? 1 : 0)
-                                .allowsHitTesting(appState.showConductor)
-                            }
+                    }
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
+                    })
+                    .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
+                    .overlay(alignment: .top) {
+                        if let terminal = appState.currentConductorTerminal {
+                            ConductorOverlayView(
+                                terminal: terminal,
+                                tmuxServer: TBDConstants.conductorsTmuxServer,
+                                parentHeight: contentAreaHeight
+                            )
+                            .opacity(appState.showConductor ? 1 : 0)
+                            .allowsHitTesting(appState.showConductor)
                         }
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(GeometryReader { geometry in
-                    Color.clear
-                        .onAppear {
-                            guard geometry.size.width > 0, geometry.size.height > 0 else { return }
-                            appState.mainAreaSize = geometry.size
-                        }
-                        .onChange(of: geometry.size) { _, newSize in
-                            guard newSize.width > 0, newSize.height > 0 else { return }
-                            appState.mainAreaSize = newSize
-                        }
-                })
             }
             .navigationSplitViewStyle(.prominentDetail)
             .toolbar(removing: .sidebarToggle)
