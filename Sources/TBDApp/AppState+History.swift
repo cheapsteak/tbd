@@ -145,7 +145,7 @@ extension AppState {
 
     /// If the in-flight worktree was the selected archived row for its repo,
     /// move selection to the next-most-recent archived row (or clear).
-    private func advanceArchivedSelectionIfNeeded(worktreeID: UUID) {
+    func advanceArchivedSelectionIfNeeded(worktreeID: UUID) {
         let repoID = archivedWorktrees.first(where: { (_, wts) in
             wts.contains(where: { $0.id == worktreeID })
         })?.key

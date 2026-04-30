@@ -66,18 +66,28 @@ extension AppState {
     }
 
     /// Revive an archived worktree.
+    /// Mirrors `reviveWithSession`'s lingering-snapshot UX: keeps the row
+    /// visible with a status pill until the user navigates away, instead
+    /// of yanking them into the now-active worktree.
     func reviveWorktree(id: UUID) async {
-        // Find the repo before reviving so we can refresh the archived list
-        let repoID = archivedWorktrees.first(where: { $0.value.contains { $0.id == id } })?.key
+        guard let snapshot = archivedWorktrees.values
+            .flatMap({ $0 })
+            .first(where: { $0.id == id })
+        else {
+            logger.warning("reviveWorktree: no archived snapshot for \(id, privacy: .public)")
+            return
+        }
+        revivingArchived[id] = .inFlight(snapshot: snapshot)
+        advanceArchivedSelectionIfNeeded(worktreeID: id)
+
         do {
             let size = mainAreaTerminalSize()
             try await daemonClient.reviveWorktree(id: id, cols: size.cols, rows: size.rows)
+            revivingArchived[id] = .done(snapshot: snapshot)
             await refreshWorktrees()
-            selectedWorktreeIDs = [id]
-            if let repoID {
-                await refreshArchivedWorktrees(repoID: repoID)
-            }
+            await refreshArchivedWorktrees(repoID: snapshot.repoID)
         } catch {
+            revivingArchived.removeValue(forKey: id)
             logger.error("Failed to revive worktree: \(error)")
             handleConnectionError(error)
         }
