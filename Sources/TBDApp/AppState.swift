@@ -47,6 +47,7 @@ final class AppState: ObservableObject {
             }
             // Clear repo selection when a worktree is selected
             if !selectedWorktreeIDs.isEmpty {
+                if let leaving = selectedRepoID { clearRevivingArchived(repoID: leaving) }
                 selectedRepoID = nil
                 recordNavigation(.worktrees(selectionOrder))
             }
@@ -57,6 +58,9 @@ final class AppState: ObservableObject {
     /// Selected repo ID — set when a repo header is clicked, shows archived worktrees in content pane.
     @Published var selectedRepoID: UUID? = nil {
         didSet {
+            if let old = oldValue, old != selectedRepoID {
+                clearRevivingArchived(repoID: old)
+            }
             guard selectedRepoID != oldValue, let id = selectedRepoID else { return }
             recordNavigation(.repo(id))
         }

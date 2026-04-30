@@ -64,15 +64,29 @@ extension AppState {
     /// Apply a navigation entry to the live selection state. Mirrors the work
     /// `selectRepo` would do for repo entries (refreshing archived worktrees).
     private func applyNavigationEntry(_ entry: NavigationEntry) {
+        let leavingRepoID = selectedRepoID
         switch entry {
         case .worktrees(let ids):
+            if let leavingRepoID { clearRevivingArchived(repoID: leavingRepoID) }
             selectedRepoID = nil
             selectedWorktreeIDs = Set(ids)
             selectionOrder = ids // must come after; didSet above rebuilds from unordered Set
         case .repo(let id):
+            if let leavingRepoID, leavingRepoID != id {
+                clearRevivingArchived(repoID: leavingRepoID)
+            }
             selectedWorktreeIDs = []
             selectedRepoID = id
             Task { await refreshArchivedWorktrees(repoID: id) }
+        }
+    }
+
+    /// Drop any lingering revive snapshots that belong to the given repo —
+    /// called when the user leaves that repo's archived view, so coming back
+    /// shows a fresh list without "Revived ✓" rows.
+    func clearRevivingArchived(repoID: UUID) {
+        revivingArchived = revivingArchived.filter { _, state in
+            state.snapshot.repoID != repoID
         }
     }
 
