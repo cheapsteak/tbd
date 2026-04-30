@@ -182,7 +182,7 @@ struct ArchivedWorktreesView: View {
     private var rightPane: some View {
         if let id = selectedID,
            let row = rows.first(where: { $0.id == id }) {
-            if (row.worktree.archivedClaudeSessions ?? []).isEmpty {
+            if row.effectiveSessionCount == 0 {
                 noSessionsState(for: row.worktree)
             } else {
                 HistoryPaneView(worktreeID: id, transcriptAction: .reviveWithSession)
@@ -231,8 +231,8 @@ struct ArchivedWorktreesView: View {
     // MARK: - Actions
 
     private func select(_ row: ArchivedRow) {
-        // In-flight or done revives are non-selectable.
-        guard row.reviveState == nil else { return }
+        // In-flight revives are non-selectable; .done rows are fine to browse.
+        if case .inFlight = row.reviveState { return }
         appState.selectedArchivedWorktreeIDs[repoID] = row.id
         Task { await appState.fetchSessions(worktreeID: row.id) }
     }
