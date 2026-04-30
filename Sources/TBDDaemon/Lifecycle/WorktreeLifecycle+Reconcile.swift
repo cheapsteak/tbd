@@ -223,13 +223,22 @@ extension WorktreeLifecycle {
 
     /// Recreates a tmux window for a terminal record after the tmux server has been lost
     /// (e.g. machine reboot). Updates the terminal's stored window/pane IDs in the DB.
-    private func recreateAfterReboot(terminal: Terminal, worktree: Worktree) async throws {
+    ///
+    /// Visibility: `internal` (not `private`) so tests in the same module can drive
+    /// this path directly. The reconcile dispatcher only enters this branch when
+    /// `serverExists → false`, which `TmuxManager(dryRun: true)` cannot simulate.
+    internal func recreateAfterReboot(terminal: Terminal, worktree: Worktree) async throws {
         if let bootstrapWindowID = try await tmux.ensureServer(server: worktree.tmuxServer, session: "main", cwd: worktree.path) {
             try? await tmux.killWindow(server: worktree.tmuxServer, windowID: bootstrapWindowID)
         }
 
         let spawn: ClaudeSpawnCommandBuilder.Result
         var env: [String: String] = [:]
+        // Always announce the worktree to recreated panes. Without this, the
+        // pane inherits whatever TBD_WORKTREE_ID the tmux server was spawned
+        // with — which would misattribute notifications to a different
+        // worktree. Applies to all branches below (claude, codex, shell/cmd).
+        env["TBD_WORKTREE_ID"] = worktree.id.uuidString
 
         if let sessionID = terminal.claudeSessionID {
             // Claude terminal — resume existing session with persisted token
@@ -251,7 +260,6 @@ extension WorktreeLifecycle {
             // Codex terminal — detected by label "Codex" (set during terminal creation).
             // No structured type field exists; label matching is the only discriminator available.
             let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
-            env["TBD_WORKTREE_ID"] = worktree.id.uuidString
             env["CODEX_HOME"] = codexHome.path
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,

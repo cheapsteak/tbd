@@ -23,6 +23,22 @@ public final class Daemon: Sendable {
         self.startTime = Date()
     }
 
+    /// Remove inherited TBD_* environment variables from the daemon's own
+    /// process environment. Called at startup before any tmux server is spawned.
+    ///
+    /// Rationale: tmux servers persist the env they were spawned with as their
+    /// global environment, and that env is then injected into every new window
+    /// (including reboot-recovery recreations). If the daemon inherits e.g.
+    /// `TBD_WORKTREE_ID=<main-uuid>` from a TBD-spawned launcher shell, every
+    /// recreated pane in every sub-worktree would report itself as the main
+    /// worktree, causing notifications to be misattributed.
+    public static func scrubInheritedTBDEnv() {
+        unsetenv("TBD_WORKTREE_ID")
+        unsetenv("TBD_PROMPT_CONTEXT")
+        unsetenv("TBD_PROMPT_INSTRUCTIONS")
+        unsetenv("TBD_PROMPT_RENAME")
+    }
+
     /// Start the daemon: create config directory, clean up stale state,
     /// initialize database and all managers, start servers, reconcile worktrees.
     public func start() async throws {
@@ -48,14 +64,23 @@ public final class Daemon: Sendable {
         // 4. Write PID file
         try pidFile.write()
 
-        // 4a. Resolve SSH agent symlink and update daemon's own environment
+        // 4a. Scrub inherited TBD_* env vars before any tmux server is spawned.
+        // The daemon may have been launched from inside a TBD-spawned shell (e.g.
+        // `scripts/restart.sh` run from a terminal pane), which exports per-worktree
+        // TBD_* vars. Without this scrub, the first `tmux new-session` bakes those
+        // vars into the tmux server's global env, poisoning every recreated pane
+        // (notifications from sub-worktrees would route to whichever worktree the
+        // daemon was last restarted from).
+        Daemon.scrubInheritedTBDEnv()
+
+        // 4b. Resolve SSH agent symlink and update daemon's own environment
         let sshResolver = SSHAgentResolver()
         if await sshResolver.resolve() {
             setenv("SSH_AUTH_SOCK", sshResolver.symlinkPath, 1)
             print("[Daemon] SSH agent symlink resolved: \(sshResolver.symlinkPath)")
         }
 
-        // 4b. Start periodic SSH agent refresh (every 60s)
+        // 4c. Start periodic SSH agent refresh (every 60s)
         self.sshRefreshTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
