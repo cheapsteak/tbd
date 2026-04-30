@@ -19,16 +19,15 @@ jobs:
       - name: Capture Swift toolchain version
         run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> $GITHUB_ENV
 
-      - name: Cache SwiftPM
+      - name: Cache SwiftPM dependencies
         uses: actions/cache@v4
         with:
           path: |
-            .build
+            .build/checkouts
             ~/Library/Caches/org.swift.swiftpm
-          key: spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Sources/**/*.swift', 'Tests/**/*.swift') }}
+          key: spm-deps-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}-
-            spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
+            spm-deps-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
 
       - name: Test
         run: swift test --parallel
