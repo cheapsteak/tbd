@@ -1,10 +1,22 @@
 import SwiftUI
 import TBDShared
 
+/// The action exposed in the transcript header. Determines the button
+/// label and which AppState method the button invokes.
+enum TranscriptAction {
+    /// Active worktree: open a new terminal in the same worktree resuming
+    /// the selected Claude session.
+    case resume
+    /// Archived worktree: revive the worktree and resume the selected
+    /// session in its primary terminal.
+    case reviveWithSession
+}
+
 // MARK: - HistoryPaneView
 
 struct HistoryPaneView: View {
     let worktreeID: UUID
+    var transcriptAction: TranscriptAction = .resume
     @EnvironmentObject var appState: AppState
 
     private var loadState: HistoryLoadState {
@@ -54,7 +66,8 @@ struct HistoryPaneView: View {
                 SessionTranscriptView(
                     sessionId: summary.sessionId,
                     worktreeID: worktreeID,
-                    summary: summary
+                    summary: summary,
+                    action: transcriptAction
                 )
             } else {
                 emptyDetailState
@@ -260,6 +273,7 @@ struct SessionTranscriptView: View {
     let sessionId: String
     let worktreeID: UUID
     let summary: SessionSummary
+    let action: TranscriptAction
     @EnvironmentObject var appState: AppState
 
     private var messages: [ChatMessage] {
@@ -268,6 +282,13 @@ struct SessionTranscriptView: View {
 
     private var isLoading: Bool {
         appState.sessionTranscriptLoading.contains(sessionId)
+    }
+
+    private var actionLabel: String {
+        switch action {
+        case .resume: return "Resume"
+        case .reviveWithSession: return "Revive with this session"
+        }
     }
 
     var body: some View {
@@ -285,9 +306,14 @@ struct SessionTranscriptView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Resume") {
+                Button(actionLabel) {
                     Task {
-                        await appState.resumeSession(worktreeID: worktreeID, sessionId: sessionId)
+                        switch action {
+                        case .resume:
+                            await appState.resumeSession(worktreeID: worktreeID, sessionId: sessionId)
+                        case .reviveWithSession:
+                            await appState.reviveWithSession(worktreeID: worktreeID, sessionId: sessionId)
+                        }
                     }
                 }
                 .buttonStyle(.borderedProminent)
