@@ -30,8 +30,8 @@ jobs:
             spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}-
             spm-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
 
-      - name: Test
-        run: swift test --parallel
+      - name: Build (including tests)
+        run: swift build --build-tests
 
-      - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
-        run: swift build
+      - name: Test
+        run: swift test --parallel --skip-build
