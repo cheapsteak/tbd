@@ -167,10 +167,13 @@ import Testing
 
 // MARK: - Initial Window Size (cols/rows flags)
 //
-// Each branch of the new size-emission conditional is exercised: explicit
-// size produces `-x N -y M`, nil/below-minimum size produces no flags. The
-// dryRun recorder tests confirm the flags reach the argv that would have
-// been passed to `tmux`, even though the process isn't spawned.
+// Size flags (-x/-y) are emitted only on `new-session` — tmux's `new-window`
+// subcommand does not accept them, so we deliberately drop them on the
+// new-window path even when callers pass cols/rows. The session's -x/-y from
+// `new-session` governs initial size and SwiftTerm's TIOCSWINSZ resizes the
+// pane once the client attaches. The tests below cover both branches of the
+// new-session size-emission conditional (explicit size emits flags, nil /
+// below-minimum size omits them) and confirm new-window never emits them.
 
 @Test func testNewServerCommandWithExplicitSize() {
     let args = TmuxManager.newServerCommand(
@@ -206,15 +209,20 @@ import Testing
 }
 
 @Test func testNewWindowCommandWithExplicitSize() {
+    // tmux's `new-window` does NOT accept -x/-y (only `new-session`,
+    // `split-window`, `resize-window`, `resize-pane` do). Even when callers
+    // pass cols/rows we must NOT emit them — the session's -x/-y from
+    // `new-session` sets the initial size and SwiftTerm's TIOCSWINSZ resizes
+    // the pane after attach.
     let args = TmuxManager.newWindowCommand(
         server: "tbd-a1b2c3d4", session: "main", cwd: "/tmp/worktree",
         shellCommand: "claude --dangerously-skip-permissions",
         cols: 200, rows: 60
     )
-    #expect(args.contains("-x"))
-    #expect(args.contains("200"))
-    #expect(args.contains("-y"))
-    #expect(args.contains("60"))
+    #expect(!args.contains("-x"))
+    #expect(!args.contains("200"))
+    #expect(!args.contains("-y"))
+    #expect(!args.contains("60"))
     // The shell command must remain at the very end (tmux's last positional
     // arg is the spawn command).
     #expect(args.last == "claude --dangerously-skip-permissions")
@@ -229,7 +237,10 @@ import Testing
     #expect(!args.contains("-y"))
 }
 
-@Test func testCreateWindowDryRunForwardsSize() async throws {
+@Test func testCreateWindowDryRunDoesNotForwardSize() async throws {
+    // `createWindow` ultimately invokes `tmux new-window`, which does not
+    // accept -x/-y. Confirm the dry-run argv does NOT include them even when
+    // the caller passes cols/rows.
     let recorded = LockedCommandRecorder()
     let manager = TmuxManager(dryRun: true, dryRunRecorder: { args in
         recorded.append(args)
@@ -241,10 +252,11 @@ import Testing
     let calls = recorded.snapshot()
     #expect(calls.count == 1)
     let args = calls[0]
-    #expect(args.contains("-x"))
-    #expect(args.contains("220"))
-    #expect(args.contains("-y"))
-    #expect(args.contains("50"))
+    #expect(args.contains("new-window"))
+    #expect(!args.contains("-x"))
+    #expect(!args.contains("-y"))
+    #expect(!args.contains("220"))
+    #expect(!args.contains("50"))
 }
 
 @Test func testEnsureServerDryRunForwardsSize() async throws {

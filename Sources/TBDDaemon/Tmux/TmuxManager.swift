@@ -102,11 +102,17 @@ public struct TmuxManager: Sendable {
             eFlags.append("-e")
             eFlags.append("\(key)=\(value)")
         }
-        // Place size flags after -c <cwd> (and after -e env flags) to keep the
-        // format-spec / shell command at the end where tmux expects them.
+        // Note: size flags (-x/-y) are intentionally NOT emitted here. tmux's
+        // `new-window` does not support those flags (only `new-session`,
+        // `split-window`, `resize-window`, and `resize-pane` do). The session's
+        // `-x`/`-y` from `new-session` governs the initial size, and once the
+        // SwiftTerm client attaches it issues TIOCSWINSZ to resize the pane to
+        // the actual viewport. The cols/rows parameters are kept on this
+        // function for now since callers still pass them; we just don't emit.
+        _ = cols
+        _ = rows
         return ["-L", server, "new-window", "-t", session, "-c", cwd]
             + eFlags
-            + sizeFlags(cols: cols, rows: rows)
             + ["-PF", "#{window_id} #{pane_id}", userShell, "-ic", fullCommand]
     }
 
