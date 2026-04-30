@@ -62,13 +62,18 @@ struct ContentView: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(GeometryReader { geometry in
-                    Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
+                    Color.clear
+                        .onAppear {
+                            guard geometry.size.width > 0, geometry.size.height > 0 else { return }
+                            appState.mainAreaSize = geometry.size
+                        }
+                        .onChange(of: geometry.size) { _, newSize in
+                            guard newSize.width > 0, newSize.height > 0 else { return }
+                            appState.mainAreaSize = newSize
+                        }
                 })
-                .onPreferenceChange(MainAreaSizeKey.self) { newSize in
-                    guard newSize.width > 0, newSize.height > 0 else { return }
-                    appState.mainAreaSize = newSize
-                }
             }
             .navigationSplitViewStyle(.prominentDetail)
             .toolbar(removing: .sidebarToggle)
