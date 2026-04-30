@@ -280,7 +280,7 @@ class TBDTerminalView: TerminalView {
         let candidate: String
         if link.hasPrefix("file://~") {
             // URL parsing treats ~ as the host, dropping it from .path. Strip the scheme manually
-            // and let tilde expansion below handle the home-relative segment.
+            // and expand the tilde directly to recover the home-relative segment.
             candidate = NSString(string: String(link.dropFirst("file://".count))).expandingTildeInPath
         } else if link.hasPrefix("file://") {
             guard let path = URL(string: link)?.path, !path.isEmpty else { return nil }
