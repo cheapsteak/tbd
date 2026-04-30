@@ -233,14 +233,20 @@ extension RPCRouter {
         )
 
         // Create a new tmux window with a default shell.
-        // Note: no TBD_WORKTREE_ID env var here (unlike handleTerminalCreate)
-        // since recreated windows run a plain shell, not Claude.
+        // Defensively set TBD_WORKTREE_ID even though the recreated pane runs a
+        // plain shell — the user may run `tbd` CLI commands or launch `claude`
+        // themselves from that shell, and those tools resolve the worktree from
+        // the env. Without this set, the pane would inherit whatever TBD_WORKTREE_ID
+        // got baked into the tmux server's global env, leaking another worktree's
+        // identity into this one.
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let env: [String: String] = ["TBD_WORKTREE_ID": worktree.id.uuidString]
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
             shellCommand: shell,
+            env: env,
             cols: resolvedCols,
             rows: resolvedRows
         )
