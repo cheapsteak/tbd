@@ -33,8 +33,7 @@ struct ArchivedWorktreesView: View {
     private var rows: [ArchivedRow] {
         guard hideEmpty else { return allRows }
         return allRows.filter { row in
-            row.reviveState != nil
-                || row.worktree.archivedClaudeSessions?.isEmpty == false
+            row.reviveState != nil || row.effectiveSessionCount > 0
         }
     }
 
@@ -255,6 +254,14 @@ private struct ArchivedRow: Identifiable {
     let worktree: Worktree
     let reviveState: ReviveState?
     var id: UUID { worktree.id }
+
+    /// Best available count of conversations for this worktree:
+    /// the daemon-supplied live file count when present, falling back to
+    /// the stored `archivedClaudeSessions` length (older archives or when
+    /// the daemon couldn't scan).
+    var effectiveSessionCount: Int {
+        worktree.liveClaudeSessionCount ?? worktree.archivedClaudeSessions?.count ?? 0
+    }
 }
 
 // MARK: - Row view
@@ -262,10 +269,6 @@ private struct ArchivedRow: Identifiable {
 private struct ArchivedWorktreeRow: View {
     let row: ArchivedRow
     let isSelected: Bool
-
-    private var hasClaudeSessions: Bool {
-        row.worktree.archivedClaudeSessions?.isEmpty == false
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -283,10 +286,9 @@ private struct ArchivedWorktreeRow: View {
                     separator
                     Text(archivedAt, format: .relative(presentation: .named))
                 }
-                if hasClaudeSessions, row.reviveState == nil {
-                    let count = row.worktree.archivedClaudeSessions?.count ?? 0
+                if row.effectiveSessionCount > 0, row.reviveState == nil {
                     separator
-                    Text("\(count) session\(count == 1 ? "" : "s")")
+                    Text("\(row.effectiveSessionCount) session\(row.effectiveSessionCount == 1 ? "" : "s")")
                 }
             }
             .font(.caption2)

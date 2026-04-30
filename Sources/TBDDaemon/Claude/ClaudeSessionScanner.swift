@@ -118,6 +118,19 @@ enum ClaudeProjectDirectory {
 
 enum ClaudeSessionScanner {
 
+    /// Cheap count of `.jsonl` session files in a project directory. Does
+    /// not parse contents, so a returned count of N means "there are N
+    /// session files on disk" — files may still be empty stubs that
+    /// `listSessions` would skip. Sufficient for filtering archived
+    /// worktrees that have nothing left on disk.
+    static func countSessionFiles(projectDir: URL) -> Int {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: projectDir, includingPropertiesForKeys: nil) else {
+            return 0
+        }
+        return entries.filter { $0.pathExtension == "jsonl" }.count
+    }
+
     /// Lists all sessions in a project directory, sorted by mtime descending.
     static func listSessions(projectDir: URL) -> [SessionSummary] {
         let fm = FileManager.default
