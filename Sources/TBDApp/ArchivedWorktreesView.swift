@@ -74,6 +74,7 @@ struct ArchivedWorktreesView: View {
                     .onTapGesture { select(row) }
                     .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                     .listRowBackground(rowBackground(for: row))
+                    .listRowSeparator(.hidden)
                     .contextMenu {
                         if row.reviveState == nil {
                             Button("Revive") {
