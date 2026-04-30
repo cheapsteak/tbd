@@ -9,13 +9,12 @@ import TBDShared
 ///   for the active tab's layout.
 /// - Multi-select (Cmd-click): Auto-grid layout, one panel per selected worktree
 ///   showing its primary terminal. No tab bar.
-/// Preference key carrying the px size of the main terminal area (the slot
-/// inside DockSplitView's `mainContent`, excluding the pinned dock and any
-/// file panel). AppState reads this via `.onPreferenceChange` to drive the
-/// daemon-side resize broadcast.
+/// Preference key carrying the px size of the detail slot in ContentView's
+/// NavigationSplitView. AppState reads this via `.onPreferenceChange` to drive
+/// the daemon-side resize broadcast.
 struct MainAreaSizeKey: PreferenceKey {
     nonisolated(unsafe) static var defaultValue: CGSize = .zero
-    /// Exactly one view in the hierarchy posts this key (TerminalContainerView's
+    /// Exactly one view in the hierarchy posts this key (ContentView's detail
     /// background GeometryReader), so taking the latest value is fine. If a
     /// second producer is ever added, this reduce will silently drop earlier
     /// values — switch to `value = max(value, nextValue())` or similar.
@@ -57,16 +56,6 @@ struct TerminalContainerView: View {
                 Text("Select a worktree or click + to create one")
                     .foregroundStyle(.secondary)
             }
-        }
-        .background(GeometryReader { geometry in
-            Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
-        })
-        .onPreferenceChange(MainAreaSizeKey.self) { newSize in
-            // SwiftUI fires .onPreferenceChange with .zero in some early
-            // layout passes; ignore those so we don't broadcast a degenerate
-            // size to the daemon.
-            guard newSize.width > 0, newSize.height > 0 else { return }
-            appState.mainAreaSize = newSize
         }
 
         // Always render DockSplitView so mainContent stays in the same
