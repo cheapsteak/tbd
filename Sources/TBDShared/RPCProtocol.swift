@@ -348,10 +348,15 @@ public struct WorktreeReviveParams: Codable, Sendable {
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    public init(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil) {
+    /// When set, the daemon reorders the worktree's stored
+    /// `archivedClaudeSessions` so this ID is first before resuming the
+    /// primary Claude terminal. Optional — nil preserves existing order.
+    public let preferredSessionID: String?
+    public init(worktreeID: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) {
         self.worktreeID = worktreeID
         self.cols = cols
         self.rows = rows
+        self.preferredSessionID = preferredSessionID
     }
 }
 
