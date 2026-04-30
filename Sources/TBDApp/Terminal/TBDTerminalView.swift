@@ -257,10 +257,12 @@ class TBDTerminalView: TerminalView {
 
         guard !candidate.isEmpty else { return nil }
 
-        // Resolve relative paths against worktreePath
+        // Resolve relative paths against worktreePath; expand leading ~ as a home-relative path.
         let resolvedPath: String
         if candidate.hasPrefix("/") {
             resolvedPath = candidate
+        } else if candidate.hasPrefix("~") {
+            resolvedPath = NSString(string: candidate).expandingTildeInPath
         } else {
             resolvedPath = URL(fileURLWithPath: worktreePath).appendingPathComponent(candidate).path
         }
@@ -276,9 +278,15 @@ class TBDTerminalView: TerminalView {
     /// Returns the resolved path if the file exists, nil otherwise.
     func resolveAsFilePath(_ link: String) -> String? {
         let candidate: String
-        if link.hasPrefix("file://") {
+        if link.hasPrefix("file://~") {
+            // URL parsing treats ~ as the host, dropping it from .path. Strip the scheme manually
+            // and expand the tilde directly to recover the home-relative segment.
+            candidate = NSString(string: String(link.dropFirst("file://".count))).expandingTildeInPath
+        } else if link.hasPrefix("file://") {
             guard let path = URL(string: link)?.path, !path.isEmpty else { return nil }
             candidate = path
+        } else if link.hasPrefix("~") {
+            candidate = NSString(string: link).expandingTildeInPath
         } else if link.hasPrefix("/") {
             candidate = link
         } else if !link.contains("://"), !worktreePath.isEmpty {
