@@ -331,7 +331,8 @@ private struct MultiWorktreeView: View {
                             let index = row * cols + col
                             if index < worktreeIDs.count {
                                 MultiWorktreeCell(
-                                    worktreeID: worktreeIDs[index]
+                                    worktreeID: worktreeIDs[index],
+                                    isPrimary: index == 0
                                 )
                                 .frame(width: cellWidth - 1, height: cellHeight - 1)
                             } else {
@@ -343,16 +344,11 @@ private struct MultiWorktreeView: View {
                 }
             }
             .background(Color(nsColor: .separatorColor))
-            // Publish per-cell size, not full grid size. The daemon
-            // broadcasts mainAreaSize to every tmux window, so each window
-            // needs to match the visible SwiftTerm pane inside its own cell
-            // (gridWidth / cols × gridHeight / rows). Broadcasting the full
-            // grid would size every window to the entire grid and clip the
-            // bottom rows the same way the original detail-slot bug did.
-            .preference(
-                key: MainAreaSizeKey.self,
-                value: CGSize(width: cellWidth, height: cellHeight)
-            )
+            // The first cell publishes its inner-content size to
+            // MainAreaSizeKey from inside MultiWorktreeCell — measuring there
+            // excludes the per-cell header bar (~21pt) and divider, which
+            // the previous outer-grid measurement included. All cells are
+            // equal size so one publisher suffices.
         }
     }
 }
@@ -362,6 +358,11 @@ private struct MultiWorktreeView: View {
 /// A single cell in the multi-worktree grid showing worktree name and its primary terminal.
 private struct MultiWorktreeCell: View {
     let worktreeID: UUID
+    /// First cell in the grid publishes its inner-content size to
+    /// MainAreaSizeKey so the daemon-side tmux resize matches the actual
+    /// SwiftTerm pane area (excludes the per-cell header bar + divider).
+    /// All cells are equal size so a single publisher suffices.
+    let isPrimary: Bool
     @EnvironmentObject var appState: AppState
 
     private var worktree: Worktree? {
@@ -410,33 +411,54 @@ private struct MultiWorktreeCell: View {
 
             Divider()
 
-            // Terminal placeholder content
-            if let worktree, let terminal = primaryTerminal {
-                let layoutBinding = Binding<LayoutNode>(
-                    get: {
-                        appState.layouts[worktreeID]
-                            ?? .pane(.terminal(terminalID: terminal.id))
-                    },
-                    set: { newLayout in
-                        appState.layouts[worktreeID] = newLayout
+            // Terminal placeholder content. The GeometryReader below
+            // (only attached on the primary cell) measures this slot
+            // specifically — excluding the header HStack and divider above
+            // — so MainAreaSizeKey reflects the actual SwiftTerm rendering
+            // area, not the full grid cell.
+            terminalContent
+                .background(
+                    Group {
+                        if isPrimary {
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: MainAreaSizeKey.self,
+                                    value: geometry.size
+                                )
+                            }
+                        }
                     }
                 )
-                PanePlaceholder(
-                    content: .terminal(terminalID: terminal.id),
-                    worktree: worktree,
-                    layout: layoutBinding
-                )
-            } else {
-                ZStack {
-                    Color(nsColor: .textBackgroundColor)
-                    VStack(spacing: 4) {
-                        Image(systemName: "terminal")
-                            .font(.title2)
-                            .foregroundStyle(.tertiary)
-                        Text("No terminal")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+        }
+    }
+
+    @ViewBuilder
+    private var terminalContent: some View {
+        if let worktree, let terminal = primaryTerminal {
+            let layoutBinding = Binding<LayoutNode>(
+                get: {
+                    appState.layouts[worktreeID]
+                        ?? .pane(.terminal(terminalID: terminal.id))
+                },
+                set: { newLayout in
+                    appState.layouts[worktreeID] = newLayout
+                }
+            )
+            PanePlaceholder(
+                content: .terminal(terminalID: terminal.id),
+                worktree: worktree,
+                layout: layoutBinding
+            )
+        } else {
+            ZStack {
+                Color(nsColor: .textBackgroundColor)
+                VStack(spacing: 4) {
+                    Image(systemName: "terminal")
+                        .font(.title2)
+                        .foregroundStyle(.tertiary)
+                    Text("No terminal")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }

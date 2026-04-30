@@ -277,11 +277,13 @@ import Testing
         shellCommand: "echo hi", cols: 220, rows: 50
     )
     let calls = recorded.snapshot()
-    #expect(calls.count == 2)
+    #expect(calls.count == 3)
     // Order matters: the new-window must be issued before the resize-window
-    // (we can only resize an existing window).
+    // (we can only resize an existing window). The set-option then unfreezes
+    // window-size so attached SwiftTerm clients can drive the size.
     #expect(calls[0].contains("new-window"))
     #expect(calls[1] == ["-L", "tbd-test", "resize-window", "-t", result.windowID, "-x", "220", "-y", "50"])
+    #expect(calls[2] == ["-L", "tbd-test", "set-option", "-wt", result.windowID, "window-size", "latest"])
 }
 
 @Test func testCreateWindowSkipsResizeWhenSizeNil() async throws {
@@ -350,8 +352,11 @@ import Testing
     })
     try await manager.resizeWindow(server: "tbd-test", windowID: "@5", cols: 240, rows: 80)
     let calls = recorded.snapshot()
-    #expect(calls.count == 1)
+    // Two calls: the resize, then the unfreeze that flips window-size out
+    // of manual mode so attached clients can drive it via TIOCSWINSZ.
+    #expect(calls.count == 2)
     #expect(calls[0] == ["-L", "tbd-test", "resize-window", "-t", "@5", "-x", "240", "-y", "80"])
+    #expect(calls[1] == ["-L", "tbd-test", "set-option", "-wt", "@5", "window-size", "latest"])
 }
 
 /// Thread-safe recorder for dry-run argv captures used by the tests above.

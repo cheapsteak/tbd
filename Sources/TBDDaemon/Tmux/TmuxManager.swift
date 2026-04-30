@@ -123,6 +123,15 @@ public struct TmuxManager: Sendable {
         ["-L", server, "resize-window", "-t", windowID, "-x", "\(cols)", "-y", "\(rows)"]
     }
 
+    /// Switch a window out of `window-size manual` mode so attached clients
+    /// can drive the size via their own TIOCSWINSZ. tmux's `resize-window`
+    /// implicitly sets manual mode, which freezes the window at that size
+    /// and prevents SwiftTerm's per-pane ioctl from shrinking it back when
+    /// the actual rendered area is smaller than the broadcast measurement.
+    public static func setWindowSizeLatestCommand(server: String, windowID: String) -> [String] {
+        ["-L", server, "set-option", "-wt", windowID, "window-size", "latest"]
+    }
+
     public static func killWindowCommand(server: String, windowID: String) -> [String] {
         ["-L", server, "kill-window", "-t", windowID]
     }
@@ -252,17 +261,28 @@ public struct TmuxManager: Sendable {
         try await runTmux(args)
     }
 
-    /// Resize an existing tmux window. Used by the main-window resize broadcast
-    /// so detached panes retain a sensible cell size after the user changes
-    /// the app window dimensions; attached panes get overwritten by SwiftTerm's
-    /// own ioctl within milliseconds, so we don't bother filtering.
+    /// Resize an existing tmux window. Used by the main-window resize
+    /// broadcast and after `new-window`, so detached panes get a sensible
+    /// cell size before any SwiftTerm client attaches. Each call is paired
+    /// with `set-option ... window-size latest` to immediately leave manual
+    /// size mode — otherwise tmux pins the window at the broadcast value
+    /// and an attached SwiftTerm client (whose actual pane is usually
+    /// smaller after accounting for tab bars, dividers, file panels, etc.)
+    /// can't shrink it back, clipping the bottom rows.
     public func resizeWindow(server: String, windowID: String, cols: Int, rows: Int) async throws {
-        let args = Self.resizeWindowCommand(server: server, windowID: windowID, cols: cols, rows: rows)
+        let resizeArgs = Self.resizeWindowCommand(server: server, windowID: windowID, cols: cols, rows: rows)
+        let unfreezeArgs = Self.setWindowSizeLatestCommand(server: server, windowID: windowID)
         if dryRun {
-            dryRunRecorder?(args)
+            dryRunRecorder?(resizeArgs)
+            dryRunRecorder?(unfreezeArgs)
             return
         }
-        try await runTmux(args)
+        try await runTmux(resizeArgs)
+        // Best-effort: the resize itself succeeded, so don't fail the call
+        // if the option flip stumbles. Detached panes still keep the
+        // resize-window dimensions; only client-driven re-sizing depends on
+        // window-size being non-manual.
+        try? await runTmux(unfreezeArgs)
     }
 
     public func sendKeys(server: String, paneID: String, text: String) async throws {
