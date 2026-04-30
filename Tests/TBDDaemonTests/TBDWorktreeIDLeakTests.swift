@@ -45,7 +45,17 @@ private func newWindowBodies(_ recorded: [[String]]) -> [String] {
 
 @Test("Daemon.scrubInheritedTBDEnv clears all four TBD_* vars")
 func testScrubInheritedTBDEnv() {
-    // Seed sentinel values for all four vars.
+    // setenv/unsetenv mutate the shared process environ. Guarantee cleanup
+    // even if #expect failures or future edits cause us to skip the scrub
+    // call below — Swift Testing runs tests concurrently by default and any
+    // future test that reads these vars must not see leaked sentinels.
+    defer {
+        unsetenv("TBD_WORKTREE_ID")
+        unsetenv("TBD_PROMPT_CONTEXT")
+        unsetenv("TBD_PROMPT_INSTRUCTIONS")
+        unsetenv("TBD_PROMPT_RENAME")
+    }
+
     setenv("TBD_WORKTREE_ID", "leaked-worktree-id", 1)
     setenv("TBD_PROMPT_CONTEXT", "leaked-context", 1)
     setenv("TBD_PROMPT_INSTRUCTIONS", "leaked-instructions", 1)

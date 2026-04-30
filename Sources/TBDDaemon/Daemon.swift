@@ -80,7 +80,7 @@ public final class Daemon: Sendable {
             print("[Daemon] SSH agent symlink resolved: \(sshResolver.symlinkPath)")
         }
 
-        // 4b. Start periodic SSH agent refresh (every 60s)
+        // 4c. Start periodic SSH agent refresh (every 60s)
         self.sshRefreshTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
