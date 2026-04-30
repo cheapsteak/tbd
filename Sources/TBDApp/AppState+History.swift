@@ -1,5 +1,8 @@
 import Foundation
 import TBDShared
+import os
+
+private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+History")
 
 // MARK: - HistoryLoadState
 
@@ -114,6 +117,7 @@ extension AppState {
             .flatMap({ $0 })
             .first(where: { $0.id == worktreeID })
         else {
+            logger.warning("reviveWithSession: no archived snapshot for \(worktreeID, privacy: .public)")
             return
         }
         revivingArchived[worktreeID] = .inFlight(snapshot: snapshot)

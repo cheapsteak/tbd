@@ -95,7 +95,8 @@ struct ArchivedWorktreesView: View {
             // Trigger initial selection if nothing is set yet. The async refresh
             // path also calls into `ensureArchivedSelectionValid`, but on
             // re-appearances (cached `archivedWorktrees`) we still need this.
-            if selectedID == nil, let first = rows.first?.worktree {
+            if selectedID == nil,
+               let first = rows.first(where: { $0.reviveState == nil })?.worktree {
                 appState.selectedArchivedWorktreeIDs[repoID] = first.id
                 Task { await appState.fetchSessions(worktreeID: first.id) }
             }
