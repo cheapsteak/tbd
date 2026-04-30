@@ -4,7 +4,46 @@ import Darwin
 import TBDShared
 import os
 
-private let lifecycleLogger = Logger(subsystem: "com.tbd.app", category: "lifecycle")
+internal let lifecycleLogger = Logger(subsystem: "com.tbd.app", category: "lifecycle")
+
+// MARK: - Crash diagnostics
+
+/// Top-level free function so it's usable as a C function pointer for
+/// NSSetUncaughtExceptionHandler.
+private func tbdUncaughtExceptionHandler(_ exception: NSException) {
+    let name = exception.name.rawValue
+    let reason = exception.reason ?? "<no reason>"
+    let stack = exception.callStackSymbols.joined(separator: "\n")
+    lifecycleLogger.fault("Uncaught NSException name=\(name, privacy: .public) reason=\(reason, privacy: .public)\n\(stack, privacy: .public)")
+}
+
+/// Async-signal-safe signal handler: writes a short literal C string to stderr
+/// then resets disposition and re-raises so the OS produces the real crash report.
+private func tbdSignalHandler(_ sig: Int32) {
+    // Literal C strings only — no Swift interpolation, no os.Logger.
+    switch sig {
+    case SIGABRT:
+        let msg = "TBDApp: caught SIGABRT\n"
+        _ = msg.withCString { Darwin.write(STDERR_FILENO, $0, strlen($0)) }
+    case SIGSEGV:
+        let msg = "TBDApp: caught SIGSEGV\n"
+        _ = msg.withCString { Darwin.write(STDERR_FILENO, $0, strlen($0)) }
+    case SIGBUS:
+        let msg = "TBDApp: caught SIGBUS\n"
+        _ = msg.withCString { Darwin.write(STDERR_FILENO, $0, strlen($0)) }
+    case SIGILL:
+        let msg = "TBDApp: caught SIGILL\n"
+        _ = msg.withCString { Darwin.write(STDERR_FILENO, $0, strlen($0)) }
+    case SIGTRAP:
+        let msg = "TBDApp: caught SIGTRAP\n"
+        _ = msg.withCString { Darwin.write(STDERR_FILENO, $0, strlen($0)) }
+    default:
+        let msg = "TBDApp: caught signal\n"
+        _ = msg.withCString { Darwin.write(STDERR_FILENO, $0, strlen($0)) }
+    }
+    signal(sig, SIG_DFL)
+    raise(sig)
+}
 
 // Write-end of the SIGUSR1 → main-queue bridge pipe.
 // Set once in applicationDidFinishLaunching; read only by the C signal handler
@@ -14,9 +53,22 @@ nonisolated(unsafe) private var _relaunchPipeWriteEnd: Int32 = -1
 class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var cachedIcon: NSImage = generateAppIcon(worktreeName: detectWorktreeName())
     private var relaunchSource: (any DispatchSourceRead)?
+    private var heartbeatTimer: Timer?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        lifecycleLogger.info("willFinishLaunching")
+
+        // Install crash handlers before any AppKit/SwiftUI code can throw or trap.
+        NSSetUncaughtExceptionHandler(tbdUncaughtExceptionHandler)
+        for sig in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTRAP] {
+            signal(sig, tbdSignalHandler)
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
+
+        lifecycleLogger.info("didFinishLaunching activationPolicy=\(NSApp.activationPolicy().rawValue, privacy: .public)")
 
         NSApp.applicationIconImage = cachedIcon
 
@@ -29,12 +81,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         installSelfRelaunchHandler()
+
+        // Lifetime heartbeat — surfaces silent disappearances of windows / dock tile.
+        let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                let policy = NSApp.activationPolicy().rawValue
+                let count = NSApp.windows.count
+                let active = NSApp.isActive
+                let hasKey = NSApp.keyWindow != nil
+                lifecycleLogger.info("heartbeat policy=\(policy, privacy: .public) windows=\(count, privacy: .public) active=\(active, privacy: .public) keyWindow=\(hasKey, privacy: .public)")
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        heartbeatTimer = timer
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        lifecycleLogger.info("didBecomeActive windows=\(NSApp.windows.count, privacy: .public)")
         if NSApp.applicationIconImage !== cachedIcon {
             NSApp.applicationIconImage = cachedIcon
         }
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        lifecycleLogger.info("didResignActive")
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        lifecycleLogger.info("willTerminate")
     }
 
     // MARK: - Self-relaunch
@@ -103,10 +177,17 @@ struct TBDAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState()
 
+    init() {
+        lifecycleLogger.info("TBDApp launching pid=\(getpid(), privacy: .public)")
+    }
+
     var body: some Scene {
         Window("TBD", id: "main") {
             ContentView()
                 .environmentObject(appState)
+                .onAppear {
+                    lifecycleLogger.info("scene main onAppear")
+                }
                 .onOpenURL { url in
                     DeepLinkHandler.handle(url, appState: appState)
                 }
