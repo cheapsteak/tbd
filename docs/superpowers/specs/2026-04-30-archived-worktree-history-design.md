@@ -73,7 +73,7 @@ New methods:
 func reviveWithSession(worktreeID: UUID, sessionId: String) async
 ```
 
-Reorders `archivedClaudeSessions` so the selected `sessionId` is first, then calls the existing revive RPC. The daemon already resumes `archivedClaudeSessions.first` in the new terminal, so reordering is sufficient.
+Calls the revive RPC with a new optional `preferredSessionID` parameter. The daemon, when provided, reorders the worktree's stored `archivedClaudeSessions` so the preferred ID is first, then runs the existing setup-terminals path (which already resumes `archivedClaudeSessions.first`). Reordering happens in the daemon, not the client, so the on-disk DB state stays consistent if the user reverts.
 
 ### Auto-selection
 
@@ -117,7 +117,7 @@ When the user revives an archived worktree from this view, its row stays visible
 - `Sources/TBDApp/AppState+Worktrees.swift` — auto-select most-recent archived row on archived-list updates.
 - `Sources/TBDApp/AppState+Navigation.swift` — clear `revivingArchived` for repo on navigate-away.
 
-No daemon, RPC, or schema changes expected.
+Daemon: extend `WorktreeReviveParams` with `preferredSessionID: String?`, and the lifecycle revive path reorders `archivedClaudeSessions` accordingly before `setupTerminals`. No schema changes.
 
 ## Testing
 
