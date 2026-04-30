@@ -1,6 +1,8 @@
 import Foundation
 import os
 
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "TmuxManager")
+
 public struct TmuxManager: Sendable {
     public let dryRun: Bool
     private let counter: Counter
@@ -209,19 +211,39 @@ public struct TmuxManager: Sendable {
     }
 
     public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) async throws -> (windowID: String, paneID: String) {
+        let result: (windowID: String, paneID: String)
         if dryRun {
             let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
             dryRunRecorder?(args)
             let n = counter.next()
-            return (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
+            result = (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
+        } else {
+            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
+            let output = try await runTmux(args)
+            let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+            guard parts.count == 2 else {
+                throw TmuxError.unexpectedOutput(output)
+            }
+            result = (windowID: String(parts[0]), paneID: String(parts[1]))
         }
-        let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
-        let output = try await runTmux(args)
-        let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
-        guard parts.count == 2 else {
-            throw TmuxError.unexpectedOutput(output)
+
+        // tmux's `new-window` does NOT accept -x/-y, and a freshly-created
+        // window inherits its size from the session's attached client. The TBD
+        // `main` session has no attached clients (we only ever attach to
+        // grouped `view-*` sessions), so tmux falls back to its 80x24 default
+        // for the new window — leaving never-viewed terminals frozen at that
+        // size with permanent hard-wraps in scrollback. Issue an explicit
+        // `resize-window` immediately after creation to lock in the requested
+        // size. Failures here are non-fatal: the window itself was created
+        // successfully, so we log a warning and continue.
+        if let cols, let rows, cols >= Self.minCols, rows >= Self.minRows {
+            do {
+                try await resizeWindow(server: server, windowID: result.windowID, cols: cols, rows: rows)
+            } catch {
+                logger.warning("resize-window after createWindow failed for \(result.windowID, privacy: .public) on server \(server, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
-        return (windowID: String(parts[0]), paneID: String(parts[1]))
+        return result
     }
 
     public func killWindow(server: String, windowID: String) async throws {

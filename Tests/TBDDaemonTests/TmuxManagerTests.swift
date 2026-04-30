@@ -237,10 +237,11 @@ import Testing
     #expect(!args.contains("-y"))
 }
 
-@Test func testCreateWindowDryRunDoesNotForwardSize() async throws {
+@Test func testCreateWindowDryRunDoesNotForwardSizeOnNewWindow() async throws {
     // `createWindow` ultimately invokes `tmux new-window`, which does not
-    // accept -x/-y. Confirm the dry-run argv does NOT include them even when
-    // the caller passes cols/rows.
+    // accept -x/-y. Confirm the dry-run argv for new-window does NOT include
+    // them even when the caller passes cols/rows. (A separate resize-window
+    // invocation should follow — see testCreateWindowEmitsResizeAfterNewWindow.)
     let recorded = LockedCommandRecorder()
     let manager = TmuxManager(dryRun: true, dryRunRecorder: { args in
         recorded.append(args)
@@ -250,13 +251,70 @@ import Testing
         shellCommand: "echo hi", cols: 220, rows: 50
     )
     let calls = recorded.snapshot()
+    let newWindowCall = calls.first { $0.contains("new-window") }
+    #expect(newWindowCall != nil)
+    if let args = newWindowCall {
+        #expect(!args.contains("-x"))
+        #expect(!args.contains("-y"))
+        #expect(!args.contains("220"))
+        #expect(!args.contains("50"))
+    }
+}
+
+@Test func testCreateWindowEmitsResizeAfterNewWindow() async throws {
+    // Because tmux `new-window` cannot take -x/-y AND the TBD `main` session
+    // has no attached client to inherit a size from (we only ever attach to
+    // `view-*` grouped sessions), a freshly-created window falls back to
+    // tmux's 80x24 default. createWindow must follow up with an explicit
+    // `resize-window` to lock in the caller-supplied dimensions, otherwise
+    // never-viewed terminals stay stuck at 80x24 with hard-wrapped scrollback.
+    let recorded = LockedCommandRecorder()
+    let manager = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    let result = try await manager.createWindow(
+        server: "tbd-test", session: "main", cwd: "/tmp",
+        shellCommand: "echo hi", cols: 220, rows: 50
+    )
+    let calls = recorded.snapshot()
+    #expect(calls.count == 2)
+    // Order matters: the new-window must be issued before the resize-window
+    // (we can only resize an existing window).
+    #expect(calls[0].contains("new-window"))
+    #expect(calls[1] == ["-L", "tbd-test", "resize-window", "-t", result.windowID, "-x", "220", "-y", "50"])
+}
+
+@Test func testCreateWindowSkipsResizeWhenSizeNil() async throws {
+    // No cols/rows → no resize. Just a single new-window invocation.
+    let recorded = LockedCommandRecorder()
+    let manager = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    _ = try await manager.createWindow(
+        server: "tbd-test", session: "main", cwd: "/tmp",
+        shellCommand: "echo hi"
+    )
+    let calls = recorded.snapshot()
     #expect(calls.count == 1)
-    let args = calls[0]
-    #expect(args.contains("new-window"))
-    #expect(!args.contains("-x"))
-    #expect(!args.contains("-y"))
-    #expect(!args.contains("220"))
-    #expect(!args.contains("50"))
+    #expect(calls[0].contains("new-window"))
+    #expect(!calls.contains { $0.contains("resize-window") })
+}
+
+@Test func testCreateWindowSkipsResizeBelowMinimum() async throws {
+    // Same floor as sizeFlags: anything below 80x24 is dropped so we don't
+    // pin the window to a degenerate size. tmux's own default is preferable.
+    let recorded = LockedCommandRecorder()
+    let manager = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    _ = try await manager.createWindow(
+        server: "tbd-test", session: "main", cwd: "/tmp",
+        shellCommand: "echo hi", cols: 40, rows: 10
+    )
+    let calls = recorded.snapshot()
+    #expect(calls.count == 1)
+    #expect(calls[0].contains("new-window"))
+    #expect(!calls.contains { $0.contains("resize-window") })
 }
 
 @Test func testEnsureServerDryRunForwardsSize() async throws {
