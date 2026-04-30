@@ -193,8 +193,35 @@ extension AppState {
         do {
             let archived = try await daemonClient.listWorktrees(repoID: repoID, status: .archived)
             archivedWorktrees[repoID] = archived
+            ensureArchivedSelectionValid(repoID: repoID)
         } catch {
             logger.error("Failed to list archived worktrees: \(error)")
+        }
+    }
+
+    /// Ensure `selectedArchivedWorktreeIDs[repoID]` points to a row that
+    /// actually exists in the archived list (or in `revivingArchived` for that
+    /// repo). If unset or stale, set it to the most-recently-archived row.
+    /// Also kicks off the session fetch for the newly-selected worktree.
+    private func ensureArchivedSelectionValid(repoID: UUID) {
+        let archived = (archivedWorktrees[repoID] ?? [])
+        let lingering = revivingArchived.values
+            .map(\.snapshot)
+            .filter { $0.repoID == repoID }
+        let allIDs = Set(archived.map(\.id) + lingering.map(\.id))
+
+        let current = selectedArchivedWorktreeIDs[repoID]
+        let needsNew = current == nil || !allIDs.contains(current!)
+        guard needsNew else { return }
+
+        let mostRecent = archived
+            .sorted { ($0.archivedAt ?? .distantPast) > ($1.archivedAt ?? .distantPast) }
+            .first
+        if let pick = mostRecent {
+            selectedArchivedWorktreeIDs[repoID] = pick.id
+            Task { await fetchSessions(worktreeID: pick.id) }
+        } else {
+            selectedArchivedWorktreeIDs.removeValue(forKey: repoID)
         }
     }
 
