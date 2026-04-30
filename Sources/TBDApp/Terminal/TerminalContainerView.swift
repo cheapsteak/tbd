@@ -9,6 +9,9 @@ import TBDShared
 ///   for the active tab's layout.
 /// - Multi-select (Cmd-click): Auto-grid layout, one panel per selected worktree
 ///   showing its primary terminal. No tab bar.
+
+// MARK: - MainAreaSizeKey
+
 /// Preference key carrying the px size of the actual terminal-rendering area
 /// — the SplitLayoutView slot inside SingleWorktreeView, or the grid inside
 /// MultiWorktreeView. Excludes the tab bar, divider, dock, and any file
@@ -340,10 +343,16 @@ private struct MultiWorktreeView: View {
                 }
             }
             .background(Color(nsColor: .separatorColor))
-            // No tab bar in multi-select mode, so the GeometryReader's size
-            // is already the actual rendering area. Publish it for the
-            // daemon-side tmux resize.
-            .preference(key: MainAreaSizeKey.self, value: geometry.size)
+            // Publish per-cell size, not full grid size. The daemon
+            // broadcasts mainAreaSize to every tmux window, so each window
+            // needs to match the visible SwiftTerm pane inside its own cell
+            // (gridWidth / cols × gridHeight / rows). Broadcasting the full
+            // grid would size every window to the entire grid and clip the
+            // bottom rows the same way the original detail-slot bug did.
+            .preference(
+                key: MainAreaSizeKey.self,
+                value: CGSize(width: cellWidth, height: cellHeight)
+            )
         }
     }
 }
