@@ -282,13 +282,14 @@ private struct ArchivedWorktreeRow: View {
             HStack(spacing: 4) {
                 Text(row.worktree.branch)
                     .lineLimit(1)
-                if let archivedAt = row.worktree.archivedAt, row.reviveState == nil {
-                    separator
-                    Text(archivedAt, format: .relative(presentation: .named))
-                }
                 if row.effectiveSessionCount > 0, row.reviveState == nil {
                     separator
                     Text("\(row.effectiveSessionCount) session\(row.effectiveSessionCount == 1 ? "" : "s")")
+                }
+                Spacer(minLength: 6)
+                if let archivedAt = row.worktree.archivedAt, row.reviveState == nil {
+                    Text(archivedAt, format: .relative(presentation: .named))
+                        .lineLimit(1)
                 }
             }
             .font(.caption2)
