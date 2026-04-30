@@ -6,6 +6,20 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState")
 
+/// Transition state for a worktree being revived from the archived view.
+/// Holds a snapshot of the `Worktree` so the row can keep rendering even
+/// after the daemon removes it from `archivedWorktrees`.
+enum ReviveState: Equatable {
+    case inFlight(snapshot: Worktree)
+    case done(snapshot: Worktree)
+
+    var snapshot: Worktree {
+        switch self {
+        case .inFlight(let s), .done(let s): return s
+        }
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var repos: [Repo] = []
@@ -176,6 +190,15 @@ final class AppState: ObservableObject {
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
     @Published var sessionTranscripts: [String: [ChatMessage]] = [:]  // sessionId → messages
     @Published var sessionTranscriptLoading: Set<String> = []
+
+    /// Selected archived worktree per repo (left rail of the archived view's nested master-detail).
+    @Published var selectedArchivedWorktreeIDs: [UUID: UUID] = [:]
+
+    /// Worktrees the user just revived from the archived view. Keeps the row
+    /// visible with a status indicator until the user navigates away from the
+    /// archived section. Cleared by `AppState+Navigation` when the active
+    /// sidebar selection moves elsewhere.
+    @Published var revivingArchived: [UUID: ReviveState] = [:]
 
     /// Conductor for each repo (wildcard conductors expanded across all repos).
     @Published var conductorsByRepo: [UUID: Conductor] = [:]
