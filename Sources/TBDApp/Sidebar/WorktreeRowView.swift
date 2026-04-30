@@ -117,6 +117,7 @@ struct WorktreeRowView: View {
     var body: some View {
         HStack(spacing: 6) {
             rowIcons()
+                .allowsHitTesting(false)
             if isEditing {
                 InlineTextField(
                     text: $editText,
@@ -182,6 +183,7 @@ struct WorktreeRowView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                .allowsHitTesting(false)
             }
         }
         .contentShape(Rectangle())

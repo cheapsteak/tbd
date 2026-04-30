@@ -103,7 +103,7 @@ struct SystemPromptBuilderTests {
         let result = SystemPromptBuilder.build(repo: repo, worktree: wt, isResume: false)
         #expect(result != nil)
         #expect(result!.contains("cw/4/feat-"))
-        #expect(!result!.contains("To do immediately"))
+        #expect(!result!.contains("Rename the git branch"))
     }
 
     @Test("build always includes TBD context for fresh sessions")
