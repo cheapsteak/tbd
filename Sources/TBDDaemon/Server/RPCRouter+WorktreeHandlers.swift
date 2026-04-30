@@ -42,7 +42,16 @@ extension RPCRouter {
 
     func handleWorktreeList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeListParams.self, from: paramsData)
-        let worktrees = try await db.worktrees.list(repoID: params.repoID, status: params.status)
+        var worktrees = try await db.worktrees.list(repoID: params.repoID, status: params.status)
+        // Enrich archived worktrees with a real session-file count so the
+        // client can filter on actual disk state, not stale stored IDs.
+        for i in worktrees.indices where worktrees[i].status == .archived {
+            if let dir = ClaudeProjectDirectory.resolve(worktreePath: worktrees[i].path) {
+                worktrees[i].liveClaudeSessionCount = ClaudeSessionScanner.countSessionFiles(projectDir: dir)
+            } else {
+                worktrees[i].liveClaudeSessionCount = 0
+            }
+        }
         return try RPCResponse(result: worktrees)
     }
 
@@ -68,7 +77,12 @@ extension RPCRouter {
 
     func handleWorktreeRevive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeReviveParams.self, from: paramsData)
-        let worktree = try await lifecycle.reviveWorktree(worktreeID: params.worktreeID, cols: params.cols, rows: params.rows)
+        let worktree = try await lifecycle.reviveWorktree(
+            worktreeID: params.worktreeID,
+            cols: params.cols,
+            rows: params.rows,
+            preferredSessionID: params.preferredSessionID
+        )
 
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: worktree.id, repoID: worktree.repoID,

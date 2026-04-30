@@ -80,12 +80,19 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var tmuxServer: String
     public var archivedClaudeSessions: [String]?
     public var sortOrder: Int = 0
+    /// Transient enrichment populated by the daemon's `worktree.list` handler
+    /// for archived worktrees: count of actual session JSONL files in the
+    /// resolved Claude project directory. Not persisted in the DB. nil when
+    /// not enriched (active worktrees, or archived worktrees whose Claude
+    /// project dir could not be resolved).
+    public var liveClaudeSessionCount: Int?
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
                 hasConflicts: Bool = false,
                 createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String,
-                archivedClaudeSessions: [String]? = nil, sortOrder: Int = 0) {
+                archivedClaudeSessions: [String]? = nil, sortOrder: Int = 0,
+                liveClaudeSessionCount: Int? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -99,6 +106,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.tmuxServer = tmuxServer
         self.archivedClaudeSessions = archivedClaudeSessions
         self.sortOrder = sortOrder
+        self.liveClaudeSessionCount = liveClaudeSessionCount
     }
 
     public init(from decoder: Decoder) throws {
@@ -116,6 +124,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         tmuxServer = try c.decode(String.self, forKey: .tmuxServer)
         archivedClaudeSessions = try c.decodeIfPresent([String].self, forKey: .archivedClaudeSessions)
         sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
     }
 }
 

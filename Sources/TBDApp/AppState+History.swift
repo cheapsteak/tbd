@@ -1,5 +1,8 @@
 import Foundation
 import TBDShared
+import os
+
+private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+History")
 
 // MARK: - HistoryLoadState
 
@@ -62,6 +65,11 @@ extension AppState {
         do {
             let fresh = try await daemonClient.listSessions(worktreeID: worktreeID)
             historyLoadStates[worktreeID] = .loaded(fresh)
+            // Auto-select the first session on initial load if nothing is selected yet.
+            // Applies to both active and archived worktrees.
+            if selectedSessionIDs[worktreeID] == nil, let first = fresh.first {
+                await selectSession(first, worktreeID: worktreeID)
+            }
         } catch {
             historyLoadStates[worktreeID] = .failed(error.localizedDescription)
         }
@@ -96,6 +104,63 @@ extension AppState {
             historyActiveWorktrees.remove(worktreeID)
         } catch {
             handleConnectionError(error)
+        }
+    }
+
+    /// Revive an archived worktree and resume the selected Claude session.
+    /// Marks the row as `inFlight` immediately so the archived view can show
+    /// a status pill, then flips to `.done` on success or clears on failure.
+    func reviveWithSession(worktreeID: UUID, sessionId: String) async {
+        // Idempotency: ignore re-entrant calls (e.g. rapid double-click)
+        // so a concurrent invocation can't overwrite the .done state with
+        // an "already active" error.
+        guard revivingArchived[worktreeID] == nil else { return }
+        // Find the snapshot in archivedWorktrees so we can keep the row visible
+        // after the daemon reconciles the worktree out of the archived list.
+        guard let snapshot = archivedWorktrees.values
+            .flatMap({ $0 })
+            .first(where: { $0.id == worktreeID })
+        else {
+            logger.warning("reviveWithSession: no archived snapshot for \(worktreeID, privacy: .public)")
+            return
+        }
+        revivingArchived[worktreeID] = .inFlight(snapshot: snapshot)
+
+        // Advance the archived row selection if this row is currently selected
+        // (rule: in-flight rows are non-selectable).
+        advanceArchivedSelectionIfNeeded(worktreeID: worktreeID)
+
+        do {
+            let size = mainAreaTerminalSize()
+            try await daemonClient.reviveWorktree(
+                id: worktreeID,
+                cols: size.cols,
+                rows: size.rows,
+                preferredSessionID: sessionId
+            )
+            revivingArchived[worktreeID] = .done(snapshot: snapshot)
+            await refreshWorktrees()
+            await refreshArchivedWorktrees(repoID: snapshot.repoID)
+        } catch {
+            revivingArchived.removeValue(forKey: worktreeID)
+            handleConnectionError(error)
+        }
+    }
+
+    /// If the in-flight worktree was the selected archived row for its repo,
+    /// move selection to the next-most-recent archived row (or clear).
+    func advanceArchivedSelectionIfNeeded(worktreeID: UUID) {
+        let repoID = archivedWorktrees.first(where: { (_, wts) in
+            wts.contains(where: { $0.id == worktreeID })
+        })?.key
+        guard let repoID, selectedArchivedWorktreeIDs[repoID] == worktreeID else { return }
+        let remaining = (archivedWorktrees[repoID] ?? [])
+            .filter { $0.id != worktreeID }
+            .sorted { ($0.archivedAt ?? .distantPast) > ($1.archivedAt ?? .distantPast) }
+        if let next = remaining.first {
+            selectedArchivedWorktreeIDs[repoID] = next.id
+        } else {
+            selectedArchivedWorktreeIDs.removeValue(forKey: repoID)
         }
     }
 }
