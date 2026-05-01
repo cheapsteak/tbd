@@ -10,7 +10,13 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "session-scan
 /// Three-tier lookup: exact encoding → regex fallback → full content scan.
 /// Results are cached after first resolution.
 enum ClaudeProjectDirectory {
-    private nonisolated(unsafe) static var cache: [String: URL] = [:]
+    /// Cache entries: `.some(url)` for resolved hits, `.none` for confirmed
+    /// misses. Caching negatives is essential — the tier-3 fallback enumerates
+    /// every directory under `~/.claude/projects` and reads the first line of
+    /// every session JSONL. Without negative caching, every repeat call for a
+    /// worktree with no matching project dir re-runs that scan, which pegs the
+    /// daemon at ~95% CPU when the app's 2s poll lists archived worktrees.
+    private nonisolated(unsafe) static var cache: [String: URL?] = [:]
     private static let lock = NSLock()
 
     static func resolve(worktreePath: String, projectsBase: URL? = nil) -> URL? {
@@ -20,16 +26,21 @@ enum ClaudeProjectDirectory {
         lock.lock()
         if let cached = cache[worktreePath] {
             lock.unlock()
-            return FileManager.default.fileExists(atPath: cached.path) ? cached : nil
+            // Re-validate hits against the filesystem so a deleted project
+            // directory doesn't leave stale results in the cache. Negative
+            // entries are returned as-is — a previously-missing dir reappearing
+            // is rare enough that we don't pay the fexist cost on every call.
+            if let url = cached {
+                return FileManager.default.fileExists(atPath: url.path) ? url : nil
+            }
+            return nil
         }
         lock.unlock()
 
         let result = resolveUncached(worktreePath: worktreePath, projectsBase: base)
-        if let result {
-            lock.lock()
-            cache[worktreePath] = result
-            lock.unlock()
-        }
+        lock.lock()
+        cache[worktreePath] = result
+        lock.unlock()
         return result
     }
 

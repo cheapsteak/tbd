@@ -45,11 +45,23 @@ extension RPCRouter {
         var worktrees = try await db.worktrees.list(repoID: params.repoID, status: params.status)
         // Enrich archived worktrees with a real session-file count so the
         // client can filter on actual disk state, not stale stored IDs.
-        for i in worktrees.indices where worktrees[i].status == .archived {
-            if let dir = ClaudeProjectDirectory.resolve(worktreePath: worktrees[i].path) {
-                worktrees[i].liveClaudeSessionCount = ClaudeSessionScanner.countSessionFiles(projectDir: dir)
-            } else {
-                worktrees[i].liveClaudeSessionCount = 0
+        //
+        // Only run this enrichment when the caller explicitly asked for the
+        // archived list. The default (status=nil) listing is hit by the app's
+        // 2s poll, and `ClaudeProjectDirectory.resolve` can fall through to a
+        // full scan of `~/.claude/projects/*` (reading the first line of every
+        // session JSONL) when the tier-1/2 path-encoding lookups miss — which
+        // they do on every archived worktree whose project directory has been
+        // cleaned up. Negative scan results are not cached, so without this
+        // guard the poll re-scans the entire projects directory every 2s,
+        // pegging the daemon at ~95% CPU.
+        if params.status == .archived {
+            for i in worktrees.indices where worktrees[i].status == .archived {
+                if let dir = ClaudeProjectDirectory.resolve(worktreePath: worktrees[i].path) {
+                    worktrees[i].liveClaudeSessionCount = ClaudeSessionScanner.countSessionFiles(projectDir: dir)
+                } else {
+                    worktrees[i].liveClaudeSessionCount = 0
+                }
             }
         }
         return try RPCResponse(result: worktrees)
