@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Open in TBD</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      max-width: 32rem;
+      margin: 4rem auto;
+      padding: 0 1.25rem;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 0.75rem; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.9em;
+      padding: 0.1em 0.35em;
+      background: color-mix(in srgb, currentColor 8%, transparent);
+      border-radius: 4px;
+      overflow-wrap: anywhere;
+    }
+    .row { margin-top: 1rem; }
+    a.btn {
+      display: inline-block;
+      padding: 0.5rem 0.9rem;
+      border-radius: 6px;
+      background: #2563eb;
+      color: white;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    a.btn:hover { background: #1d4ed8; }
+    .muted { opacity: 0.7; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>Open in TBD</h1>
+  <p id="status">Redirecting…</p>
+  <div class="row" id="manual" hidden>
+    <a class="btn" id="link" href="#">Open in TBD</a>
+  </div>
+  <p class="row muted">
+    TBD is a macOS worktree + terminal manager.
+    If nothing happens, you may not have it installed —
+    grab it from <a href="https://github.com/cheapsteak/tbd">cheapsteak/tbd</a>.
+  </p>
+
+  <script>
+    (function () {
+      var params = new URLSearchParams(location.search);
+      var raw = params.get('worktree') || '';
+      // Accept either a UUID or a worktree slug (letters, digits, hyphens, underscores).
+      var ok = /^[A-Za-z0-9_-]{1,128}$/.test(raw);
+      var status = document.getElementById('status');
+      var manual = document.getElementById('manual');
+      var link = document.getElementById('link');
+
+      if (!ok) {
+        status.textContent = 'Missing or invalid ?worktree= parameter.';
+        return;
+      }
+
+      var target = 'tbd://open?worktree=' + encodeURIComponent(raw);
+      link.href = target;
+      manual.hidden = false;
+      status.innerHTML = 'Opening TBD for worktree <code>' + raw.replace(/[<&]/g, function (c) {
+        return c === '<' ? '&lt;' : '&amp;';
+      }) + '</code>…';
+
+      // Trigger the custom scheme. location.replace avoids a back-button trap.
+      // Browsers handle the unknown scheme silently if the handler isn't installed,
+      // so we leave the manual button visible as a fallback.
+      setTimeout(function () { location.replace(target); }, 50);
+    })();
+  </script>
+</body>
+</html>
