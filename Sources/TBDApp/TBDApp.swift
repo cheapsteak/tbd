@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Darwin
+import ObjectiveC.runtime
 import TBDShared
 import os
 
@@ -15,6 +16,33 @@ private func tbdUncaughtExceptionHandler(_ exception: NSException) {
     let reason = exception.reason ?? "<no reason>"
     let stack = exception.callStackSymbols.joined(separator: "\n")
     lifecycleLogger.fault("Uncaught NSException name=\(name, privacy: .public) reason=\(reason, privacy: .public)\n\(stack, privacy: .public)")
+}
+
+/// Objective-C exception preprocessor — fires the instant `[NSException raise]`
+/// is called, before any unwinding or AppKit catch logic. We need this because
+/// AppKit's `NSApplicationCrashOnExceptions` path calls
+/// `+[NSApplication _crashOnException:]`, which raises SIGTRAP directly without
+/// going through `NSSetUncaughtExceptionHandler`. The preprocessor lets us log
+/// the reason before the process dies.
+///
+/// NOTE: This fires for ALL NSExceptions, including ones that are caught
+/// internally (e.g. some AppKit/NSColor parsing paths throw and catch as
+/// flow control). That's expected and not a bug — we only care about the
+/// final crashing one, and fault-level entries are cheap.
+///
+/// Returns the exception unchanged so normal handling continues.
+///
+/// The `objc_exception_preprocessor` typedef is `id _Nonnull (*)(id _Nonnull)`,
+/// which Swift imports as `@convention(c) (Any) -> Any`. We accept/return `Any`
+/// and cast internally.
+let tbdExceptionPreprocessor: @convention(c) (Any) -> Any = { exception in
+    if let ns = exception as? NSException {
+        let name = ns.name.rawValue
+        let reason = ns.reason ?? "<no reason>"
+        let stack = ns.callStackSymbols.joined(separator: "\n")
+        lifecycleLogger.fault("Preprocessed NSException name=\(name, privacy: .public) reason=\(reason, privacy: .public) stack=\(stack, privacy: .public)")
+    }
+    return exception
 }
 
 /// Async-signal-safe signal handler: writes a short literal C string to stderr
@@ -59,6 +87,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         lifecycleLogger.info("willFinishLaunching")
 
         // Install crash handlers before any AppKit/SwiftUI code can throw or trap.
+        // The Obj-C exception preprocessor must come first — it's our only chance
+        // to capture the reason for exceptions that AppKit converts to SIGTRAP via
+        // +[NSApplication _crashOnException:], which bypasses NSSetUncaughtExceptionHandler.
+        _ = objc_setExceptionPreprocessor(tbdExceptionPreprocessor)
         NSSetUncaughtExceptionHandler(tbdUncaughtExceptionHandler)
         for sig in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTRAP] {
             signal(sig, tbdSignalHandler)
