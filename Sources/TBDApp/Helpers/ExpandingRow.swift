@@ -142,6 +142,12 @@ final class ExpandingRowPanel {
                 .padding(.trailing, 6)
                 .frame(maxHeight: .infinity)
         ))
+        // Use frame-based layout, not AutoLayout. Mixing manual `frame =` (set
+        // below) with the default translatesAutoresizingMaskIntoConstraints=false
+        // makes NSHostingView keep posting setNeedsUpdateConstraints up to the
+        // panel's window every layout pass — AppKit then aborts with
+        // "more Update Constraints in Window passes than there are views".
+        hosting.translatesAutoresizingMaskIntoConstraints = true
         let fittingSize = hosting.fittingSize
         let totalWidth = contentInset.x + fittingSize.width
 
@@ -157,7 +163,16 @@ final class ExpandingRowPanel {
             height: screenFrame.height
         )
 
+        // If already showing the same panel frame, no-op. Hover events fire
+        // repeatedly during mouse-move; rebuilding the content view each time
+        // amplifies layout pressure and trips AppKit's update-constraints cap.
+        if self.panel != nil, panel.isVisible, currentPanelFrame == panelFrame {
+            currentOnClick = onClick
+            return
+        }
+
         let bg = NSView(frame: NSRect(origin: .zero, size: panelFrame.size))
+        bg.translatesAutoresizingMaskIntoConstraints = true
         bg.wantsLayer = true
         // windowBackgroundColor resolves to pure white in light mode, which is
         // too bright for the sidebar's vibrancy-tinted gray. Use approximate
