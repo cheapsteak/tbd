@@ -827,10 +827,30 @@ final class AppState: ObservableObject {
         return truncated.isEmpty ? "conductor" : truncated
     }
 
+    /// UserDefaults key for the WIP terminal-auto-resize feature. Off by
+    /// default — the feature broadcasts main-area pixel size to the daemon
+    /// and resizes every tracked tmux window on app resize / terminal
+    /// create. See `mainAreaTerminalSize()` and `scheduleMainAreaSizeBroadcast()`
+    /// for the two enforcement points. Settings UI toggle lives in the
+    /// "Experimental" section of the General settings tab.
+    static let terminalAutoResizeKey = "enableTerminalAutoResize"
+
+    /// Whether the WIP main-area resize broadcast is enabled. Default false.
+    private var terminalAutoResizeEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.terminalAutoResizeKey)
+    }
+
     /// Convert the current `mainAreaSize` (pixels) into tmux cell dimensions
     /// using SwiftTerm's font metrics. Floors at the tmux minimum (80x24) so
     /// degenerate window sizes during launch never produce a too-small pane.
-    func mainAreaTerminalSize() -> (cols: Int, rows: Int) {
+    /// Returns `(nil, nil)` when the auto-resize feature flag is off so the
+    /// daemon's `cols ?? TmuxManager.defaultCols` / `rows ?? defaultRows`
+    /// fallback fires (220×50). Returning `(0, 0)` would NOT trigger the
+    /// fallback — `Optional.some(0)` is non-nil — and tmux would drop back
+    /// to its own 80×24 default with the un-reflowable hard-wrapped
+    /// scrollback that #73 introduced these defaults to prevent.
+    func mainAreaTerminalSize() -> (cols: Int?, rows: Int?) {
+        guard terminalAutoResizeEnabled else { return (nil, nil) }
         let cell = TBDTerminalView.cellDimensions(for: TBDTerminalView.defaultMonospaceFont)
         guard cell.width > 0, cell.height > 0 else { return (80, 24) }
         let cols = max(80, Int(mainAreaSize.width / cell.width))
@@ -842,8 +862,14 @@ final class AppState: ObservableObject {
     /// every tracked tmux window. Coalesces rapid resize events into a single
     /// RPC ~300ms after the user stops dragging the window edge.
     private func scheduleMainAreaSizeBroadcast() {
+        // Belt-and-suspenders: `mainAreaTerminalSize()` already returns
+        // (nil, nil) when the flag is off, but this also avoids spinning up
+        // the debounce Task and the noop diff against `lastBroadcastCols/Rows`
+        // for every mainAreaSize change while disabled.
+        guard terminalAutoResizeEnabled else { return }
         mainAreaSizeBroadcastTask?.cancel()
         let (cols, rows) = mainAreaTerminalSize()
+        guard let cols, let rows else { return }
         // Skip noop broadcasts: same cell dims as the previous send.
         guard cols != lastBroadcastCols || rows != lastBroadcastRows else { return }
         mainAreaSizeBroadcastTask = Task { [weak self] in
