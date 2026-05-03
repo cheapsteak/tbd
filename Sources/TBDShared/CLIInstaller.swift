@@ -1,7 +1,9 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: "com.tbd.shared", category: "cli-installer")
+// CLIInstaller is currently only invoked from TBDApp; using com.tbd.app keeps
+// the established subsystem taxonomy from docs/diagnostics-strategy.md intact.
+private let logger = Logger(subsystem: "com.tbd.app", category: "cli-installer")
 
 public enum CLIInstallState: Equatable {
     case notInstalled
