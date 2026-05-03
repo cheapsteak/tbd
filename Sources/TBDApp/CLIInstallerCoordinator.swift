@@ -81,16 +81,17 @@ final class CLIInstallerCoordinator {
     private func presentLaunchPrompt(target: String, kind: LaunchPromptKind) async {
         let alert = NSAlert()
         alert.alertStyle = .informational
+        let symlinkPath = installer.symlinkPath
         switch kind {
         case .missing:
             alert.messageText = "Install the tbd command-line tool?"
-            alert.informativeText = "TBD can add a `tbd` command at ~/.local/bin/tbd so you can launch and control TBD from the terminal. No sudo required."
+            alert.informativeText = "TBD can add a `tbd` command at \(symlinkPath) so you can launch and control TBD from the terminal. No sudo required."
         case .stale(let current):
             alert.messageText = "Refresh the tbd command-line tool?"
-            alert.informativeText = "Your `tbd` symlink at ~/.local/bin/tbd points at \(current), which doesn't match this TBD's CLI. Update it?"
+            alert.informativeText = "Your `tbd` symlink at \(symlinkPath) points at \(current), which doesn't match this TBD's CLI. Update it?"
         case .nonSymlink:
-            alert.messageText = "Replace the file at ~/.local/bin/tbd?"
-            alert.informativeText = "A regular file already exists at ~/.local/bin/tbd. TBD can replace it with a symlink to this TBD's CLI."
+            alert.messageText = "Replace the file at \(symlinkPath)?"
+            alert.informativeText = "A regular file already exists at \(symlinkPath). TBD can replace it with a symlink to this TBD's CLI."
         }
         alert.addButton(withTitle: "Install")
         alert.addButton(withTitle: "Not Now")
@@ -102,11 +103,12 @@ final class CLIInstallerCoordinator {
     }
 
     private func performInstall(target: String, confirm: Bool) async {
+        let symlinkDir = (installer.symlinkPath as NSString).deletingLastPathComponent
         if confirm {
             let alert = NSAlert()
             alert.alertStyle = .informational
-            alert.messageText = "Install tbd to ~/.local/bin?"
-            alert.informativeText = "This creates a symlink at ~/.local/bin/tbd pointing at \(target)."
+            alert.messageText = "Install tbd to \(symlinkDir)?"
+            alert.informativeText = "This creates a symlink at \(installer.symlinkPath) pointing at \(target)."
             alert.addButton(withTitle: "Install")
             alert.addButton(withTitle: "Cancel")
             if alert.runModal() != .alertFirstButtonReturn { return }
@@ -144,7 +146,7 @@ final class CLIInstallerCoordinator {
             alert.informativeText = """
             Symlink created at \(result.symlinkPath).
 
-            ~/.local/bin is not on your shell's PATH. Add this line to \(rc) and restart your shell:
+            \(symlinkDir) is not on your shell's PATH. Add this line to \(rc) and restart your shell:
 
             \(line)
             """
