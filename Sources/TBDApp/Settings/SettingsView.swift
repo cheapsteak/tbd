@@ -87,14 +87,11 @@ struct GeneralSettingsTab: View {
 
             Section {
                 Toggle("Auto-resize tmux windows to match the app pane (WIP)", isOn: $enableTerminalAutoResize)
-                    .help("When on, TBD broadcasts the live pane size to the daemon and resizes every tmux window on app resize. Currently unstable — can leave panes smaller than the visible area and clip the bottom rows. Restart the app after toggling.")
-                Text("Restart the app after toggling so the daemon picks up the change.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .help("When on, TBD broadcasts the live pane size to the daemon and resizes every tmux window on app resize. Currently unstable — can leave panes smaller than the visible area and clip the bottom rows.")
             } header: {
                 Text("Experimental")
             } footer: {
-                Text("Off by default — under active development. Opens you up to known bugs around tmux \"window-size manual\" lock-in. If you toggle this on and want to bail out, just turn it off and restart.")
+                Text("Off by default — under active development. Known bugs around tmux \"window-size manual\" lock-in can clip the bottom rows of a pane. To bail out, turn it off and restart the app.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

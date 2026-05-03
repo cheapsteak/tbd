@@ -27,7 +27,7 @@ struct TerminalAutoResizeFlagTests {
         try body()
     }
 
-    @Test("returns (0, 0) when flag is off so daemon-side resize gates skip")
+    @Test("returns (nil, nil) when flag is off so daemon falls back to its 220×50 default")
     func mainAreaTerminalSizeOff() throws {
         try withFlag(false) {
             let state = AppState()
@@ -35,8 +35,11 @@ struct TerminalAutoResizeFlagTests {
             // otherwise produce a real cell count — verify the flag wins.
             state.mainAreaSize = CGSize(width: 1200, height: 800)
             let size = state.mainAreaTerminalSize()
-            #expect(size.cols == 0)
-            #expect(size.rows == 0)
+            // nil (not 0) is required so callers' Int? params trigger the
+            // daemon's `?? TmuxManager.defaultCols` fallback. `Some(0)` would
+            // bypass the fallback and tmux would land at 80×24.
+            #expect(size.cols == nil)
+            #expect(size.rows == nil)
         }
     }
 
@@ -50,10 +53,12 @@ struct TerminalAutoResizeFlagTests {
             // we just assert plausible bounds — the floor is 80x24 and a
             // 1200x800 viewport must not exceed it by more than the screen
             // could fit at any reasonable cell size.
-            #expect(size.cols >= 80)
-            #expect(size.rows >= 24)
-            #expect(size.cols < 1200)
-            #expect(size.rows < 800)
+            let cols = try #require(size.cols)
+            let rows = try #require(size.rows)
+            #expect(cols >= 80)
+            #expect(rows >= 24)
+            #expect(cols < 1200)
+            #expect(rows < 800)
         }
     }
 }
