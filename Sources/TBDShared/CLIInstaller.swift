@@ -42,7 +42,7 @@ public enum CLIInstallerError: Error, Equatable {
 
 public struct CLIInstaller: Sendable {
     public let symlinkPath: String
-    public let pathProbe: @Sendable () -> String?
+    public let pathProbe: @Sendable () async -> String?
     public let homeDir: String
     public let shellPath: String
 
@@ -50,12 +50,12 @@ public struct CLIInstaller: Sendable {
         symlinkPath: String? = nil,
         homeDir: String = NSHomeDirectory(),
         shellPath: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
-        pathProbe: (@Sendable () -> String?)? = nil
+        pathProbe: (@Sendable () async -> String?)? = nil
     ) {
         self.homeDir = homeDir
         self.symlinkPath = symlinkPath ?? (homeDir as NSString).appendingPathComponent(".local/bin/tbd")
         self.shellPath = shellPath
-        self.pathProbe = pathProbe ?? { Self.defaultLoginShellPathProbe(shellPath: shellPath) }
+        self.pathProbe = pathProbe ?? { await Self.defaultLoginShellPathProbe(shellPath: shellPath) }
     }
 
     /// Compute the TBDCLI path given the daemon's executable path.
@@ -104,7 +104,7 @@ public struct CLIInstaller: Sendable {
     }
 
     /// Create or replace the symlink to point at `target`. Idempotent.
-    public func install(target: String) throws -> CLIInstallResult {
+    public func install(target: String) async throws -> CLIInstallResult {
         let fm = FileManager.default
         let parent = (symlinkPath as NSString).deletingLastPathComponent
         if !fm.fileExists(atPath: parent) {
@@ -132,7 +132,7 @@ public struct CLIInstaller: Sendable {
             throw CLIInstallerError.symlinkCreationFailed(error.localizedDescription)
         }
 
-        let pathInfo = pathStatus()
+        let pathInfo = await pathStatus()
         return CLIInstallResult(
             symlinkPath: symlinkPath,
             target: target,
@@ -144,9 +144,9 @@ public struct CLIInstaller: Sendable {
 
     /// Compute current path status (whether the symlink's parent dir is on the
     /// user's login-shell PATH, plus suggested rc / export line if not).
-    public func pathStatus() -> (onPath: Bool, shellRC: String, exportLine: String) {
+    public func pathStatus() async -> (onPath: Bool, shellRC: String, exportLine: String) {
         let binDir = (symlinkPath as NSString).deletingLastPathComponent
-        let probed = pathProbe()
+        let probed = await pathProbe()
         let onPath = Self.directoryIsOnPath(binDir, pathString: probed, homeDir: homeDir)
         let (rc, line) = Self.shellRCAndExport(forShellPath: shellPath, binDir: binDir, homeDir: homeDir)
         return (onPath, rc, line)
@@ -175,7 +175,8 @@ public struct CLIInstaller: Sendable {
             if displayBinDir == "~/.local/bin" {
                 line = "set -gx PATH $HOME/.local/bin $PATH"
             } else {
-                line = "set -gx PATH \(displayBinDir) $PATH"
+                // Single-quote so paths with spaces don't word-split.
+                line = "set -gx PATH '\(displayBinDir)' $PATH"
             }
             return (rc, line)
         case "bash":
@@ -228,7 +229,10 @@ public struct CLIInstaller: Sendable {
     }
 
     /// Spawn the user's login shell to print PATH. Returns nil on any failure.
-    public static func defaultLoginShellPathProbe(shellPath: String) -> String? {
+    /// Bridges `Process.terminationHandler` and a 2-second `DispatchQueue` timer
+    /// into a continuation so the awaiting task yields its cooperative-pool
+    /// thread instead of blocking on `Thread.sleep`.
+    public static func defaultLoginShellPathProbe(shellPath: String) async -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: shellPath)
         process.arguments = ["-ilc", "echo $PATH"]
@@ -236,31 +240,55 @@ public struct CLIInstaller: Sendable {
         process.standardOutput = pipe
         process.standardError = Pipe()  // discard
 
-        do {
-            try process.run()
-        } catch {
-            logger.warning("Login-shell PATH probe failed to launch \(shellPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return nil
-        }
+        return await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+            // Guard against double-resume (terminationHandler vs timeout race).
+            let resumed = ManagedAtomicBool()
+            let resume: @Sendable (String?) -> Void = { value in
+                if resumed.exchange(true) { return }
+                cont.resume(returning: value)
+            }
 
-        // Best-effort 2-second timeout.
-        let deadline = Date().addingTimeInterval(2.0)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        if process.isRunning {
-            process.terminate()
-            logger.warning("Login-shell PATH probe timed out")
-            return nil
-        }
+            process.terminationHandler = { _ in
+                guard let data = try? pipe.fileHandleForReading.readToEnd(),
+                      let output = String(data: data, encoding: .utf8) else {
+                    resume(nil); return
+                }
+                let firstLine = output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first.map(String.init) ?? ""
+                let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+                resume(trimmed.isEmpty ? nil : trimmed)
+            }
 
-        guard let data = try? pipe.fileHandleForReading.readToEnd(),
-              let output = String(data: data, encoding: .utf8) else {
-            return nil
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+                if process.isRunning {
+                    process.terminate()
+                    logger.warning("Login-shell PATH probe timed out")
+                }
+                resume(nil)
+            }
+
+            do {
+                try process.run()
+            } catch {
+                logger.warning("Login-shell PATH probe failed to launch \(shellPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                resume(nil)
+            }
         }
-        let firstLine = output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first.map(String.init) ?? ""
-        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+/// Lock-protected bool used to gate single-resume semantics on the probe
+/// continuation. `swift-atomics` is not in this package's deps, so a tiny
+/// `NSLock`-backed flag does the job.
+private final class ManagedAtomicBool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    /// Sets the flag to true and returns the *previous* value.
+    func exchange(_ newValue: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let old = value
+        value = newValue
+        return old
     }
 }
 

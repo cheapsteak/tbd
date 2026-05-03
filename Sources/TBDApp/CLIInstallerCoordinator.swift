@@ -114,13 +114,10 @@ final class CLIInstallerCoordinator {
 
         let result: CLIInstallResult
         do {
-            // Offload off the main actor: install() invokes the login-shell
-            // PATH probe, which spawns a child process and waits up to 2s.
-            // Running it on the main thread freezes AppKit event handling.
-            let installer = self.installer
-            result = try await Task.detached(priority: .userInitiated) {
-                try installer.install(target: target)
-            }.value
+            // install() is async — its PATH probe bridges Process termination
+            // into a continuation, so the awaiting task yields its thread
+            // instead of blocking AppKit during the 2s wait.
+            result = try await installer.install(target: target)
         } catch {
             logger.error("CLI install failed: \(error.localizedDescription, privacy: .public)")
             let alert = NSAlert()

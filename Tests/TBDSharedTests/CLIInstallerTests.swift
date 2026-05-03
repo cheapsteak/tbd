@@ -113,7 +113,7 @@ private func makeFile(_ path: String) throws {
 
 // MARK: - install
 
-@Test func installCreatesParentDirectoryAndSymlink() throws {
+@Test func installCreatesParentDirectoryAndSymlink() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/build/TBDCLI"
@@ -121,7 +121,7 @@ private func makeFile(_ path: String) throws {
     let symlink = home.path + "/.local/bin/tbd"
 
     let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { "/usr/bin:/bin" })
-    let result = try installer.install(target: target)
+    let result = try await installer.install(target: target)
     #expect(result.symlinkPath == symlink)
     #expect(result.target == target)
 
@@ -129,7 +129,7 @@ private func makeFile(_ path: String) throws {
     #expect(dest == target)
 }
 
-@Test func installReplacesExistingSymlink() throws {
+@Test func installReplacesExistingSymlink() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let oldTarget = home.path + "/old-cli"
@@ -144,14 +144,14 @@ private func makeFile(_ path: String) throws {
     try FileManager.default.createSymbolicLink(atPath: symlink, withDestinationPath: oldTarget)
 
     let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { "/usr/bin" })
-    _ = try installer.install(target: newTarget)
+    _ = try await installer.install(target: newTarget)
     let dest = try FileManager.default.destinationOfSymbolicLink(atPath: symlink)
     #expect(dest == newTarget)
 }
 
 // MARK: - PATH detection / on-PATH branch
 
-@Test func installReportsOnPathWhenBinDirIsPresent() throws {
+@Test func installReportsOnPathWhenBinDirIsPresent() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli"
@@ -159,17 +159,17 @@ private func makeFile(_ path: String) throws {
     let symlink = home.path + "/.local/bin/tbd"
 
     let homePath = home.path
-    let probe: @Sendable () -> String? = {
+    let probe: @Sendable () async -> String? = {
         "/usr/bin:\(homePath)/.local/bin:/sbin"
     }
     let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: probe)
-    let result = try installer.install(target: target)
+    let result = try await installer.install(target: target)
     #expect(result.onPath == true)
     #expect(result.suggestedShellRC == nil)
     #expect(result.exportLine == nil)
 }
 
-@Test func installReportsOnPathWhenBinDirAppearsTildeExpanded() throws {
+@Test func installReportsOnPathWhenBinDirAppearsTildeExpanded() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli"
@@ -177,15 +177,15 @@ private func makeFile(_ path: String) throws {
     let symlink = home.path + "/.local/bin/tbd"
 
     // Path string contains the tilde-prefixed form — should still match.
-    let probe: @Sendable () -> String? = { "/usr/bin:~/.local/bin:/sbin" }
+    let probe: @Sendable () async -> String? = { "/usr/bin:~/.local/bin:/sbin" }
     let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: probe)
-    let result = try installer.install(target: target)
+    let result = try await installer.install(target: target)
     #expect(result.onPath == true)
 }
 
 // MARK: - PATH detection / off-PATH branch
 
-@Test func installReportsOffPathAndZshRCByDefault() throws {
+@Test func installReportsOffPathAndZshRCByDefault() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli"
@@ -198,13 +198,13 @@ private func makeFile(_ path: String) throws {
         shellPath: "/bin/zsh",
         pathProbe: { "/usr/bin:/bin" }
     )
-    let result = try installer.install(target: target)
+    let result = try await installer.install(target: target)
     #expect(result.onPath == false)
     #expect(result.suggestedShellRC == "~/.zshrc")
     #expect(result.exportLine == "export PATH=\"$HOME/.local/bin:$PATH\"")
 }
 
-@Test func installReportsOffPathBashProfileForBash() throws {
+@Test func installReportsOffPathBashProfileForBash() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli"
@@ -217,13 +217,13 @@ private func makeFile(_ path: String) throws {
         shellPath: "/bin/bash",
         pathProbe: { "/usr/bin:/bin" }
     )
-    let result = try installer.install(target: target)
+    let result = try await installer.install(target: target)
     #expect(result.onPath == false)
     #expect(result.suggestedShellRC == "~/.bash_profile")
     #expect(result.exportLine == "export PATH=\"$HOME/.local/bin:$PATH\"")
 }
 
-@Test func installReportsOffPathFishConfigForFish() throws {
+@Test func installReportsOffPathFishConfigForFish() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli"
@@ -236,13 +236,23 @@ private func makeFile(_ path: String) throws {
         shellPath: "/usr/local/bin/fish",
         pathProbe: { "/usr/bin:/bin" }
     )
-    let result = try installer.install(target: target)
+    let result = try await installer.install(target: target)
     #expect(result.onPath == false)
     #expect(result.suggestedShellRC == "~/.config/fish/config.fish")
     #expect(result.exportLine == "set -gx PATH $HOME/.local/bin $PATH")
 }
 
-@Test func pathProbeReturningNilTreatedAsOffPath() throws {
+@Test func fishExportLineQuotesNonDefaultBinDirToHandleSpaces() {
+    let (rc, line) = CLIInstaller.shellRCAndExport(
+        forShellPath: "/usr/local/bin/fish",
+        binDir: "/Users/me/Library/Application Support/tbd/bin",
+        homeDir: "/Users/me"
+    )
+    #expect(rc == "~/.config/fish/config.fish")
+    #expect(line == "set -gx PATH '~/Library/Application Support/tbd/bin' $PATH")
+}
+
+@Test func pathProbeReturningNilTreatedAsOffPath() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli"
@@ -250,7 +260,7 @@ private func makeFile(_ path: String) throws {
     let symlink = home.path + "/.local/bin/tbd"
 
     let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { nil })
-    let result = try installer.install(target: target)
+    let result = try await installer.install(target: target)
     #expect(result.onPath == false)
     #expect(result.exportLine != nil)
 }
