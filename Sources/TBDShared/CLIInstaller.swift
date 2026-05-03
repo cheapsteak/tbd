@@ -1,0 +1,264 @@
+import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.tbd.shared", category: "cli-installer")
+
+public enum CLIInstallState: Equatable {
+    case notInstalled
+    case installed(target: String)
+    case stale(currentTarget: String)
+}
+
+public struct CLIInstallResult: Equatable {
+    public let symlinkPath: String
+    public let target: String
+    public let onPath: Bool
+    public let suggestedShellRC: String?
+    public let exportLine: String?
+
+    public init(
+        symlinkPath: String,
+        target: String,
+        onPath: Bool,
+        suggestedShellRC: String?,
+        exportLine: String?
+    ) {
+        self.symlinkPath = symlinkPath
+        self.target = target
+        self.onPath = onPath
+        self.suggestedShellRC = suggestedShellRC
+        self.exportLine = exportLine
+    }
+}
+
+public enum CLIInstallerError: Error, Equatable {
+    case daemonExecutablePathUnavailable
+    case cliBinaryNotFound(searched: String)
+    case symlinkCreationFailed(String)
+}
+
+public struct CLIInstaller {
+    public let symlinkPath: String
+    public let pathProbe: () -> String?
+    public let homeDir: String
+    public let shellPath: String
+
+    public init(
+        symlinkPath: String? = nil,
+        homeDir: String = NSHomeDirectory(),
+        shellPath: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
+        pathProbe: (() -> String?)? = nil
+    ) {
+        self.homeDir = homeDir
+        self.symlinkPath = symlinkPath ?? (homeDir as NSString).appendingPathComponent(".local/bin/tbd")
+        self.shellPath = shellPath
+        self.pathProbe = pathProbe ?? { Self.defaultLoginShellPathProbe(shellPath: shellPath) }
+    }
+
+    /// Compute the TBDCLI path given the daemon's executable path.
+    public static func cliPath(forDaemonExecutable daemonPath: String) -> String {
+        let dir = (daemonPath as NSString).deletingLastPathComponent
+        return (dir as NSString).appendingPathComponent("TBDCLI")
+    }
+
+    /// Inspect the symlink. Pass the expected target (resolved daemon-sibling
+    /// path) to determine staleness. If `expectedTarget` is nil, only checks
+    /// that the symlink exists and points at a real file.
+    public func currentState(expectedTarget: String?) -> CLIInstallState {
+        let fm = FileManager.default
+        let attrs = try? fm.attributesOfItem(atPath: symlinkPath)
+        guard let attrs, attrs[.type] as? FileAttributeType == .typeSymbolicLink else {
+            // Either missing entirely, or a non-symlink we'd need to overwrite.
+            if (attrs?[.type] as? FileAttributeType) != nil {
+                return .stale(currentTarget: symlinkPath)
+            }
+            return .notInstalled
+        }
+        let destination: String
+        do {
+            destination = try fm.destinationOfSymbolicLink(atPath: symlinkPath)
+        } catch {
+            return .notInstalled
+        }
+
+        let resolvedDest = Self.absolutize(
+            destination,
+            relativeTo: (symlinkPath as NSString).deletingLastPathComponent,
+            homeDir: homeDir
+        )
+
+        if let expectedTarget {
+            let expectedAbs = Self.absolutize(expectedTarget, relativeTo: homeDir, homeDir: homeDir)
+            if resolvedDest == expectedAbs && fm.fileExists(atPath: resolvedDest) {
+                return .installed(target: resolvedDest)
+            }
+            return .stale(currentTarget: resolvedDest)
+        } else {
+            if fm.fileExists(atPath: resolvedDest) {
+                return .installed(target: resolvedDest)
+            }
+            return .stale(currentTarget: resolvedDest)
+        }
+    }
+
+    /// Create or replace the symlink to point at `target`. Idempotent.
+    public func install(target: String) throws -> CLIInstallResult {
+        let fm = FileManager.default
+        let parent = (symlinkPath as NSString).deletingLastPathComponent
+        if !fm.fileExists(atPath: parent) {
+            do {
+                try fm.createDirectory(atPath: parent, withIntermediateDirectories: true)
+            } catch {
+                throw CLIInstallerError.symlinkCreationFailed("create parent: \(error.localizedDescription)")
+            }
+        }
+
+        // Remove any existing entry (symlink or file). Use lstat so we don't
+        // follow a broken symlink and miss the removal.
+        var st = stat()
+        if lstat(symlinkPath, &st) == 0 {
+            do {
+                try fm.removeItem(atPath: symlinkPath)
+            } catch {
+                throw CLIInstallerError.symlinkCreationFailed("remove existing: \(error.localizedDescription)")
+            }
+        }
+
+        do {
+            try fm.createSymbolicLink(atPath: symlinkPath, withDestinationPath: target)
+        } catch {
+            throw CLIInstallerError.symlinkCreationFailed(error.localizedDescription)
+        }
+
+        let pathInfo = pathStatus()
+        return CLIInstallResult(
+            symlinkPath: symlinkPath,
+            target: target,
+            onPath: pathInfo.onPath,
+            suggestedShellRC: pathInfo.onPath ? nil : pathInfo.shellRC,
+            exportLine: pathInfo.onPath ? nil : pathInfo.exportLine
+        )
+    }
+
+    /// Compute current path status (whether the symlink's parent dir is on the
+    /// user's login-shell PATH, plus suggested rc / export line if not).
+    public func pathStatus() -> (onPath: Bool, shellRC: String, exportLine: String) {
+        let binDir = (symlinkPath as NSString).deletingLastPathComponent
+        let probed = pathProbe()
+        let onPath = Self.directoryIsOnPath(binDir, pathString: probed, homeDir: homeDir)
+        let (rc, line) = Self.shellRCAndExport(forShellPath: shellPath, binDir: binDir, homeDir: homeDir)
+        return (onPath, rc, line)
+    }
+
+    // MARK: - Helpers
+
+    static func directoryIsOnPath(_ dir: String, pathString: String?, homeDir: String) -> Bool {
+        guard let pathString, !pathString.isEmpty else { return false }
+        let entries = pathString.split(separator: ":").map(String.init)
+        let normalizedDir = absolutize(dir, relativeTo: homeDir, homeDir: homeDir)
+        for entry in entries {
+            let normalized = absolutize(entry, relativeTo: homeDir, homeDir: homeDir)
+            if normalized == normalizedDir { return true }
+        }
+        return false
+    }
+
+    static func shellRCAndExport(forShellPath shellPath: String, binDir: String, homeDir: String) -> (rc: String, exportLine: String) {
+        let shellName = (shellPath as NSString).lastPathComponent.lowercased()
+        let displayBinDir = displayPath(binDir, homeDir: homeDir)
+        switch shellName {
+        case "fish":
+            let rc = "~/.config/fish/config.fish"
+            let line: String
+            if displayBinDir == "~/.local/bin" {
+                line = "set -gx PATH $HOME/.local/bin $PATH"
+            } else {
+                line = "set -gx PATH \(displayBinDir) $PATH"
+            }
+            return (rc, line)
+        case "bash":
+            let rc = "~/.bash_profile"
+            let line: String
+            if displayBinDir == "~/.local/bin" {
+                line = "export PATH=\"$HOME/.local/bin:$PATH\""
+            } else {
+                line = "export PATH=\"\(displayBinDir):$PATH\""
+            }
+            return (rc, line)
+        default:
+            let rc = "~/.zshrc"
+            let line: String
+            if displayBinDir == "~/.local/bin" {
+                line = "export PATH=\"$HOME/.local/bin:$PATH\""
+            } else {
+                line = "export PATH=\"\(displayBinDir):$PATH\""
+            }
+            return (rc, line)
+        }
+    }
+
+    /// Render a path as `~/...` if it's under the home dir, else the absolute path.
+    static func displayPath(_ path: String, homeDir: String) -> String {
+        let abs = absolutize(path, relativeTo: homeDir, homeDir: homeDir)
+        if abs == homeDir { return "~" }
+        if abs.hasPrefix(homeDir + "/") {
+            return "~" + abs.dropFirst(homeDir.count)
+        }
+        return abs
+    }
+
+    static func expandTilde(_ path: String, homeDir: String) -> String {
+        if path == "~" { return homeDir }
+        if path.hasPrefix("~/") {
+            return homeDir + String(path.dropFirst(1))
+        }
+        return path
+    }
+
+    static func absolutize(_ path: String, relativeTo base: String, homeDir: String = NSHomeDirectory()) -> String {
+        let expanded = expandTilde(path, homeDir: homeDir)
+        let nsPath = expanded as NSString
+        if nsPath.isAbsolutePath {
+            return nsPath.standardizingPath
+        }
+        let combined = (base as NSString).appendingPathComponent(expanded)
+        return (combined as NSString).standardizingPath
+    }
+
+    /// Spawn the user's login shell to print PATH. Returns nil on any failure.
+    public static func defaultLoginShellPathProbe(shellPath: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shellPath)
+        process.arguments = ["-ilc", "echo $PATH"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()  // discard
+
+        do {
+            try process.run()
+        } catch {
+            logger.warning("Login-shell PATH probe failed to launch \(shellPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+
+        // Best-effort 2-second timeout.
+        let deadline = Date().addingTimeInterval(2.0)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+            logger.warning("Login-shell PATH probe timed out")
+            return nil
+        }
+
+        guard let data = try? pipe.fileHandleForReading.readToEnd(),
+              let output = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let firstLine = output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first.map(String.init) ?? ""
+        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+

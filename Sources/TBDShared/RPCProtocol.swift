@@ -531,8 +531,19 @@ public struct DaemonStatusResult: Codable, Sendable {
     public let version: String
     public let uptime: TimeInterval
     public let connectedClients: Int
-    public init(version: String, uptime: TimeInterval, connectedClients: Int) {
-        self.version = version; self.uptime = uptime; self.connectedClients = connectedClients
+    /// Absolute path to the running daemon's executable. Optional for backward
+    /// compatibility — older daemons won't include this field.
+    public let executablePath: String?
+    public init(
+        version: String,
+        uptime: TimeInterval,
+        connectedClients: Int,
+        executablePath: String? = nil
+    ) {
+        self.version = version
+        self.uptime = uptime
+        self.connectedClients = connectedClients
+        self.executablePath = executablePath
     }
 }
 

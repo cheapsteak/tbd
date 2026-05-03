@@ -694,9 +694,24 @@ extension RPCRouter {
         let status = DaemonStatusResult(
             version: TBDConstants.version,
             uptime: uptime,
-            connectedClients: 0  // Will be updated when socket server is implemented
+            connectedClients: 0,  // Will be updated when socket server is implemented
+            executablePath: Self.resolvedExecutablePath()
         )
         return try RPCResponse(result: status)
+    }
+
+    /// Resolve the daemon's own executable path to an absolute, standardized
+    /// path. Falls back to nil if no usable argv[0] is available.
+    private static func resolvedExecutablePath() -> String? {
+        guard let argv0 = CommandLine.arguments.first, !argv0.isEmpty else { return nil }
+        let url: URL
+        if argv0.hasPrefix("/") {
+            url = URL(fileURLWithPath: argv0)
+        } else {
+            let cwd = FileManager.default.currentDirectoryPath
+            url = URL(fileURLWithPath: argv0, relativeTo: URL(fileURLWithPath: cwd))
+        }
+        return url.standardizedFileURL.path
     }
 
     // MARK: - Resolve Path
