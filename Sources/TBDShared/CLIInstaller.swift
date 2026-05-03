@@ -7,9 +7,12 @@ public enum CLIInstallState: Equatable {
     case notInstalled
     case installed(target: String)
     case stale(currentTarget: String)
+    /// A non-symlink (regular file or directory) exists at `symlinkPath`.
+    /// `install()` will overwrite it, but the UI should warn before doing so.
+    case nonSymlink
 }
 
-public struct CLIInstallResult: Equatable {
+public struct CLIInstallResult: Equatable, Sendable {
     public let symlinkPath: String
     public let target: String
     public let onPath: Bool
@@ -37,9 +40,9 @@ public enum CLIInstallerError: Error, Equatable {
     case symlinkCreationFailed(String)
 }
 
-public struct CLIInstaller {
+public struct CLIInstaller: Sendable {
     public let symlinkPath: String
-    public let pathProbe: () -> String?
+    public let pathProbe: @Sendable () -> String?
     public let homeDir: String
     public let shellPath: String
 
@@ -47,7 +50,7 @@ public struct CLIInstaller {
         symlinkPath: String? = nil,
         homeDir: String = NSHomeDirectory(),
         shellPath: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
-        pathProbe: (() -> String?)? = nil
+        pathProbe: (@Sendable () -> String?)? = nil
     ) {
         self.homeDir = homeDir
         self.symlinkPath = symlinkPath ?? (homeDir as NSString).appendingPathComponent(".local/bin/tbd")
@@ -68,9 +71,8 @@ public struct CLIInstaller {
         let fm = FileManager.default
         let attrs = try? fm.attributesOfItem(atPath: symlinkPath)
         guard let attrs, attrs[.type] as? FileAttributeType == .typeSymbolicLink else {
-            // Either missing entirely, or a non-symlink we'd need to overwrite.
             if (attrs?[.type] as? FileAttributeType) != nil {
-                return .stale(currentTarget: symlinkPath)
+                return .nonSymlink
             }
             return .notInstalled
         }

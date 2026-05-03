@@ -83,6 +83,17 @@ private func makeFile(_ path: String) throws {
     #expect(state == .stale(currentTarget: other))
 }
 
+@Test func currentStateNonSymlinkWhenRegularFileExistsAtPath() throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let symlink = home.path + "/.local/bin/tbd"
+    try makeFile(symlink)
+
+    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { nil })
+    let state = installer.currentState(expectedTarget: "/some/target")
+    #expect(state == .nonSymlink)
+}
+
 @Test func currentStateStaleWhenSymlinkTargetMissing() throws {
     let home = try TempHome()
     defer { home.cleanup() }
@@ -147,8 +158,9 @@ private func makeFile(_ path: String) throws {
     try makeFile(target)
     let symlink = home.path + "/.local/bin/tbd"
 
-    let probe: () -> String? = {
-        "/usr/bin:\(home.path)/.local/bin:/sbin"
+    let homePath = home.path
+    let probe: @Sendable () -> String? = {
+        "/usr/bin:\(homePath)/.local/bin:/sbin"
     }
     let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: probe)
     let result = try installer.install(target: target)
@@ -165,7 +177,7 @@ private func makeFile(_ path: String) throws {
     let symlink = home.path + "/.local/bin/tbd"
 
     // Path string contains the tilde-prefixed form — should still match.
-    let probe: () -> String? = { "/usr/bin:~/.local/bin:/sbin" }
+    let probe: @Sendable () -> String? = { "/usr/bin:~/.local/bin:/sbin" }
     let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: probe)
     let result = try installer.install(target: target)
     #expect(result.onPath == true)

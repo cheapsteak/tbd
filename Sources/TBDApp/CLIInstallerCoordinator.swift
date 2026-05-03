@@ -29,6 +29,9 @@ final class CLIInstallerCoordinator {
         case .stale(let current):
             logger.info("CLI symlink stale: current=\(current, privacy: .public) expected=\(target, privacy: .public) — prompting to refresh")
             await presentLaunchPrompt(target: target, kind: .stale(current: current))
+        case .nonSymlink:
+            logger.info("Non-symlink at \(self.installer.symlinkPath, privacy: .public) — prompting to replace")
+            await presentLaunchPrompt(target: target, kind: .nonSymlink)
         }
     }
 
@@ -42,7 +45,7 @@ final class CLIInstallerCoordinator {
         switch state {
         case .installed:
             presentAlreadyInstalledAlert(target: target)
-        case .notInstalled, .stale:
+        case .notInstalled, .stale, .nonSymlink:
             await performInstall(target: target, confirm: true)
         }
     }
@@ -52,6 +55,7 @@ final class CLIInstallerCoordinator {
     private enum LaunchPromptKind {
         case missing
         case stale(current: String)
+        case nonSymlink
     }
 
     private func fetchExpectedTarget() async -> String? {
@@ -84,6 +88,9 @@ final class CLIInstallerCoordinator {
         case .stale(let current):
             alert.messageText = "Refresh the tbd command-line tool?"
             alert.informativeText = "Your `tbd` symlink at ~/.local/bin/tbd points at \(current), which doesn't match this TBD's CLI. Update it?"
+        case .nonSymlink:
+            alert.messageText = "Replace the file at ~/.local/bin/tbd?"
+            alert.informativeText = "A regular file already exists at ~/.local/bin/tbd. TBD can replace it with a symlink to this TBD's CLI."
         }
         alert.addButton(withTitle: "Install")
         alert.addButton(withTitle: "Not Now")
@@ -107,7 +114,13 @@ final class CLIInstallerCoordinator {
 
         let result: CLIInstallResult
         do {
-            result = try installer.install(target: target)
+            // Offload off the main actor: install() invokes the login-shell
+            // PATH probe, which spawns a child process and waits up to 2s.
+            // Running it on the main thread freezes AppKit event handling.
+            let installer = self.installer
+            result = try await Task.detached(priority: .userInitiated) {
+                try installer.install(target: target)
+            }.value
         } catch {
             logger.error("CLI install failed: \(error.localizedDescription, privacy: .public)")
             let alert = NSAlert()
