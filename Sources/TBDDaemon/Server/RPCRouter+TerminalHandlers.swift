@@ -711,7 +711,10 @@ extension RPCRouter {
             let cwd = FileManager.default.currentDirectoryPath
             url = URL(fileURLWithPath: argv0, relativeTo: URL(fileURLWithPath: cwd))
         }
-        return url.standardizedFileURL.path
+        // Resolve symlinks so we return the real binary path — `cliPath()`
+        // expects to find `TBDCLI` next to the actual TBDDaemon binary, not
+        // next to a symlink that points at it.
+        return url.resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     // MARK: - Resolve Path
