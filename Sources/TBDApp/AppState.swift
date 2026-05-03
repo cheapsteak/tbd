@@ -458,9 +458,11 @@ final class AppState: ObservableObject {
             pendingDeepLinkID = nil
             navigateToWorktree(pendingID)
         }
-        Task { [weak self] in
-            guard let self else { return }
-            await self.cliInstallerCoordinator.checkOnLaunch()
+        if didConnect {
+            Task { [weak self] in
+                guard let self else { return }
+                await self.cliInstallerCoordinator.checkOnLaunch()
+            }
         }
     }
 
