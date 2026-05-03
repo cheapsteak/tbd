@@ -21,7 +21,7 @@ public struct SSHAgentResolver: Sendable {
     }
 
     public func resolve() async -> Bool {
-        if isValid() {
+        if await isValid() {
             logger.debug("SSH agent symlink is valid")
             return true
         }
@@ -49,12 +49,15 @@ public struct SSHAgentResolver: Sendable {
         return false
     }
 
-    public func isValid() -> Bool {
+    public func isValid() async -> Bool {
         let fm = FileManager.default
         guard let target = try? fm.destinationOfSymbolicLink(atPath: symlinkPath) else {
             return false
         }
-        return canConnect(to: target)
+        guard canConnect(to: target) else { return false }
+        // A stale launchd socket can still accept connect(2) without speaking the
+        // SSH agent protocol — probe with ssh-add -l to confirm a real agent answers.
+        return await probeWithSSHAdd(socketPath: symlinkPath)
     }
 
     // MARK: - Private

@@ -2,16 +2,19 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 
-@Test func testIsValidReturnsFalseForNonexistentSymlink() {
+@Test func testIsValidReturnsFalseForNonexistentSymlink() async {
     let resolver = SSHAgentResolver(
         symlinkPath: "/tmp/tbd-test-nonexistent-\(UUID().uuidString).sock"
     )
-    #expect(!resolver.isValid())
+    #expect(!(await resolver.isValid()))
 }
 
-@Test func testIsValidReturnsTrueForLiveSocket() throws {
-    // Create a real Unix domain socket
-    let socketPath = "/tmp/tbd-test-\(UUID().uuidString).sock"
+@Test func testIsValidReturnsFalseForZombieSocket() async throws {
+    // Regression: a Unix socket that accepts connect(2) but does not speak the
+    // SSH agent protocol (e.g. a stale launchd Listeners socket) must be
+    // rejected. Otherwise the periodic refresh skips re-resolving and the
+    // tbd-agent.sock symlink remains pointed at a dead agent.
+    let socketPath = "/tmp/tbd-test-zombie-\(UUID().uuidString).sock"
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     #expect(fd >= 0)
     defer {
@@ -35,7 +38,6 @@ import Testing
     #expect(bindResult == 0)
     listen(fd, 1)
 
-    // Create symlink pointing to the socket
     let symlinkPath = "/tmp/tbd-test-link-\(UUID().uuidString).sock"
     try FileManager.default.createSymbolicLink(
         atPath: symlinkPath,
@@ -44,10 +46,10 @@ import Testing
     defer { unlink(symlinkPath) }
 
     let resolver = SSHAgentResolver(symlinkPath: symlinkPath)
-    #expect(resolver.isValid())
+    #expect(!(await resolver.isValid()))
 }
 
-@Test func testIsValidReturnsFalseForStaleSocket() throws {
+@Test func testIsValidReturnsFalseForStaleSocket() async throws {
     // Create symlink pointing to a nonexistent socket
     let symlinkPath = "/tmp/tbd-test-link-\(UUID().uuidString).sock"
     try FileManager.default.createSymbolicLink(
@@ -57,7 +59,7 @@ import Testing
     defer { unlink(symlinkPath) }
 
     let resolver = SSHAgentResolver(symlinkPath: symlinkPath)
-    #expect(!resolver.isValid())
+    #expect(!(await resolver.isValid()))
 }
 
 @Test func testResolveFindsLiveSocket() async throws {
@@ -83,7 +85,7 @@ import Testing
         }
     }
     #expect(bindResult == 0)
-    listen(fd, 5)  // backlog >= 2 so resolve() + isValid() can both connect
+    listen(fd, 1)
 
     let symlinkPath = "/tmp/tbd-test-link-\(UUID().uuidString).sock"
     defer { unlink(symlinkPath) }
@@ -97,7 +99,9 @@ import Testing
 
     let target = try FileManager.default.destinationOfSymbolicLink(atPath: symlinkPath)
     #expect(target == socketPath)
-    #expect(resolver.isValid())
+    // Note: isValid() is intentionally not asserted here — the strengthened
+    // check requires a real ssh-agent responding to ssh-add -l, which a plain
+    // bound socket cannot satisfy. See testIsValidReturnsFalseForZombieSocket.
 }
 
 @Test func testResolveReturnsFalseWhenNoLiveSocket() async {

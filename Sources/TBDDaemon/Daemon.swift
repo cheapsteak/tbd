@@ -84,7 +84,7 @@ public final class Daemon: Sendable {
         self.sshRefreshTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
-                if !sshResolver.isValid() {
+                if !(await sshResolver.isValid()) {
                     if await sshResolver.resolve() {
                         print("[Daemon] SSH agent symlink refreshed")
                     }
