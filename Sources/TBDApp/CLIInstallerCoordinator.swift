@@ -53,22 +53,31 @@ final class CLIInstallerCoordinator {
         case .nonSymlink:
             logger.info("Non-symlink at \(self.installer.symlinkPath, privacy: .public) — prompting to replace")
         }
-        await presentLaunchPrompt(target: target, kind: kind)
+        await presentLaunchPrompt(target: target, kind: kind, recordDismissalOnDecline: true)
     }
 
-    /// Called from the menu item. Confirms, runs install, presents post-install dialog.
+    /// Called from the menu item. Routes through the same prompt as the
+    /// launch-time check (so verb/wording stays accurate per state) but
+    /// doesn't record a Not-Now dismissal — the user explicitly invoked us.
     func runFromMenu() async {
         guard let target = await fetchExpectedTarget() else {
             presentTargetUnavailableAlert()
             return
         }
         let state = installer.currentState(expectedTarget: target)
+        let kind: CLILaunchPromptKind
         switch state {
         case .installed:
             presentAlreadyInstalledAlert(target: target)
-        case .notInstalled, .stale, .nonSymlink:
-            await performInstall(target: target, confirm: true)
+            return
+        case .notInstalled:
+            kind = .missing
+        case .stale(let current):
+            kind = .stale(current: current)
+        case .nonSymlink:
+            kind = .nonSymlink
         }
+        await presentLaunchPrompt(target: target, kind: kind, recordDismissalOnDecline: false)
     }
 
     // MARK: - Private
@@ -93,7 +102,7 @@ final class CLIInstallerCoordinator {
         return cli
     }
 
-    private func presentLaunchPrompt(target: String, kind: CLILaunchPromptKind) async {
+    private func presentLaunchPrompt(target: String, kind: CLILaunchPromptKind, recordDismissalOnDecline: Bool) async {
         let alert = NSAlert()
         alert.alertStyle = .informational
         let symlinkPath = installer.symlinkPath
@@ -117,29 +126,21 @@ final class CLIInstallerCoordinator {
 
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            await performInstall(target: target, confirm: false)
-        } else if case .missing = kind {
-            // User declined the missing-CLI prompt. Suppress on future launches
-            // until they install — manually, via menu, or after we observe a
-            // healthy `.installed` state. Stale/nonSymlink dismissals are NOT
-            // remembered: those are broken-install states they opted into.
+            await performInstall(target: target)
+        } else if recordDismissalOnDecline, case .missing = kind {
+            // User declined the auto-launch missing-CLI prompt. Suppress on
+            // future launches until they install — manually, via menu, or
+            // after we observe a healthy `.installed` state. Stale/nonSymlink
+            // dismissals are NOT remembered: those are broken-install states
+            // they opted into. Menu-invoked declines also aren't remembered
+            // (the user explicitly opened the dialog themselves).
             logger.info("User dismissed install prompt — not auto-prompting next launch")
             notInstalledDismissed = true
         }
     }
 
-    private func performInstall(target: String, confirm: Bool) async {
+    private func performInstall(target: String) async {
         let symlinkDir = (installer.symlinkPath as NSString).deletingLastPathComponent
-        if confirm {
-            let alert = NSAlert()
-            alert.alertStyle = .informational
-            alert.messageText = "Install tbd to \(symlinkDir)?"
-            alert.informativeText = "This creates a symlink at \(installer.symlinkPath) pointing at \(target)."
-            alert.addButton(withTitle: "Install")
-            alert.addButton(withTitle: "Cancel")
-            if alert.runModal() != .alertFirstButtonReturn { return }
-        }
-
         let result: CLIInstallResult
         do {
             // install() is async — its PATH probe bridges Process termination
@@ -198,7 +199,7 @@ final class CLIInstallerCoordinator {
         alert.addButton(withTitle: "Reinstall")
         if alert.runModal() == .alertSecondButtonReturn {
             Task { @MainActor in
-                await self.performInstall(target: target, confirm: false)
+                await self.performInstall(target: target)
             }
         }
     }
