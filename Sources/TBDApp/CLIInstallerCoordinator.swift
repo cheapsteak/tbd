@@ -82,18 +82,22 @@ final class CLIInstallerCoordinator {
         let alert = NSAlert()
         alert.alertStyle = .informational
         let symlinkPath = installer.symlinkPath
+        let primaryButton: String
         switch kind {
         case .missing:
             alert.messageText = "Install the tbd command-line tool?"
             alert.informativeText = "TBD can add a `tbd` command at \(symlinkPath) so you can launch and control TBD from the terminal. No sudo required."
+            primaryButton = "Install"
         case .stale(let current):
             alert.messageText = "Refresh the tbd command-line tool?"
             alert.informativeText = "Your `tbd` symlink at \(symlinkPath) points at \(current), which doesn't match this TBD's CLI. Update it?"
+            primaryButton = "Refresh"
         case .nonSymlink:
             alert.messageText = "Replace the file at \(symlinkPath)?"
             alert.informativeText = "A regular file already exists at \(symlinkPath). TBD can replace it with a symlink to this TBD's CLI."
+            primaryButton = "Replace"
         }
-        alert.addButton(withTitle: "Install")
+        alert.addButton(withTitle: primaryButton)
         alert.addButton(withTitle: "Not Now")
 
         let response = alert.runModal()
