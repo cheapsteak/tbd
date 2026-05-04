@@ -447,6 +447,7 @@ struct EditEndpointSheet: View {
                     probeStatus = .idle
                 }
             }
+            let priorAlert = await MainActor.run { appState.alertMessage }
             await appState.updateModelProfileEndpoint(
                 id: profile.id,
                 baseURL: trimmedBase,
@@ -454,6 +455,14 @@ struct EditEndpointSheet: View {
             )
             await MainActor.run {
                 isSaving = false
+                let newAlert = appState.alertMessage
+                if newAlert != priorAlert, let msg = newAlert {
+                    // Surface inline and keep the sheet open so the user can
+                    // correct the input without losing what they typed.
+                    probeStatus = .warn(msg)
+                    appState.alertMessage = priorAlert
+                    return
+                }
                 dismiss()
             }
         }
