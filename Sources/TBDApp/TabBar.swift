@@ -1,6 +1,14 @@
 import SwiftUI
 import TBDShared
 
+/// Predicate for showing a per-tab profile badge: only when the terminal has
+/// a non-nil profileID that differs from the resolved default for its
+/// worktree (repo override → global default). Extracted as a free function
+/// to keep the test independent of SwiftUI rendering.
+func shouldShowProfileBadge(terminalProfileID: UUID?, resolvedDefaultID: UUID?) -> Bool {
+    return terminalProfileID != nil && terminalProfileID != resolvedDefaultID
+}
+
 // MARK: - TabBar
 
 /// Generic tab bar that renders Tab items with type-appropriate icons and labels.
@@ -232,6 +240,15 @@ private struct TabBarItem: View {
                         .lineLimit(1)
                         .fixedSize()
                         .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
+
+                    if let badgeName = profileBadgeName {
+                        Text(badgeName)
+                            .font(.caption2)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 4)
+                    }
                 }
             }
             .buttonStyle(.plain)
@@ -270,28 +287,55 @@ private struct TabBarItem: View {
         }
     }
 
-    private func formatTokenHeader(_ tokenID: UUID?) -> String {
-        guard let tokenID else { return "Token: Default (logged in)" }
-        guard let entry = appState.claudeTokens.first(where: { $0.profile.id == tokenID }) else {
-            return "Token: (missing)"
+    private func resolvedDefaultProfileID(for worktreeID: UUID) -> UUID? {
+        // Find the repo for this worktree.
+        for (_, list) in appState.worktrees {
+            if let wt = list.first(where: { $0.id == worktreeID }) {
+                if let repo = appState.repos.first(where: { $0.id == wt.repoID }),
+                   let override = repo.profileOverrideID {
+                    return override
+                }
+                break
+            }
         }
-        return "Token: \(entry.profile.name)"
+        return appState.defaultProfileID
     }
 
-    private func formatTokenSubmenuLabel(_ entry: ModelProfileWithUsage) -> String {
+    private var profileBadgeName: String? {
+        guard let terminal else { return nil }
+        let resolved = resolvedDefaultProfileID(for: terminal.worktreeID)
+        guard shouldShowProfileBadge(terminalProfileID: terminal.profileID, resolvedDefaultID: resolved) else {
+            return nil
+        }
+        guard let id = terminal.profileID,
+              let entry = appState.modelProfiles.first(where: { $0.profile.id == id }) else {
+            return nil
+        }
+        return entry.profile.name
+    }
+
+    private func formatProfileHeader(_ profileID: UUID?) -> String {
+        guard let profileID else { return "Profile: Default (logged in)" }
+        guard let entry = appState.modelProfiles.first(where: { $0.profile.id == profileID }) else {
+            return "Profile: (missing)"
+        }
+        return "Profile: \(entry.profile.name)"
+    }
+
+    private func formatProfileSubmenuLabel(_ entry: ModelProfileWithUsage) -> String {
         entry.profile.name
     }
 
     @ViewBuilder
     private var contextMenuContent: some View {
         if isClaudeTerminal {
-            Button(formatTokenHeader(terminal?.profileID)) {}
+            Button(formatProfileHeader(terminal?.profileID)) {}
                 .disabled(true)
 
-            Menu("Swap token") {
+            Menu("Swap profile") {
                 Button {
                     guard let terminalID = terminal?.id else { return }
-                    Task { await appState.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: nil) }
+                    Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: nil) }
                 } label: {
                     let prefix = terminal?.profileID == nil ? "● " : "  "
                     Text("\(prefix)Default (logged in)")
@@ -299,13 +343,13 @@ private struct TabBarItem: View {
 
                 Divider()
 
-                ForEach(appState.claudeTokens, id: \.profile.id) { entry in
+                ForEach(appState.modelProfiles, id: \.profile.id) { entry in
                     Button {
                         guard let terminalID = terminal?.id else { return }
-                        Task { await appState.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: entry.profile.id) }
+                        Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: entry.profile.id) }
                     } label: {
                         let prefix = terminal?.profileID == entry.profile.id ? "● " : "  "
-                        Text("\(prefix)\(formatTokenSubmenuLabel(entry))")
+                        Text("\(prefix)\(formatProfileSubmenuLabel(entry))")
                     }
                 }
             }
@@ -374,15 +418,15 @@ private struct TabBarItem: View {
         }
         switch tab.content {
         case .terminal:
-            if isClaudeTerminal, let tokenID = terminal?.profileID,
-               let entry = appState.claudeTokens.first(where: { $0.profile.id == tokenID }) {
+            if isClaudeTerminal, let profileID = terminal?.profileID,
+               let entry = appState.modelProfiles.first(where: { $0.profile.id == profileID }) {
                 let name = entry.profile.name
                 let worktreeID = terminal!.worktreeID
                 let allTabs = appState.tabs[worktreeID] ?? []
                 let allTerminals = appState.terminals[worktreeID] ?? []
                 let sameTokenTerminalIDs = Set(
                     allTerminals
-                        .filter { $0.profileID == tokenID }
+                        .filter { $0.profileID == profileID }
                         .map { $0.id }
                 )
                 let sameTokenTabs = allTabs.filter { tab in

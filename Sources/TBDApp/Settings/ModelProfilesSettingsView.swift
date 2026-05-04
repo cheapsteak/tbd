@@ -1,30 +1,7 @@
-// ClaudeTokensSettingsView
-//
-// Settings tab for managing Claude tokens. SwiftUI-only; no automated tests.
-//
-// Manual verification steps:
-// 1. Open Settings → Claude Tokens. Empty state shows only "Default (claude
-//    keychain login)" in the global default picker.
-// 2. Click "Add token". The modal opens with Name + Token (SecureField) and
-//    helper text mentioning `claude setup-token`. Save is disabled until both
-//    fields are filled and the name is not a duplicate.
-// 3. Enter a name + paste a real `sk-ant-oat01-...` token. Spinner shows in
-//    the Save button while saving, then the modal dismisses on success.
-// 4. The new row shows the name, an OAuth/API key badge, and (after the next
-//    refresh) `5h X% · 7d Y%`. Hovering the percentages shows a tooltip with
-//    `Resets in Xh Ym` for each window.
-// 5. Double-click the row's name to inline-rename. Enter commits, Esc cancels.
-// 6. The trailing `…` menu offers "Set as global default", "Rename…", and
-//    "Delete…". Set-as-default updates the header picker.
-// 7. Delete… opens a confirm. If any running terminals use this token the
-//    copy includes the count from `appState.terminals`.
-// 8. Force `last_status = http_401` in the DB → red "Invalid" badge.
-//    Force `last_status = http_429` → amber "Stale" badge.
-
 import SwiftUI
 import TBDShared
 
-struct ClaudeTokensSettingsView: View {
+struct ModelProfilesSettingsView: View {
     @EnvironmentObject var appState: AppState
     @State private var showAddSheet = false
 
@@ -32,14 +9,14 @@ struct ClaudeTokensSettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             globalDefaultHeader
             Divider()
-            tokenList
+            profileList
             Spacer()
             addButton
         }
         .padding(20)
-        .task { await appState.refreshClaudeTokens() }
+        .task { await appState.loadModelProfiles() }
         .sheet(isPresented: $showAddSheet) {
-            AddClaudeTokenSheet()
+            AddModelProfileSheet()
                 .environmentObject(appState)
         }
     }
@@ -49,13 +26,13 @@ struct ClaudeTokensSettingsView: View {
             Text("Global default:")
                 .font(.headline)
             Picker("", selection: Binding(
-                get: { appState.globalDefaultClaudeTokenID },
+                get: { appState.defaultProfileID },
                 set: { newValue in
-                    Task { await appState.setGlobalDefaultClaudeToken(id: newValue) }
+                    Task { await appState.setDefaultProfile(id: newValue) }
                 }
             )) {
                 Text("Default (claude keychain login)").tag(UUID?.none)
-                ForEach(appState.claudeTokens, id: \.profile.id) { entry in
+                ForEach(appState.modelProfiles, id: \.profile.id) { entry in
                     Text(entry.profile.name).tag(UUID?.some(entry.profile.id))
                 }
             }
@@ -65,10 +42,10 @@ struct ClaudeTokensSettingsView: View {
         }
     }
 
-    private var tokenList: some View {
+    private var profileList: some View {
         List {
-            ForEach(appState.claudeTokens, id: \.profile.id) { entry in
-                ClaudeTokenRow(entry: entry)
+            ForEach(appState.modelProfiles, id: \.profile.id) { entry in
+                ModelProfileRow(entry: entry)
                     .environmentObject(appState)
             }
         }
@@ -80,46 +57,64 @@ struct ClaudeTokensSettingsView: View {
         Button {
             showAddSheet = true
         } label: {
-            Label("Add token", systemImage: "plus")
+            Label("Add profile", systemImage: "plus")
         }
     }
 }
 
 // MARK: - Row
 
-struct ClaudeTokenRow: View {
+struct ModelProfileRow: View {
     @EnvironmentObject var appState: AppState
     let entry: ModelProfileWithUsage
 
     @State private var isEditingName = false
     @State private var draftName = ""
     @State private var showDeleteConfirm = false
+    @State private var showEditEndpoint = false
 
-    private var token: ModelProfile { entry.profile }
+    private var profile: ModelProfile { entry.profile }
     private var usage: ModelProfileUsage? { entry.usage }
 
-    private static let relativeFormatter: RelativeDateTimeFormatter = {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .abbreviated
-        return f
-    }()
-
     var body: some View {
-        HStack(spacing: 10) {
-            nameView
-            kindBadge
-            Spacer()
-            menuButton
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 10) {
+                nameView
+                kindBadge
+                Spacer()
+                if profile.baseURL != nil {
+                    Button("Edit endpoint") { showEditEndpoint = true }
+                        .controlSize(.small)
+                }
+                menuButton
+            }
+            if let caption = endpointCaption {
+                Text(caption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .contentShape(Rectangle())
-        .confirmationDialog("Delete token?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+        .confirmationDialog("Delete profile?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
-                Task { await appState.deleteClaudeToken(id: token.id) }
+                Task { await appState.deleteModelProfile(id: profile.id) }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(deleteMessage)
         }
+        .sheet(isPresented: $showEditEndpoint) {
+            EditEndpointSheet(profile: profile)
+                .environmentObject(appState)
+        }
+    }
+
+    private var endpointCaption: String? {
+        guard let baseURL = profile.baseURL else { return nil }
+        if let model = profile.model, !model.isEmpty {
+            return "via \(baseURL) · \(model)"
+        }
+        return "via \(baseURL)"
     }
 
     @ViewBuilder
@@ -130,10 +125,10 @@ struct ClaudeTokenRow: View {
                 .frame(maxWidth: 180)
                 .onExitCommand { isEditingName = false }
         } else {
-            Text(token.name)
+            Text(profile.name)
                 .font(.body)
                 .onTapGesture(count: 2) {
-                    draftName = token.name
+                    draftName = profile.name
                     isEditingName = true
                 }
         }
@@ -142,12 +137,12 @@ struct ClaudeTokenRow: View {
     private func commitRename() {
         let trimmed = draftName.trimmingCharacters(in: .whitespaces)
         isEditingName = false
-        guard !trimmed.isEmpty, trimmed != token.name else { return }
-        Task { await appState.renameClaudeToken(id: token.id, name: trimmed) }
+        guard !trimmed.isEmpty, trimmed != profile.name else { return }
+        Task { await appState.renameModelProfile(id: profile.id, name: trimmed) }
     }
 
     private var kindBadge: some View {
-        Text(token.kind == .oauth ? "OAuth" : "API key")
+        Text(profile.kind == .oauth ? "OAuth" : "API key")
             .font(.caption2)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -155,76 +150,13 @@ struct ClaudeTokenRow: View {
             .clipShape(Capsule())
     }
 
-    @ViewBuilder
-    private var statusBadges: some View {
-        switch usage?.lastStatus {
-        case "http_401":
-            badge("Invalid", color: .red)
-        case "http_429":
-            badge("Stale", color: .orange)
-        case "network_error", "decode_error":
-            badge("Unverified", color: .orange)
-        default:
-            EmptyView()
-        }
-    }
-
-    private func badge(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.caption2).bold()
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(color.opacity(0.2))
-            .foregroundColor(color)
-            .clipShape(Capsule())
-    }
-
-    @ViewBuilder
-    private var usageView: some View {
-        if let usage,
-           let fiveHPct = usage.fiveHourPct,
-           let sevenDPct = usage.sevenDayPct {
-            let fiveH = Int((fiveHPct * 100).rounded())
-            let sevenD = Int((sevenDPct * 100).rounded())
-            Text("5h \(fiveH)% · 7d \(sevenD)%")
-                .font(.system(.caption, design: .monospaced))
-                .help(resetTooltip(usage))
-        } else {
-            Text("—")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-    }
-
-    private func resetTooltip(_ usage: ModelProfileUsage) -> String {
-        let fiveH = formatRelativeFuture(usage.fiveHourResetsAt)
-        let sevenD = formatRelativeFuture(usage.sevenDayResetsAt)
-        return "Resets in \(fiveH) (5h) / \(sevenD) (7d)"
-    }
-
-    private func formatRelativeFuture(_ date: Date?) -> String {
-        guard let date else { return "—" }
-        let secs = max(0, Int(date.timeIntervalSinceNow))
-        let h = secs / 3600
-        let m = (secs % 3600) / 60
-        return "\(h)h \(m)m"
-    }
-
-    @ViewBuilder
-    private var timestampView: some View {
-        if let fetched = usage?.fetchedAt {
-            Text(Self.relativeFormatter.localizedString(for: fetched, relativeTo: Date()))
-                .font(.caption2)
-                .foregroundColor(.secondary)
-        }
-    }
-
     private var menuButton: some View {
         Menu {
             Button("Set as global default") {
-                Task { await appState.setGlobalDefaultClaudeToken(id: token.id) }
+                Task { await appState.setDefaultProfile(id: profile.id) }
             }
             Button("Rename…") {
-                draftName = token.name
+                draftName = profile.name
                 isEditingName = true
             }
             Divider()
@@ -240,43 +172,97 @@ struct ClaudeTokenRow: View {
 
     private var inUseCount: Int {
         appState.terminals.values.reduce(0) { acc, list in
-            acc + list.filter { $0.profileID == token.id }.count
+            acc + list.filter { $0.profileID == profile.id }.count
         }
     }
 
     private var deleteMessage: String {
         let n = inUseCount
         if n > 0 {
-            return "\(n) running terminal(s) are using this token. They'll keep running on it until closed. Delete anyway?"
+            return "\(n) running terminal(s) are using this profile. They'll keep running on it until closed. Delete anyway?"
         }
-        return "This will remove the token from TBD. Are you sure?"
+        return "This will remove the profile from TBD. Are you sure?"
     }
 }
 
 // MARK: - Add sheet
 
-struct AddClaudeTokenSheet: View {
+private enum AddPreset: String, CaseIterable, Identifiable {
+    case claudeDirect = "Claude (direct)"
+    case proxy = "Anthropic-compatible proxy"
+    var id: String { rawValue }
+}
+
+private enum ProbeStatus: Equatable {
+    case idle
+    case checking
+    case ok(Int?)
+    case warn(String)
+}
+
+// Map a daemon health-probe failure detail into a user-facing warning, or nil to suppress.
+func probeWarningMessage(for detail: String?) -> String? {
+    guard let detail, !detail.isEmpty else { return "Could not verify reachability. Saving anyway." }
+    // Phase-5 TODO: this substring filter is a temporary bridge for the Phase 1-3 daemon stub
+    // that returns "Not yet implemented" / "Unknown method". A real upstream proxy could
+    // legitimately return "501 Not Implemented" and that would be silently suppressed here.
+    // Phase 5 must add a structured signal on ModelProfileHealthCheckResult (e.g.
+    // `notSupported: Bool` or a sentinel detail value) so the UI can distinguish "stub not
+    // yet wired" from "real upstream said 501". Once that lands, DELETE this filter entirely.
+    if detail.localizedCaseInsensitiveContains("not yet implemented") ||
+       detail.localizedCaseInsensitiveContains("not implemented") ||
+       detail.localizedCaseInsensitiveContains("unknown method") {
+        return nil
+    }
+    return "Unreachable — \(detail). Saving anyway."
+}
+
+struct AddModelProfileSheet: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
+    @State private var preset: AddPreset = .claudeDirect
     @State private var name = ""
     @State private var token = ""
+    @State private var baseURL = ""
+    @State private var model = ""
     @State private var isSaving = false
     @State private var errorMessage: String?
+    @State private var probeStatus: ProbeStatus = .idle
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Add Claude Token").font(.headline)
+            Text("Add Model Profile").font(.headline)
+
+            Picker("", selection: $preset) {
+                ForEach(AddPreset.allCases) { p in
+                    Text(p.rawValue).tag(p)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
 
             Form {
                 TextField("Name", text: $name)
                 SecureField("Token", text: $token)
-                (Text("Run ")
-                    + Text("claude setup-token").font(.system(.caption, design: .monospaced))
-                    + Text(" in a terminal and paste the resulting sk-ant-oat01-… token."))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                if preset == .proxy {
+                    TextField("Base URL", text: $baseURL,
+                              prompt: Text("http://127.0.0.1:3456"))
+                    TextField("Model", text: $model,
+                              prompt: Text("e.g. gpt-5-codex"))
+                    Text("Leave blank to pass through whatever model Claude Code selects.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    (Text("Run ")
+                        + Text("claude setup-token").font(.system(.caption, design: .monospaced))
+                        + Text(" in a terminal and paste the resulting sk-ant-oat01-… token."))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
+
+            probeView
 
             if let errorMessage {
                 Text(errorMessage)
@@ -299,27 +285,78 @@ struct AddClaudeTokenSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 420)
+        .frame(width: 460)
+    }
+
+    @ViewBuilder
+    private var probeView: some View {
+        switch probeStatus {
+        case .idle:
+            EmptyView()
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking endpoint…").font(.caption).foregroundStyle(.secondary)
+            }
+        case .ok(let code):
+            if let code {
+                Label("Reachable (HTTP \(code))", systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Label("Reachable", systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .warn(let message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
     }
 
     private var canSave: Bool {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
         guard !trimmedName.isEmpty, !token.isEmpty, !isSaving else { return false }
-        let duplicate = appState.claudeTokens.contains { $0.profile.name == trimmedName }
-        return !duplicate
+        let duplicate = appState.modelProfiles.contains { $0.profile.name == trimmedName }
+        if duplicate { return false }
+        if preset == .proxy {
+            let trimmedBase = baseURL.trimmingCharacters(in: .whitespaces)
+            if trimmedBase.isEmpty { return false }
+        }
+        return true
     }
 
     private func save() {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
         let tokenValue = token
+        let trimmedBase = baseURL.trimmingCharacters(in: .whitespaces)
+        let trimmedModel = model.trimmingCharacters(in: .whitespaces)
+        let useProxy = preset == .proxy
         isSaving = true
         errorMessage = nil
         Task {
-            // addClaudeToken sets appState.alertMessage on error and returns
-            // nil; on success it returns an optional warning string. We treat
-            // a nil return alongside a freshly-set alertMessage as failure.
+            if useProxy {
+                await MainActor.run { probeStatus = .checking }
+                let result = await appState.healthCheckProfile(baseURL: trimmedBase)
+                await MainActor.run {
+                    if result.reachable {
+                        probeStatus = .ok(result.statusCode)
+                    } else if let msg = probeWarningMessage(for: result.detail) {
+                        probeStatus = .warn(msg)
+                    } else {
+                        probeStatus = .idle
+                    }
+                }
+            }
+
             let priorAlert = await MainActor.run { appState.alertMessage }
-            let warning = await appState.addClaudeToken(name: trimmedName, token: tokenValue)
+            let warning = await appState.addModelProfile(
+                name: trimmedName,
+                token: tokenValue,
+                baseURL: useProxy ? trimmedBase : nil,
+                model: useProxy ? (trimmedModel.isEmpty ? nil : trimmedModel) : nil
+            )
             await MainActor.run {
                 isSaving = false
                 let newAlert = appState.alertMessage
@@ -328,11 +365,99 @@ struct AddClaudeTokenSheet: View {
                     appState.alertMessage = priorAlert
                     return
                 }
-                // Token was saved. A non-nil `warning` means the daemon could
-                // not verify the token's quota with Anthropic but stored it
-                // anyway — surface that to the user via the row's status
-                // badge, not as a red error in this modal. Dismiss either way.
                 _ = warning
+                dismiss()
+            }
+        }
+    }
+}
+
+// MARK: - Edit endpoint sheet
+
+struct EditEndpointSheet: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    let profile: ModelProfile
+
+    @State private var baseURL: String
+    @State private var model: String
+    @State private var isSaving = false
+    @State private var probeStatus: ProbeStatus = .idle
+
+    init(profile: ModelProfile) {
+        self.profile = profile
+        _baseURL = State(initialValue: profile.baseURL ?? "")
+        _model = State(initialValue: profile.model ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Edit Endpoint").font(.headline)
+            Form {
+                TextField("Base URL", text: $baseURL,
+                          prompt: Text("http://127.0.0.1:3456"))
+                TextField("Model", text: $model,
+                          prompt: Text("e.g. gpt-5-codex"))
+                Text("Leave blank to pass through whatever model Claude Code selects.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            probeLabel
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(action: save) {
+                    if isSaving { ProgressView().controlSize(.small) } else { Text("Save") }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(baseURL.trimmingCharacters(in: .whitespaces).isEmpty || isSaving)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    @ViewBuilder
+    private var probeLabel: some View {
+        switch probeStatus {
+        case .idle: EmptyView()
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking endpoint…").font(.caption).foregroundStyle(.secondary)
+            }
+        case .ok:
+            Label("Reachable", systemImage: "checkmark.circle")
+                .font(.caption).foregroundStyle(.secondary)
+        case .warn(let message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.caption).foregroundStyle(.orange)
+        }
+    }
+
+    private func save() {
+        let trimmedBase = baseURL.trimmingCharacters(in: .whitespaces)
+        let trimmedModel = model.trimmingCharacters(in: .whitespaces)
+        isSaving = true
+        Task {
+            await MainActor.run { probeStatus = .checking }
+            let result = await appState.healthCheckProfile(baseURL: trimmedBase)
+            await MainActor.run {
+                if result.reachable {
+                    probeStatus = .ok(result.statusCode)
+                } else if let msg = probeWarningMessage(for: result.detail) {
+                    probeStatus = .warn(msg)
+                } else {
+                    probeStatus = .idle
+                }
+            }
+            await appState.updateModelProfileEndpoint(
+                id: profile.id,
+                baseURL: trimmedBase,
+                model: trimmedModel.isEmpty ? nil : trimmedModel
+            )
+            await MainActor.run {
+                isSaving = false
                 dismiss()
             }
         }

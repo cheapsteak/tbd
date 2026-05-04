@@ -233,7 +233,7 @@ actor DaemonClient {
                     // Retry transient interruptions. Blocking recv on a Unix
                     // socket can be kicked out with EINTR when the app process
                     // services signals (GCD timers, Combine, etc.) during a
-                    // long handler like claudeToken.add where the daemon is
+                    // long handler like modelProfile.add where the daemon is
                     // itself waiting on a network round-trip to Anthropic.
                     if savedErrno == EINTR || savedErrno == EAGAIN {
                         continue
@@ -740,26 +740,26 @@ actor DaemonClient {
 
     // MARK: - Model Profiles
     //
-    // IMPORTANT: never log raw secret bytes. The `addClaudeToken` wrapper is
+    // IMPORTANT: never log raw secret bytes. The `addModelProfile` wrapper is
     // the only place a secret crosses the actor boundary in the app process —
     // keep it out of any logger / print statement.
 
     /// List all model profiles with cached usage and the global default ID.
-    func listClaudeTokens() async throws -> ModelProfileListResult {
+    func listModelProfiles() async throws -> ModelProfileListResult {
         return try await callNoParamsAsync(method: RPCMethod.modelProfileList, resultType: ModelProfileListResult.self)
     }
 
     /// Add a model profile. The raw secret string MUST NOT be logged.
-    func addClaudeToken(name: String, token: String) async throws -> ModelProfileAddResult {
+    func addModelProfile(name: String, token: String, baseURL: String? = nil, model: String? = nil) async throws -> ModelProfileAddResult {
         return try await callAsync(
             method: RPCMethod.modelProfileAdd,
-            params: ModelProfileAddParams(name: name, token: token),
+            params: ModelProfileAddParams(name: name, token: token, baseURL: baseURL, model: model),
             resultType: ModelProfileAddResult.self
         )
     }
 
     /// Delete a model profile by ID.
-    func deleteClaudeToken(id: UUID) async throws {
+    func deleteModelProfile(id: UUID) async throws {
         try await callVoidAsync(
             method: RPCMethod.modelProfileDelete,
             params: ModelProfileDeleteParams(id: id)
@@ -767,15 +767,32 @@ actor DaemonClient {
     }
 
     /// Rename a model profile.
-    func renameClaudeToken(id: UUID, name: String) async throws {
+    func renameModelProfile(id: UUID, name: String) async throws {
         try await callVoidAsync(
             method: RPCMethod.modelProfileRename,
             params: ModelProfileRenameParams(id: id, name: name)
         )
     }
 
+    /// Update a model profile's proxy endpoint (baseURL + model).
+    func updateModelProfileEndpoint(id: UUID, baseURL: String?, model: String?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileUpdateEndpoint,
+            params: ModelProfileUpdateEndpointParams(id: id, baseURL: baseURL, model: model)
+        )
+    }
+
+    /// Probe a proxy base URL for reachability.
+    func healthCheckProfile(baseURL: String) async throws -> ModelProfileHealthCheckResult {
+        return try await callAsync(
+            method: RPCMethod.modelProfileHealthCheck,
+            params: ModelProfileHealthCheckParams(baseURL: baseURL),
+            resultType: ModelProfileHealthCheckResult.self
+        )
+    }
+
     /// Set or clear the global default model profile.
-    func setGlobalDefaultClaudeToken(id: UUID?) async throws {
+    func setDefaultProfile(id: UUID?) async throws {
         try await callVoidAsync(
             method: RPCMethod.modelProfileSetGlobalDefault,
             params: ModelProfileSetGlobalDefaultParams(id: id)
@@ -783,15 +800,15 @@ actor DaemonClient {
     }
 
     /// Set or clear a per-repo model profile override.
-    func setRepoClaudeTokenOverride(repoID: UUID, tokenID: UUID?) async throws {
+    func setRepoProfileOverride(repoID: UUID, profileID: UUID?) async throws {
         try await callVoidAsync(
             method: RPCMethod.modelProfileSetRepoOverride,
-            params: ModelProfileSetRepoOverrideParams(repoID: repoID, profileID: tokenID)
+            params: ModelProfileSetRepoOverrideParams(repoID: repoID, profileID: profileID)
         )
     }
 
     /// Fetch fresh usage for a single profile (60s server-side dedupe).
-    func fetchClaudeTokenUsage(id: UUID) async throws -> ModelProfileUsage {
+    func fetchProfileUsage(id: UUID) async throws -> ModelProfileUsage {
         let result = try await callAsync(
             method: RPCMethod.modelProfileFetchUsage,
             params: ModelProfileFetchUsageParams(id: id),
@@ -802,10 +819,10 @@ actor DaemonClient {
 
     /// Swap the model profile associated with a running terminal.
     /// Returns the newly created Terminal (the daemon forks a new tab).
-    func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+    func swapTerminalProfile(terminalID: UUID, newProfileID: UUID?, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: terminalID, newProfileID: newTokenID, cols: cols, rows: rows),
+            params: TerminalSwapProfileParams(terminalID: terminalID, newProfileID: newProfileID, cols: cols, rows: rows),
             resultType: Terminal.self
         )
     }

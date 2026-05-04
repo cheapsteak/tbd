@@ -187,8 +187,8 @@ final class AppState: ObservableObject {
     @Published var editingWorktreeID: UUID? = nil
     @Published var isRenamingWorktree = false
     @Published var prStatuses: [UUID: PRStatus] = [:]
-    @Published var claudeTokens: [ModelProfileWithUsage] = []
-    @Published var globalDefaultClaudeTokenID: UUID? = nil
+    @Published var modelProfiles: [ModelProfileWithUsage] = []
+    @Published var defaultProfileID: UUID? = nil
     @Published var historyActiveWorktrees: Set<UUID> = []
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
@@ -367,9 +367,9 @@ final class AppState: ObservableObject {
         case .notificationReceived(let notification):
             handleNotificationDelta(notification)
         case .modelProfileUsageUpdated(let usage):
-            applyClaudeTokenUsageDelta(usage)
+            applyModelProfileUsageDelta(usage)
         case .modelProfilesChanged:
-            Task { [weak self] in await self?.refreshClaudeTokens() }
+            Task { [weak self] in await self?.loadModelProfiles() }
         default:
             break
         }
@@ -377,12 +377,12 @@ final class AppState: ObservableObject {
 
     /// Update the in-place usage entry for a single profile. If no match,
     /// silently ignore — the next full refresh will pick it up.
-    private func applyClaudeTokenUsageDelta(_ usage: ModelProfileUsage) {
-        guard let idx = claudeTokens.firstIndex(where: { $0.profile.id == usage.profileID }) else {
+    private func applyModelProfileUsageDelta(_ usage: ModelProfileUsage) {
+        guard let idx = modelProfiles.firstIndex(where: { $0.profile.id == usage.profileID }) else {
             return
         }
-        let existing = claudeTokens[idx]
-        claudeTokens[idx] = ModelProfileWithUsage(profile: existing.profile, usage: usage)
+        let existing = modelProfiles[idx]
+        modelProfiles[idx] = ModelProfileWithUsage(profile: existing.profile, usage: usage)
     }
 
     private func handleNotificationDelta(_ notification: NotificationDelta) {
@@ -441,7 +441,7 @@ final class AppState: ObservableObject {
         isConnected = didConnect
         if didConnect {
             await refreshAll()
-            await refreshClaudeTokens()
+            await loadModelProfiles()
             startSubscription()
             await refreshPRStatuses()
             let suspendEnabled = AppState.autoSuspendClaudeEnabled

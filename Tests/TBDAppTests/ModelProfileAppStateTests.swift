@@ -11,8 +11,8 @@ import TBDShared
 @MainActor
 @Test func appState_initialModelProfilesEmpty() {
     let state = AppState()
-    #expect(state.claudeTokens.isEmpty)
-    #expect(state.globalDefaultClaudeTokenID == nil)
+    #expect(state.modelProfiles.isEmpty)
+    #expect(state.defaultProfileID == nil)
 }
 
 @MainActor
@@ -20,13 +20,13 @@ import TBDShared
     let state = AppState()
     let profileID = UUID()
     let profile = ModelProfile(id: profileID, name: "test", kind: .oauth)
-    state.claudeTokens = [ModelProfileWithUsage(profile: profile, usage: nil)]
+    state.modelProfiles = [ModelProfileWithUsage(profile: profile, usage: nil)]
 
     let usage = ModelProfileUsage(profileID: profileID, fiveHourPct: 0.42)
     state.handleDelta(.modelProfileUsageUpdated(usage))
 
-    #expect(state.claudeTokens.count == 1)
-    #expect(state.claudeTokens[0].usage?.fiveHourPct == 0.42)
+    #expect(state.modelProfiles.count == 1)
+    #expect(state.modelProfiles[0].usage?.fiveHourPct == 0.42)
 }
 
 @MainActor

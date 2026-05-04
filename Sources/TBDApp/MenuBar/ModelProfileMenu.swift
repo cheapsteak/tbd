@@ -2,20 +2,20 @@ import SwiftUI
 import AppKit
 import TBDShared
 
-/// Menu bar "Claude Token" submenu. Shows the keychain login fallback as
-/// "Default (logged in)", followed by each stored token with its 5h / 7d
-/// usage. The current global default has a checkmark. Selecting a row
-/// updates the global default (affects new spawns only — running terminals
-/// keep their resolved token).
+/// Menu bar "Model Profile" submenu. Shows the keychain login fallback as
+/// "Default (logged in)", followed by each stored profile. The current
+/// global default has a checkmark. Selecting a row updates the global
+/// default (affects new spawns only — running terminals keep their
+/// resolved profile).
 ///
-/// Tab pre-selection in Settings is deferred — "Manage tokens…" simply
-/// opens the Settings window and the user clicks the Claude Tokens tab.
-struct ClaudeTokenMenu: Commands {
+/// Tab pre-selection in Settings is deferred — "Manage profiles…" simply
+/// opens the Settings window and the user clicks the Model Profiles tab.
+struct ModelProfileMenu: Commands {
     @ObservedObject var appState: AppState
 
     var body: some Commands {
-        CommandMenu("Claude Token") {
-            ClaudeTokenMenuContent()
+        CommandMenu("Model Profile") {
+            ModelProfileMenuContent()
                 .environmentObject(appState)
         }
     }
@@ -24,31 +24,30 @@ struct ClaudeTokenMenu: Commands {
 /// Extracted into a `View` so SwiftUI re-renders the menu body when
 /// `@Published` properties on `AppState` change. `Commands` bodies do not
 /// always observe `@ObservedObject` mutations reliably for nested content.
-private struct ClaudeTokenMenuContent: View {
+private struct ModelProfileMenuContent: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        // Default (keychain login fallback) row
         Button(action: {
             Task { @MainActor in
-                await appState.setGlobalDefaultClaudeToken(id: nil)
+                await appState.setDefaultProfile(id: nil)
             }
         }) {
-            if appState.globalDefaultClaudeTokenID == nil {
+            if appState.defaultProfileID == nil {
                 Label("Default (logged in)          —", systemImage: "checkmark")
             } else {
                 Text("Default (logged in)")
             }
         }
 
-        ForEach(appState.claudeTokens, id: \.profile.id) { entry in
-            let tokenID = entry.profile.id
+        ForEach(appState.modelProfiles, id: \.profile.id) { entry in
+            let profileID = entry.profile.id
             Button(action: {
                 Task { @MainActor in
-                    await appState.setGlobalDefaultClaudeToken(id: tokenID)
+                    await appState.setDefaultProfile(id: profileID)
                 }
             }) {
-                if appState.globalDefaultClaudeTokenID == tokenID {
+                if appState.defaultProfileID == profileID {
                     Label(Self.formatRow(entry: entry), systemImage: "checkmark")
                 } else {
                     Text(Self.formatRow(entry: entry))
@@ -58,7 +57,7 @@ private struct ClaudeTokenMenuContent: View {
 
         Divider()
 
-        Button("Manage tokens…") {
+        Button("Manage profiles…") {
             NSApp.sendAction(
                 Selector(("showSettingsWindow:")),
                 to: nil,
@@ -67,9 +66,6 @@ private struct ClaudeTokenMenuContent: View {
         }
     }
 
-    /// Format a token row. Usage display is currently disabled (the
-    /// `/api/oauth/usage` endpoint requires a `user:profile` scope that
-    /// `claude setup-token` does not grant), so we render the bare name.
     private static func formatRow(entry: ModelProfileWithUsage) -> String {
         entry.profile.name
     }
