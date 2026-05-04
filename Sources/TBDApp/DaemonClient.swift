@@ -509,6 +509,24 @@ actor DaemonClient {
         )
     }
 
+    /// Get the current skill installation status.
+    func skillStatus(harness: Harness = .claudeCode) async throws -> SkillStatusResult {
+        return try await callAsync(
+            method: RPCMethod.skillStatus,
+            params: SkillStatusParams(harness: harness),
+            resultType: SkillStatusResult.self
+        )
+    }
+
+    /// Install or update the skill in the user's harness.
+    func installSkill(harness: Harness = .claudeCode) async throws -> SkillInstallResultRPC {
+        return try await callAsync(
+            method: RPCMethod.skillInstall,
+            params: SkillInstallParams(harness: harness),
+            resultType: SkillInstallResultRPC.self
+        )
+    }
+
     /// List unread notifications grouped by worktree (highest severity per worktree).
     func listNotifications() async throws -> [UUID: NotificationType] {
         let result = try await callNoParamsAsync(method: RPCMethod.notificationsList, resultType: NotificationsListResult.self)
