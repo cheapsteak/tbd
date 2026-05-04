@@ -10,6 +10,10 @@ final class CLIInstallerCoordinator {
     private let daemonClient: DaemonClient
     private let installer = CLIInstaller()
 
+    /// Set after `checkOnLaunch` runs, so daemon reconnects within the same
+    /// app session don't keep re-prompting for stale/nonSymlink states.
+    private var hasCheckedThisSession = false
+
     /// Persists across launches. Set when the user clicks "Not Now" on the
     /// `.notInstalled` prompt; cleared on successful install or whenever we
     /// observe a healthy install at launch (so a manual install or a later
@@ -26,9 +30,17 @@ final class CLIInstallerCoordinator {
 
     /// Called once at end of `connectAndLoadInitialState`. Surfaces a one-click
     /// prompt if the symlink is missing or stale. Silent if everything's healthy
-    /// or if the user previously dismissed the missing-CLI prompt.
+    /// or if the user previously dismissed the missing-CLI prompt. No-op on
+    /// subsequent calls within the same app session — daemon reconnects
+    /// shouldn't re-prompt for stale/nonSymlink.
     func checkOnLaunch() async {
-        guard let target = await fetchExpectedTarget() else { return }
+        guard !hasCheckedThisSession else { return }
+        guard let target = await fetchExpectedTarget() else {
+            // Don't latch the flag — a later reconnect with a healthy daemon
+            // status response should still get its first chance to check.
+            return
+        }
+        hasCheckedThisSession = true
         let state = installer.currentState(expectedTarget: target)
 
         if case .installed = state {
