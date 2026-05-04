@@ -28,13 +28,22 @@ private struct SkillMenuContent: View {
             Button("Install TBD Skill…") {
                 Task { @MainActor in
                     await appState.installSkill()
-                    if let status = appState.skillStatus, status.status == .upToDate {
-                        let alert = NSAlert()
+                    let post = appState.skillStatus
+                    let alert = NSAlert()
+                    if let s = post, s.status == .upToDate {
                         alert.messageText = "TBD skill installed"
-                        alert.informativeText = "Installed at \(status.harnessPath)"
-                        alert.addButton(withTitle: "OK")
-                        alert.runModal()
+                        alert.informativeText = "Installed at \(s.harnessPath)"
+                    } else if let s = post, s.status == .harnessNotDetected {
+                        alert.alertStyle = .warning
+                        alert.messageText = "Claude Code not detected"
+                        alert.informativeText = "TBD couldn't find ~/.claude/. Install Claude Code, then try again."
+                    } else {
+                        alert.alertStyle = .warning
+                        alert.messageText = "Couldn't install TBD skill"
+                        alert.informativeText = "Check Console.app (subsystem com.tbd.app, category skill) for details."
                     }
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
                 }
             }
         case .some(.upToDate):

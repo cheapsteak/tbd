@@ -79,7 +79,7 @@ Use `--prompt-file -` with a heredoc to avoid shell escaping issues.
 ## Env vars set in TBD-managed terminals
 
 - `TBD_WORKTREE_ID` — current worktree UUID.
-- `TBD_PROMPT_CONTEXT` — the same content as this skill, for piping into spawned shells.
+- `TBD_PROMPT_CONTEXT` — short pointer that names this skill and the absolute path to its fallback file (~/Library/Application Support/TBD/skill/SKILL.md). The skill body itself is not in env — read it from that path or via your harness's skill mechanism.
 - `TBD_PROMPT_INSTRUCTIONS` — per-repo custom instructions (if configured).
 
 ## Outside a TBD terminal
