@@ -200,20 +200,9 @@ private enum ProbeStatus: Equatable {
     case warn(String)
 }
 
-// Map a daemon health-probe failure detail into a user-facing warning, or nil to suppress.
+// Map a daemon health-probe failure detail into a user-facing warning.
 func probeWarningMessage(for detail: String?) -> String? {
     guard let detail, !detail.isEmpty else { return "Could not verify reachability. Saving anyway." }
-    // Phase-5 TODO: this substring filter is a temporary bridge for the Phase 1-3 daemon stub
-    // that returns "Not yet implemented" / "Unknown method". A real upstream proxy could
-    // legitimately return "501 Not Implemented" and that would be silently suppressed here.
-    // Phase 5 must add a structured signal on ModelProfileHealthCheckResult (e.g.
-    // `notSupported: Bool` or a sentinel detail value) so the UI can distinguish "stub not
-    // yet wired" from "real upstream said 501". Once that lands, DELETE this filter entirely.
-    if detail.localizedCaseInsensitiveContains("not yet implemented") ||
-       detail.localizedCaseInsensitiveContains("not implemented") ||
-       detail.localizedCaseInsensitiveContains("unknown method") {
-        return nil
-    }
     return "Unreachable — \(detail). Saving anyway."
 }
 

@@ -36,3 +36,23 @@ import TBDShared
     state.handleDelta(.modelProfilesChanged)
     #expect(true)
 }
+
+@MainActor
+@Test func appState_dismissedProxyWarningsStartsEmptyAndAcceptsInsertions() {
+    // The banner dismissal logic in TerminalPanelView writes to this set so a
+    // dismissed banner stays dismissed across view reconstructions (tab
+    // switches, parent re-renders). The contract is just that AppState
+    // exposes a published Set<UUID> that round-trips terminal IDs.
+    let state = AppState()
+    #expect(state.dismissedProxyWarnings.isEmpty)
+
+    let terminalA = UUID()
+    let terminalB = UUID()
+    state.dismissedProxyWarnings.insert(terminalA)
+    #expect(state.dismissedProxyWarnings.contains(terminalA))
+    #expect(!state.dismissedProxyWarnings.contains(terminalB))
+
+    // Idempotent — a second dismissal is a no-op.
+    state.dismissedProxyWarnings.insert(terminalA)
+    #expect(state.dismissedProxyWarnings.count == 1)
+}

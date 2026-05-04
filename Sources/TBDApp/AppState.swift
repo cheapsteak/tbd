@@ -189,6 +189,9 @@ final class AppState: ObservableObject {
     @Published var prStatuses: [UUID: PRStatus] = [:]
     @Published var modelProfiles: [ModelProfileWithUsage] = []
     @Published var defaultProfileID: UUID? = nil
+    /// Terminals where the user has dismissed the proxy-unreachable banner.
+    /// Cleared on app relaunch (in-memory only — banners are advisory).
+    @Published var dismissedProxyWarnings: Set<UUID> = []
     @Published var historyActiveWorktrees: Set<UUID> = []
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId

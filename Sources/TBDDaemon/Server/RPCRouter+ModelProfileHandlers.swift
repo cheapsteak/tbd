@@ -255,11 +255,11 @@ extension RPCRouter {
         }
     }
 
-    // MARK: - Health Check (Phase 5 stub)
+    // MARK: - Health Check
 
-    /// Stub — Phase 5 implements the actual probe. For now the RPC type exists
-    /// so the build is green; calling the method returns a not-implemented error.
     func handleModelProfileHealthCheck(_ paramsData: Data) async throws -> RPCResponse {
-        return RPCResponse(error: "Not yet implemented")
+        let params = try decoder.decode(ModelProfileHealthCheckParams.self, from: paramsData)
+        let result = await ModelProfileHealthProbe.probe(baseURL: params.baseURL)
+        return try RPCResponse(result: result)
     }
 }
