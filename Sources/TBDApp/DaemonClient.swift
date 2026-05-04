@@ -530,7 +530,7 @@ actor DaemonClient {
     }
 
     /// Notify the daemon which worktrees are currently selected in the app.
-    func worktreeSelectionChanged(selectedWorktreeIDs: Set<UUID>, suspendEnabled: Bool = true) async throws {
+    func worktreeSelectionChanged(selectedWorktreeIDs: Set<UUID>, suspendEnabled: Bool) async throws {
         try await callVoidAsync(
             method: RPCMethod.worktreeSelectionChanged,
             params: WorktreeSelectionChangedParams(selectedWorktreeIDs: Array(selectedWorktreeIDs), suspendEnabled: suspendEnabled)

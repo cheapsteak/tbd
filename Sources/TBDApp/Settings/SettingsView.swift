@@ -28,7 +28,7 @@ struct SettingsView: View {
 struct GeneralSettingsTab: View {
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
-    @AppStorage("autoSuspendClaude") private var autoSuspend: Bool = true
+    @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = true
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
