@@ -163,7 +163,13 @@ struct ContentView: View {
                     }
 
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) { showFilePanel.toggle() }
+                        // Defer the toggle one run-loop tick and skip the explicit
+                        // withAnimation wrapper. Stacking an easeInOut animation
+                        // on top of an in-flight NavigationSplitView selection
+                        // change blew the per-window constraint-update budget
+                        // (NSGenericException from _uncollapseArrangedView:animated:).
+                        // SwiftUI still animates the layout change implicitly.
+                        DispatchQueue.main.async { showFilePanel.toggle() }
                     } label: {
                         Image(systemName: "sidebar.right")
                     }
