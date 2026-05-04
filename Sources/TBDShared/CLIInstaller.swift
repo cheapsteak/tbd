@@ -5,7 +5,7 @@ import os
 // the established subsystem taxonomy from docs/diagnostics-strategy.md intact.
 private let logger = Logger(subsystem: "com.tbd.app", category: "cli-installer")
 
-public enum CLIInstallState: Equatable {
+public enum CLIInstallState: Equatable, Sendable {
     case notInstalled
     case installed(target: String)
     case stale(currentTarget: String)
