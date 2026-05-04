@@ -444,9 +444,11 @@ final class AppState: ObservableObject {
             await refreshClaudeTokens()
             startSubscription()
             await refreshPRStatuses()
-            Task {
+            let suspendEnabled = AppState.autoSuspendClaudeEnabled
+            Task { [selectedWorktreeIDs] in
                 try? await daemonClient.worktreeSelectionChanged(
-                    selectedWorktreeIDs: selectedWorktreeIDs
+                    selectedWorktreeIDs: selectedWorktreeIDs,
+                    suspendEnabled: suspendEnabled
                 )
             }
         } else {
@@ -838,6 +840,18 @@ final class AppState: ObservableObject {
     /// Whether the WIP main-area resize broadcast is enabled. Default false.
     private var terminalAutoResizeEnabled: Bool {
         UserDefaults.standard.bool(forKey: Self.terminalAutoResizeKey)
+    }
+
+    /// UserDefaults key mirroring the `@AppStorage("autoSuspendClaude")`
+    /// toggle in ContentView/SettingsView. Read from non-View contexts (e.g.
+    /// the daemon-reconnect path) to avoid sending `suspendEnabled=true`
+    /// when the user has the toggle off.
+    static let autoSuspendClaudeKey = "autoSuspendClaude"
+
+    /// Whether auto-suspend is enabled. Defaults to true when the user has
+    /// never touched the toggle, matching the `@AppStorage` defaults.
+    static var autoSuspendClaudeEnabled: Bool {
+        UserDefaults.standard.object(forKey: autoSuspendClaudeKey) as? Bool ?? true
     }
 
     /// Convert the current `mainAreaSize` (pixels) into tmux cell dimensions
