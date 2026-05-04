@@ -111,6 +111,36 @@ private func makeFile(_ path: String) throws {
     #expect(state == .stale(currentTarget: target))
 }
 
+// MARK: - launchPromptKind
+
+@Test func launchPromptKindIsNilWhenInstalled() {
+    let state: CLIInstallState = .installed(target: "/bin/tbd")
+    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == nil)
+    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == nil)
+}
+
+@Test func launchPromptKindMissingWhenNotInstalledAndNotDismissed() {
+    let state: CLIInstallState = .notInstalled
+    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == .missing)
+}
+
+@Test func launchPromptKindNilWhenNotInstalledAndPreviouslyDismissed() {
+    let state: CLIInstallState = .notInstalled
+    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == nil)
+}
+
+@Test func launchPromptKindStaleAlwaysSurfacedRegardlessOfDismissal() {
+    let state: CLIInstallState = .stale(currentTarget: "/old/tbd")
+    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == .stale(current: "/old/tbd"))
+    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == .stale(current: "/old/tbd"))
+}
+
+@Test func launchPromptKindNonSymlinkAlwaysSurfacedRegardlessOfDismissal() {
+    let state: CLIInstallState = .nonSymlink
+    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == .nonSymlink)
+    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == .nonSymlink)
+}
+
 // MARK: - install
 
 @Test func installCreatesParentDirectoryAndSymlink() async throws {

@@ -14,6 +14,35 @@ public enum CLIInstallState: Equatable {
     case nonSymlink
 }
 
+/// What the launch-time check should prompt the user about, if anything.
+public enum CLILaunchPromptKind: Equatable, Sendable {
+    case missing
+    case stale(current: String)
+    case nonSymlink
+}
+
+public extension CLIInstallState {
+    /// Decide whether the launch-time check should surface a prompt.
+    ///
+    /// `userPreviouslyDismissed` should be true if the user clicked "Not Now"
+    /// on a previous `.notInstalled` prompt — in which case we suppress the
+    /// re-prompt to avoid nagging. `.stale` and `.nonSymlink` are always
+    /// surfaced because they represent a broken install the user likely wants
+    /// fixed (and they explicitly opted in by installing once before).
+    func launchPromptKind(userPreviouslyDismissed: Bool) -> CLILaunchPromptKind? {
+        switch self {
+        case .installed:
+            return nil
+        case .notInstalled:
+            return userPreviouslyDismissed ? nil : .missing
+        case .stale(let current):
+            return .stale(current: current)
+        case .nonSymlink:
+            return .nonSymlink
+        }
+    }
+}
+
 public struct CLIInstallResult: Equatable, Sendable {
     public let symlinkPath: String
     public let target: String

@@ -10,29 +10,50 @@ final class CLIInstallerCoordinator {
     private let daemonClient: DaemonClient
     private let installer = CLIInstaller()
 
+    /// Persists across launches. Set when the user clicks "Not Now" on the
+    /// `.notInstalled` prompt; cleared on successful install or whenever we
+    /// observe a healthy install at launch (so a manual install or a later
+    /// re-install via the menu re-arms the prompt for future deletions).
+    private static let dismissedKey = "com.tbd.app.cliInstaller.notInstalledDismissed"
+    private var notInstalledDismissed: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.dismissedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.dismissedKey) }
+    }
+
     init(daemonClient: DaemonClient) {
         self.daemonClient = daemonClient
     }
 
     /// Called once at end of `connectAndLoadInitialState`. Surfaces a one-click
-    /// prompt if the symlink is missing or stale. Silent if everything's healthy.
+    /// prompt if the symlink is missing or stale. Silent if everything's healthy
+    /// or if the user previously dismissed the missing-CLI prompt.
     func checkOnLaunch() async {
         guard let target = await fetchExpectedTarget() else { return }
         let state = installer.currentState(expectedTarget: target)
-        switch state {
-        case .installed:
+
+        if case .installed = state {
             logger.debug("CLI symlink installed and current at \(self.installer.symlinkPath, privacy: .public)")
+            if notInstalledDismissed {
+                logger.info("CLI symlink healthy — clearing prior dismissal")
+                notInstalledDismissed = false
+            }
             return
-        case .notInstalled:
+        }
+
+        guard let kind = state.launchPromptKind(userPreviouslyDismissed: notInstalledDismissed) else {
+            logger.debug("Skipping CLI install prompt — user previously dismissed Not Now")
+            return
+        }
+
+        switch kind {
+        case .missing:
             logger.info("CLI symlink missing — prompting to install")
-            await presentLaunchPrompt(target: target, kind: .missing)
         case .stale(let current):
             logger.info("CLI symlink stale: current=\(current, privacy: .public) expected=\(target, privacy: .public) — prompting to refresh")
-            await presentLaunchPrompt(target: target, kind: .stale(current: current))
         case .nonSymlink:
             logger.info("Non-symlink at \(self.installer.symlinkPath, privacy: .public) — prompting to replace")
-            await presentLaunchPrompt(target: target, kind: .nonSymlink)
         }
+        await presentLaunchPrompt(target: target, kind: kind)
     }
 
     /// Called from the menu item. Confirms, runs install, presents post-install dialog.
@@ -51,12 +72,6 @@ final class CLIInstallerCoordinator {
     }
 
     // MARK: - Private
-
-    private enum LaunchPromptKind {
-        case missing
-        case stale(current: String)
-        case nonSymlink
-    }
 
     private func fetchExpectedTarget() async -> String? {
         let status: DaemonStatusResult
@@ -78,7 +93,7 @@ final class CLIInstallerCoordinator {
         return cli
     }
 
-    private func presentLaunchPrompt(target: String, kind: LaunchPromptKind) async {
+    private func presentLaunchPrompt(target: String, kind: CLILaunchPromptKind) async {
         let alert = NSAlert()
         alert.alertStyle = .informational
         let symlinkPath = installer.symlinkPath
@@ -103,6 +118,13 @@ final class CLIInstallerCoordinator {
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
             await performInstall(target: target, confirm: false)
+        } else if case .missing = kind {
+            // User declined the missing-CLI prompt. Suppress on future launches
+            // until they install — manually, via menu, or after we observe a
+            // healthy `.installed` state. Stale/nonSymlink dismissals are NOT
+            // remembered: those are broken-install states they opted into.
+            logger.info("User dismissed install prompt — not auto-prompting next launch")
+            notInstalledDismissed = true
         }
     }
 
@@ -136,6 +158,8 @@ final class CLIInstallerCoordinator {
         }
 
         logger.info("CLI symlink installed: \(result.symlinkPath, privacy: .public) -> \(result.target, privacy: .public) onPath=\(result.onPath, privacy: .public)")
+        // Re-arm the launch prompt for any future unintended deletion.
+        notInstalledDismissed = false
 
         let alert = NSAlert()
         alert.alertStyle = .informational
