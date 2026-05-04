@@ -9,6 +9,97 @@ internal let lifecycleLogger = Logger(subsystem: "com.tbd.app", category: "lifec
 
 // MARK: - Crash diagnostics
 
+/// Directory where on-disk crash forensics are written.
+/// `~/Library/Logs/TBD` — survives restarts, no sudo or logd config required.
+private func tbdCrashLogDirectory() -> URL? {
+    guard let libraryURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first else {
+        return nil
+    }
+    return libraryURL.appendingPathComponent("Logs/TBD")
+}
+
+private let tbdExceptionsLogMaxBytes: UInt64 = 5 * 1024 * 1024
+
+/// Best-effort persisted append of an exception report. Never throws; never crashes.
+/// Called from the Obj-C exception preprocessor on whatever thread raised.
+private func tbdPersistException(_ ns: NSException) {
+    do {
+        guard let dir = tbdCrashLogDirectory() else { return }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let timestamp = formatter.string(from: Date())
+
+        let name = ns.name.rawValue
+        let reason = ns.reason ?? "<no reason>"
+        let userInfoDump: String = {
+            guard let info = ns.userInfo else { return "<nil>" }
+            return String(describing: info)
+        }()
+
+        var windowDescription = "<none>"
+        if let info = ns.userInfo,
+           let window = info.values.first(where: { $0 is NSWindow }) as? NSWindow {
+            // Best-effort — accessing AppKit off main is unsafe, so guard.
+            if Thread.isMainThread {
+                let frame = window.frame
+                let title = window.title
+                let cls = String(describing: type(of: window))
+                let contentCls = window.contentView.map { String(describing: type(of: $0)) } ?? "<nil>"
+                windowDescription = "class=\(cls) title=\"\(title)\" frame=\(frame) contentView=\(contentCls)"
+            } else {
+                windowDescription = "<NSWindow present in userInfo, not on main thread — skipped introspection>"
+            }
+        }
+
+        let stack = ns.callStackSymbols.joined(separator: "\n")
+
+        var report = ""
+        report += "=== \(timestamp) ===\n"
+        report += "name: \(name)\n"
+        report += "reason: \(reason)\n"
+        report += "userInfo: \(userInfoDump)\n"
+        report += "window: \(windowDescription)\n"
+        report += "callStackSymbols:\n\(stack)\n"
+        report += "===\n\n"
+
+        let appendURL = dir.appendingPathComponent("exceptions.log")
+        let latestURL = dir.appendingPathComponent("last-exception.txt")
+
+        // Latest — atomic overwrite.
+        if let data = report.data(using: .utf8) {
+            try? data.write(to: latestURL, options: [.atomic])
+        }
+
+        // Append log — rotate if it would exceed the size cap.
+        let fm = FileManager.default
+        if fm.fileExists(atPath: appendURL.path) {
+            if let attrs = try? fm.attributesOfItem(atPath: appendURL.path),
+               let size = attrs[.size] as? UInt64,
+               size > tbdExceptionsLogMaxBytes {
+                let rotatedURL = dir.appendingPathComponent("exceptions.log.1")
+                try? fm.removeItem(at: rotatedURL)
+                try? fm.moveItem(at: appendURL, to: rotatedURL)
+            }
+        }
+        if !fm.fileExists(atPath: appendURL.path) {
+            let header = "=== TBDApp exceptions log ===\n".data(using: .utf8) ?? Data()
+            try? header.write(to: appendURL)
+        }
+
+        if let handle = try? FileHandle(forWritingTo: appendURL) {
+            defer { try? handle.close() }
+            try? handle.seekToEnd()
+            if let data = report.data(using: .utf8) {
+                try? handle.write(contentsOf: data)
+            }
+        }
+    } catch {
+        // Swallow — preprocessor must never throw.
+    }
+}
+
 /// Top-level free function so it's usable as a C function pointer for
 /// NSSetUncaughtExceptionHandler.
 private func tbdUncaughtExceptionHandler(_ exception: NSException) {
@@ -41,6 +132,7 @@ let tbdExceptionPreprocessor: @convention(c) (Any) -> Any = { exception in
         let reason = ns.reason ?? "<no reason>"
         let stack = ns.callStackSymbols.joined(separator: "\n")
         lifecycleLogger.fault("Preprocessed NSException name=\(name, privacy: .public) reason=\(reason, privacy: .public) stack=\(stack, privacy: .public)")
+        tbdPersistException(ns)
     }
     return exception
 }
@@ -94,6 +186,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSSetUncaughtExceptionHandler(tbdUncaughtExceptionHandler)
         for sig in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTRAP] {
             signal(sig, tbdSignalHandler)
+        }
+
+        if let dir = tbdCrashLogDirectory() {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            lifecycleLogger.info("Crash forensics writing to \(dir.path, privacy: .public)")
         }
     }
 
