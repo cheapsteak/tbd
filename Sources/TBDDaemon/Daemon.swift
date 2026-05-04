@@ -1,5 +1,6 @@
 import Foundation
 import TBDShared
+import os
 
 /// Top-level daemon orchestrator.
 ///
@@ -63,6 +64,17 @@ public final class Daemon: Sendable {
 
         // 4. Write PID file
         try pidFile.write()
+
+        // Drop the canonical TBD skill body to the failsafe path so any
+        // Claude session can `Read` it even when no harness skill is registered.
+        // Failures here are non-fatal — the slim system-prompt pointer can still
+        // reference the path, and a missing file is recoverable on next boot.
+        do {
+            try SkillFileWriter().writeFallback()
+        } catch {
+            Logger(subsystem: "com.tbd.daemon", category: "skill")
+                .error("Failed to write fallback skill file: \(String(describing: error), privacy: .public)")
+        }
 
         // 4a. Scrub inherited TBD_* env vars before any tmux server is spawned.
         // The daemon may have been launched from inside a TBD-spawned shell (e.g.
