@@ -6,7 +6,7 @@ struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
-    @AppStorage("autoSuspendClaude") private var autoSuspendClaude: Bool = true
+    @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspendClaude: Bool = true
     @State private var conductorHotkeyMonitor = ConductorHotkeyMonitor()
     @State private var contentAreaHeight: CGFloat = 600
     /// Saved first responder to restore when conductor hides.
