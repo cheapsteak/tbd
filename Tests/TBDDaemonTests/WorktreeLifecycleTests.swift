@@ -492,12 +492,12 @@ private func makeTestRepo(
     let db = try TBDDatabase(inMemory: true)
 
     // Seed a token row and set it as the global default.
-    let token = try await db.claudeTokens.create(name: "Test", kind: .oauth)
-    try await db.config.setDefaultClaudeTokenID(token.id)
+    let token = try await db.modelProfiles.create(name: "Test", kind: .oauth)
+    try await db.config.setDefaultProfileID(token.id)
 
     let secret = "sk-ant-oat01-FAKETOKEN_value"
-    let resolver = ClaudeTokenResolver(
-        tokens: db.claudeTokens,
+    let resolver = ModelProfileResolver(
+        profiles: db.modelProfiles,
         repos: db.repos,
         config: db.config,
         keychain: { id in id == token.id.uuidString ? secret : nil }
@@ -514,7 +514,7 @@ private func makeTestRepo(
         git: GitManager(),
         tmux: tmux,
         hooks: HookResolver(),
-        claudeTokenResolver: resolver
+        modelProfileResolver: resolver
     )
 
     let repo = try await db.repos.create(
@@ -537,11 +537,11 @@ private func makeTestRepo(
     #expect(!shellBody.contains("CLAUDE_CODE_OAUTH_TOKEN"),
             "env var name leaked into shell command body: \(shellBody)")
 
-    // (b) Persisted terminal row has claudeTokenID set to the known token UUID.
+    // (b) Persisted terminal row has profileID set to the known token UUID.
     let terminals = try await db.terminals.list(worktreeID: wt.id)
-    let claudeTerminal = terminals.first { $0.claudeTokenID != nil }
-    #expect(claudeTerminal?.claudeTokenID == token.id,
-            "expected the Claude terminal to persist claudeTokenID=\(token.id)")
+    let claudeTerminal = terminals.first { $0.profileID != nil }
+    #expect(claudeTerminal?.profileID == token.id,
+            "expected the Claude terminal to persist profileID=\(token.id)")
 }
 
 @Test func testWorktreePathStructure() async throws {

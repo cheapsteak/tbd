@@ -14,7 +14,7 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public var createdAt: Date
     public var renamePrompt: String?
     public var customInstructions: String?
-    public var claudeTokenOverrideID: UUID?
+    public var profileOverrideID: UUID?
     public var worktreeSlot: String?
     public var worktreeRoot: String?
     public var status: RepoStatus
@@ -22,7 +22,7 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
                 displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
                 renamePrompt: String? = nil, customInstructions: String? = nil,
-                claudeTokenOverrideID: UUID? = nil,
+                profileOverrideID: UUID? = nil,
                 worktreeSlot: String? = nil, worktreeRoot: String? = nil,
                 status: RepoStatus = .ok) {
         self.id = id
@@ -33,7 +33,7 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.renamePrompt = renamePrompt
         self.customInstructions = customInstructions
-        self.claudeTokenOverrideID = claudeTokenOverrideID
+        self.profileOverrideID = profileOverrideID
         self.worktreeSlot = worktreeSlot
         self.worktreeRoot = worktreeRoot
         self.status = status
@@ -41,7 +41,7 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, path, remoteURL, displayName, defaultBranch, createdAt
-        case renamePrompt, customInstructions, claudeTokenOverrideID
+        case renamePrompt, customInstructions, profileOverrideID
         case worktreeSlot, worktreeRoot, status
     }
 
@@ -55,7 +55,7 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         renamePrompt = try c.decodeIfPresent(String.self, forKey: .renamePrompt)
         customInstructions = try c.decodeIfPresent(String.self, forKey: .customInstructions)
-        claudeTokenOverrideID = try c.decodeIfPresent(UUID.self, forKey: .claudeTokenOverrideID)
+        profileOverrideID = try c.decodeIfPresent(UUID.self, forKey: .profileOverrideID)
         worktreeSlot = try c.decodeIfPresent(String.self, forKey: .worktreeSlot)
         worktreeRoot = try c.decodeIfPresent(String.self, forKey: .worktreeRoot)
         status = try c.decodeIfPresent(RepoStatus.self, forKey: .status) ?? .ok
@@ -139,13 +139,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var claudeSessionID: String?
     public var suspendedAt: Date?
     public var suspendedSnapshot: String?
-    public var claudeTokenID: UUID?
+    public var profileID: UUID?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
                 pinnedAt: Date? = nil, claudeSessionID: String? = nil,
                 suspendedAt: Date? = nil, suspendedSnapshot: String? = nil,
-                claudeTokenID: UUID? = nil) {
+                profileID: UUID? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -156,7 +156,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.claudeSessionID = claudeSessionID
         self.suspendedAt = suspendedAt
         self.suspendedSnapshot = suspendedSnapshot
-        self.claudeTokenID = claudeTokenID
+        self.profileID = profileID
     }
 
     public init(from decoder: Decoder) throws {
@@ -171,34 +171,57 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         claudeSessionID = try c.decodeIfPresent(String.self, forKey: .claudeSessionID)
         suspendedAt = try c.decodeIfPresent(Date.self, forKey: .suspendedAt)
         suspendedSnapshot = try c.decodeIfPresent(String.self, forKey: .suspendedSnapshot)
-        claudeTokenID = try c.decodeIfPresent(UUID.self, forKey: .claudeTokenID)
+        profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
     }
 }
 
-public enum ClaudeTokenKind: String, Codable, Sendable {
+public enum CredentialKind: String, Codable, Sendable {
     case oauth
     case apiKey
 }
 
-public struct ClaudeToken: Codable, Sendable, Identifiable, Equatable {
+public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var name: String
-    public var kind: ClaudeTokenKind
+    public var kind: CredentialKind
+    /// Optional Anthropic-compatible endpoint URL. nil = use Claude default
+    /// (i.e. don't set ANTHROPIC_BASE_URL when spawning).
+    public var baseURL: String?
+    /// Optional model id passed via ANTHROPIC_MODEL. nil = use Claude default.
+    public var model: String?
     public var createdAt: Date
     public var lastUsedAt: Date?
 
-    public init(id: UUID = UUID(), name: String, kind: ClaudeTokenKind,
+    public init(id: UUID = UUID(), name: String, kind: CredentialKind,
+                baseURL: String? = nil, model: String? = nil,
                 createdAt: Date = Date(), lastUsedAt: Date? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
+        self.baseURL = baseURL
+        self.model = model
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
     }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, kind, baseURL, model, createdAt, lastUsedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        kind = try c.decode(CredentialKind.self, forKey: .kind)
+        baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
+    }
 }
 
-public struct ClaudeTokenUsage: Codable, Sendable, Equatable {
-    public var tokenID: UUID
+public struct ModelProfileUsage: Codable, Sendable, Equatable {
+    public var profileID: UUID
     public var fiveHourPct: Double?
     public var sevenDayPct: Double?
     public var fiveHourResetsAt: Date?
@@ -206,10 +229,10 @@ public struct ClaudeTokenUsage: Codable, Sendable, Equatable {
     public var fetchedAt: Date?
     public var lastStatus: String?
 
-    public init(tokenID: UUID, fiveHourPct: Double? = nil, sevenDayPct: Double? = nil,
+    public init(profileID: UUID, fiveHourPct: Double? = nil, sevenDayPct: Double? = nil,
                 fiveHourResetsAt: Date? = nil, sevenDayResetsAt: Date? = nil,
                 fetchedAt: Date? = nil, lastStatus: String? = nil) {
-        self.tokenID = tokenID
+        self.profileID = profileID
         self.fiveHourPct = fiveHourPct
         self.sevenDayPct = sevenDayPct
         self.fiveHourResetsAt = fiveHourResetsAt
@@ -217,27 +240,59 @@ public struct ClaudeTokenUsage: Codable, Sendable, Equatable {
         self.fetchedAt = fetchedAt
         self.lastStatus = lastStatus
     }
-}
 
-public struct ClaudeTokenWithUsage: Codable, Sendable, Equatable {
-    public let token: ClaudeToken
-    public let usage: ClaudeTokenUsage?
-    public init(token: ClaudeToken, usage: ClaudeTokenUsage? = nil) {
-        self.token = token
-        self.usage = usage
-    }
-}
-
-public struct Config: Codable, Sendable, Equatable {
-    public var defaultClaudeTokenID: UUID?
-
-    public init(defaultClaudeTokenID: UUID? = nil) {
-        self.defaultClaudeTokenID = defaultClaudeTokenID
+    enum CodingKeys: String, CodingKey {
+        case profileID, tokenID  // tokenID is the legacy key for one release window
+        case fiveHourPct, sevenDayPct, fiveHourResetsAt, sevenDayResetsAt, fetchedAt, lastStatus
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        defaultClaudeTokenID = try c.decodeIfPresent(UUID.self, forKey: .defaultClaudeTokenID)
+        if let id = try c.decodeIfPresent(UUID.self, forKey: .profileID) {
+            profileID = id
+        } else {
+            profileID = try c.decode(UUID.self, forKey: .tokenID)
+        }
+        fiveHourPct = try c.decodeIfPresent(Double.self, forKey: .fiveHourPct)
+        sevenDayPct = try c.decodeIfPresent(Double.self, forKey: .sevenDayPct)
+        fiveHourResetsAt = try c.decodeIfPresent(Date.self, forKey: .fiveHourResetsAt)
+        sevenDayResetsAt = try c.decodeIfPresent(Date.self, forKey: .sevenDayResetsAt)
+        fetchedAt = try c.decodeIfPresent(Date.self, forKey: .fetchedAt)
+        lastStatus = try c.decodeIfPresent(String.self, forKey: .lastStatus)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(profileID, forKey: .profileID)
+        try c.encodeIfPresent(fiveHourPct, forKey: .fiveHourPct)
+        try c.encodeIfPresent(sevenDayPct, forKey: .sevenDayPct)
+        try c.encodeIfPresent(fiveHourResetsAt, forKey: .fiveHourResetsAt)
+        try c.encodeIfPresent(sevenDayResetsAt, forKey: .sevenDayResetsAt)
+        try c.encodeIfPresent(fetchedAt, forKey: .fetchedAt)
+        try c.encodeIfPresent(lastStatus, forKey: .lastStatus)
+    }
+}
+
+public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
+    public let profile: ModelProfile
+    public let usage: ModelProfileUsage?
+    public init(profile: ModelProfile, usage: ModelProfileUsage? = nil) {
+        self.profile = profile
+        self.usage = usage
+    }
+}
+
+
+public struct Config: Codable, Sendable, Equatable {
+    public var defaultProfileID: UUID?
+
+    public init(defaultProfileID: UUID? = nil) {
+        self.defaultProfileID = defaultProfileID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        defaultProfileID = try c.decodeIfPresent(UUID.self, forKey: .defaultProfileID)
     }
 }
 

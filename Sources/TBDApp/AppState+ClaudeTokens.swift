@@ -16,8 +16,8 @@ extension AppState {
     func refreshClaudeTokens() async {
         do {
             let result = try await daemonClient.listClaudeTokens()
-            if result.tokens != claudeTokens {
-                claudeTokens = result.tokens
+            if result.profiles != claudeTokens {
+                claudeTokens = result.profiles
             }
             if result.defaultID != globalDefaultClaudeTokenID {
                 globalDefaultClaudeTokenID = result.defaultID
@@ -84,7 +84,7 @@ extension AppState {
             // Optimistically update local repo state
             if let idx = repos.firstIndex(where: { $0.id == repoID }) {
                 var repo = repos[idx]
-                repo.claudeTokenOverrideID = tokenID
+                repo.profileOverrideID = tokenID
                 repos[idx] = repo
             }
         } catch {
@@ -115,9 +115,9 @@ extension AppState {
     func fetchClaudeTokenUsage(id: UUID) async {
         do {
             let usage = try await daemonClient.fetchClaudeTokenUsage(id: id)
-            if let idx = claudeTokens.firstIndex(where: { $0.token.id == id }) {
+            if let idx = claudeTokens.firstIndex(where: { $0.profile.id == id }) {
                 let existing = claudeTokens[idx]
-                claudeTokens[idx] = ClaudeTokenWithUsage(token: existing.token, usage: usage)
+                claudeTokens[idx] = ModelProfileWithUsage(profile: existing.profile, usage: usage)
             }
         } catch {
             logger.error("Failed to fetch Claude token usage: \(error)")

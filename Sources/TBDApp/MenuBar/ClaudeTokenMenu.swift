@@ -41,8 +41,8 @@ private struct ClaudeTokenMenuContent: View {
             }
         }
 
-        ForEach(appState.claudeTokens, id: \.token.id) { entry in
-            let tokenID = entry.token.id
+        ForEach(appState.claudeTokens, id: \.profile.id) { entry in
+            let tokenID = entry.profile.id
             Button(action: {
                 Task { @MainActor in
                     await appState.setGlobalDefaultClaudeToken(id: tokenID)
@@ -70,7 +70,7 @@ private struct ClaudeTokenMenuContent: View {
     /// Format a token row. Usage display is currently disabled (the
     /// `/api/oauth/usage` endpoint requires a `user:profile` scope that
     /// `claude setup-token` does not grant), so we render the bare name.
-    private static func formatRow(entry: ClaudeTokenWithUsage) -> String {
-        entry.token.name
+    private static func formatRow(entry: ModelProfileWithUsage) -> String {
+        entry.profile.name
     }
 }

@@ -291,6 +291,34 @@ import Testing
     #expect(repo.status == .ok)
 }
 
+@Test func modelProfileUsageDecodesModernProfileIDKey() throws {
+    let id = UUID()
+    let json = """
+    {
+      "profileID": "\(id.uuidString)",
+      "fiveHourPct": 0.42,
+      "lastStatus": "ok"
+    }
+    """
+    let decoded = try JSONDecoder().decode(ModelProfileUsage.self, from: Data(json.utf8))
+    #expect(decoded.profileID == id)
+    #expect(decoded.fiveHourPct == 0.42)
+    #expect(decoded.lastStatus == "ok")
+}
+
+@Test func modelProfileUsageDecodesLegacyTokenIDKey() throws {
+    let id = UUID()
+    let json = """
+    {
+      "tokenID": "\(id.uuidString)",
+      "sevenDayPct": 0.10
+    }
+    """
+    let decoded = try JSONDecoder().decode(ModelProfileUsage.self, from: Data(json.utf8))
+    #expect(decoded.profileID == id)
+    #expect(decoded.sevenDayPct == 0.10)
+}
+
 @Test func repoEncodesNewFields() throws {
     var repo = Repo(path: "/tmp/r", displayName: "r")
     repo.worktreeSlot = "r"

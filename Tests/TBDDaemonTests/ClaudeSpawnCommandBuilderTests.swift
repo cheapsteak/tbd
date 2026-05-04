@@ -16,7 +16,7 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: nil,
             appendSystemPrompt: nil,
             initialPrompt: nil,
-            tokenSecret: nil,
+            profileSecret: nil,
             cmd: nil,
             shellFallback: "/bin/zsh"
         )
@@ -31,7 +31,7 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: "sid-1",
             appendSystemPrompt: nil,
             initialPrompt: nil,
-            tokenSecret: nil,
+            profileSecret: nil,
             cmd: nil,
             shellFallback: "/bin/zsh"
         )
@@ -46,7 +46,7 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: "sid",
             appendSystemPrompt: "hello world",
             initialPrompt: nil,
-            tokenSecret: nil,
+            profileSecret: nil,
             cmd: nil,
             shellFallback: ""
         )
@@ -60,7 +60,7 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: "sid",
             appendSystemPrompt: nil,
             initialPrompt: "do the thing",
-            tokenSecret: nil,
+            profileSecret: nil,
             cmd: nil,
             shellFallback: ""
         )
@@ -74,7 +74,7 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: nil,
             appendSystemPrompt: nil,
             initialPrompt: nil,
-            tokenSecret: nil,
+            profileSecret: nil,
             cmd: "ls -la",
             shellFallback: "/bin/zsh"
         )
@@ -89,7 +89,7 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: nil,
             appendSystemPrompt: nil,
             initialPrompt: nil,
-            tokenSecret: nil,
+            profileSecret: nil,
             cmd: nil,
             shellFallback: "/bin/zsh"
         )
@@ -106,7 +106,7 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: nil,
             appendSystemPrompt: nil,
             initialPrompt: nil,
-            tokenSecret: fakeOauth,
+            profileSecret: fakeOauth,
             cmd: nil,
             shellFallback: ""
         )
@@ -123,7 +123,7 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: "sid",
             appendSystemPrompt: nil,
             initialPrompt: nil,
-            tokenSecret: fakeOauth,
+            profileSecret: fakeOauth,
             cmd: nil,
             shellFallback: ""
         )
@@ -139,8 +139,8 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: nil,
             appendSystemPrompt: nil,
             initialPrompt: nil,
-            tokenSecret: fakeOauth,
-            tokenKind: .apiKey,
+            profileSecret: fakeOauth,
+            profileKind: .apiKey,
             cmd: nil,
             shellFallback: ""
         )
@@ -155,7 +155,7 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: nil,
             appendSystemPrompt: nil,
             initialPrompt: nil,
-            tokenSecret: fakeOauth,
+            profileSecret: fakeOauth,
             cmd: "make test",
             shellFallback: ""
         )
@@ -170,11 +170,51 @@ struct ClaudeSpawnCommandBuilderTests {
             freshSessionID: nil,
             appendSystemPrompt: nil,
             initialPrompt: nil,
-            tokenSecret: fakeOauth,
+            profileSecret: fakeOauth,
             cmd: nil,
             shellFallback: "/bin/zsh"
         )
         #expect(r.command == "/bin/zsh")
         #expect(r.sensitiveEnv.isEmpty)
+    }
+
+    // MARK: - Profile baseURL / model injection
+
+    @Test("base URL and model env vars set when profile has them")
+    func profileWithProxyInjectsRoutingEnv() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: "key",
+            profileKind: .apiKey,
+            profileBaseURL: "http://127.0.0.1:3456",
+            profileModel: "gpt-5-codex",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == "key")
+        #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3456")
+        #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == "gpt-5-codex")
+    }
+
+    @Test("no base URL or model means env stays auth-only (today's behavior)")
+    func profileWithoutProxyOnlyInjectsAuth() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: "tok",
+            profileKind: .oauth,
+            profileBaseURL: nil,
+            profileModel: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == "tok")
+        #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == nil)
+        #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == nil)
     }
 }

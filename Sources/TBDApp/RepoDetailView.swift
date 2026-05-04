@@ -52,8 +52,8 @@ struct RepoSettingsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Picker("Claude token", selection: tokenOverrideBinding(repo: repo)) {
                         Text("Inherit global default").tag(UUID?.none)
-                        ForEach(appState.claudeTokens, id: \.token.id) { entry in
-                            Text(entry.token.name).tag(UUID?.some(entry.token.id))
+                        ForEach(appState.claudeTokens, id: \.profile.id) { entry in
+                            Text(entry.profile.name).tag(UUID?.some(entry.profile.id))
                         }
                     }
                     .pickerStyle(.menu)
@@ -76,7 +76,7 @@ struct RepoSettingsView: View {
 
     private func tokenOverrideBinding(repo: Repo) -> Binding<UUID?> {
         Binding(
-            get: { repo.claudeTokenOverrideID },
+            get: { repo.profileOverrideID },
             set: { newValue in
                 Task {
                     await appState.setRepoClaudeTokenOverride(repoID: repo.id, tokenID: newValue)
@@ -86,12 +86,12 @@ struct RepoSettingsView: View {
     }
 
     private func tokenOverrideCaption(repo: Repo) -> String? {
-        if let overrideID = repo.claudeTokenOverrideID {
-            let name = appState.claudeTokens.first(where: { $0.token.id == overrideID })?.token.name ?? "Unknown token"
+        if let overrideID = repo.profileOverrideID {
+            let name = appState.claudeTokens.first(where: { $0.profile.id == overrideID })?.profile.name ?? "Unknown token"
             return "Overriding with: \(name)"
         }
         if let defaultID = appState.globalDefaultClaudeTokenID,
-           let name = appState.claudeTokens.first(where: { $0.token.id == defaultID })?.token.name {
+           let name = appState.claudeTokens.first(where: { $0.profile.id == defaultID })?.profile.name {
             return "Inheriting: \(name)"
         }
         return "Inheriting: Default (claude keychain login)"

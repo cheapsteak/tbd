@@ -9,7 +9,7 @@ import TBDShared
 // the parent plan's DoD.
 
 @MainActor
-@Test func appState_initialClaudeTokensEmpty() {
+@Test func appState_initialModelProfilesEmpty() {
     let state = AppState()
     #expect(state.claudeTokens.isEmpty)
     #expect(state.globalDefaultClaudeTokenID == nil)
@@ -18,21 +18,21 @@ import TBDShared
 @MainActor
 @Test func appState_handlesUsageUpdatedDeltaInPlace() {
     let state = AppState()
-    let tokenID = UUID()
-    let token = ClaudeToken(id: tokenID, name: "test", kind: .oauth)
-    state.claudeTokens = [ClaudeTokenWithUsage(token: token, usage: nil)]
+    let profileID = UUID()
+    let profile = ModelProfile(id: profileID, name: "test", kind: .oauth)
+    state.claudeTokens = [ModelProfileWithUsage(profile: profile, usage: nil)]
 
-    let usage = ClaudeTokenUsage(tokenID: tokenID, fiveHourPct: 0.42)
-    state.handleDelta(.claudeTokenUsageUpdated(usage))
+    let usage = ModelProfileUsage(profileID: profileID, fiveHourPct: 0.42)
+    state.handleDelta(.modelProfileUsageUpdated(usage))
 
     #expect(state.claudeTokens.count == 1)
     #expect(state.claudeTokens[0].usage?.fiveHourPct == 0.42)
 }
 
 @MainActor
-@Test func appState_handlesTokensChangedDeltaWithoutCrash() {
+@Test func appState_handlesProfilesChangedDeltaWithoutCrash() {
     let state = AppState()
     // No daemon running — the spawned refresh task will fail and be swallowed.
-    state.handleDelta(.claudeTokensChanged)
+    state.handleDelta(.modelProfilesChanged)
     #expect(true)
 }

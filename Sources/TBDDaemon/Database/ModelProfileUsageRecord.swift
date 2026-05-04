@@ -2,10 +2,10 @@ import Foundation
 import GRDB
 import TBDShared
 
-struct ClaudeTokenUsageRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
-    static let databaseTableName = "claude_token_usage"
+struct ModelProfileUsageRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "model_profile_usage"
 
-    var token_id: String
+    var profile_id: String
     var five_hour_pct: Double?
     var seven_day_pct: Double?
     var five_hour_resets_at: Date?
@@ -13,8 +13,8 @@ struct ClaudeTokenUsageRecord: Codable, FetchableRecord, PersistableRecord, Send
     var fetched_at: Date?
     var last_status: String?
 
-    init(from u: ClaudeTokenUsage) {
-        self.token_id = u.tokenID.uuidString
+    init(from u: ModelProfileUsage) {
+        self.profile_id = u.profileID.uuidString
         self.five_hour_pct = u.fiveHourPct
         self.seven_day_pct = u.sevenDayPct
         self.five_hour_resets_at = u.fiveHourResetsAt
@@ -23,9 +23,9 @@ struct ClaudeTokenUsageRecord: Codable, FetchableRecord, PersistableRecord, Send
         self.last_status = u.lastStatus
     }
 
-    func toModel() -> ClaudeTokenUsage {
-        ClaudeTokenUsage(
-            tokenID: UUID(uuidString: token_id)!,
+    func toModel() -> ModelProfileUsage {
+        ModelProfileUsage(
+            profileID: UUID(uuidString: profile_id)!,
             fiveHourPct: five_hour_pct,
             sevenDayPct: seven_day_pct,
             fiveHourResetsAt: five_hour_resets_at,
@@ -36,29 +36,29 @@ struct ClaudeTokenUsageRecord: Codable, FetchableRecord, PersistableRecord, Send
     }
 }
 
-public struct ClaudeTokenUsageStore: Sendable {
+public struct ModelProfileUsageStore: Sendable {
     let writer: any DatabaseWriter
 
     init(writer: any DatabaseWriter) {
         self.writer = writer
     }
 
-    public func upsert(_ usage: ClaudeTokenUsage) async throws {
-        let record = ClaudeTokenUsageRecord(from: usage)
+    public func upsert(_ usage: ModelProfileUsage) async throws {
+        let record = ModelProfileUsageRecord(from: usage)
         try await writer.write { db in
             try record.save(db)
         }
     }
 
-    public func get(tokenID: UUID) async throws -> ClaudeTokenUsage? {
+    public func get(profileID: UUID) async throws -> ModelProfileUsage? {
         try await writer.read { db in
-            try ClaudeTokenUsageRecord.fetchOne(db, key: tokenID.uuidString)?.toModel()
+            try ModelProfileUsageRecord.fetchOne(db, key: profileID.uuidString)?.toModel()
         }
     }
 
-    public func deleteForToken(id: UUID) async throws {
+    public func deleteForProfile(id: UUID) async throws {
         _ = try await writer.write { db in
-            try ClaudeTokenUsageRecord.deleteOne(db, key: id.uuidString)
+            try ModelProfileUsageRecord.deleteOne(db, key: id.uuidString)
         }
     }
 }

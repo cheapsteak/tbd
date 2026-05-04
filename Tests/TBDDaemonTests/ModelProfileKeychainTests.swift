@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 
-@Suite("ClaudeTokenKeychain")
-struct ClaudeTokenKeychainTests {
+@Suite("ModelProfileKeychain")
+struct ModelProfileKeychainTests {
 
     private func freshID() -> String {
         "test-\(UUID().uuidString)"
@@ -12,32 +12,32 @@ struct ClaudeTokenKeychainTests {
     @Test("store + load round-trip")
     func roundTrip() throws {
         let id = freshID()
-        defer { try? ClaudeTokenKeychain.delete(id: id) }
+        defer { try? ModelProfileKeychain.delete(id: id) }
 
-        try ClaudeTokenKeychain.store(id: id, token: "sk-ant-secret-A")
-        let loaded = try ClaudeTokenKeychain.load(id: id)
+        try ModelProfileKeychain.store(id: id, token: "sk-ant-secret-A")
+        let loaded = try ModelProfileKeychain.load(id: id)
         #expect(loaded == "sk-ant-secret-A")
     }
 
     @Test("store overwrites existing (upsert)")
     func upsert() throws {
         let id = freshID()
-        defer { try? ClaudeTokenKeychain.delete(id: id) }
+        defer { try? ModelProfileKeychain.delete(id: id) }
 
-        try ClaudeTokenKeychain.store(id: id, token: "value-A")
-        try ClaudeTokenKeychain.store(id: id, token: "value-B")
-        let loaded = try ClaudeTokenKeychain.load(id: id)
+        try ModelProfileKeychain.store(id: id, token: "value-A")
+        try ModelProfileKeychain.store(id: id, token: "value-B")
+        let loaded = try ModelProfileKeychain.load(id: id)
         #expect(loaded == "value-B")
     }
 
     @Test("delete removes item")
     func deleteRemoves() throws {
         let id = freshID()
-        defer { try? ClaudeTokenKeychain.delete(id: id) }
+        defer { try? ModelProfileKeychain.delete(id: id) }
 
-        try ClaudeTokenKeychain.store(id: id, token: "to-be-deleted")
-        try ClaudeTokenKeychain.delete(id: id)
-        let loaded = try ClaudeTokenKeychain.load(id: id)
+        try ModelProfileKeychain.store(id: id, token: "to-be-deleted")
+        try ModelProfileKeychain.delete(id: id)
+        let loaded = try ModelProfileKeychain.load(id: id)
         #expect(loaded == nil)
     }
 
@@ -45,13 +45,13 @@ struct ClaudeTokenKeychainTests {
     func deleteIdempotent() throws {
         let id = freshID()
         // No store; delete should not throw.
-        try ClaudeTokenKeychain.delete(id: id)
+        try ModelProfileKeychain.delete(id: id)
     }
 
     @Test("load of nonexistent id returns nil")
     func loadMissing() throws {
         let id = freshID()
-        let loaded = try ClaudeTokenKeychain.load(id: id)
+        let loaded = try ModelProfileKeychain.load(id: id)
         #expect(loaded == nil)
     }
 }

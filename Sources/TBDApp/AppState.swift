@@ -187,7 +187,7 @@ final class AppState: ObservableObject {
     @Published var editingWorktreeID: UUID? = nil
     @Published var isRenamingWorktree = false
     @Published var prStatuses: [UUID: PRStatus] = [:]
-    @Published var claudeTokens: [ClaudeTokenWithUsage] = []
+    @Published var claudeTokens: [ModelProfileWithUsage] = []
     @Published var globalDefaultClaudeTokenID: UUID? = nil
     @Published var historyActiveWorktrees: Set<UUID> = []
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
@@ -366,23 +366,23 @@ final class AppState: ObservableObject {
         switch delta {
         case .notificationReceived(let notification):
             handleNotificationDelta(notification)
-        case .claudeTokenUsageUpdated(let usage):
+        case .modelProfileUsageUpdated(let usage):
             applyClaudeTokenUsageDelta(usage)
-        case .claudeTokensChanged:
+        case .modelProfilesChanged:
             Task { [weak self] in await self?.refreshClaudeTokens() }
         default:
             break
         }
     }
 
-    /// Update the in-place usage entry for a single Claude token. If no match,
+    /// Update the in-place usage entry for a single profile. If no match,
     /// silently ignore — the next full refresh will pick it up.
-    private func applyClaudeTokenUsageDelta(_ usage: ClaudeTokenUsage) {
-        guard let idx = claudeTokens.firstIndex(where: { $0.token.id == usage.tokenID }) else {
+    private func applyClaudeTokenUsageDelta(_ usage: ModelProfileUsage) {
+        guard let idx = claudeTokens.firstIndex(where: { $0.profile.id == usage.profileID }) else {
             return
         }
         let existing = claudeTokens[idx]
-        claudeTokens[idx] = ClaudeTokenWithUsage(token: existing.token, usage: usage)
+        claudeTokens[idx] = ModelProfileWithUsage(profile: existing.profile, usage: usage)
     }
 
     private func handleNotificationDelta(_ notification: NotificationDelta) {

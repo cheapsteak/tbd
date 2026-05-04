@@ -232,15 +232,15 @@ extension WorktreeLifecycle {
             rows: resolvedRows
         )
 
-        // Resolve claude token (repo override → global default → none).
+        // Resolve model profile (repo override → global default → none).
         // Failures here must NOT break worktree creation — fall back to keychain login.
-        var resolvedToken: ResolvedClaudeToken? = nil
-        if !skipClaude, let resolver = claudeTokenResolver {
+        var resolvedProfile: ResolvedModelProfile? = nil
+        if !skipClaude, let resolver = modelProfileResolver {
             do {
-                resolvedToken = try await resolver.resolve(repoID: repo.id)
+                resolvedProfile = try await resolver.resolve(repoID: repo.id)
             } catch {
-                logger.warning("claude token resolution failed; falling back to keychain login")
-                resolvedToken = nil
+                logger.warning("model profile resolution failed; falling back to keychain login")
+                resolvedProfile = nil
             }
         }
 
@@ -248,12 +248,12 @@ extension WorktreeLifecycle {
         let claudeCommand: String
         let claudeSensitiveEnv: [String: String]
         let claudeSessionID: String?
-        let claudeTokenID: UUID?
+        let pinnedProfileID: UUID?
         if skipClaude {
             claudeCommand = defaultShell
             claudeSensitiveEnv = [:]
             claudeSessionID = nil
-            claudeTokenID = nil
+            pinnedProfileID = nil
         } else {
             let sessionUUID = archivedClaudeSessions?.first ?? UUID().uuidString
             claudeSessionID = sessionUUID
@@ -264,14 +264,16 @@ extension WorktreeLifecycle {
                 freshSessionID: sessionUUID,
                 appendSystemPrompt: appendPrompt,
                 initialPrompt: isResume ? nil : initialPrompt,
-                tokenSecret: resolvedToken?.secret,
-                tokenKind: resolvedToken?.kind,
+                profileSecret: resolvedProfile?.secret,
+                profileKind: resolvedProfile?.kind,
+                profileBaseURL: resolvedProfile?.baseURL,
+                profileModel: resolvedProfile?.model,
                 cmd: nil,
                 shellFallback: defaultShell
             )
             claudeCommand = spawn.command
             claudeSensitiveEnv = spawn.sensitiveEnv
-            claudeTokenID = resolvedToken?.tokenID
+            pinnedProfileID = resolvedProfile?.profileID
         }
         let window1 = try await tmux.createWindow(
             server: tmuxServer,
@@ -288,7 +290,7 @@ extension WorktreeLifecycle {
             tmuxPaneID: window1.paneID,
             label: skipClaude ? "shell" : "Claude Code",
             claudeSessionID: claudeSessionID,
-            claudeTokenID: claudeTokenID
+            profileID: pinnedProfileID
         )
 
         // Create terminal 2: setup hook
@@ -321,8 +323,10 @@ extension WorktreeLifecycle {
                     freshSessionID: sessionID,
                     appendSystemPrompt: nil,
                     initialPrompt: nil,
-                    tokenSecret: resolvedToken?.secret,
-                    tokenKind: resolvedToken?.kind,
+                    profileSecret: resolvedProfile?.secret,
+                    profileKind: resolvedProfile?.kind,
+                    profileBaseURL: resolvedProfile?.baseURL,
+                    profileModel: resolvedProfile?.model,
                     cmd: nil,
                     shellFallback: defaultShell
                 )
@@ -341,7 +345,7 @@ extension WorktreeLifecycle {
                     tmuxPaneID: window.paneID,
                     label: "Claude Code",
                     claudeSessionID: sessionID,
-                    claudeTokenID: resolvedToken?.tokenID
+                    profileID: resolvedProfile?.profileID
                 )
             }
         }

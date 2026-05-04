@@ -272,20 +272,20 @@ private struct TabBarItem: View {
 
     private func formatTokenHeader(_ tokenID: UUID?) -> String {
         guard let tokenID else { return "Token: Default (logged in)" }
-        guard let entry = appState.claudeTokens.first(where: { $0.token.id == tokenID }) else {
+        guard let entry = appState.claudeTokens.first(where: { $0.profile.id == tokenID }) else {
             return "Token: (missing)"
         }
-        return "Token: \(entry.token.name)"
+        return "Token: \(entry.profile.name)"
     }
 
-    private func formatTokenSubmenuLabel(_ entry: ClaudeTokenWithUsage) -> String {
-        entry.token.name
+    private func formatTokenSubmenuLabel(_ entry: ModelProfileWithUsage) -> String {
+        entry.profile.name
     }
 
     @ViewBuilder
     private var contextMenuContent: some View {
         if isClaudeTerminal {
-            Button(formatTokenHeader(terminal?.claudeTokenID)) {}
+            Button(formatTokenHeader(terminal?.profileID)) {}
                 .disabled(true)
 
             Menu("Swap token") {
@@ -293,18 +293,18 @@ private struct TabBarItem: View {
                     guard let terminalID = terminal?.id else { return }
                     Task { await appState.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: nil) }
                 } label: {
-                    let prefix = terminal?.claudeTokenID == nil ? "● " : "  "
+                    let prefix = terminal?.profileID == nil ? "● " : "  "
                     Text("\(prefix)Default (logged in)")
                 }
 
                 Divider()
 
-                ForEach(appState.claudeTokens, id: \.token.id) { entry in
+                ForEach(appState.claudeTokens, id: \.profile.id) { entry in
                     Button {
                         guard let terminalID = terminal?.id else { return }
-                        Task { await appState.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: entry.token.id) }
+                        Task { await appState.swapClaudeTokenOnTerminal(terminalID: terminalID, newTokenID: entry.profile.id) }
                     } label: {
-                        let prefix = terminal?.claudeTokenID == entry.token.id ? "● " : "  "
+                        let prefix = terminal?.profileID == entry.profile.id ? "● " : "  "
                         Text("\(prefix)\(formatTokenSubmenuLabel(entry))")
                     }
                 }
@@ -374,15 +374,15 @@ private struct TabBarItem: View {
         }
         switch tab.content {
         case .terminal:
-            if isClaudeTerminal, let tokenID = terminal?.claudeTokenID,
-               let entry = appState.claudeTokens.first(where: { $0.token.id == tokenID }) {
-                let name = entry.token.name
+            if isClaudeTerminal, let tokenID = terminal?.profileID,
+               let entry = appState.claudeTokens.first(where: { $0.profile.id == tokenID }) {
+                let name = entry.profile.name
                 let worktreeID = terminal!.worktreeID
                 let allTabs = appState.tabs[worktreeID] ?? []
                 let allTerminals = appState.terminals[worktreeID] ?? []
                 let sameTokenTerminalIDs = Set(
                     allTerminals
-                        .filter { $0.claudeTokenID == tokenID }
+                        .filter { $0.profileID == tokenID }
                         .map { $0.id }
                 )
                 let sameTokenTabs = allTabs.filter { tab in

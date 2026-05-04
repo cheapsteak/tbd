@@ -1,30 +1,28 @@
 import Foundation
 
-/// File-backed secret store for Claude OAuth tokens.
+/// Stores per-profile secrets (oauth tokens / api keys) in a file-backed
+/// store, keyed by profile id.
 ///
-/// **Naming note:** the type is still `ClaudeTokenKeychain` for historical
-/// reasons — the original implementation used macOS Keychain, but Keychain's
-/// per-binary ACL model is incompatible with an unbundled / unsigned SPM
-/// daemon that rebuilds frequently (each rebuild changes the binary signature
-/// and the legacy keychain's `SecItemCopyMatching` hangs forever waiting on a
-/// user-auth GUI prompt that a background daemon can't display, wedging the
-/// keychain's global mutex for every other thread in the process).
+/// **Storage path note:** the on-disk path `~/.tbd/claude-tokens/<uuid>.token`
+/// MUST NOT change. Existing entries are keyed by it; renaming the directory
+/// would break tokens for users upgrading from the previous build.
 ///
-/// We now write tokens as plain files under `~/.tbd/claude-tokens/<uuid>.token`
-/// with mode 0600 (parent dir 0700). This matches the storage model used by
-/// `claude setup-token` itself (writes to `~/.claude/.credentials.json`), as
-/// well as `gh`, `aws`, `kubectl`, `docker`, `npm`, and most other CLI tools
-/// on macOS. The threat model is effectively equivalent to the Keychain for
-/// the cases that matter (multi-user POSIX perms, FileVault-at-rest) and
-/// strictly better than the deadlock we had with Keychain.
-public enum ClaudeTokenKeychainError: Error, Equatable {
+/// We use plain files under `~/.tbd/claude-tokens/<uuid>.token` with mode 0600
+/// (parent dir 0700). This matches the storage model used by `claude
+/// setup-token` itself, as well as `gh`, `aws`, `kubectl`, `docker`, `npm`,
+/// and most other CLI tools on macOS. The threat model is effectively
+/// equivalent to the macOS Keychain for the cases that matter (multi-user
+/// POSIX perms, FileVault-at-rest) and strictly better than Keychain's
+/// per-binary ACL model for an unbundled / unsigned SPM daemon that rebuilds
+/// frequently.
+public enum ModelProfileKeychainError: Error, Equatable {
     case dataEncoding
     case permissionMismatch(String)
     case ownerMismatch
     case ioFailure(String)
 }
 
-public enum ClaudeTokenKeychain {
+public enum ModelProfileKeychain {
     /// Storage directory. Resolved lazily so tests can override via TMPDIR if needed.
     private static var storageDir: URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -50,17 +48,17 @@ public enum ClaudeTokenKeychain {
         }
     }
 
-    /// Store (or overwrite) a token.
+    /// Store (or overwrite) a secret.
     public static func store(id: String, token: String) throws {
         guard let data = token.data(using: .utf8) else {
-            throw ClaudeTokenKeychainError.dataEncoding
+            throw ModelProfileKeychainError.dataEncoding
         }
         try ensureStorageDir()
         let url = fileURL(id: id)
         do {
             try data.write(to: url, options: [.atomic])
         } catch {
-            throw ClaudeTokenKeychainError.ioFailure(error.localizedDescription)
+            throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
         }
         // Atomic write uses a temp file + rename, which may drop our intended
         // mode bits. Set them explicitly after the write.
@@ -70,9 +68,9 @@ public enum ClaudeTokenKeychain {
         )
     }
 
-    /// Load a token. Returns nil if no file exists for the given id.
+    /// Load a secret. Returns nil if no file exists for the given id.
     /// Throws if the file exists but has wrong mode or wrong owner — we don't
-    /// want to return tokens from a misconfigured restore.
+    /// want to return secrets from a misconfigured restore.
     public static func load(id: String) throws -> String? {
         let url = fileURL(id: id)
         let fm = FileManager.default
@@ -82,20 +80,20 @@ public enum ClaudeTokenKeychain {
         do {
             attrs = try fm.attributesOfItem(atPath: url.path)
         } catch {
-            throw ClaudeTokenKeychainError.ioFailure(error.localizedDescription)
+            throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
         }
 
         if let perms = attrs[.posixPermissions] as? NSNumber {
             let mode = perms.int16Value & 0o777
             if mode != 0o600 {
-                throw ClaudeTokenKeychainError.permissionMismatch(
+                throw ModelProfileKeychainError.permissionMismatch(
                     String(format: "expected 0600, got 0%o", mode)
                 )
             }
         }
         if let ownerID = attrs[.ownerAccountID] as? NSNumber {
             if ownerID.uint32Value != getuid() {
-                throw ClaudeTokenKeychainError.ownerMismatch
+                throw ModelProfileKeychainError.ownerMismatch
             }
         }
 
@@ -103,10 +101,10 @@ public enum ClaudeTokenKeychain {
         do {
             data = try Data(contentsOf: url)
         } catch {
-            throw ClaudeTokenKeychainError.ioFailure(error.localizedDescription)
+            throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
         }
         guard let token = String(data: data, encoding: .utf8) else {
-            throw ClaudeTokenKeychainError.dataEncoding
+            throw ModelProfileKeychainError.dataEncoding
         }
         return token
     }
@@ -119,7 +117,7 @@ public enum ClaudeTokenKeychain {
         do {
             try fm.removeItem(at: url)
         } catch {
-            throw ClaudeTokenKeychainError.ioFailure(error.localizedDescription)
+            throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
         }
     }
 }

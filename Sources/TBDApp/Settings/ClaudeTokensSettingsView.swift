@@ -55,8 +55,8 @@ struct ClaudeTokensSettingsView: View {
                 }
             )) {
                 Text("Default (claude keychain login)").tag(UUID?.none)
-                ForEach(appState.claudeTokens, id: \.token.id) { entry in
-                    Text(entry.token.name).tag(UUID?.some(entry.token.id))
+                ForEach(appState.claudeTokens, id: \.profile.id) { entry in
+                    Text(entry.profile.name).tag(UUID?.some(entry.profile.id))
                 }
             }
             .pickerStyle(.menu)
@@ -67,7 +67,7 @@ struct ClaudeTokensSettingsView: View {
 
     private var tokenList: some View {
         List {
-            ForEach(appState.claudeTokens, id: \.token.id) { entry in
+            ForEach(appState.claudeTokens, id: \.profile.id) { entry in
                 ClaudeTokenRow(entry: entry)
                     .environmentObject(appState)
             }
@@ -89,14 +89,14 @@ struct ClaudeTokensSettingsView: View {
 
 struct ClaudeTokenRow: View {
     @EnvironmentObject var appState: AppState
-    let entry: ClaudeTokenWithUsage
+    let entry: ModelProfileWithUsage
 
     @State private var isEditingName = false
     @State private var draftName = ""
     @State private var showDeleteConfirm = false
 
-    private var token: ClaudeToken { entry.token }
-    private var usage: ClaudeTokenUsage? { entry.usage }
+    private var token: ModelProfile { entry.profile }
+    private var usage: ModelProfileUsage? { entry.usage }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -195,7 +195,7 @@ struct ClaudeTokenRow: View {
         }
     }
 
-    private func resetTooltip(_ usage: ClaudeTokenUsage) -> String {
+    private func resetTooltip(_ usage: ModelProfileUsage) -> String {
         let fiveH = formatRelativeFuture(usage.fiveHourResetsAt)
         let sevenD = formatRelativeFuture(usage.sevenDayResetsAt)
         return "Resets in \(fiveH) (5h) / \(sevenD) (7d)"
@@ -240,7 +240,7 @@ struct ClaudeTokenRow: View {
 
     private var inUseCount: Int {
         appState.terminals.values.reduce(0) { acc, list in
-            acc + list.filter { $0.claudeTokenID == token.id }.count
+            acc + list.filter { $0.profileID == token.id }.count
         }
     }
 
@@ -305,7 +305,7 @@ struct AddClaudeTokenSheet: View {
     private var canSave: Bool {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
         guard !trimmedName.isEmpty, !token.isEmpty, !isSaving else { return false }
-        let duplicate = appState.claudeTokens.contains { $0.token.name == trimmedName }
+        let duplicate = appState.claudeTokens.contains { $0.profile.name == trimmedName }
         return !duplicate
     }
 

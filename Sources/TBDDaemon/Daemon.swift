@@ -104,15 +104,15 @@ public final class Daemon: Sendable {
         let git = GitManager()
         let tmux = TmuxManager()
         let hooks = HookResolver()
-        let claudeTokenResolver = ClaudeTokenResolver(
-            tokens: database.claudeTokens,
+        let modelProfileResolver = ModelProfileResolver(
+            profiles: database.modelProfiles,
             repos: database.repos,
             config: database.config
         )
         let lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
-            claudeTokenResolver: claudeTokenResolver
+            modelProfileResolver: modelProfileResolver
         )
         let prManager = PRStatusManager()
 
@@ -125,7 +125,7 @@ public final class Daemon: Sendable {
             startTime: startTime,
             subscriptions: subs,
             prManager: prManager,
-            claudeTokenResolver: claudeTokenResolver
+            modelProfileResolver: modelProfileResolver
         )
         self.router = rpcRouter
 
@@ -181,12 +181,12 @@ public final class Daemon: Sendable {
 
         // 12b. Start Claude OAuth usage poller (30-min cadence, 30s stagger).
         let poller = ClaudeUsagePoller(
-            tokens: database.claudeTokens,
-            usage: database.claudeTokenUsage,
-            keychain: { id in try ClaudeTokenKeychain.load(id: id) },
+            profiles: database.modelProfiles,
+            usage: database.modelProfileUsage,
+            keychain: { id in try ModelProfileKeychain.load(id: id) },
             fetcher: LiveClaudeUsageFetcher(),
             clock: SystemPollerClock(),
-            broadcast: { [weak subs] row in subs?.broadcastClaudeTokenUsage(row) }
+            broadcast: { [weak subs] row in subs?.broadcastModelProfileUsage(row) }
         )
         self.claudeUsagePoller = poller
         rpcRouter.claudeUsagePoller = poller
