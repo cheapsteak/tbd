@@ -66,8 +66,6 @@ public struct CLIInstallResult: Equatable, Sendable {
 }
 
 public enum CLIInstallerError: Error, Equatable {
-    case daemonExecutablePathUnavailable
-    case cliBinaryNotFound(searched: String)
     case symlinkCreationFailed(String)
 }
 
