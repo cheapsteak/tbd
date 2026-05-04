@@ -130,7 +130,7 @@ final class CLIInstallerCoordinator {
             primaryButton = "Refresh"
         case .nonSymlink:
             alert.messageText = "Replace the file at \(symlinkPath)?"
-            alert.informativeText = "A regular file already exists at \(symlinkPath). TBD can replace it with a symlink to this TBD's CLI."
+            alert.informativeText = "A file already exists at \(symlinkPath). TBD can replace it with a symlink to this TBD's CLI."
             primaryButton = "Replace"
         }
         alert.addButton(withTitle: primaryButton)
