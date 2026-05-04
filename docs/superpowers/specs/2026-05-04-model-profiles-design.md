@@ -87,14 +87,18 @@ The `base_url` and `model` values are not technically secrets, but routing them 
 
 ### Settings → "Model Profiles" pane
 
-Renamed from "Claude Tokens." Same list-of-rows layout. Each row shows name, kind (oauth / api-key), and — if set — a small caption like `via http://127.0.0.1:3456 · gpt-5-codex`.
+Renamed from "Claude Tokens." Same list-of-rows layout. Each row shows name, kind (oauth / api-key), and — if a base URL is set — a small caption. Caption rendering depends on which optional fields are populated:
+
+- `baseURL` set, `model` set → `via {baseURL} · {model}`
+- `baseURL` set, `model` nil → `via {baseURL}` (no trailing separator)
+- `baseURL` nil → no caption (Claude direct, today's UX)
 
 **"+ Add profile"** opens a form with two preset buttons at the top:
 
 - **"Claude (direct)"** — hides the base-URL and model fields. The form collapses to today's add-token form (name + kind + secret).
-- **"Anthropic-compatible proxy"** — shows the base-URL and model fields. Base-URL placeholder: `http://127.0.0.1:3456`. Both fields required when this preset is selected.
+- **"Anthropic-compatible proxy"** — shows the base-URL and model fields. Base-URL placeholder: `http://127.0.0.1:3456`. **Base URL is required; model is optional.** Helper text under the model field: *"Leave blank to pass through whatever model Claude Code selects."* The optional model is essential for pass-through use cases (logging proxies, mitmproxy-style inspection, request recorders) where overriding the model would defeat the proxy's purpose.
 
-On save, TBD performs a lightweight health probe of `base_url` (HTTP `GET <base_url>` or a minimal `/v1/messages` request — implementation detail to be decided in the plan) and surfaces the outcome inline. A failed probe is a **warning**, not a save-blocker — the proxy might just not be running yet.
+On save, TBD performs a lightweight health probe of `base_url` and surfaces the outcome inline. A failed probe is a **warning**, not a save-blocker — the proxy might just not be running yet. The probe uses a **TCP connect** (resolve host, attempt to open the port) rather than an HTTP request: a bare `GET <base_url>` returns 404/405 against api.anthropic.com and most proxies, which would warn on entirely correct configs. TCP connect is the cheapest no-false-positive reachability signal. (A future enhancement could send a minimal `/v1/messages` POST, but only if the user supplies a real-traffic credential, which we don't want to do unsolicited.)
 
 A future "Codex via CCR" preset (option C from brainstorming) is explicitly deferred. We can add it as a third button later without schema changes.
 
@@ -142,6 +146,10 @@ Following the project's branching-conditional rule (`CLAUDE.md`): each new gate 
 
 ## Open questions for the implementation plan
 
-- Exact shape of the health-probe request (HTTP HEAD vs. minimal `/v1/messages` vs. just TCP connect).
 - Whether the per-repo default picker UI needs any visual changes beyond the rename.
 - Migration ordering relative to any pending migrations on `main`.
+
+## Resolved design questions
+
+- **Health probe shape:** TCP connect (resolved 2026-05-04). Bare HTTP GET would 404/405 against api.anthropic.com and most proxies — would warn on correct configs. Cheapest no-false-positive signal.
+- **Model field on proxy preset:** optional, not required (resolved 2026-05-04). Pass-through use cases (logging proxies, mitmproxy, request recorders) need to forward whatever model Claude Code negotiates without override. Schema was already nullable; only form validation and helper copy change.
