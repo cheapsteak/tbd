@@ -106,9 +106,18 @@ struct ExpandingRowAnchorView: NSViewRepresentable {
 @MainActor
 final class ExpandingRowPanel {
     private static var panel: NSPanel?
+    private static var hosting: NSHostingView<AnyView>?
+    private static var bg: NSView?
     private static var clickMonitor: Any?
     private static var currentOnClick: (() -> Void)?
     private static var currentPanelFrame: NSRect = .zero
+    private static var currentIsDark: Bool?
+    // Cached inputs to avoid recomputing fittingSize on every hover tick.
+    // fittingSize forces a layout pass on the hosting view; doing it 60×/sec
+    // during hover is part of what blew the per-window update-constraints
+    // budget that surfaced as NSGenericException.
+    private static var lastFittingSize: NSSize?
+    private static var lastFittingInputs: (screenW: CGFloat, screenH: CGFloat, insetX: CGFloat)?
 
     static func show<V: View>(
         content: V,
@@ -118,6 +127,22 @@ final class ExpandingRowPanel {
         onClick: (() -> Void)?
     ) {
         guard let parentWindow else { return }
+
+        // Cheap geometry rejection BEFORE allocating any AppKit views. Most
+        // hover ticks on non-truncated rows hit this path.
+        // Width-relevant inputs for fittingSize are screen height (frame max
+        // height) and the trailing padding on content. If those haven't changed
+        // we can reuse last known fittingSize and short-circuit early.
+        let inputs = (screenW: screenFrame.width, screenH: screenFrame.height, insetX: contentInset.x)
+        if let cached = lastFittingSize,
+           let prev = lastFittingInputs,
+           prev == inputs {
+            let totalWidth = contentInset.x + cached.width
+            if totalWidth <= screenFrame.width + 2 {
+                hide()
+                return
+            }
+        }
 
         let panel = self.panel ?? {
             let p = NSPanel(
@@ -137,18 +162,45 @@ final class ExpandingRowPanel {
             return p
         }()
 
-        let hosting = NSHostingView(rootView: AnyView(
-            content
-                .padding(.trailing, 6)
-                .frame(maxHeight: .infinity)
-        ))
-        // Use frame-based layout, not AutoLayout. Mixing manual `frame =` (set
-        // below) with the default translatesAutoresizingMaskIntoConstraints=false
-        // makes NSHostingView keep posting setNeedsUpdateConstraints up to the
-        // panel's window every layout pass — AppKit then aborts with
-        // "more Update Constraints in Window passes than there are views".
-        hosting.translatesAutoresizingMaskIntoConstraints = true
-        let fittingSize = hosting.fittingSize
+        // Persist ONE NSHostingView and ONE bg NSView for the panel's lifetime.
+        // Reassigning panel.contentView and re-allocating NSHostingView on every
+        // hover tick is what triggered "more Update Constraints in Window passes
+        // than there are views" — each rebuild forces a fresh constraint pass
+        // against the panel's window and we exhaust AppKit's per-window budget.
+        let hosting: NSHostingView<AnyView>
+        if let existing = self.hosting {
+            hosting = existing
+            hosting.rootView = AnyView(
+                content
+                    .padding(.trailing, 6)
+                    .frame(maxHeight: .infinity)
+            )
+        } else {
+            hosting = NSHostingView(rootView: AnyView(
+                content
+                    .padding(.trailing, 6)
+                    .frame(maxHeight: .infinity)
+            ))
+            // Use frame-based layout, not AutoLayout. Mixing manual `frame =`
+            // with the default translatesAutoresizingMaskIntoConstraints=false
+            // makes NSHostingView keep posting setNeedsUpdateConstraints up to
+            // the panel's window every layout pass.
+            hosting.translatesAutoresizingMaskIntoConstraints = true
+            self.hosting = hosting
+        }
+
+        // Recompute fittingSize only when the cache is stale.
+        let fittingSize: NSSize
+        if let cached = lastFittingSize,
+           let prev = lastFittingInputs,
+           prev == inputs,
+           self.hosting != nil {
+            fittingSize = cached
+        } else {
+            fittingSize = hosting.fittingSize
+            lastFittingSize = fittingSize
+            lastFittingInputs = inputs
+        }
         let totalWidth = contentInset.x + fittingSize.width
 
         guard totalWidth > screenFrame.width + 2 else {
@@ -163,46 +215,58 @@ final class ExpandingRowPanel {
             height: screenFrame.height
         )
 
-        // If already showing the same panel frame, no-op. Hover events fire
-        // repeatedly during mouse-move; rebuilding the content view each time
-        // amplifies layout pressure and trips AppKit's update-constraints cap.
-        if self.panel != nil, panel.isVisible, currentPanelFrame == panelFrame {
-            currentOnClick = onClick
-            return
+        let bg: NSView
+        if let existing = self.bg {
+            bg = existing
+            bg.frame = NSRect(origin: .zero, size: panelFrame.size)
+        } else {
+            bg = NSView(frame: NSRect(origin: .zero, size: panelFrame.size))
+            bg.translatesAutoresizingMaskIntoConstraints = true
+            bg.wantsLayer = true
+            bg.layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
+            bg.layer?.cornerRadius = 5
+            bg.addSubview(hosting)
+            self.bg = bg
+            // Set contentView exactly once for the panel's lifetime.
+            panel.contentView = bg
         }
 
-        let bg = NSView(frame: NSRect(origin: .zero, size: panelFrame.size))
-        bg.translatesAutoresizingMaskIntoConstraints = true
-        bg.wantsLayer = true
         // windowBackgroundColor resolves to pure white in light mode, which is
         // too bright for the sidebar's vibrancy-tinted gray. Use approximate
-        // sidebar background values instead.
+        // sidebar background values instead. Only rewrite the layer color
+        // when appearance actually changes — cheap, but not free.
         let isDark = parentWindow.effectiveAppearance
             .bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let bgColor = isDark
-            ? NSColor(white: 0.157, alpha: 1.0)   // ≈ #282828, macOS dark sidebar
-            : NSColor(white: 241.0 / 255.0, alpha: 1.0)   // ≈ #F1F1F1, measured via Digital Color Meter
-        bg.layer?.backgroundColor = bgColor.cgColor
-        bg.layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
-        bg.layer?.cornerRadius = 5
+        if currentIsDark != isDark {
+            let bgColor = isDark
+                ? NSColor(white: 0.157, alpha: 1.0)   // ≈ #282828, macOS dark sidebar
+                : NSColor(white: 241.0 / 255.0, alpha: 1.0)   // ≈ #F1F1F1, measured via Digital Color Meter
+            bg.layer?.backgroundColor = bgColor.cgColor
+            currentIsDark = isDark
+        }
 
-        hosting.frame = NSRect(
+        let newHostingFrame = NSRect(
             x: contentInset.x,
             y: 0,
             width: fittingSize.width,
             height: panelFrame.height
         )
+        if hosting.frame != newHostingFrame {
+            hosting.frame = newHostingFrame
+        }
 
-        bg.addSubview(hosting)
-        panel.contentView = bg
-        panel.setFrame(panelFrame, display: true)
-        currentPanelFrame = panelFrame
+        if currentPanelFrame != panelFrame {
+            panel.setFrame(panelFrame, display: true)
+            currentPanelFrame = panelFrame
+        }
         currentOnClick = onClick
 
         if panel.parent == nil {
             parentWindow.addChildWindow(panel, ordered: .above)
         }
-        panel.orderFront(nil)
+        if !panel.isVisible {
+            panel.orderFront(nil)
+        }
 
         // Local event monitor intercepts clicks in the panel's screen area.
         // The panel ignores mouse events (for hover), but we catch clicks
