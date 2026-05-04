@@ -201,7 +201,8 @@ private enum ProbeStatus: Equatable {
 }
 
 // Map a daemon health-probe failure detail into a user-facing warning.
-func probeWarningMessage(for detail: String?) -> String? {
+// Always returns a non-empty string — both branches produce a message.
+func probeWarningMessage(for detail: String?) -> String {
     guard let detail, !detail.isEmpty else { return "Could not verify reachability. Saving anyway." }
     return "Unreachable — \(detail). Saving anyway."
 }
@@ -331,10 +332,8 @@ struct AddModelProfileSheet: View {
                 await MainActor.run {
                     if result.reachable {
                         probeStatus = .ok(result.statusCode)
-                    } else if let msg = probeWarningMessage(for: result.detail) {
-                        probeStatus = .warn(msg)
                     } else {
-                        probeStatus = .idle
+                        probeStatus = .warn(probeWarningMessage(for: result.detail))
                     }
                 }
             }
@@ -441,10 +440,8 @@ struct EditEndpointSheet: View {
             await MainActor.run {
                 if result.reachable {
                     probeStatus = .ok(result.statusCode)
-                } else if let msg = probeWarningMessage(for: result.detail) {
-                    probeStatus = .warn(msg)
                 } else {
-                    probeStatus = .idle
+                    probeStatus = .warn(probeWarningMessage(for: result.detail))
                 }
             }
             let priorAlert = await MainActor.run { appState.alertMessage }
