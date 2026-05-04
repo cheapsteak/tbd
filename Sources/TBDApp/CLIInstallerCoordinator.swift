@@ -80,7 +80,7 @@ final class CLIInstallerCoordinator {
         let kind: CLILaunchPromptKind
         switch state {
         case .installed:
-            presentAlreadyInstalledAlert(target: target)
+            await presentAlreadyInstalledAlert(target: target)
             return
         case .notInstalled:
             kind = .missing
@@ -202,7 +202,7 @@ final class CLIInstallerCoordinator {
         }
     }
 
-    private func presentAlreadyInstalledAlert(target: String) {
+    private func presentAlreadyInstalledAlert(target: String) async {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "tbd is already installed"
@@ -210,9 +210,7 @@ final class CLIInstallerCoordinator {
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Reinstall")
         if alert.runModal() == .alertSecondButtonReturn {
-            Task { @MainActor in
-                await self.performInstall(target: target)
-            }
+            await performInstall(target: target)
         }
     }
 
