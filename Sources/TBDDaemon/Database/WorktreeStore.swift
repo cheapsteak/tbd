@@ -19,6 +19,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var tmuxServer: String
     var archivedClaudeSessions: String?
     var sortOrder: Int
+    var archivedHeadSHA: String?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -33,6 +34,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.archivedAt = wt.archivedAt
         self.tmuxServer = wt.tmuxServer
         self.sortOrder = wt.sortOrder
+        self.archivedHeadSHA = wt.archivedHeadSHA
         if let sessions = wt.archivedClaudeSessions {
             self.archivedClaudeSessions = try? String(
                 data: JSONEncoder().encode(sessions), encoding: .utf8)
@@ -58,7 +60,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             archivedAt: archivedAt,
             tmuxServer: tmuxServer,
             archivedClaudeSessions: sessions,
-            sortOrder: sortOrder
+            sortOrder: sortOrder,
+            archivedHeadSHA: archivedHeadSHA
         )
     }
 }
@@ -252,6 +255,17 @@ public struct WorktreeStore: Sendable {
                 throw DatabaseError(message: "Worktree not found")
             }
             record.path = path
+            try record.update(db)
+        }
+    }
+
+    /// Update the archived HEAD SHA for a worktree (captured at archive time).
+    public func updateArchivedHeadSHA(id: UUID, sha: String?) async throws {
+        try await writer.write { db in
+            guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Worktree not found")
+            }
+            record.archivedHeadSHA = sha
             try record.update(db)
         }
     }

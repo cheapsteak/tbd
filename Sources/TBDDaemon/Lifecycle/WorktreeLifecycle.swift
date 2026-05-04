@@ -2,7 +2,7 @@ import Foundation
 import TBDShared
 
 /// Errors that can occur during worktree lifecycle operations.
-public enum WorktreeLifecycleError: Error, CustomStringConvertible {
+public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedError {
     case repoNotFound(UUID)
     case worktreeNotFound(UUID)
     case worktreeNotArchived(UUID)
@@ -11,6 +11,9 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible {
     case invalidOperation(String)
     case worktreePathAlreadyExists(String)
     case worktreeAlreadyRegistered(String)
+    /// The archived worktree's branch no longer exists and we have no captured
+    /// HEAD SHA to fall back to — there's no safe way to recreate the working tree.
+    case branchMissingNoFallback(branch: String)
 
     public var description: String {
         switch self {
@@ -30,8 +33,12 @@ public enum WorktreeLifecycleError: Error, CustomStringConvertible {
             return "Cannot revive worktree: a file or directory already exists at \(path). Remove or move it and try again."
         case .worktreeAlreadyRegistered(let path):
             return "Cannot revive worktree: git already has a worktree registered at \(path). Run `git worktree remove \(path)` (or `git worktree prune`) from the main repo and try again."
+        case .branchMissingNoFallback(let branch):
+            return "Cannot revive worktree: branch '\(branch)' no longer exists in the repository, and no archived HEAD SHA was captured to fall back to. The branch may have been renamed or deleted before this worktree was archived."
         }
     }
+
+    public var errorDescription: String? { description }
 }
 
 /// Orchestrates the full lifecycle of worktrees: create, archive, revive, and reconcile.

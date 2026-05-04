@@ -166,6 +166,11 @@ public final class Daemon: Sendable {
             print("[Daemon] Warning: Failed to list repos for reconciliation: \(error)")
         }
 
+        // 11a. Backfill archived worktrees whose branch is missing — repairs
+        // rows whose branch was renamed before archive captured the new name.
+        // Idempotent and best-effort; never throws.
+        await ArchivedWorktreeBackfill(db: database, git: git).run()
+
         // 11b. Validate repo health — flips repos with stale paths to .missing.
         //      Must come *after* reconcile so newly-discovered worktrees see the
         //      correct status, and *before* the periodic tasks so users get accurate

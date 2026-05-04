@@ -92,6 +92,7 @@ extension AppState {
         } catch {
             revivingArchived.removeValue(forKey: id)
             logger.error("Failed to revive worktree: \(error)")
+            showAlert("Couldn't revive worktree: \(error.localizedDescription)", isError: true)
             handleConnectionError(error)
         }
     }

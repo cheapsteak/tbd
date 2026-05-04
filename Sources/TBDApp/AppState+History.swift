@@ -143,6 +143,8 @@ extension AppState {
             await refreshArchivedWorktrees(repoID: snapshot.repoID)
         } catch {
             revivingArchived.removeValue(forKey: worktreeID)
+            logger.error("reviveWithSession failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+            showAlert("Couldn't revive worktree: \(error.localizedDescription)", isError: true)
             handleConnectionError(error)
         }
     }

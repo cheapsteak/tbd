@@ -101,6 +101,38 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["worktree", "add", worktreePath, branch], at: repoPath)
     }
 
+    /// Adds a worktree at `worktreePath`, creating a new branch pointing at the given SHA.
+    /// Used as a fallback when the original branch was renamed/deleted but we have the
+    /// archived HEAD SHA to recover the commit.
+    public func worktreeAddNewBranch(repoPath: String, worktreePath: String, branch: String, sha: String) async throws {
+        _ = try await run(
+            arguments: ["worktree", "add", "-b", branch, worktreePath, sha],
+            at: repoPath
+        )
+    }
+
+    /// Returns the HEAD SHA of a worktree directory.
+    public func headSHA(worktreePath: String) async throws -> String {
+        let output = try await run(arguments: ["rev-parse", "HEAD"], at: worktreePath)
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Returns true if the given branch / ref name resolves in the repo.
+    public func refExists(repoPath: String, ref: String) async -> Bool {
+        do {
+            _ = try await run(arguments: ["rev-parse", "--verify", "--quiet", ref], at: repoPath)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Returns the raw output of `git log -g --all --pretty=%H %gs` for reflog mining.
+    /// Used by the archived-worktree backfill to discover branch renames.
+    public func reflogAll(repoPath: String) async throws -> String {
+        return try await run(arguments: ["log", "-g", "--all", "--pretty=%H %gs"], at: repoPath)
+    }
+
     /// Removes a worktree at the given path.
     public func worktreeRemove(repoPath: String, worktreePath: String) async throws {
         _ = try await run(arguments: ["worktree", "remove", worktreePath, "--force"], at: repoPath)
