@@ -244,7 +244,7 @@ public struct CLIInstaller: Sendable {
 
         return await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
             // Guard against double-resume (terminationHandler vs timeout race).
-            let resumed = ManagedAtomicBool()
+            let resumed = OnceFlag()
             let resume: @Sendable (String?) -> Void = { value in
                 if resumed.exchange(true) { return }
                 cont.resume(returning: value)
@@ -278,10 +278,10 @@ public struct CLIInstaller: Sendable {
     }
 }
 
-/// Lock-protected bool used to gate single-resume semantics on the probe
-/// continuation. `swift-atomics` is not in this package's deps, so a tiny
-/// `NSLock`-backed flag does the job.
-private final class ManagedAtomicBool: @unchecked Sendable {
+/// One-shot flag used to gate single-resume semantics on the probe
+/// continuation when terminationHandler and the timeout race. `swift-atomics`
+/// is not in this package's deps, so a tiny `NSLock`-backed flag does the job.
+private final class OnceFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
     /// Sets the flag to true and returns the *previous* value.
