@@ -41,13 +41,17 @@ private func tbdPersistException(_ ns: NSException) {
         var windowDescription = "<none>"
         if let info = ns.userInfo,
            let window = info.values.first(where: { $0 is NSWindow }) as? NSWindow {
-            // Best-effort — accessing AppKit off main is unsafe, so guard.
+            // Best-effort — NSWindow properties are MainActor-isolated, so
+            // gate on a main-thread runtime check and use assumeIsolated to
+            // satisfy the Swift concurrency checker.
             if Thread.isMainThread {
-                let frame = window.frame
-                let title = window.title
-                let cls = String(describing: type(of: window))
-                let contentCls = window.contentView.map { String(describing: type(of: $0)) } ?? "<nil>"
-                windowDescription = "class=\(cls) title=\"\(title)\" frame=\(frame) contentView=\(contentCls)"
+                windowDescription = MainActor.assumeIsolated {
+                    let frame = window.frame
+                    let title = window.title
+                    let cls = String(describing: type(of: window))
+                    let contentCls = window.contentView.map { String(describing: type(of: $0)) } ?? "<nil>"
+                    return "class=\(cls) title=\"\(title)\" frame=\(frame) contentView=\(contentCls)"
+                }
             } else {
                 windowDescription = "<NSWindow present in userInfo, not on main thread — skipped introspection>"
             }
@@ -90,7 +94,7 @@ private func tbdPersistException(_ ns: NSException) {
 
         if let handle = try? FileHandle(forWritingTo: appendURL) {
             defer { try? handle.close() }
-            try? handle.seekToEnd()
+            _ = try? handle.seekToEnd()
             if let data = report.data(using: .utf8) {
                 try? handle.write(contentsOf: data)
             }
