@@ -169,37 +169,30 @@ public struct CLIInstaller: Sendable {
 
     static func shellRCAndExport(forShellPath shellPath: String, binDir: String, homeDir: String) -> (rc: String, exportLine: String) {
         let shellName = (shellPath as NSString).lastPathComponent.lowercased()
-        let displayBinDir = displayPath(binDir, homeDir: homeDir)
+        // Use $HOME (not ~) so the path expands inside quoted strings —
+        // bash/zsh don't expand ~ inside double quotes; fish doesn't expand
+        // anything inside single quotes. Double-quoting keeps space-safety.
+        let exportPath = shellExpandable(binDir, homeDir: homeDir)
         switch shellName {
         case "fish":
-            let rc = "~/.config/fish/config.fish"
-            let line: String
-            if displayBinDir == "~/.local/bin" {
-                line = "set -gx PATH $HOME/.local/bin $PATH"
-            } else {
-                // Single-quote so paths with spaces don't word-split.
-                line = "set -gx PATH '\(displayBinDir)' $PATH"
-            }
-            return (rc, line)
+            return ("~/.config/fish/config.fish", "set -gx PATH \"\(exportPath)\" $PATH")
         case "bash":
-            let rc = "~/.bash_profile"
-            let line: String
-            if displayBinDir == "~/.local/bin" {
-                line = "export PATH=\"$HOME/.local/bin:$PATH\""
-            } else {
-                line = "export PATH=\"\(displayBinDir):$PATH\""
-            }
-            return (rc, line)
+            return ("~/.bash_profile", "export PATH=\"\(exportPath):$PATH\"")
         default:
-            let rc = "~/.zshrc"
-            let line: String
-            if displayBinDir == "~/.local/bin" {
-                line = "export PATH=\"$HOME/.local/bin:$PATH\""
-            } else {
-                line = "export PATH=\"\(displayBinDir):$PATH\""
-            }
-            return (rc, line)
+            return ("~/.zshrc", "export PATH=\"\(exportPath):$PATH\"")
         }
+    }
+
+    /// Render a path as `$HOME/...` if it's under the home dir, else the
+    /// absolute path. Suitable for embedding inside double-quoted strings
+    /// in bash/zsh and fish, where `~` would NOT be expanded.
+    static func shellExpandable(_ path: String, homeDir: String) -> String {
+        let abs = absolutize(path, relativeTo: homeDir, homeDir: homeDir)
+        if abs == homeDir { return "$HOME" }
+        if abs.hasPrefix(homeDir + "/") {
+            return "$HOME" + abs.dropFirst(homeDir.count)
+        }
+        return abs
     }
 
     /// Render a path as `~/...` if it's under the home dir, else the absolute path.

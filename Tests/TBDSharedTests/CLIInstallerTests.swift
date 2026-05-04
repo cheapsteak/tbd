@@ -239,17 +239,32 @@ private func makeFile(_ path: String) throws {
     let result = try await installer.install(target: target)
     #expect(result.onPath == false)
     #expect(result.suggestedShellRC == "~/.config/fish/config.fish")
-    #expect(result.exportLine == "set -gx PATH $HOME/.local/bin $PATH")
+    #expect(result.exportLine == "set -gx PATH \"$HOME/.local/bin\" $PATH")
 }
 
-@Test func fishExportLineQuotesNonDefaultBinDirToHandleSpaces() {
+@Test func fishExportLineUsesHomeAndDoubleQuotesForNonDefaultBinDirWithSpaces() {
+    // Tilde is NOT expanded inside fish single quotes, and $HOME is NOT
+    // expanded inside single quotes either — so we use $HOME inside double
+    // quotes, which both expands and preserves spaces.
     let (rc, line) = CLIInstaller.shellRCAndExport(
         forShellPath: "/usr/local/bin/fish",
         binDir: "/Users/me/Library/Application Support/tbd/bin",
         homeDir: "/Users/me"
     )
     #expect(rc == "~/.config/fish/config.fish")
-    #expect(line == "set -gx PATH '~/Library/Application Support/tbd/bin' $PATH")
+    #expect(line == "set -gx PATH \"$HOME/Library/Application Support/tbd/bin\" $PATH")
+}
+
+@Test func bashExportLineUsesHomeForPathsOutsideHome() {
+    // $HOME prefix only applies under the home dir; absolute paths elsewhere
+    // are embedded as-is and the surrounding double quotes keep them intact.
+    let (rc, line) = CLIInstaller.shellRCAndExport(
+        forShellPath: "/bin/bash",
+        binDir: "/opt/tbd/bin",
+        homeDir: "/Users/me"
+    )
+    #expect(rc == "~/.bash_profile")
+    #expect(line == "export PATH=\"/opt/tbd/bin:$PATH\"")
 }
 
 @Test func pathProbeReturningNilTreatedAsOffPath() async throws {
