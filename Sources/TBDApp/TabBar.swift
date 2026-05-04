@@ -418,10 +418,10 @@ private struct TabBarItem: View {
         }
         switch tab.content {
         case .terminal:
-            if isClaudeTerminal, let profileID = terminal?.profileID,
+            if isClaudeTerminal, let terminal, let profileID = terminal.profileID,
                let entry = appState.modelProfiles.first(where: { $0.profile.id == profileID }) {
                 let name = entry.profile.name
-                let worktreeID = terminal!.worktreeID
+                let worktreeID = terminal.worktreeID
                 let allTabs = appState.tabs[worktreeID] ?? []
                 let allTerminals = appState.terminals[worktreeID] ?? []
                 let sameTokenTerminalIDs = Set(
@@ -435,7 +435,7 @@ private struct TabBarItem: View {
                     }
                     return false
                 }
-                let myTerminalID = terminal!.id
+                let myTerminalID = terminal.id
                 let position = (sameTokenTabs.firstIndex { tab in
                     if case .terminal(let tID) = tab.content { return tID == myTerminalID }
                     return false
