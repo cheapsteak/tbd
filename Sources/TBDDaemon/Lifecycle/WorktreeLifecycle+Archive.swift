@@ -45,7 +45,6 @@ extension WorktreeLifecycle {
         // so a rename done inside the worktree (e.g. `git branch -m`) is
         // captured before we lose the live worktree. Without this, revive
         // would later try to check out a stale branch that no longer exists.
-        var resolvedBranch = worktree.branch
         // git canonicalizes worktree paths (e.g. /var → /private/var on macOS),
         // so compare resolved-symlink forms when matching against `worktree.path`.
         let resolvedWtPath = (URL(fileURLWithPath: worktree.path).resolvingSymlinksInPath()).path
@@ -58,7 +57,6 @@ extension WorktreeLifecycle {
            gitWt.branch != worktree.branch {
             do {
                 try await db.worktrees.updateBranch(id: worktreeID, branch: gitWt.branch)
-                resolvedBranch = gitWt.branch
                 archiveLogger.info("archive: updated branch for \(worktreeID, privacy: .public) from '\(worktree.branch, privacy: .public)' to '\(gitWt.branch, privacy: .public)' (git worktree list)")
             } catch {
                 archiveLogger.warning("archive: failed to update branch for \(worktreeID, privacy: .public): \(error, privacy: .public)")
@@ -83,7 +81,6 @@ extension WorktreeLifecycle {
                 archiveLogger.warning("archive: failed to persist archivedHeadSHA for \(worktreeID, privacy: .public): \(error, privacy: .public)")
             }
         }
-        _ = resolvedBranch
 
         // Update DB status and save sessions in one transaction
         try await db.worktrees.archive(id: worktreeID, claudeSessionIDs: claudeSessionIDs)
