@@ -38,6 +38,13 @@ extension RPCRouter {
             return RPCResponse(error: "Token contains invalid characters (newlines or NULL bytes are not allowed)")
         }
 
+        // OAuth/api-key tokens get caught by the prefix check below, but proxy
+        // profiles (baseURL set) accept any non-empty string and would happily
+        // store an empty token, then inject `ANTHROPIC_API_KEY=` at spawn.
+        guard !trimmed.isEmpty else {
+            return RPCResponse(error: "Token cannot be empty")
+        }
+
         // Infer credential kind. Claude-direct profiles must look like a Claude
         // OAuth token or API key; proxy profiles (baseURL set) accept any
         // string (the proxy decides what's valid).

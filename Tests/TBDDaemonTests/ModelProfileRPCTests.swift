@@ -169,6 +169,43 @@ struct ModelProfileRPCTests {
         #expect(try await db.modelProfiles.list().isEmpty)
     }
 
+    @Test("add: empty token rejected for proxy profiles")
+    func addProxyEmptyTokenRejected() async throws {
+        let (router, db, stub) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "EmptyProxy",
+                token: "",
+                baseURL: "http://127.0.0.1:3456",
+                model: nil
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error == "Token cannot be empty")
+        #expect(stub.callCount == 0)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("add: whitespace-only token rejected for proxy profiles")
+    func addProxyWhitespaceTokenRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "WhitespaceProxy",
+                token: "   ",
+                baseURL: "http://127.0.0.1:3456",
+                model: nil
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error == "Token cannot be empty")
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
     @Test("add: duplicate name rejected")
     func addDuplicateName() async throws {
         let stub = StubClaudeUsageFetcher(responses: [.ok(sampleUsage())])
