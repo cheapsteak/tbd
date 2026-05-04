@@ -695,14 +695,18 @@ extension RPCRouter {
             version: TBDConstants.version,
             uptime: uptime,
             connectedClients: 0,  // Will be updated when socket server is implemented
-            executablePath: Self.resolvedExecutablePath()
+            executablePath: Self.resolvedExecutablePath
         )
         return try RPCResponse(result: status)
     }
 
-    /// Resolve the daemon's own executable path to an absolute, standardized
-    /// path. Falls back to nil if no usable argv[0] is available.
-    private static func resolvedExecutablePath() -> String? {
+    /// Daemon's own executable path, resolved once at module load. Captures
+    /// CWD at startup (rather than at each `daemon.status` RPC) so a later
+    /// `chdir` can't make the resolution wrong if `argv[0]` is relative.
+    /// Symlinks are followed so we return the real binary path — `cliPath()`
+    /// looks for `TBDCLI` next to the actual TBDDaemon binary, not next to
+    /// a symlink that points at it.
+    private static let resolvedExecutablePath: String? = {
         guard let argv0 = CommandLine.arguments.first, !argv0.isEmpty else { return nil }
         let url: URL
         if argv0.hasPrefix("/") {
@@ -711,11 +715,8 @@ extension RPCRouter {
             let cwd = FileManager.default.currentDirectoryPath
             url = URL(fileURLWithPath: argv0, relativeTo: URL(fileURLWithPath: cwd))
         }
-        // Resolve symlinks so we return the real binary path — `cliPath()`
-        // expects to find `TBDCLI` next to the actual TBDDaemon binary, not
-        // next to a symlink that points at it.
         return url.resolvingSymlinksInPath().standardizedFileURL.path
-    }
+    }()
 
     // MARK: - Resolve Path
 
