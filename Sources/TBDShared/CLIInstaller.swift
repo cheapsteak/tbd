@@ -248,8 +248,12 @@ public struct CLIInstaller: Sendable {
                       let output = String(data: data, encoding: .utf8) else {
                     resume(nil); return
                 }
-                let firstLine = output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first.map(String.init) ?? ""
-                let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+                // Interactive shells (-i) source rc files that may print
+                // banners (nvm/rbenv version notices, welcome messages) to
+                // stdout *before* our `echo $PATH`, so PATH is always the
+                // last non-empty line.
+                let lastLine = output.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).last.map(String.init) ?? ""
+                let trimmed = lastLine.trimmingCharacters(in: .whitespaces)
                 resume(trimmed.isEmpty ? nil : trimmed)
             }
 
