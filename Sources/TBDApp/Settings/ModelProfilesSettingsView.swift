@@ -354,7 +354,14 @@ struct AddModelProfileSheet: View {
                     appState.alertMessage = priorAlert
                     return
                 }
-                _ = warning
+                // OAuth-add returned a non-nil verification warning (e.g. 429
+                // or network error from the Anthropic usage endpoint). Show it
+                // inline and keep the sheet open — the user must acknowledge
+                // before deciding whether to keep the unverified profile.
+                if let warning {
+                    errorMessage = warning
+                    return
+                }
                 dismiss()
             }
         }
