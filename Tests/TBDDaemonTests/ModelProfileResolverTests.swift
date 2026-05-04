@@ -116,6 +116,44 @@ struct ModelProfileResolverTests {
         }
     }
 
+    @Test func loadByID_bypassesPrecedence_andCarriesBaseURLAndModel() async throws {
+        let (db, box, resolver) = try makeHarness()
+        // Default profile is "Default" — would normally win the precedence chain.
+        let def = try await db.modelProfiles.create(
+            name: "Default",
+            kind: .oauth,
+            baseURL: nil,
+            model: nil
+        )
+        try await db.config.setDefaultProfileID(def.id)
+        box.map[def.id.uuidString] = "secret-default"
+
+        // Pinned profile carries baseURL + model (proxy endpoint).
+        let pinned = try await db.modelProfiles.create(
+            name: "Pinned",
+            kind: .apiKey,
+            baseURL: "https://proxy.example.com",
+            model: "claude-3-5-sonnet-20241022"
+        )
+        box.map[pinned.id.uuidString] = "secret-pinned"
+
+        // loadByID returns the pinned profile, NOT the default.
+        let result = try await resolver.loadByID(pinned.id)
+        #expect(result?.profileID == pinned.id)
+        #expect(result?.name == "Pinned")
+        #expect(result?.kind == .apiKey)
+        #expect(result?.baseURL == "https://proxy.example.com")
+        #expect(result?.model == "claude-3-5-sonnet-20241022")
+        #expect(result?.secret == "secret-pinned")
+    }
+
+    @Test func loadByID_keychainMissing_returnsNil() async throws {
+        let (db, _, resolver) = try makeHarness()
+        let p = try await db.modelProfiles.create(name: "P", kind: .apiKey)
+        let result = try await resolver.loadByID(p.id)
+        #expect(result == nil)
+    }
+
     @Test func resolve_failure_doesNotBumpLastUsedAt() async throws {
         let (db, _, resolver) = try makeHarness()
         let tok = try await db.modelProfiles.create(name: "T", kind: .oauth)

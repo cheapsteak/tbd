@@ -64,4 +64,52 @@ struct ModelProfileMigrationTests {
             #expect(!termCols.contains("claude_token_id"))
         }
     }
+
+    @Test("ModelProfile round-trips through the store with baseURL/model nil and non-nil")
+    func dataPreservationRoundTrip() async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        // Case 1: baseURL = nil, model = nil — Anthropic-direct profile.
+        let direct = try await db.modelProfiles.create(
+            name: "Direct",
+            kind: .oauth,
+            baseURL: nil,
+            model: nil
+        )
+        let directReloaded = try await db.modelProfiles.get(id: direct.id)
+        #expect(directReloaded?.id == direct.id)
+        #expect(directReloaded?.name == "Direct")
+        #expect(directReloaded?.kind == .oauth)
+        #expect(directReloaded?.baseURL == nil)
+        #expect(directReloaded?.model == nil)
+
+        // Case 2: baseURL + model set — proxy/compatible-endpoint profile.
+        let proxy = try await db.modelProfiles.create(
+            name: "Proxy",
+            kind: .apiKey,
+            baseURL: "https://proxy.example.com",
+            model: "claude-3-5-sonnet-20241022"
+        )
+        let proxyReloaded = try await db.modelProfiles.get(id: proxy.id)
+        #expect(proxyReloaded?.id == proxy.id)
+        #expect(proxyReloaded?.name == "Proxy")
+        #expect(proxyReloaded?.kind == .apiKey)
+        #expect(proxyReloaded?.baseURL == "https://proxy.example.com")
+        #expect(proxyReloaded?.model == "claude-3-5-sonnet-20241022")
+
+        // updateEndpoint round-trip: clear and re-set the endpoint fields.
+        try await db.modelProfiles.updateEndpoint(id: proxy.id, baseURL: nil, model: nil)
+        let cleared = try await db.modelProfiles.get(id: proxy.id)
+        #expect(cleared?.baseURL == nil)
+        #expect(cleared?.model == nil)
+
+        try await db.modelProfiles.updateEndpoint(
+            id: proxy.id,
+            baseURL: "https://other.example.com",
+            model: "claude-3-opus"
+        )
+        let updated = try await db.modelProfiles.get(id: proxy.id)
+        #expect(updated?.baseURL == "https://other.example.com")
+        #expect(updated?.model == "claude-3-opus")
+    }
 }
