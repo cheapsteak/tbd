@@ -230,11 +230,41 @@ public struct GitManager: Sendable {
 
             let commandDescription = "git " + arguments.joined(separator: " ")
 
+            // Drain pipes incrementally to prevent deadlock when output exceeds the
+            // OS pipe buffer (~64KB). Without this, the child process blocks on
+            // write and `terminationHandler` never fires.
+            let stdoutAccumulator = PipeDataAccumulator()
+            let stderrAccumulator = PipeDataAccumulator()
+            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if chunk.isEmpty {
+                    handle.readabilityHandler = nil
+                } else {
+                    stdoutAccumulator.append(chunk)
+                }
+            }
+            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if chunk.isEmpty {
+                    handle.readabilityHandler = nil
+                } else {
+                    stderrAccumulator.append(chunk)
+                }
+            }
+
             process.terminationHandler = { _ in
-                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                // Detach handlers and drain anything still buffered.
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                if let tail = try? stdoutPipe.fileHandleForReading.readToEnd(), !tail.isEmpty {
+                    stdoutAccumulator.append(tail)
+                }
+                if let tail = try? stderrPipe.fileHandleForReading.readToEnd(), !tail.isEmpty {
+                    stderrAccumulator.append(tail)
+                }
+
+                let stdout = String(data: stdoutAccumulator.snapshot(), encoding: .utf8) ?? ""
+                let stderr = String(data: stderrAccumulator.snapshot(), encoding: .utf8) ?? ""
 
                 if process.terminationStatus != 0 {
                     continuation.resume(throwing: GitError(
@@ -297,5 +327,24 @@ public struct GitManager: Sendable {
         }
 
         return results
+    }
+}
+
+/// Thread-safe accumulator for incremental pipe reads. The readability handler
+/// fires on a background dispatch queue, so concurrent appends need a lock.
+private final class PipeDataAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        data.append(chunk)
+        lock.unlock()
+    }
+
+    func snapshot() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
     }
 }
