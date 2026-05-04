@@ -329,6 +329,7 @@ struct TBDAppMain: App {
         .commands {
             TBDCommands(appState: appState)
             ModelProfileMenu(appState: appState)
+            SkillMenu(appState: appState)
         }
 
         Settings {
