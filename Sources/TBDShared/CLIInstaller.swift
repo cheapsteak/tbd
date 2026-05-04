@@ -222,16 +222,6 @@ public struct CLIInstaller: Sendable {
         return abs
     }
 
-    /// Render a path as `~/...` if it's under the home dir, else the absolute path.
-    static func displayPath(_ path: String, homeDir: String) -> String {
-        let abs = absolutize(path, relativeTo: homeDir, homeDir: homeDir)
-        if abs == homeDir { return "~" }
-        if abs.hasPrefix(homeDir + "/") {
-            return "~" + abs.dropFirst(homeDir.count)
-        }
-        return abs
-    }
-
     static func expandTilde(_ path: String, homeDir: String) -> String {
         if path == "~" { return homeDir }
         if path.hasPrefix("~/") {
