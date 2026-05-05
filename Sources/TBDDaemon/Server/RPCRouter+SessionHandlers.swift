@@ -20,6 +20,19 @@ extension RPCRouter {
 
     func handleSessionMessages(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(SessionMessagesParams.self, from: paramsData)
+
+        // Constrain path to ~/.claude/projects/ — same trust boundary as
+        // handleTerminalTranscript. The app supplies these via SessionSummary
+        // entries that the daemon itself produced, but a crafted RPC could
+        // ask for any user-accessible file otherwise.
+        let projectsBase = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".claude/projects")
+            .standardizedFileURL.path
+        let candidate = URL(fileURLWithPath: params.filePath).standardizedFileURL.path
+        guard candidate.hasPrefix(projectsBase + "/") else {
+            return RPCResponse(error: "Refusing to read path outside ~/.claude/projects/: \(params.filePath)")
+        }
+
         let messages: [TranscriptItem]
         if let cached = await TranscriptParseCache.shared.get(filePath: params.filePath) {
             messages = cached
