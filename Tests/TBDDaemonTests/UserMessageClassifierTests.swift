@@ -142,4 +142,9 @@ struct UserMessageClassifierClassifyTests {
         let line = userLine("<3 hearts to you")
         #expect(UserMessageClassifier.classify(line) == nil)
     }
+
+    @Test func skill_body_returns_skillBody() {
+        let line = userLine("Base directory for this skill: /Users/chang/.claude/skills/pr\n\n# Commit, Push, and Open a PR\n\n## Step 1: …")
+        #expect(UserMessageClassifier.classify(line) == .skillBody)
+    }
 }

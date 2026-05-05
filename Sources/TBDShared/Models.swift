@@ -431,6 +431,7 @@ public enum SystemKind: String, Codable, Sendable {
     case hookOutput
     case environmentDetails
     case slashEnvelope
+    case skillBody
     case other
 }
 

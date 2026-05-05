@@ -275,6 +275,37 @@ struct TranscriptParserTests {
         #expect(ts != nil, "timestamp with fractional seconds should parse")
     }
 
+    @Test func skill_body_emits_systemReminder_with_skillBody_kind() throws {
+        let body = "Base directory for this skill: /Users/chang/.claude/skills/pr\n\n# Commit, Push, and Open a PR\n\n## Step 1: ..."
+        let escaped = body.replacingOccurrences(of: "\n", with: "\\n")
+        let line = "{\"type\":\"user\",\"uuid\":\"u1\",\"timestamp\":\"2026-05-05T10:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"\(escaped)\"}}"
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        if case .systemReminder(_, let kind, let text, _) = items[0] {
+            #expect(kind == .skillBody)
+            #expect(text.hasPrefix("Base directory for this skill:"))
+        } else {
+            Issue.record("expected .systemReminder(.skillBody)")
+        }
+    }
+
+    @Test func slash_envelope_emits_user_prompt_with_command_text() throws {
+        let line = #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"user","content":"<command-name>/pr</command-name><command-message>pr</command-message><command-args></command-args>"}}"#
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        if case .userPrompt(_, let text, _) = items[0] {
+            #expect(text == "/pr")
+        } else {
+            Issue.record("expected .userPrompt with slash command text")
+        }
+    }
+
     // MARK: - helpers
 
     private func writeTempJSONL(_ contents: String) throws -> String {

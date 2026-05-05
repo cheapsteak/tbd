@@ -15,6 +15,7 @@ struct SystemReminderRow: View {
         case .hookOutput: return "hook"
         case .environmentDetails: return "env"
         case .slashEnvelope: return "command"
+        case .skillBody: return "skill"
         case .other: return "info"
         }
     }

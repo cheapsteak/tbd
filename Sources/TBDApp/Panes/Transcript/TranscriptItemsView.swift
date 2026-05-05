@@ -33,7 +33,11 @@ struct TranscriptItemsView: View {
         case .thinking:
             EmptyView()
         case .systemReminder(let id, let kind, let text, let ts):
-            SystemReminderRow(id: id, kind: kind, text: text, timestamp: ts)
+            if kind == .skillBody {
+                SkillBodyRow(id: id, text: text, timestamp: ts)
+            } else {
+                SystemReminderRow(id: id, kind: kind, text: text, timestamp: ts)
+            }
         case .slashCommand(let id, let name, let args, let ts):
             SlashCommandRow(id: id, name: name, args: args, timestamp: ts)
         case .toolCall(let id, let name, let inputJSON, let result, let subagent, let ts):

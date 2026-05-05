@@ -95,6 +95,7 @@ enum UserMessageClassifier {
             return nil
         }
 
+        if text.hasPrefix("Base directory for this skill:") { return .skillBody }
         if text.hasPrefix("<system-reminder") { return .toolReminder }
         if text.hasPrefix("<command-") { return .slashEnvelope }
         if text.hasPrefix("<environment_details") { return .environmentDetails }

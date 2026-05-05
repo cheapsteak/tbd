@@ -91,9 +91,19 @@ enum TranscriptParser {
 
             if typeStr == "user", let kind = UserMessageClassifier.classify(json) {
                 let text = extractUserText(from: json) ?? ""
+                // NOTE: TranscriptItem.slashCommand is no longer emitted — slash commands
+                // are flattened into .userPrompt so they render as the user's chat bubble
+                // (the slash command IS what the user typed). The case remains in the
+                // enum for Codable compatibility with any persisted state.
                 if kind == .slashEnvelope {
                     let (name, args) = parseSlashEnvelope(text)
-                    items.append(.slashCommand(id: lineUUID, name: name, args: args, timestamp: timestamp))
+                    let bubbleText: String
+                    if let args, !args.isEmpty {
+                        bubbleText = "/\(name) \(args)"
+                    } else {
+                        bubbleText = "/\(name)"
+                    }
+                    items.append(.userPrompt(id: lineUUID, text: bubbleText, timestamp: timestamp))
                 } else {
                     items.append(.systemReminder(id: lineUUID, kind: kind, text: text, timestamp: timestamp))
                 }
