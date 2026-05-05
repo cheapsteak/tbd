@@ -104,6 +104,8 @@ struct PanePlaceholder: View {
             Text(URL(fileURLWithPath: path).lastPathComponent)
         case .note(let noteID):
             EditableNoteTitle(noteID: noteID, worktreeID: worktree.id)
+        case .liveTranscript:
+            Text("Transcript")
         }
     }
 
@@ -159,6 +161,9 @@ struct PanePlaceholder: View {
 
         case .note:
             EmptyView()
+
+        case .liveTranscript:
+            EmptyView()
         }
     }
 
@@ -175,6 +180,8 @@ struct PanePlaceholder: View {
             CodeViewerPaneView(path: path, worktreePath: worktree.path, showSourceCode: showSourceCode)
         case .note(let noteID):
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
+        case .liveTranscript:
+            EmptyView()
         }
     }
 

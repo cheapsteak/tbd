@@ -66,4 +66,26 @@ struct PaneContentTests {
         #expect(decoded == tab)
         #expect(decoded.label == nil)
     }
+
+    @Test func paneID_liveTranscript() {
+        let paneID = UUID()
+        let terminalID = UUID()
+        let content = PaneContent.liveTranscript(id: paneID, terminalID: terminalID)
+        #expect(content.paneID == paneID)
+        #expect(content.paneID != terminalID, "pane ID must be distinct from terminal ID")
+    }
+
+    @Test func codable_roundtrip_liveTranscript() throws {
+        let original = PaneContent.liveTranscript(id: UUID(), terminalID: UUID())
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(PaneContent.self, from: data)
+        #expect(decoded == original)
+    }
+
+    @Test func liveTranscript_distinct_from_terminal_with_same_uuid() throws {
+        let id = UUID()
+        let terminal = PaneContent.terminal(terminalID: id)
+        let transcript = PaneContent.liveTranscript(id: UUID(), terminalID: id)
+        #expect(terminal != transcript)
+    }
 }
