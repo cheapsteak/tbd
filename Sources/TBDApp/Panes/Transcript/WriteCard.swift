@@ -20,7 +20,8 @@ struct WriteCard: View {
     }
 
     private func lineCount(for parsed: Input?) -> Int {
-        parsed?.content.split(separator: "\n", omittingEmptySubsequences: false).count ?? 0
+        guard let content = parsed?.content, !content.isEmpty else { return 0 }
+        return content.split(separator: "\n", omittingEmptySubsequences: false).count
     }
 
     var body: some View {
