@@ -228,6 +228,7 @@ final class AppState: ObservableObject {
 
     /// Cached skill installation status; refreshed on app activation and after install.
     @Published var skillStatus: SkillStatusResult? = nil
+    @Published var skillInstallError: String? = nil
 
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()

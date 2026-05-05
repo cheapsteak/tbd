@@ -17,11 +17,14 @@ extension AppState {
     }
 
     /// Install or update the skill, then refresh status so the menu reflects the new state.
+    /// Stores any install error in `skillInstallError` so the menu can surface it.
     @MainActor
     func installSkill() async {
         do {
             _ = try await daemonClient.installSkill()
+            self.skillInstallError = nil
         } catch {
+            self.skillInstallError = String(describing: error)
             Self.skillLogger.error("installSkill error: \(String(describing: error), privacy: .public)")
         }
         await refreshSkillStatus()
