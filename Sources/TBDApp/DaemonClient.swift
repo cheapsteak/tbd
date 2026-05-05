@@ -874,6 +874,16 @@ actor DaemonClient {
         )
     }
 
+    /// Fetch the un-truncated body for a single transcript item (for
+    /// "Show full output" expansion).
+    func terminalTranscriptItemFullBody(terminalID: UUID, itemID: String) async throws -> TerminalTranscriptItemFullBodyResult {
+        return try await callAsync(
+            method: RPCMethod.terminalTranscriptItemFullBody,
+            params: TerminalTranscriptItemFullBodyParams(terminalID: terminalID, itemID: itemID),
+            resultType: TerminalTranscriptItemFullBodyResult.self
+        )
+    }
+
     /// Notify the daemon whether the app is in the foreground (drives usage poller).
     func setAppForegroundState(isForeground: Bool) async throws {
         try await callVoidAsync(
