@@ -20,6 +20,7 @@ struct LiveTranscriptPaneView: View {
     @State private var loadError: String?
     @State private var hasShownInitialMessages = false
     @State private var lastSessionID: String?
+    @State private var retryToken = 0
     // NOTE: Autoscroll-freeze-on-user-scroll detection is deliberately deferred.
     // SwiftUI doesn't expose ScrollView scroll position cleanly without
     // `.scrollPosition` (macOS 14+) or GeometryReader hacks. For v1, autoscroll
@@ -55,7 +56,7 @@ struct LiveTranscriptPaneView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: terminalID) { await pollLoop() }
+        .task(id: TaskKey(terminalID: terminalID, retryToken: retryToken)) { await pollLoop() }
     }
 
     // MARK: - States
@@ -90,6 +91,7 @@ struct LiveTranscriptPaneView: View {
                 .padding(.horizontal, 24)
             Button("Retry") {
                 loadError = nil
+                retryToken &+= 1
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -180,4 +182,9 @@ struct LiveTranscriptPaneView: View {
         guard a.count == b.count else { return false }
         return zip(a, b).allSatisfy { $0.id == $1.id }
     }
+}
+
+private struct TaskKey: Equatable {
+    let terminalID: UUID
+    let retryToken: Int
 }
