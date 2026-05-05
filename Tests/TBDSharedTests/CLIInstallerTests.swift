@@ -159,6 +159,35 @@ private func makeFile(_ path: String) throws {
     #expect(dest == target)
 }
 
+@Test func installRefusesToReplaceDirectory() async throws {
+    // FileManager.removeItem deletes directories recursively. If a directory
+    // is unexpectedly at the install path, install() must refuse rather than
+    // silently rm -rf based on a "Replace the file" confirmation.
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/cli"
+    try makeFile(target)
+    let symlink = home.path + "/.local/bin/tbd"
+    // Create a directory at the symlink path with a file inside (to verify
+    // we wouldn't have silently lost it).
+    try FileManager.default.createDirectory(atPath: symlink, withIntermediateDirectories: true)
+    try makeFile(symlink + "/important.txt")
+
+    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { nil })
+    do {
+        _ = try await installer.install(target: target)
+        Issue.record("Expected install to throw when a directory exists at the path")
+    } catch let error as CLIInstallerError {
+        if case .symlinkCreationFailed(let reason) = error {
+            #expect(reason.contains("directory"))
+        } else {
+            Issue.record("Wrong CLIInstallerError case: \(error)")
+        }
+    }
+    // The directory and its contents must still be there.
+    #expect(FileManager.default.fileExists(atPath: symlink + "/important.txt"))
+}
+
 @Test func installReplacesExistingSymlink() async throws {
     let home = try TempHome()
     defer { home.cleanup() }

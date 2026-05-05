@@ -162,9 +162,18 @@ public struct CLIInstaller: Sendable {
         }
 
         // Remove any existing entry (symlink or file). Use lstat so we don't
-        // follow a broken symlink and miss the removal.
+        // follow a broken symlink and miss the removal. Refuse to recurse
+        // into a directory: FileManager.removeItem deletes directories
+        // recursively, and the "Replace the file at …" alert doesn't signal
+        // that scope. A directory at this path is improbable in practice,
+        // but the safer behavior is to surface the situation to the user.
         var st = stat()
         if lstat(symlinkPath, &st) == 0 {
+            if (st.st_mode & S_IFMT) == S_IFDIR {
+                throw CLIInstallerError.symlinkCreationFailed(
+                    "a directory exists at \(symlinkPath); remove it manually before installing"
+                )
+            }
             do {
                 try fm.removeItem(atPath: symlinkPath)
             } catch {
