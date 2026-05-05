@@ -136,6 +136,8 @@ public enum RPCMethod {
     public static let sessionList = "session.list"
     public static let sessionMessages = "session.messages"
     public static let setMainAreaSize = "app.setMainAreaSize"
+    public static let skillStatus = "skill.status"
+    public static let skillInstall = "skill.install"
 }
 
 // MARK: - Main Area Size
@@ -677,5 +679,43 @@ public struct ConversationMessage: Codable, Sendable {
     public let content: String
     public init(role: String, content: String) {
         self.role = role; self.content = content
+    }
+}
+
+// MARK: - Skill RPC payloads
+
+public struct SkillStatusParams: Codable, Sendable {
+    public let harness: Harness
+    public init(harness: Harness = .claudeCode) {
+        self.harness = harness
+    }
+}
+
+public struct SkillStatusResult: Codable, Sendable {
+    public let harness: Harness
+    public let status: SkillStatus
+    public let harnessPath: String
+    public let daemonHash: String
+    public init(harness: Harness, status: SkillStatus, harnessPath: String, daemonHash: String) {
+        self.harness = harness
+        self.status = status
+        self.harnessPath = harnessPath
+        self.daemonHash = daemonHash
+    }
+}
+
+public struct SkillInstallParams: Codable, Sendable {
+    public let harness: Harness
+    public init(harness: Harness = .claudeCode) {
+        self.harness = harness
+    }
+}
+
+public struct SkillInstallResultRPC: Codable, Sendable {
+    public let action: SkillInstallResult.Action
+    public let path: String
+    public init(action: SkillInstallResult.Action, path: String) {
+        self.action = action
+        self.path = path
     }
 }

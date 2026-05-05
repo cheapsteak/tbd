@@ -116,7 +116,7 @@ struct SystemPromptBuilderTests {
         let result = SystemPromptBuilder.build(repo: repo, worktree: wt, isResume: false)
         #expect(result != nil)
         #expect(result!.contains("TBD-managed worktree"))
-        #expect(result!.contains("tbd notify"))
+        #expect(result!.contains("`tbd` skill"))
     }
 
     @Test("build includes general instructions when set")
@@ -144,5 +144,44 @@ struct SystemPromptBuilderTests {
         #expect(result != nil)
         #expect(!result!.contains("   \n  "))
         #expect(result!.contains("TBD-managed worktree"))
+    }
+
+    // MARK: - Slim context (skill pointer)
+
+    @Test("builtInTBDContext names the tbd skill")
+    func slimContextNamesSkill() {
+        let ctx = SystemPromptBuilder.builtInTBDContext
+        #expect(ctx.contains("`tbd` skill"))
+    }
+
+    @Test("builtInTBDContext references absolute fallback path")
+    func slimContextReferencesFallbackPath() {
+        let ctx = SystemPromptBuilder.builtInTBDContext
+        #expect(ctx.contains("/Library/Application Support/TBD/skill/SKILL.md"))
+    }
+
+    @Test("builtInTBDContext is short (no longer a full CLI reference)")
+    func slimContextIsShort() {
+        // Generous upper bound — flag if anyone re-bloats this string.
+        #expect(SystemPromptBuilder.builtInTBDContext.count < 600)
+    }
+
+    @Test("builtInTBDContext no longer enumerates every subcommand")
+    func slimContextDoesNotEnumerateAllCommands() {
+        let ctx = SystemPromptBuilder.builtInTBDContext
+        #expect(!ctx.contains("tbd terminal send"))
+        #expect(!ctx.contains("tbd terminal output"))
+        #expect(!ctx.contains("--prompt-file"))
+    }
+
+    @Test("fresh session includes the slim pointer")
+    func freshSessionIncludesSlimPointer() {
+        let repo = Repo(path: "/test", displayName: "test", defaultBranch: "main")
+        let wt = Worktree(repoID: repo.id, name: "test-wt", displayName: "🔐 Auth Fix",
+                          branch: "tbd/test-wt", path: "/test/.tbd/worktrees/test-wt",
+                          tmuxServer: "tbd-test")
+        let prompt = SystemPromptBuilder.build(repo: repo, worktree: wt, isResume: false)
+        #expect(prompt != nil)
+        #expect(prompt?.contains("`tbd` skill") == true)
     }
 }

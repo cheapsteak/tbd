@@ -11,46 +11,22 @@ enum SystemPromptBuilder {
 
     static let defaultRenamePrompt = RepoConstants.defaultRenamePrompt
 
-    static let builtInTBDContext = """
-        You are running inside a TBD-managed worktree. TBD is a macOS worktree + terminal manager.
-
-        Available CLI commands:
-        - tbd worktree rename "<worktree-name>" "<display-name>" — rename the worktree display name
-        - tbd worktree create [--repo <path-or-id>] [--folder <dir>] [--branch <name>] [--name "<display>"] — create a new worktree
-        - tbd worktree list [--repo <id>] — list worktrees
-        - tbd link [<worktree>] — print a tbd://open URL for a worktree (no arg = current); clicking opens TBD on that worktree, survives renames
-        - tbd terminal create <worktree> [--type claude|shell] [--cmd <command>] — create a new terminal tab
-        - tbd terminal send --terminal <id> --text <text> [--submit] — send text to a terminal (--submit presses Enter)
-        - tbd terminal output <terminal-id> [--lines N] — read terminal output
-        - tbd notify --type <type> [--message <msg>] — send notifications to TBD UI
-          Types: response_complete, error, task_complete, attention_needed
-
-        Environment variables:
-        - TBD_WORKTREE_ID — UUID of the current worktree (auto-set in all TBD terminals)
-        - TBD_PROMPT_CONTEXT — Built-in TBD context (this text), for passing to spawned sessions
-        - TBD_PROMPT_INSTRUCTIONS — Per-repo custom instructions (set if configured)
-        - TBD_PROMPT_RENAME — Worktree rename prompt (set if worktree hasn't been renamed yet)
-
-        Spawning a new Claude tab in the current worktree:
-          tbd terminal create "$TBD_WORKTREE_ID" --type claude --prompt-file - <<'EOF'
-          your task here
-          EOF
-
-        Creating a new worktree with an initial task for its default Claude tab:
-          tbd worktree create --prompt-file - <<'EOF'
-          your task here
-          EOF
-
-        When using --prompt or --prompt-file to spawn a new worktree or Claude tab, write a
-        thorough briefing — the new session starts with zero context from your conversation.
-        Include what you're trying to accomplish, what you've already learned or ruled out,
-        relevant file paths and line numbers, and enough surrounding context that the new
-        session can make judgment calls rather than follow narrow instructions. Use
-        --prompt-file - with a heredoc for multi-line prompts to avoid shell escaping issues.
-
-        Using --cmd for full control (env vars expand in the new shell):
-          tbd terminal create "$TBD_WORKTREE_ID" --cmd 'claude --append-system-prompt "$TBD_PROMPT_CONTEXT"'
-        """
+    /// Slim pointer injected via `--append-system-prompt` on fresh Claude
+    /// sessions. The full TBD reference content lives in the `tbd` skill
+    /// (registered at `~/.claude/skills/tbd/SKILL.md` after the user clicks
+    /// "Install TBD Skill" in the menu) and at the failsafe path resolved below.
+    static var builtInTBDContext: String {
+        let appSupport = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?.path
+            ?? (FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support")
+        let fallback = appSupport + "/TBD/skill/SKILL.md"
+        return """
+            You are running inside a TBD-managed worktree (a macOS worktree + terminal manager).
+            A `tbd` skill should be available — invoke it for worktree/terminal actions.
+            If unavailable, read its content directly from \(fallback).
+            """
+    }
 
     /// Returns the individual prompt layers as env-var-name → value pairs.
     /// Used both to set env vars in terminals and to build the combined `--append-system-prompt`.
