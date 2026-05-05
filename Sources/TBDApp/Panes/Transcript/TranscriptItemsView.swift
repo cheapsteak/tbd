@@ -25,28 +25,36 @@ struct TranscriptItemsView: View {
 
     @ViewBuilder
     private func rowFor(_ item: TranscriptItem) -> some View {
-        switch item {
-        case .userPrompt, .assistantText:
-            ChatBubbleView(item: item)
-        case .thinking:
-            EmptyView()
-        case .systemReminder(let id, let kind, let text, let ts):
-            if kind == .skillBody {
-                SkillBodyRow(id: id, text: text, timestamp: ts)
-            } else {
-                SystemReminderRow(id: id, kind: kind, text: text, timestamp: ts)
-            }
-        case .slashCommand(let id, let name, let args, let ts):
-            SlashCommandRow(id: id, name: name, args: args, timestamp: ts)
-        case .toolCall(let id, let name, let inputJSON, let result, let subagent, let ts):
-            if hiddenToolNames.contains(name) {
+        if depth >= 8 {
+            Text("… nested too deep")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+        } else {
+            switch item {
+            case .userPrompt, .assistantText:
+                ChatBubbleView(item: item)
+            case .thinking:
                 EmptyView()
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    toolCardFor(name: name, id: id, inputJSON: inputJSON, result: result, timestamp: ts)
-                    if let subagent {
-                        SubagentDisclosure(subagent: subagent, terminalID: terminalID, depth: depth)
-                            .padding(.leading, 32)
+            case .systemReminder(let id, let kind, let text, let ts):
+                if kind == .skillBody {
+                    SkillBodyRow(id: id, text: text, timestamp: ts)
+                } else {
+                    SystemReminderRow(id: id, kind: kind, text: text, timestamp: ts)
+                }
+            case .slashCommand(let id, let name, let args, let ts):
+                SlashCommandRow(id: id, name: name, args: args, timestamp: ts)
+            case .toolCall(let id, let name, let inputJSON, let result, let subagent, let ts):
+                if hiddenToolNames.contains(name) {
+                    EmptyView()
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        toolCardFor(name: name, id: id, inputJSON: inputJSON, result: result, timestamp: ts)
+                        if let subagent {
+                            SubagentDisclosure(subagent: subagent, terminalID: terminalID, depth: depth)
+                                .padding(.leading, 32)
+                        }
                     }
                 }
             }
