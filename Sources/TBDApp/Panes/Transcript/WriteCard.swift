@@ -9,6 +9,7 @@ struct WriteCard: View {
     let terminalID: UUID?
 
     @State private var expanded = true
+    @State private var containerExpanded = false
     @EnvironmentObject var appState: AppState
 
     private struct Input: Decodable { let file_path: String; let content: String }
@@ -37,14 +38,32 @@ struct WriteCard: View {
             }
         } body: {
             if let content = input?.content {
-                let preview = String(content.split(separator: "\n", omittingEmptySubsequences: false).prefix(15).joined(separator: "\n"))
-                Text(preview)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                ZStack(alignment: .topTrailing) {
+                    ScrollView(.vertical) {
+                        Text(content)
+                            .font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: containerExpanded ? .infinity : 120)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
+
+                    Button(action: { containerExpanded.toggle() }) {
+                        Image(systemName: containerExpanded
+                            ? "arrow.down.right.and.arrow.up.left"
+                            : "arrow.up.left.and.arrow.down.right")
+                            .font(.caption2)
+                            .padding(4)
+                            .background(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .padding(4)
+                    .help(containerExpanded ? "Collapse container" : "Expand container")
+                }
             }
         }
     }
