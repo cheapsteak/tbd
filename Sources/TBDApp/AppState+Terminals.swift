@@ -126,7 +126,7 @@ extension AppState {
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
                 resumeSessionID: sessionID,
-                overrideTokenID: tokenID,
+                overrideProfileID: tokenID,
                 cols: size.cols,
                 rows: size.rows
             )

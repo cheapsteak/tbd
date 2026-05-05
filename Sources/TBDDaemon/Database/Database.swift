@@ -15,8 +15,8 @@ public final class TBDDatabase: Sendable {
     public let notifications: NotificationStore
     public let notes: NoteStore
     public let conductors: ConductorStore
-    public let claudeTokens: ClaudeTokenStore
-    public let claudeTokenUsage: ClaudeTokenUsageStore
+    public let modelProfiles: ModelProfileStore
+    public let modelProfileUsage: ModelProfileUsageStore
     public let config: ConfigStore
     public let meta: TBDMetaStore
 
@@ -36,8 +36,8 @@ public final class TBDDatabase: Sendable {
         self.notifications = NotificationStore(writer: pool)
         self.notes = NoteStore(writer: pool)
         self.conductors = ConductorStore(writer: pool)
-        self.claudeTokens = ClaudeTokenStore(writer: pool)
-        self.claudeTokenUsage = ClaudeTokenUsageStore(writer: pool)
+        self.modelProfiles = ModelProfileStore(writer: pool)
+        self.modelProfileUsage = ModelProfileUsageStore(writer: pool)
         self.config = ConfigStore(writer: pool)
         self.meta = TBDMetaStore(writer: pool)
         try Self.migrate(writer: pool)
@@ -54,8 +54,8 @@ public final class TBDDatabase: Sendable {
         self.notifications = NotificationStore(writer: queue)
         self.notes = NoteStore(writer: queue)
         self.conductors = ConductorStore(writer: queue)
-        self.claudeTokens = ClaudeTokenStore(writer: queue)
-        self.claudeTokenUsage = ClaudeTokenUsageStore(writer: queue)
+        self.modelProfiles = ModelProfileStore(writer: queue)
+        self.modelProfileUsage = ModelProfileUsageStore(writer: queue)
         self.config = ConfigStore(writer: queue)
         self.meta = TBDMetaStore(writer: queue)
         try Self.migrate(writer: queue)
@@ -300,6 +300,33 @@ public final class TBDDatabase: Sendable {
                     arguments: [slot, id]
                 )
             }
+        }
+
+        migrator.registerMigration("v15_model_profiles") { db in
+            // SQLite's ALTER TABLE ... RENAME TO updates FK references in other
+            // tables only when legacy_alter_table is OFF. GRDB pools default to
+            // legacy_alter_table=OFF in modern SQLite, but be explicit so the
+            // migration is robust to env changes.
+            try db.execute(sql: "PRAGMA legacy_alter_table = OFF")
+
+            // Rename tables. SQLite supports ALTER TABLE RENAME since 3.25.
+            try db.execute(sql: "ALTER TABLE claude_tokens RENAME TO model_profiles")
+            try db.execute(sql: "ALTER TABLE claude_token_usage RENAME TO model_profile_usage")
+
+            // Add new optional columns to profiles.
+            try db.alter(table: "model_profiles") { t in
+                t.add(column: "base_url", .text)
+                t.add(column: "model", .text)
+            }
+
+            // Rename token-id columns to profile-id columns.
+            // SQLite >= 3.25 supports ALTER TABLE ... RENAME COLUMN.
+            try db.execute(sql: "ALTER TABLE config RENAME COLUMN default_claude_token_id TO default_profile_id")
+            try db.execute(sql: "ALTER TABLE repo RENAME COLUMN claude_token_override_id TO profile_override_id")
+            try db.execute(sql: "ALTER TABLE terminal RENAME COLUMN claude_token_id TO profile_id")
+
+            // Rename the foreign-key column inside model_profile_usage as well.
+            try db.execute(sql: "ALTER TABLE model_profile_usage RENAME COLUMN token_id TO profile_id")
         }
 
         try migrator.migrate(writer)

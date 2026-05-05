@@ -241,18 +241,20 @@ extension WorktreeLifecycle {
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
 
         if let sessionID = terminal.claudeSessionID {
-            // Claude terminal — resume existing session with persisted token
-            var resolvedToken: ResolvedClaudeToken? = nil
-            if let tokenID = terminal.claudeTokenID, let resolver = claudeTokenResolver {
-                resolvedToken = try? await resolver.loadByID(tokenID)
+            // Claude terminal — resume existing session with persisted profile
+            var resolvedProfile: ResolvedModelProfile? = nil
+            if let profileID = terminal.profileID, let resolver = modelProfileResolver {
+                resolvedProfile = try? await resolver.loadByID(profileID)
             }
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: sessionID,
                 freshSessionID: nil,
                 appendSystemPrompt: nil,
                 initialPrompt: nil,
-                tokenSecret: resolvedToken?.secret,
-                tokenKind: resolvedToken?.kind,
+                profileSecret: resolvedProfile?.secret,
+                profileKind: resolvedProfile?.kind,
+                profileBaseURL: resolvedProfile?.baseURL,
+                profileModel: resolvedProfile?.model,
                 cmd: nil,
                 shellFallback: defaultShell
             )
@@ -266,7 +268,7 @@ extension WorktreeLifecycle {
                 freshSessionID: nil,
                 appendSystemPrompt: nil,
                 initialPrompt: nil,
-                tokenSecret: nil,
+                profileSecret: nil,
                 cmd: "codex --full-auto",
                 shellFallback: defaultShell
             )
@@ -279,7 +281,7 @@ extension WorktreeLifecycle {
                 freshSessionID: nil,
                 appendSystemPrompt: nil,
                 initialPrompt: nil,
-                tokenSecret: nil,
+                profileSecret: nil,
                 cmd: cmd,
                 shellFallback: defaultShell
             )

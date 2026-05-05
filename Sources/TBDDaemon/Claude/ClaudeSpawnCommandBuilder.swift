@@ -25,8 +25,8 @@ import TBDShared
 enum ClaudeSpawnCommandBuilder {
     struct Result: Equatable {
         let command: String
-        /// Env vars containing secrets. MUST be passed to tmux via `-e KEY=VALUE`,
-        /// never inlined into the shell command (would leak via `ps`).
+        /// Env vars containing secrets OR routing config. Keep using tmux's
+        /// `-e KEY=VALUE` flag for all of these to avoid leaking via `ps`.
         let sensitiveEnv: [String: String]
     }
 
@@ -35,8 +35,10 @@ enum ClaudeSpawnCommandBuilder {
         freshSessionID: String?,
         appendSystemPrompt: String?,
         initialPrompt: String?,
-        tokenSecret: String?,
-        tokenKind: ClaudeTokenKind? = nil,
+        profileSecret: String?,
+        profileKind: CredentialKind? = nil,
+        profileBaseURL: String? = nil,
+        profileModel: String? = nil,
         cmd: String?,
         shellFallback: String
     ) -> Result {
@@ -58,14 +60,17 @@ enum ClaudeSpawnCommandBuilder {
             return Result(command: shellFallback, sensitiveEnv: [:])
         }
 
-        guard let secret = tokenSecret else {
-            return Result(command: base, sensitiveEnv: [:])
+        var env: [String: String] = [:]
+        if let secret = profileSecret {
+            // Secrets flow through tmux's `-e KEY=VALUE` (argv, no shell
+            // parsing), so we don't need shell-escape allowlists here.
+            // Storage-time validation rejects newlines / NULL bytes that would
+            // break tmux's single-line arg parsing.
+            let envVar = profileKind == .apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"
+            env[envVar] = secret
         }
-        // Tokens flow through tmux's `-e KEY=VALUE` (argv, no shell parsing),
-        // so we don't need shell-escape allowlists here. Storage-time validation
-        // (handleClaudeTokenAdd) rejects newlines / NULL bytes that would break
-        // tmux's single-line arg parsing.
-        let envVar = tokenKind == .apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"
-        return Result(command: base, sensitiveEnv: [envVar: secret])
+        if let baseURL = profileBaseURL { env["ANTHROPIC_BASE_URL"] = baseURL }
+        if let model = profileModel { env["ANTHROPIC_MODEL"] = model }
+        return Result(command: base, sensitiveEnv: env)
     }
 }

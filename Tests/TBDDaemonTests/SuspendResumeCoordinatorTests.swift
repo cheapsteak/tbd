@@ -115,11 +115,11 @@ struct SuspendResumeCoordinatorTests {
             branch: "main", path: "/tmp/test-repo",
             tmuxServer: "tbd-test"
         )
-        let token = try await db.claudeTokens.create(name: "test-token", kind: .oauth)
+        let token = try await db.modelProfiles.create(name: "test-token", kind: .oauth)
         let terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
             label: "claude-1", claudeSessionID: "session-abc",
-            claudeTokenID: token.id
+            profileID: token.id
         )
         try await db.terminals.setSuspended(
             id: terminal.id, sessionID: "session-abc", snapshot: nil
@@ -127,8 +127,8 @@ struct SuspendResumeCoordinatorTests {
 
         // Stub keychain closure returns a known secret only for this token.
         let secret = "sk-ant-oat01-FAKETOKEN_value"
-        let resolver = ClaudeTokenResolver(
-            tokens: db.claudeTokens,
+        let resolver = ModelProfileResolver(
+            profiles: db.modelProfiles,
             repos: db.repos,
             config: db.config,
             keychain: { id in id == token.id.uuidString ? secret : nil }
@@ -139,7 +139,7 @@ struct SuspendResumeCoordinatorTests {
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
             recorded.append(args)
         })
-        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, claudeTokenResolver: resolver)
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, modelProfileResolver: resolver)
 
         await coordinator.selectionChanged(to: [wt.id], suspendEnabled: true)
         try await Task.sleep(for: .seconds(5))
@@ -171,7 +171,7 @@ struct SuspendResumeCoordinatorTests {
             recorded.append(args)
         })
         // No resolver supplied — fallback branch.
-        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, claudeTokenResolver: nil)
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, modelProfileResolver: nil)
 
         await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: true)
         try await Task.sleep(for: .seconds(5))

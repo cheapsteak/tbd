@@ -34,12 +34,12 @@ public actor ClaudeUsagePoller {
 
     // MARK: - Dependencies
 
-    private let tokens: ClaudeTokenStore
-    private let usage: ClaudeTokenUsageStore
+    private let profiles: ModelProfileStore
+    private let usage: ModelProfileUsageStore
     private let keychain: @Sendable (String) throws -> String?
     private let fetcher: ClaudeUsageFetcher
     private let clock: PollerClock
-    private let broadcast: @Sendable (ClaudeTokenUsage) -> Void
+    private let broadcast: @Sendable (ModelProfileUsage) -> Void
     /// Optional jitter override for tests; production uses `Double.random`.
     private let staggerProvider: @Sendable () -> TimeInterval
 
@@ -54,21 +54,21 @@ public actor ClaudeUsagePoller {
     /// In-flight sleep task; cancelled by `wake()` to interrupt the current sleep.
     private var currentSleepTask: Task<Void, Error>?
     private var loggedBackoff: Set<String> = []
-    /// Tokens that returned HTTP 401 and must never be polled again until restart.
+    /// Profiles that returned HTTP 401 and must never be polled again until restart.
     private var permanentlyExcluded: Set<String> = []
 
     // MARK: - Init
 
     public init(
-        tokens: ClaudeTokenStore,
-        usage: ClaudeTokenUsageStore,
+        profiles: ModelProfileStore,
+        usage: ModelProfileUsageStore,
         keychain: @escaping @Sendable (String) throws -> String?,
         fetcher: ClaudeUsageFetcher,
         clock: PollerClock,
-        broadcast: @escaping @Sendable (ClaudeTokenUsage) -> Void,
+        broadcast: @escaping @Sendable (ModelProfileUsage) -> Void,
         staggerProvider: (@Sendable () -> TimeInterval)? = nil
     ) {
-        self.tokens = tokens
+        self.profiles = profiles
         self.usage = usage
         self.keychain = keychain
         self.fetcher = fetcher
@@ -131,11 +131,11 @@ public actor ClaudeUsagePoller {
         wake()
     }
 
-    /// Single-token poke (used by RPC fetchUsage handler).
-    public func poke(tokenID: String) async {
-        guard var entry = schedule[tokenID], !entry.excluded else { return }
+    /// Single-profile poke (used by RPC fetchUsage handler).
+    public func poke(profileID: String) async {
+        guard var entry = schedule[profileID], !entry.excluded else { return }
         entry.nextFireAt = clock.now()
-        schedule[tokenID] = entry
+        schedule[profileID] = entry
         wake()
     }
 
@@ -182,13 +182,13 @@ public actor ClaudeUsagePoller {
             currentSleepTask = nil
             if Task.isCancelled { return }
 
-            // Tick all tokens that are due now.
+            // Tick all profiles that are due now.
             let now = clock.now()
             let due = schedule
                 .filter { !$0.value.excluded && $0.value.nextFireAt <= now }
                 .map { $0.key }
-            for tokenID in due {
-                await tick(tokenID: tokenID)
+            for profileID in due {
+                await tick(profileID: profileID)
             }
         }
     }
@@ -199,22 +199,30 @@ public actor ClaudeUsagePoller {
         }
     }
 
-    /// Re-read tokens from the store, add new oauth tokens to schedule,
-    /// drop missing/api_key tokens.
+    /// Re-read profiles from the store, add new oauth profiles (Claude direct
+    /// only — `baseURL == nil`) to the schedule, drop missing / api_key /
+    /// proxy-routed profiles.
     private func refreshSchedule() async {
-        let allTokens: [ClaudeToken]
+        let allProfiles: [ModelProfile]
         do {
-            allTokens = try await tokens.list()
+            allProfiles = try await profiles.list()
         } catch {
             return
         }
-        let oauthIDs = Set(allTokens.filter { $0.kind == .oauth }.map { $0.id.uuidString })
+        // Only poll OAuth profiles that target Claude direct (baseURL == nil).
+        // Proxy-routed profiles can't use the Claude API usage endpoint —
+        // cross-profile cost tracking is out of scope per the spec.
+        let oauthIDs = Set(
+            allProfiles
+                .filter { $0.kind == .oauth && $0.baseURL == nil }
+                .map { $0.id.uuidString }
+        )
 
-        // Drop tokens no longer present or no longer oauth.
+        // Drop profiles no longer present, or no longer eligible.
         for key in schedule.keys where !oauthIDs.contains(key) {
             schedule.removeValue(forKey: key)
         }
-        // Add new tokens with stagger.
+        // Add new profiles with stagger.
         let now = clock.now()
         for id in oauthIDs where schedule[id] == nil && !permanentlyExcluded.contains(id) {
             schedule[id] = Entry(
@@ -236,47 +244,47 @@ public actor ClaudeUsagePoller {
 
     // MARK: - Tick (single-token fetch)
 
-    private func tick(tokenID: String) async {
-        // 1. Confirm still exists & is oauth.
-        guard let uuid = UUID(uuidString: tokenID) else {
-            schedule.removeValue(forKey: tokenID)
+    private func tick(profileID: String) async {
+        // 1. Confirm still exists, is oauth, and is Claude direct.
+        guard let uuid = UUID(uuidString: profileID) else {
+            schedule.removeValue(forKey: profileID)
             return
         }
-        let row: ClaudeToken?
+        let row: ModelProfile?
         do {
-            row = try await tokens.get(id: uuid)
+            row = try await profiles.get(id: uuid)
         } catch {
             return
         }
-        guard let token = row, token.kind == .oauth else {
-            schedule.removeValue(forKey: tokenID)
+        guard let profile = row, profile.kind == .oauth, profile.baseURL == nil else {
+            schedule.removeValue(forKey: profileID)
             return
         }
 
-        var entry = schedule[tokenID] ?? Entry(nextFireAt: clock.now(), backoffActive: false, excluded: false)
+        var entry = schedule[profileID] ?? Entry(nextFireAt: clock.now(), backoffActive: false, excluded: false)
         let now = clock.now()
 
         // 2. Dedupe against fetched_at.
-        if let cached = try? await usage.get(tokenID: uuid),
+        if let cached = try? await usage.get(profileID: uuid),
            let fetchedAt = cached.fetchedAt,
            now.timeIntervalSince(fetchedAt) < Self.dedupeWindow {
             entry.nextFireAt = now.addingTimeInterval(entry.backoffActive ? Self.backoff : Self.cadence)
-            schedule[tokenID] = entry
+            schedule[profileID] = entry
             return
         }
 
         // 3. Load secret.
         let secret: String?
         do {
-            secret = try keychain(tokenID)
+            secret = try keychain(profileID)
         } catch {
             entry.nextFireAt = now.addingTimeInterval(Self.cadence)
-            schedule[tokenID] = entry
+            schedule[profileID] = entry
             return
         }
         guard let bytes = secret else {
             entry.nextFireAt = now.addingTimeInterval(Self.cadence)
-            schedule[tokenID] = entry
+            schedule[profileID] = entry
             return
         }
 
@@ -286,8 +294,8 @@ public actor ClaudeUsagePoller {
         // 5. Branch on result.
         switch status {
         case .ok(let result):
-            let updated = ClaudeTokenUsage(
-                tokenID: uuid,
+            let updated = ModelProfileUsage(
+                profileID: uuid,
                 fiveHourPct: result.fiveHourPct,
                 sevenDayPct: result.sevenDayPct,
                 fiveHourResetsAt: result.fiveHourResetsAt,
@@ -298,15 +306,15 @@ public actor ClaudeUsagePoller {
             try? await usage.upsert(updated)
             broadcast(updated)
             entry.backoffActive = false
-            loggedBackoff.remove(tokenID)
+            loggedBackoff.remove(profileID)
             entry.nextFireAt = clock.now().addingTimeInterval(Self.cadence)
-            schedule[tokenID] = entry
+            schedule[profileID] = entry
 
         case .http429:
             // Preserve cached pcts; only update status + fetched_at.
-            let cached = try? await usage.get(tokenID: uuid)
-            let updated = ClaudeTokenUsage(
-                tokenID: uuid,
+            let cached = try? await usage.get(profileID: uuid)
+            let updated = ModelProfileUsage(
+                profileID: uuid,
                 fiveHourPct: cached?.fiveHourPct,
                 sevenDayPct: cached?.sevenDayPct,
                 fiveHourResetsAt: cached?.fiveHourResetsAt,
@@ -317,17 +325,17 @@ public actor ClaudeUsagePoller {
             try? await usage.upsert(updated)
             broadcast(updated)
             entry.backoffActive = true
-            if !loggedBackoff.contains(tokenID) {
-                loggedBackoff.insert(tokenID)
-                logger.warning("429 backoff for token \(tokenID)")
+            if !loggedBackoff.contains(profileID) {
+                loggedBackoff.insert(profileID)
+                logger.warning("429 backoff for profile \(profileID, privacy: .public)")
             }
             entry.nextFireAt = clock.now().addingTimeInterval(Self.backoff)
-            schedule[tokenID] = entry
+            schedule[profileID] = entry
 
         case .http401:
-            let cached = try? await usage.get(tokenID: uuid)
-            let updated = ClaudeTokenUsage(
-                tokenID: uuid,
+            let cached = try? await usage.get(profileID: uuid)
+            let updated = ModelProfileUsage(
+                profileID: uuid,
                 fiveHourPct: cached?.fiveHourPct,
                 sevenDayPct: cached?.sevenDayPct,
                 fiveHourResetsAt: cached?.fiveHourResetsAt,
@@ -337,13 +345,13 @@ public actor ClaudeUsagePoller {
             )
             try? await usage.upsert(updated)
             broadcast(updated)
-            permanentlyExcluded.insert(tokenID)
-            schedule.removeValue(forKey: tokenID)
+            permanentlyExcluded.insert(profileID)
+            schedule.removeValue(forKey: profileID)
 
         case .networkError:
-            let cached = try? await usage.get(tokenID: uuid)
-            let updated = ClaudeTokenUsage(
-                tokenID: uuid,
+            let cached = try? await usage.get(profileID: uuid)
+            let updated = ModelProfileUsage(
+                profileID: uuid,
                 fiveHourPct: cached?.fiveHourPct,
                 sevenDayPct: cached?.sevenDayPct,
                 fiveHourResetsAt: cached?.fiveHourResetsAt,
@@ -354,11 +362,11 @@ public actor ClaudeUsagePoller {
             try? await usage.upsert(updated)
             broadcast(updated)
             entry.nextFireAt = clock.now().addingTimeInterval(entry.backoffActive ? Self.backoff : Self.cadence)
-            schedule[tokenID] = entry
+            schedule[profileID] = entry
 
         case .decodeError:
             entry.nextFireAt = clock.now().addingTimeInterval(entry.backoffActive ? Self.backoff : Self.cadence)
-            schedule[tokenID] = entry
+            schedule[profileID] = entry
         }
     }
 }

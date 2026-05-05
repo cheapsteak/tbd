@@ -14,13 +14,10 @@ private final class WeakTerminalRef: @unchecked Sendable {
 
 // MARK: - TerminalPanelView
 
-/// Wraps SwiftTerm's `TerminalView` in a SwiftUI `NSViewRepresentable`.
-///
-/// Uses tmux grouped sessions for session persistence:
-/// 1. TmuxBridge creates a grouped session pointing at the right window
-/// 2. SwiftTerm spawns `tmux attach -t <grouped-session>` in a native PTY
-/// 3. All input, output, and resize handled natively by the terminal driver
-struct TerminalPanelView: NSViewRepresentable {
+/// SwiftUI view that hosts a SwiftTerm-backed terminal panel and, for terminals
+/// pinned to a proxy profile (`baseURL != nil`), shows a one-shot
+/// proxy-unreachable banner driven by a TCP-connect health probe.
+struct TerminalPanelView: View {
     let terminalID: UUID
     let tmuxServer: String
     let tmuxWindowID: String
@@ -43,6 +40,106 @@ struct TerminalPanelView: NSViewRepresentable {
     /// shell would overwrite the snapshot. Once resume completes and
     /// `tmuxWindowID` changes, the view is recreated (`.id` changes) with
     /// this flag false, and tmux connects normally.
+    var isSuspendedSnapshot: Bool = false
+
+    @State private var proxyWarning: String?
+    @State private var didProbe = false
+
+    /// Profile id pinned to this terminal (if any). Used as the `.task` id so
+    /// the probe re-fires once AppState populates. `nil` while AppState hasn't
+    /// loaded the terminal yet — the probe just returns without consuming its
+    /// one-shot gate.
+    private var pinnedProfileID: UUID? {
+        appState.terminals.values.flatMap({ $0 })
+            .first(where: { $0.id == terminalID })?.profileID
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let warning = proxyWarning,
+               !appState.dismissedProxyWarnings.contains(terminalID) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                    Text(warning).font(.caption)
+                    Spacer()
+                    Button("Dismiss") {
+                        appState.dismissedProxyWarnings.insert(terminalID)
+                    }
+                        .buttonStyle(.plain)
+                }
+                .padding(8)
+                .background(Color.yellow.opacity(0.2))
+            }
+            TerminalPanelRepresentable(
+                terminalID: terminalID,
+                tmuxServer: tmuxServer,
+                tmuxWindowID: tmuxWindowID,
+                tmuxBridge: tmuxBridge,
+                worktreePath: worktreePath,
+                remoteURL: remoteURL,
+                onFilePathClicked: onFilePathClicked,
+                onTerminalNotification: onTerminalNotification,
+                onDeadWindow: onDeadWindow,
+                initialSnapshot: initialSnapshot,
+                isSuspendedSnapshot: isSuspendedSnapshot
+            )
+        }
+        .task(id: pinnedProfileID) {
+            await maybeProbeProxy()
+        }
+    }
+
+    @MainActor
+    private func maybeProbeProxy() async {
+        if didProbe { return }
+
+        // Look up the pinned profile for this terminal. Only proxy profiles
+        // (baseURL != nil) get probed — Claude-direct has nothing to be
+        // unreachable. If the lookup fails (AppState hasn't populated yet),
+        // return WITHOUT setting `didProbe` so a later `.task` fire — once
+        // `pinnedProfileID` settles — gets another chance.
+        guard let terminal = appState.terminals.values.flatMap({ $0 })
+            .first(where: { $0.id == terminalID }),
+              let profileID = terminal.profileID,
+              let profile = appState.modelProfiles
+                  .first(where: { $0.profile.id == profileID })?.profile,
+              let baseURL = profile.baseURL, !baseURL.isEmpty
+        else {
+            return
+        }
+
+        didProbe = true   // gate further attempts only once we actually probe
+
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        let result = await appState.healthCheckProfile(baseURL: baseURL)
+        if !result.reachable {
+            proxyWarning = "Proxy unreachable at \(baseURL). Is your local proxy running?"
+            logger.debug("proxy unreachable for terminal \(terminalID, privacy: .public) base=\(baseURL, privacy: .public) detail=\(result.detail ?? "nil", privacy: .public)")
+        }
+    }
+}
+
+// MARK: - TerminalPanelRepresentable
+
+/// Wraps SwiftTerm's `TerminalView` in a SwiftUI `NSViewRepresentable`.
+///
+/// Uses tmux grouped sessions for session persistence:
+/// 1. TmuxBridge creates a grouped session pointing at the right window
+/// 2. SwiftTerm spawns `tmux attach -t <grouped-session>` in a native PTY
+/// 3. All input, output, and resize handled natively by the terminal driver
+private struct TerminalPanelRepresentable: NSViewRepresentable {
+    let terminalID: UUID
+    let tmuxServer: String
+    let tmuxWindowID: String
+    let tmuxBridge: TmuxBridge
+    var worktreePath: String = ""
+    var remoteURL: String?
+    var onFilePathClicked: ((String) -> Void)?
+    var onTerminalNotification: ((String, String) -> Void)?
+    @EnvironmentObject var appState: AppState
+    var onDeadWindow: (() -> Void)?
+    var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
 
     func makeNSView(context: Context) -> TBDTerminalView {

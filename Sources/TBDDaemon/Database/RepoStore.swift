@@ -14,7 +14,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var createdAt: Date
     var renamePrompt: String?
     var customInstructions: String?
-    var claude_token_override_id: String?
+    var profile_override_id: String?
     var worktree_slot: String?
     var worktree_root: String?
     var status: String
@@ -28,7 +28,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.createdAt = repo.createdAt
         self.renamePrompt = repo.renamePrompt
         self.customInstructions = repo.customInstructions
-        self.claude_token_override_id = repo.claudeTokenOverrideID?.uuidString
+        self.profile_override_id = repo.profileOverrideID?.uuidString
         self.worktree_slot = repo.worktreeSlot
         self.worktree_root = repo.worktreeRoot
         self.status = repo.status.rawValue
@@ -44,7 +44,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             createdAt: createdAt,
             renamePrompt: renamePrompt,
             customInstructions: customInstructions,
-            claudeTokenOverrideID: claude_token_override_id.flatMap(UUID.init(uuidString:)),
+            profileOverrideID: profile_override_id.flatMap(UUID.init(uuidString:)),
             worktreeSlot: worktree_slot,
             worktreeRoot: worktree_root,
             status: RepoStatus(rawValue: status) ?? .ok
@@ -136,22 +136,22 @@ public struct RepoStore: Sendable {
         }
     }
 
-    /// Set or clear the Claude token override for a repo.
-    public func setClaudeTokenOverride(id: UUID, tokenID: UUID?) async throws {
+    /// Set or clear the model profile override for a repo.
+    public func setProfileOverride(id: UUID, profileID: UUID?) async throws {
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE repo SET claude_token_override_id = ? WHERE id = ?",
-                arguments: [tokenID?.uuidString, id.uuidString]
+                sql: "UPDATE repo SET profile_override_id = ? WHERE id = ?",
+                arguments: [profileID?.uuidString, id.uuidString]
             )
         }
     }
 
-    /// Clear the Claude token override on every repo whose override matches the given token.
-    public func clearClaudeTokenOverride(matching tokenID: UUID) async throws {
+    /// Clear the profile override on every repo whose override matches the given profile.
+    public func clearProfileOverride(matching profileID: UUID) async throws {
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE repo SET claude_token_override_id = NULL WHERE claude_token_override_id = ?",
-                arguments: [tokenID.uuidString]
+                sql: "UPDATE repo SET profile_override_id = NULL WHERE profile_override_id = ?",
+                arguments: [profileID.uuidString]
             )
         }
     }

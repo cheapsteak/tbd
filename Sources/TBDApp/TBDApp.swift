@@ -328,7 +328,7 @@ struct TBDAppMain: App {
         .defaultSize(width: 1200, height: 800)
         .commands {
             TBDCommands(appState: appState)
-            ClaudeTokenMenu(appState: appState)
+            ModelProfileMenu(appState: appState)
         }
 
         Settings {

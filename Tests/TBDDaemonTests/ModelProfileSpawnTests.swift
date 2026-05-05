@@ -4,7 +4,7 @@ import Testing
 @testable import TBDShared
 
 @Suite("Claude Token Spawn + Swap")
-struct ClaudeTokenSpawnTests {
+struct ModelProfileSpawnTests {
 
     /// Recorder for tmux argv lists invoked during dryRun.
     final class TmuxRecorder: @unchecked Sendable {
@@ -58,20 +58,20 @@ struct ClaudeTokenSpawnTests {
         return (repo, wt)
     }
 
-    private func seedToken(_ db: TBDDatabase, name: String, secret: String) async throws -> ClaudeToken {
-        let row = try await db.claudeTokens.create(name: name, kind: .oauth)
-        try ClaudeTokenKeychain.store(id: row.id.uuidString, token: secret)
+    private func seedToken(_ db: TBDDatabase, name: String, secret: String) async throws -> ModelProfile {
+        let row = try await db.modelProfiles.create(name: name, kind: .oauth)
+        try ModelProfileKeychain.store(id: row.id.uuidString, token: secret)
         return row
     }
 
     private func cleanup(_ db: TBDDatabase) async {
-        let toks = (try? await db.claudeTokens.list()) ?? []
-        for t in toks { try? ClaudeTokenKeychain.delete(id: t.id.uuidString) }
+        let toks = (try? await db.modelProfiles.list()) ?? []
+        for t in toks { try? ModelProfileKeychain.delete(id: t.id.uuidString) }
     }
 
     // MARK: - Spawn: no token configured
 
-    @Test("spawn: no tokens → no env prefix, claudeTokenID nil")
+    @Test("spawn: no tokens → no env prefix, profileID nil")
     func spawnNoToken() async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
@@ -84,20 +84,20 @@ struct ClaudeTokenSpawnTests {
         let resp = await router.handle(req)
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
-        #expect(term.claudeTokenID == nil)
+        #expect(term.profileID == nil)
         #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
     // MARK: - Spawn: global default
 
-    @Test("spawn: global default → env prefix + claudeTokenID")
+    @Test("spawn: global default → env prefix + profileID")
     func spawnWithGlobalDefault() async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let secret = "sk-ant-oat01-fakeAAAA"
         let tok = try await seedToken(db, name: "Default", secret: secret)
-        try await db.config.setDefaultClaudeTokenID(tok.id)
+        try await db.config.setDefaultProfileID(tok.id)
 
         let req = try RPCRequest(
             method: RPCMethod.terminalCreate,
@@ -106,7 +106,7 @@ struct ClaudeTokenSpawnTests {
         let resp = await router.handle(req)
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
-        #expect(term.claudeTokenID == tok.id)
+        #expect(term.profileID == tok.id)
         // Token must be passed via tmux -e flag, never inlined in shell body.
         #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)"))
         #expect(!recorder.shellBodies.contains(secret),
@@ -125,8 +125,8 @@ struct ClaudeTokenSpawnTests {
         let secretB = "sk-ant-oat01-BBBB"
         let a = try await seedToken(db, name: "A", secret: secretA)
         let b = try await seedToken(db, name: "B", secret: secretB)
-        try await db.config.setDefaultClaudeTokenID(a.id)
-        try await db.repos.setClaudeTokenOverride(id: repo.id, tokenID: b.id)
+        try await db.config.setDefaultProfileID(a.id)
+        try await db.repos.setProfileOverride(id: repo.id, profileID: b.id)
 
         let req = try RPCRequest(
             method: RPCMethod.terminalCreate,
@@ -135,7 +135,7 @@ struct ClaudeTokenSpawnTests {
         let resp = await router.handle(req)
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
-        #expect(term.claudeTokenID == b.id)
+        #expect(term.profileID == b.id)
         #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secretB)"))
         #expect(!recorder.joinedAll.contains(secretA))
         #expect(!recorder.shellBodies.contains(secretB),
@@ -151,7 +151,7 @@ struct ClaudeTokenSpawnTests {
         let (_, wt) = try await seedRepoAndWorktree(db)
         let secret = "sk-ant-oat01-AAAA"
         let tok = try await seedToken(db, name: "A", secret: secret)
-        try await db.config.setDefaultClaudeTokenID(tok.id)
+        try await db.config.setDefaultProfileID(tok.id)
 
         let req = try RPCRequest(
             method: RPCMethod.terminalCreate,
@@ -160,7 +160,7 @@ struct ClaudeTokenSpawnTests {
         let resp = await router.handle(req)
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
-        #expect(term.claudeTokenID == nil)
+        #expect(term.profileID == nil)
         #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
@@ -175,7 +175,7 @@ struct ClaudeTokenSpawnTests {
         let secretB = "sk-ant-oat01-BBBB"
         let a = try await seedToken(db, name: "A", secret: secretA)
         let b = try await seedToken(db, name: "B", secret: secretB)
-        try await db.config.setDefaultClaudeTokenID(a.id)
+        try await db.config.setDefaultProfileID(a.id)
 
         // Spawn original claude terminal with token A. The session is "blank" —
         // no JSONL exists on disk for it — so swap should pick the fresh path.
@@ -185,27 +185,27 @@ struct ClaudeTokenSpawnTests {
         ))
         #expect(createResp.success)
         let oldTerm = try createResp.decodeResult(Terminal.self)
-        #expect(oldTerm.claudeTokenID == a.id)
+        #expect(oldTerm.profileID == a.id)
         let oldSessionID = oldTerm.claudeSessionID
 
         let beforeSwap = recorder.calls.count
 
         // Swap to B → returns a NEW terminal row, old one untouched
         let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapClaudeToken,
-            params: TerminalSwapClaudeTokenParams(terminalID: oldTerm.id, newTokenID: b.id)
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id)
         ))
         #expect(swapResp.success)
         let newTerm = try swapResp.decodeResult(Terminal.self)
         #expect(newTerm.id != oldTerm.id)
-        #expect(newTerm.claudeTokenID == b.id)
+        #expect(newTerm.profileID == b.id)
         // Blank session → fresh spawn with a NEW session id (not a resume of the old one).
         #expect(newTerm.claudeSessionID != nil)
         #expect(newTerm.claudeSessionID != oldSessionID)
 
         // Old terminal row is unchanged
         let oldAfter = try await db.terminals.get(id: oldTerm.id)
-        #expect(oldAfter?.claudeTokenID == a.id)
+        #expect(oldAfter?.profileID == a.id)
 
         // Daemon did NOT send C-c or send-keys to the old pane
         let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
@@ -235,28 +235,28 @@ struct ClaudeTokenSpawnTests {
         let (_, wt) = try await seedRepoAndWorktree(db)
         let secretA = "sk-ant-oat01-AAAA"
         let a = try await seedToken(db, name: "A", secret: secretA)
-        try await db.config.setDefaultClaudeTokenID(a.id)
+        try await db.config.setDefaultProfileID(a.id)
 
         let createResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
             params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
         ))
         let oldTerm = try createResp.decodeResult(Terminal.self)
-        #expect(oldTerm.claudeTokenID == a.id)
+        #expect(oldTerm.profileID == a.id)
 
         let beforeSwap = recorder.calls.count
 
         let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapClaudeToken,
-            params: TerminalSwapClaudeTokenParams(terminalID: oldTerm.id, newTokenID: nil)
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: nil)
         ))
         #expect(swapResp.success)
         let newTerm = try swapResp.decodeResult(Terminal.self)
         #expect(newTerm.id != oldTerm.id)
-        #expect(newTerm.claudeTokenID == nil)
+        #expect(newTerm.profileID == nil)
         // Old terminal still has its original token
         let oldAfter = try await db.terminals.get(id: oldTerm.id)
-        #expect(oldAfter?.claudeTokenID == a.id)
+        #expect(oldAfter?.profileID == a.id)
 
         let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
         let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
@@ -283,8 +283,8 @@ struct ClaudeTokenSpawnTests {
         #expect(term.claudeSessionID == nil)
 
         let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapClaudeToken,
-            params: TerminalSwapClaudeTokenParams(terminalID: term.id, newTokenID: nil)
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: term.id, newProfileID: nil)
         ))
         #expect(!swapResp.success)
         #expect(swapResp.error?.contains("not a Claude terminal") == true)
@@ -305,8 +305,8 @@ struct ClaudeTokenSpawnTests {
         let term = try createResp.decodeResult(Terminal.self)
 
         let swapResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSwapClaudeToken,
-            params: TerminalSwapClaudeTokenParams(terminalID: term.id, newTokenID: UUID())
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: term.id, newProfileID: UUID())
         ))
         #expect(!swapResp.success)
     }

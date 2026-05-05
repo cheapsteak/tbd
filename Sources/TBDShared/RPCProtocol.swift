@@ -121,14 +121,16 @@ public enum RPCMethod {
     public static let conductorClearSuggestion = "conductor.clearSuggestion"
     public static let terminalConversation = "terminal.conversation"
     public static let repoUpdateInstructions = "repo.updateInstructions"
-    public static let claudeTokenList = "claudeToken.list"
-    public static let claudeTokenAdd = "claudeToken.add"
-    public static let claudeTokenDelete = "claudeToken.delete"
-    public static let claudeTokenRename = "claudeToken.rename"
-    public static let claudeTokenSetGlobalDefault = "claudeToken.setGlobalDefault"
-    public static let claudeTokenSetRepoOverride = "claudeToken.setRepoOverride"
-    public static let claudeTokenFetchUsage = "claudeToken.fetchUsage"
-    public static let terminalSwapClaudeToken = "terminal.swapClaudeToken"
+    public static let modelProfileList = "modelProfile.list"
+    public static let modelProfileAdd = "modelProfile.add"
+    public static let modelProfileDelete = "modelProfile.delete"
+    public static let modelProfileRename = "modelProfile.rename"
+    public static let modelProfileUpdateEndpoint = "modelProfile.updateEndpoint"
+    public static let modelProfileSetGlobalDefault = "modelProfile.setGlobalDefault"
+    public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
+    public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
+    public static let modelProfileHealthCheck = "modelProfile.healthCheck"
+    public static let terminalSwapProfile = "terminal.swapProfile"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let sessionList = "session.list"
@@ -152,48 +154,52 @@ public struct AppSetForegroundStateParams: Codable, Sendable {
     public init(isForeground: Bool) { self.isForeground = isForeground }
 }
 
-// MARK: - Terminal Swap Claude Token
+// MARK: - Terminal Swap Profile
 
-public struct TerminalSwapClaudeTokenParams: Codable, Sendable {
+public struct TerminalSwapProfileParams: Codable, Sendable {
     public let terminalID: UUID
-    public let newTokenID: UUID?
+    public let newProfileID: UUID?
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    public init(terminalID: UUID, newTokenID: UUID?, cols: Int? = nil, rows: Int? = nil) {
+    public init(terminalID: UUID, newProfileID: UUID?, cols: Int? = nil, rows: Int? = nil) {
         self.terminalID = terminalID
-        self.newTokenID = newTokenID
+        self.newProfileID = newProfileID
         self.cols = cols
         self.rows = rows
     }
 }
 
-// MARK: - Claude Token RPC
+// MARK: - Model Profile RPC
 
-public struct ClaudeTokenAddParams: Codable, Sendable {
+public struct ModelProfileAddParams: Codable, Sendable {
     public let name: String
     public let token: String
-    public init(name: String, token: String) {
+    public let baseURL: String?
+    public let model: String?
+    public init(name: String, token: String, baseURL: String? = nil, model: String? = nil) {
         self.name = name
         self.token = token
+        self.baseURL = baseURL
+        self.model = model
     }
 }
 
-public struct ClaudeTokenAddResult: Codable, Sendable {
-    public let token: ClaudeToken
+public struct ModelProfileAddResult: Codable, Sendable {
+    public let profile: ModelProfile
     public let warning: String?
-    public init(token: ClaudeToken, warning: String? = nil) {
-        self.token = token
+    public init(profile: ModelProfile, warning: String? = nil) {
+        self.profile = profile
         self.warning = warning
     }
 }
 
-public struct ClaudeTokenDeleteParams: Codable, Sendable {
+public struct ModelProfileDeleteParams: Codable, Sendable {
     public let id: UUID
     public init(id: UUID) { self.id = id }
 }
 
-public struct ClaudeTokenRenameParams: Codable, Sendable {
+public struct ModelProfileRenameParams: Codable, Sendable {
     public let id: UUID
     public let name: String
     public init(id: UUID, name: String) {
@@ -201,42 +207,65 @@ public struct ClaudeTokenRenameParams: Codable, Sendable {
     }
 }
 
-public struct ClaudeTokenSetGlobalDefaultParams: Codable, Sendable {
+public struct ModelProfileUpdateEndpointParams: Codable, Sendable {
+    public let id: UUID
+    public let baseURL: String?
+    public let model: String?
+    public init(id: UUID, baseURL: String?, model: String?) {
+        self.id = id; self.baseURL = baseURL; self.model = model
+    }
+}
+
+public struct ModelProfileSetGlobalDefaultParams: Codable, Sendable {
     public let id: UUID?
     public init(id: UUID?) { self.id = id }
 }
 
-public struct ClaudeTokenSetRepoOverrideParams: Codable, Sendable {
+public struct ModelProfileSetRepoOverrideParams: Codable, Sendable {
     public let repoID: UUID
-    public let tokenID: UUID?
-    public init(repoID: UUID, tokenID: UUID?) {
-        self.repoID = repoID; self.tokenID = tokenID
+    public let profileID: UUID?
+    public init(repoID: UUID, profileID: UUID?) {
+        self.repoID = repoID; self.profileID = profileID
     }
 }
 
-public struct ClaudeTokenFetchUsageParams: Codable, Sendable {
+public struct ModelProfileFetchUsageParams: Codable, Sendable {
     public let id: UUID
     public init(id: UUID) { self.id = id }
 }
 
-public struct ClaudeTokenListResult: Codable, Sendable {
-    public let tokens: [ClaudeTokenWithUsage]
+public struct ModelProfileListResult: Codable, Sendable {
+    public let profiles: [ModelProfileWithUsage]
     public let defaultID: UUID?
-    public init(tokens: [ClaudeTokenWithUsage], defaultID: UUID? = nil) {
-        self.tokens = tokens
+    public init(profiles: [ModelProfileWithUsage], defaultID: UUID? = nil) {
+        self.profiles = profiles
         self.defaultID = defaultID
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        tokens = try c.decode([ClaudeTokenWithUsage].self, forKey: .tokens)
+        profiles = try c.decode([ModelProfileWithUsage].self, forKey: .profiles)
         defaultID = try c.decodeIfPresent(UUID.self, forKey: .defaultID)
     }
 }
 
-public struct ClaudeTokenFetchUsageResult: Codable, Sendable {
-    public let usage: ClaudeTokenUsage
-    public init(usage: ClaudeTokenUsage) { self.usage = usage }
+public struct ModelProfileFetchUsageResult: Codable, Sendable {
+    public let usage: ModelProfileUsage
+    public init(usage: ModelProfileUsage) { self.usage = usage }
+}
+
+public struct ModelProfileHealthCheckParams: Codable, Sendable {
+    public let baseURL: String
+    public init(baseURL: String) { self.baseURL = baseURL }
+}
+
+public struct ModelProfileHealthCheckResult: Codable, Sendable {
+    public let reachable: Bool
+    public let statusCode: Int?
+    public let detail: String?
+    public init(reachable: Bool, statusCode: Int?, detail: String?) {
+        self.reachable = reachable; self.statusCode = statusCode; self.detail = detail
+    }
 }
 
 public struct NotificationsListResult: Codable, Sendable {
@@ -390,13 +419,13 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let resumeSessionID: String?
     /// Initial prompt to send to the Claude session (only used with type: .claude).
     public let prompt: String?
-    /// Pin a specific token ID for this terminal, bypassing resolve(repoID:).
-    public let overrideTokenID: UUID?
+    /// Pin a specific profile ID for this terminal, bypassing resolve(repoID:).
+    public let overrideProfileID: UUID?
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideTokenID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) {
-        self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideTokenID = overrideTokenID
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) {
+        self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
         self.cols = cols; self.rows = rows
     }
 }

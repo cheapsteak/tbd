@@ -14,7 +14,7 @@ public final class RPCRouter: Sendable {
     public let suspendResumeCoordinator: SuspendResumeCoordinator
     public let conductorManager: ConductorManager
     public let usageFetcher: ClaudeUsageFetcher
-    public let claudeTokenResolver: ClaudeTokenResolver
+    public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
 
     let decoder = JSONDecoder()
@@ -30,7 +30,7 @@ public final class RPCRouter: Sendable {
         prManager: PRStatusManager = PRStatusManager(),
         conductorManager: ConductorManager? = nil,
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
-        claudeTokenResolver: ClaudeTokenResolver? = nil
+        modelProfileResolver: ModelProfileResolver? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -39,14 +39,14 @@ public final class RPCRouter: Sendable {
         self.startTime = startTime
         self.subscriptions = subscriptions
         self.prManager = prManager
-        let resolvedClaudeTokenResolver = claudeTokenResolver ?? ClaudeTokenResolver(
-            tokens: db.claudeTokens,
+        let resolvedModelProfileResolver = modelProfileResolver ?? ModelProfileResolver(
+            profiles: db.modelProfiles,
             repos: db.repos,
             config: db.config
         )
-        self.claudeTokenResolver = resolvedClaudeTokenResolver
+        self.modelProfileResolver = resolvedModelProfileResolver
         self.suspendResumeCoordinator = SuspendResumeCoordinator(
-            db: db, tmux: tmux, claudeTokenResolver: resolvedClaudeTokenResolver
+            db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver
         )
         self.conductorManager = conductorManager ?? ConductorManager(db: db, tmux: tmux)
         self.usageFetcher = usageFetcher
@@ -99,8 +99,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalDelete(request.paramsData)
             case RPCMethod.terminalSetPin:
                 return try await handleTerminalSetPin(request.paramsData)
-            case RPCMethod.terminalSwapClaudeToken:
-                return try await handleTerminalSwapClaudeToken(request.paramsData)
+            case RPCMethod.terminalSwapProfile:
+                return try await handleTerminalSwapProfile(request.paramsData)
             case RPCMethod.notify:
                 return try await handleNotify(request.paramsData)
             case RPCMethod.daemonStatus:
@@ -159,20 +159,24 @@ public final class RPCRouter: Sendable {
                 return try await handleConductorSuggest(request.paramsData)
             case RPCMethod.conductorClearSuggestion:
                 return try await handleConductorClearSuggestion(request.paramsData)
-            case RPCMethod.claudeTokenList:
-                return try await handleClaudeTokenList()
-            case RPCMethod.claudeTokenAdd:
-                return try await handleClaudeTokenAdd(request.paramsData)
-            case RPCMethod.claudeTokenDelete:
-                return try await handleClaudeTokenDelete(request.paramsData)
-            case RPCMethod.claudeTokenRename:
-                return try await handleClaudeTokenRename(request.paramsData)
-            case RPCMethod.claudeTokenSetGlobalDefault:
-                return try await handleClaudeTokenSetGlobalDefault(request.paramsData)
-            case RPCMethod.claudeTokenSetRepoOverride:
-                return try await handleClaudeTokenSetRepoOverride(request.paramsData)
-            case RPCMethod.claudeTokenFetchUsage:
-                return try await handleClaudeTokenFetchUsage(request.paramsData)
+            case RPCMethod.modelProfileList:
+                return try await handleModelProfileList()
+            case RPCMethod.modelProfileAdd:
+                return try await handleModelProfileAdd(request.paramsData)
+            case RPCMethod.modelProfileDelete:
+                return try await handleModelProfileDelete(request.paramsData)
+            case RPCMethod.modelProfileRename:
+                return try await handleModelProfileRename(request.paramsData)
+            case RPCMethod.modelProfileUpdateEndpoint:
+                return try await handleModelProfileUpdateEndpoint(request.paramsData)
+            case RPCMethod.modelProfileSetGlobalDefault:
+                return try await handleModelProfileSetGlobalDefault(request.paramsData)
+            case RPCMethod.modelProfileSetRepoOverride:
+                return try await handleModelProfileSetRepoOverride(request.paramsData)
+            case RPCMethod.modelProfileFetchUsage:
+                return try await handleModelProfileFetchUsage(request.paramsData)
+            case RPCMethod.modelProfileHealthCheck:
+                return try await handleModelProfileHealthCheck(request.paramsData)
             case RPCMethod.appSetForegroundState:
                 let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
                 await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)

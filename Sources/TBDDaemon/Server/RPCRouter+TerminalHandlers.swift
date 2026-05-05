@@ -68,7 +68,7 @@ extension RPCRouter {
                 tmuxPaneID: window.paneID,
                 label: "Codex",
                 claudeSessionID: nil,
-                claudeTokenID: nil
+                profileID: nil
             )
 
             subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -82,19 +82,19 @@ extension RPCRouter {
         let claudeSessionID: String?
         let label: String?
 
-        // Resolve claude token (repo override → global default → none).
+        // Resolve model profile (repo override → global default → none).
         // Failure here must NOT break terminal spawn — fall back to keychain login.
-        var resolvedToken: ResolvedClaudeToken? = nil
+        var resolvedProfile: ResolvedModelProfile? = nil
         if isClaudeType {
             do {
-                if let overrideID = params.overrideTokenID {
-                    resolvedToken = try await claudeTokenResolver.loadByID(overrideID)
+                if let overrideID = params.overrideProfileID {
+                    resolvedProfile = try await modelProfileResolver.loadByID(overrideID)
                 } else {
-                    resolvedToken = try await claudeTokenResolver.resolve(repoID: worktree.repoID)
+                    resolvedProfile = try await modelProfileResolver.resolve(repoID: worktree.repoID)
                 }
             } catch {
-                logger.warning("claude token resolution failed; falling back to keychain login")
-                resolvedToken = nil
+                logger.warning("model profile resolution failed; falling back to keychain login")
+                resolvedProfile = nil
             }
         }
 
@@ -134,8 +134,10 @@ extension RPCRouter {
             freshSessionID: freshSessionID,
             appendSystemPrompt: appendSystemPrompt,
             initialPrompt: params.prompt,
-            tokenSecret: resolvedToken?.secret,
-            tokenKind: resolvedToken?.kind,
+            profileSecret: resolvedProfile?.secret,
+            profileKind: resolvedProfile?.kind,
+            profileBaseURL: resolvedProfile?.baseURL,
+            profileModel: resolvedProfile?.model,
             cmd: params.cmd,
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
         )
@@ -157,7 +159,7 @@ extension RPCRouter {
             tmuxPaneID: window.paneID,
             label: label,
             claudeSessionID: claudeSessionID,
-            claudeTokenID: resolvedToken?.tokenID
+            profileID: resolvedProfile?.profileID
         )
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -406,8 +408,8 @@ extension RPCRouter {
         return .resume(sessionID: oldSessionID)
     }
 
-    func handleTerminalSwapClaudeToken(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(TerminalSwapClaudeTokenParams.self, from: paramsData)
+    func handleTerminalSwapProfile(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSwapProfileParams.self, from: paramsData)
 
         guard let oldTerminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
@@ -419,17 +421,17 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
-        // Resolve the requested token (nil = no override; keychain login).
+        // Resolve the requested profile (nil = no override; keychain login).
         // We do NOT touch the old terminal — both tabs coexist after the swap.
-        let resolved: ResolvedClaudeToken?
-        if let newID = params.newTokenID {
+        let resolved: ResolvedModelProfile?
+        if let newID = params.newProfileID {
             do {
-                resolved = try await claudeTokenResolver.loadByID(newID)
+                resolved = try await modelProfileResolver.loadByID(newID)
             } catch {
-                return RPCResponse(error: "Failed to load token")
+                return RPCResponse(error: "Failed to load profile")
             }
             if resolved == nil {
-                return RPCResponse(error: "Token not found or unreadable")
+                return RPCResponse(error: "Profile not found or unreadable")
             }
         } else {
             resolved = nil
@@ -462,8 +464,10 @@ extension RPCRouter {
                 freshSessionID: nil,
                 appendSystemPrompt: nil,
                 initialPrompt: nil,
-                tokenSecret: resolved?.secret,
-                tokenKind: resolved?.kind,
+                profileSecret: resolved?.secret,
+                profileKind: resolved?.kind,
+                profileBaseURL: resolved?.baseURL,
+                profileModel: resolved?.model,
                 cmd: nil,
                 shellFallback: ""
             )
@@ -479,8 +483,10 @@ extension RPCRouter {
                 freshSessionID: newSessionID,
                 appendSystemPrompt: appendPrompt,
                 initialPrompt: nil,
-                tokenSecret: resolved?.secret,
-                tokenKind: resolved?.kind,
+                profileSecret: resolved?.secret,
+                profileKind: resolved?.kind,
+                profileBaseURL: resolved?.baseURL,
+                profileModel: resolved?.model,
                 cmd: nil,
                 shellFallback: ""
             )
@@ -510,7 +516,7 @@ extension RPCRouter {
             tmuxPaneID: window.paneID,
             label: "claude",
             claudeSessionID: storedSessionID,
-            claudeTokenID: resolved?.tokenID
+            profileID: resolved?.profileID
         )
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(

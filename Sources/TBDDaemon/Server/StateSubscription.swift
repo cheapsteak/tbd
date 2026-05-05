@@ -44,9 +44,9 @@ public final class StateSubscriptionManager: @unchecked Sendable {
         return subscribers.count
     }
 
-    /// Convenience: broadcast a Claude token usage update.
-    public func broadcastClaudeTokenUsage(_ usage: ClaudeTokenUsage) {
-        broadcast(delta: .claudeTokenUsageUpdated(usage))
+    /// Convenience: broadcast a model profile usage update.
+    public func broadcastModelProfileUsage(_ usage: ModelProfileUsage) {
+        broadcast(delta: .modelProfileUsageUpdated(usage))
     }
 
     /// Broadcast a delta event to all subscribers.

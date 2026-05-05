@@ -6,11 +6,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "config"
 
     var id: String
-    var default_claude_token_id: String?
+    var default_profile_id: String?
 
     func toModel() -> Config {
         Config(
-            defaultClaudeTokenID: default_claude_token_id.flatMap(UUID.init(uuidString:))
+            defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:))
         )
     }
 }
@@ -29,10 +29,10 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    public func setDefaultClaudeTokenID(_ id: UUID?) async throws {
+    public func setDefaultProfileID(_ id: UUID?) async throws {
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE config SET default_claude_token_id = ? WHERE id = ?",
+                sql: "UPDATE config SET default_profile_id = ? WHERE id = ?",
                 arguments: [id?.uuidString, Self.singletonID]
             )
         }

@@ -233,7 +233,7 @@ actor DaemonClient {
                     // Retry transient interruptions. Blocking recv on a Unix
                     // socket can be kicked out with EINTR when the app process
                     // services signals (GCD timers, Combine, etc.) during a
-                    // long handler like claudeToken.add where the daemon is
+                    // long handler like modelProfile.add where the daemon is
                     // itself waiting on a network round-trip to Anthropic.
                     if savedErrno == EINTR || savedErrno == EAGAIN {
                         continue
@@ -435,10 +435,10 @@ actor DaemonClient {
     }
 
     /// Create a terminal in a worktree.
-    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideTokenID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideTokenID: overrideTokenID, cols: cols, rows: rows),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideProfileID: overrideProfileID, cols: cols, rows: rows),
             resultType: Terminal.self
         )
     }
@@ -738,74 +738,91 @@ actor DaemonClient {
         )
     }
 
-    // MARK: - Claude Tokens
+    // MARK: - Model Profiles
     //
-    // IMPORTANT: never log raw token bytes. The `addClaudeToken` wrapper is
-    // the only place a secret token crosses the actor boundary in the app
-    // process — keep it out of any logger / print statement.
+    // IMPORTANT: never log raw secret bytes. The `addModelProfile` wrapper is
+    // the only place a secret crosses the actor boundary in the app process —
+    // keep it out of any logger / print statement.
 
-    /// List all Claude tokens with cached usage and the global default ID.
-    func listClaudeTokens() async throws -> ClaudeTokenListResult {
-        return try await callNoParamsAsync(method: RPCMethod.claudeTokenList, resultType: ClaudeTokenListResult.self)
+    /// List all model profiles with cached usage and the global default ID.
+    func listModelProfiles() async throws -> ModelProfileListResult {
+        return try await callNoParamsAsync(method: RPCMethod.modelProfileList, resultType: ModelProfileListResult.self)
     }
 
-    /// Add a Claude token. The raw token string MUST NOT be logged.
-    func addClaudeToken(name: String, token: String) async throws -> ClaudeTokenAddResult {
+    /// Add a model profile. The raw secret string MUST NOT be logged.
+    func addModelProfile(name: String, token: String, baseURL: String? = nil, model: String? = nil) async throws -> ModelProfileAddResult {
         return try await callAsync(
-            method: RPCMethod.claudeTokenAdd,
-            params: ClaudeTokenAddParams(name: name, token: token),
-            resultType: ClaudeTokenAddResult.self
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: name, token: token, baseURL: baseURL, model: model),
+            resultType: ModelProfileAddResult.self
         )
     }
 
-    /// Delete a Claude token by ID.
-    func deleteClaudeToken(id: UUID) async throws {
+    /// Delete a model profile by ID.
+    func deleteModelProfile(id: UUID) async throws {
         try await callVoidAsync(
-            method: RPCMethod.claudeTokenDelete,
-            params: ClaudeTokenDeleteParams(id: id)
+            method: RPCMethod.modelProfileDelete,
+            params: ModelProfileDeleteParams(id: id)
         )
     }
 
-    /// Rename a Claude token.
-    func renameClaudeToken(id: UUID, name: String) async throws {
+    /// Rename a model profile.
+    func renameModelProfile(id: UUID, name: String) async throws {
         try await callVoidAsync(
-            method: RPCMethod.claudeTokenRename,
-            params: ClaudeTokenRenameParams(id: id, name: name)
+            method: RPCMethod.modelProfileRename,
+            params: ModelProfileRenameParams(id: id, name: name)
         )
     }
 
-    /// Set or clear the global default Claude token.
-    func setGlobalDefaultClaudeToken(id: UUID?) async throws {
+    /// Update a model profile's proxy endpoint (baseURL + model).
+    func updateModelProfileEndpoint(id: UUID, baseURL: String?, model: String?) async throws {
         try await callVoidAsync(
-            method: RPCMethod.claudeTokenSetGlobalDefault,
-            params: ClaudeTokenSetGlobalDefaultParams(id: id)
+            method: RPCMethod.modelProfileUpdateEndpoint,
+            params: ModelProfileUpdateEndpointParams(id: id, baseURL: baseURL, model: model)
         )
     }
 
-    /// Set or clear a per-repo Claude token override.
-    func setRepoClaudeTokenOverride(repoID: UUID, tokenID: UUID?) async throws {
+    /// Probe a proxy base URL for reachability.
+    func healthCheckProfile(baseURL: String) async throws -> ModelProfileHealthCheckResult {
+        return try await callAsync(
+            method: RPCMethod.modelProfileHealthCheck,
+            params: ModelProfileHealthCheckParams(baseURL: baseURL),
+            resultType: ModelProfileHealthCheckResult.self
+        )
+    }
+
+    /// Set or clear the global default model profile.
+    func setDefaultProfile(id: UUID?) async throws {
         try await callVoidAsync(
-            method: RPCMethod.claudeTokenSetRepoOverride,
-            params: ClaudeTokenSetRepoOverrideParams(repoID: repoID, tokenID: tokenID)
+            method: RPCMethod.modelProfileSetGlobalDefault,
+            params: ModelProfileSetGlobalDefaultParams(id: id)
         )
     }
 
-    /// Fetch fresh usage for a single Claude token (60s server-side dedupe).
-    func fetchClaudeTokenUsage(id: UUID) async throws -> ClaudeTokenUsage {
+    /// Set or clear a per-repo model profile override.
+    func setRepoProfileOverride(repoID: UUID, profileID: UUID?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileSetRepoOverride,
+            params: ModelProfileSetRepoOverrideParams(repoID: repoID, profileID: profileID)
+        )
+    }
+
+    /// Fetch fresh usage for a single profile (60s server-side dedupe).
+    func fetchProfileUsage(id: UUID) async throws -> ModelProfileUsage {
         let result = try await callAsync(
-            method: RPCMethod.claudeTokenFetchUsage,
-            params: ClaudeTokenFetchUsageParams(id: id),
-            resultType: ClaudeTokenFetchUsageResult.self
+            method: RPCMethod.modelProfileFetchUsage,
+            params: ModelProfileFetchUsageParams(id: id),
+            resultType: ModelProfileFetchUsageResult.self
         )
         return result.usage
     }
 
-    /// Swap the Claude token associated with a running terminal.
+    /// Swap the model profile associated with a running terminal.
     /// Returns the newly created Terminal (the daemon forks a new tab).
-    func swapClaudeTokenOnTerminal(terminalID: UUID, newTokenID: UUID?, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+    func swapTerminalProfile(terminalID: UUID, newProfileID: UUID?, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
         return try await callAsync(
-            method: RPCMethod.terminalSwapClaudeToken,
-            params: TerminalSwapClaudeTokenParams(terminalID: terminalID, newTokenID: newTokenID, cols: cols, rows: rows),
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: terminalID, newProfileID: newProfileID, cols: cols, rows: rows),
             resultType: Terminal.self
         )
     }

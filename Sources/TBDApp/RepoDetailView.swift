@@ -50,15 +50,15 @@ struct RepoSettingsView: View {
         if let repo = repo {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Picker("Claude token", selection: tokenOverrideBinding(repo: repo)) {
+                    Picker("Model profile override", selection: profileOverrideBinding(repo: repo)) {
                         Text("Inherit global default").tag(UUID?.none)
-                        ForEach(appState.claudeTokens, id: \.token.id) { entry in
-                            Text(entry.token.name).tag(UUID?.some(entry.token.id))
+                        ForEach(appState.modelProfiles, id: \.profile.id) { entry in
+                            Text(profileLabel(entry: entry)).tag(UUID?.some(entry.profile.id))
                         }
                     }
                     .pickerStyle(.menu)
 
-                    if let caption = tokenOverrideCaption(repo: repo) {
+                    if let caption = profileOverrideCaption(repo: repo) {
                         Text(caption)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -74,24 +74,32 @@ struct RepoSettingsView: View {
         }
     }
 
-    private func tokenOverrideBinding(repo: Repo) -> Binding<UUID?> {
+    private func profileOverrideBinding(repo: Repo) -> Binding<UUID?> {
         Binding(
-            get: { repo.claudeTokenOverrideID },
+            get: { repo.profileOverrideID },
             set: { newValue in
                 Task {
-                    await appState.setRepoClaudeTokenOverride(repoID: repo.id, tokenID: newValue)
+                    await appState.setRepoProfileOverride(repoID: repo.id, profileID: newValue)
                 }
             }
         )
     }
 
-    private func tokenOverrideCaption(repo: Repo) -> String? {
-        if let overrideID = repo.claudeTokenOverrideID {
-            let name = appState.claudeTokens.first(where: { $0.token.id == overrideID })?.token.name ?? "Unknown token"
+    private func profileLabel(entry: ModelProfileWithUsage) -> String {
+        guard let baseURL = entry.profile.baseURL else { return entry.profile.name }
+        if let model = entry.profile.model, !model.isEmpty {
+            return "\(entry.profile.name) — via \(baseURL) · \(model)"
+        }
+        return "\(entry.profile.name) — via \(baseURL)"
+    }
+
+    private func profileOverrideCaption(repo: Repo) -> String? {
+        if let overrideID = repo.profileOverrideID {
+            let name = appState.modelProfiles.first(where: { $0.profile.id == overrideID })?.profile.name ?? "Unknown profile"
             return "Overriding with: \(name)"
         }
-        if let defaultID = appState.globalDefaultClaudeTokenID,
-           let name = appState.claudeTokens.first(where: { $0.token.id == defaultID })?.token.name {
+        if let defaultID = appState.defaultProfileID,
+           let name = appState.modelProfiles.first(where: { $0.profile.id == defaultID })?.profile.name {
             return "Inheriting: \(name)"
         }
         return "Inheriting: Default (claude keychain login)"
