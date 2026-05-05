@@ -20,6 +20,8 @@ private struct TranscriptParseCacheEntry {
 actor TranscriptParseCache {
     static let shared = TranscriptParseCache()
     private var entries: [String: TranscriptParseCacheEntry] = [:]
+    private var order: [String] = []  // most-recently-used at the end
+    private let cap = 50
 
     func get(filePath: String) -> [TranscriptItem]? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
@@ -31,6 +33,11 @@ actor TranscriptParseCache {
               entry.mtime == mtime, entry.size == size else {
             return nil
         }
+        // Touch — move to most-recently-used.
+        if let idx = order.firstIndex(of: filePath) {
+            order.remove(at: idx)
+        }
+        order.append(filePath)
         return entry.result
     }
 
@@ -41,6 +48,14 @@ actor TranscriptParseCache {
             return
         }
         entries[filePath] = TranscriptParseCacheEntry(mtime: mtime, size: size, result: result)
+        if let idx = order.firstIndex(of: filePath) {
+            order.remove(at: idx)
+        }
+        order.append(filePath)
+        while order.count > cap {
+            let evict = order.removeFirst()
+            entries.removeValue(forKey: evict)
+        }
     }
 }
 
