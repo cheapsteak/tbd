@@ -133,6 +133,11 @@ extension RPCRouter {
 
     func handleRepoRename(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(RepoRenameParams.self, from: paramsData)
+
+        guard try await db.repos.get(id: params.repoID) != nil else {
+            return RPCResponse(error: "Repository not found: \(params.repoID)")
+        }
+
         try await db.repos.rename(id: params.repoID, displayName: params.displayName)
 
         subscriptions.broadcast(delta: .repoRenamed(RepoRenameDelta(
