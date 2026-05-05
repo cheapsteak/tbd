@@ -115,9 +115,17 @@ final class CLIInstallerCoordinator {
     }
 
     private func presentLaunchPrompt(target: String, kind: CLILaunchPromptKind, recordDismissalOnDecline: Bool) async {
+        let symlinkPath = installer.symlinkPath
+        // Directory at the symlink path needs different copy and a single
+        // button: install() refuses to recursively delete a directory, so
+        // there's no "Replace" path to offer.
+        if case .nonSymlink = kind, Self.isDirectory(at: symlinkPath) {
+            presentDirectoryAtSymlinkPathAlert(symlinkPath: symlinkPath)
+            return
+        }
+
         let alert = NSAlert()
         alert.alertStyle = .informational
-        let symlinkPath = installer.symlinkPath
         let primaryButton: String
         switch kind {
         case .missing:
@@ -212,6 +220,22 @@ final class CLIInstallerCoordinator {
         if alert.runModal() == .alertSecondButtonReturn {
             await performInstall(target: target)
         }
+    }
+
+    private func presentDirectoryAtSymlinkPathAlert(symlinkPath: String) {
+        logger.info("Directory at \(symlinkPath, privacy: .public) — surfacing manual-removal alert instead of Replace prompt")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "A directory exists at \(symlinkPath)"
+        alert.informativeText = "TBD won't replace a directory automatically. Remove it manually (along with anything you want to keep) and try installing again from the menu."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private static func isDirectory(at path: String) -> Bool {
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return false }
+        return (st.st_mode & S_IFMT) == S_IFDIR
     }
 
     private func presentTargetUnavailableAlert() {
