@@ -25,7 +25,10 @@ struct BashCard: View {
         if let desc = input?.description, !desc.isEmpty { return desc }
         if let cmd = input?.command {
             let trimmed = cmd.replacingOccurrences(of: "\n", with: " ")
-            return "$(\(String(trimmed.prefix(60)))…)"
+            if trimmed.count > 60 {
+                return "$(\(String(trimmed.prefix(60)))…)"
+            }
+            return "$(\(trimmed))"
         }
         return "…"
     }
