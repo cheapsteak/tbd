@@ -11,6 +11,7 @@ public enum StateDelta: Codable, Sendable {
     case notificationReceived(NotificationDelta)
     case repoAdded(RepoDelta)
     case repoRemoved(RepoIDDelta)
+    case repoRenamed(RepoRenameDelta)
     case terminalCreated(TerminalDelta)
     case terminalRemoved(TerminalIDDelta)
     case worktreeConflictsChanged(WorktreeConflictDelta)
@@ -74,6 +75,15 @@ public struct RepoDelta: Codable, Sendable {
 public struct RepoIDDelta: Codable, Sendable {
     public let repoID: UUID
     public init(repoID: UUID) { self.repoID = repoID }
+}
+
+/// Delta payload for repo rename.
+public struct RepoRenameDelta: Codable, Sendable {
+    public let repoID: UUID
+    public let displayName: String
+    public init(repoID: UUID, displayName: String) {
+        self.repoID = repoID; self.displayName = displayName
+    }
 }
 
 /// Delta payload for terminal creation.

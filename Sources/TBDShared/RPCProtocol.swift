@@ -133,6 +133,7 @@ public enum RPCMethod {
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
+    public static let repoRename = "repo.rename"
     public static let sessionList = "session.list"
     public static let sessionMessages = "session.messages"
     public static let setMainAreaSize = "app.setMainAreaSize"
@@ -336,6 +337,14 @@ public struct RepoRelocateResult: Codable, Sendable {
         self.repo = repo
         self.worktreesRepaired = worktreesRepaired
         self.worktreesFailed = worktreesFailed
+    }
+}
+
+public struct RepoRenameParams: Codable, Sendable {
+    public let repoID: UUID
+    public let displayName: String
+    public init(repoID: UUID, displayName: String) {
+        self.repoID = repoID; self.displayName = displayName
     }
 }
 
