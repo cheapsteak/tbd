@@ -38,9 +38,15 @@ struct ReadCard: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let off = input?.offset {
-                    Text("lines \(off)–\(off + (input?.limit ?? 0))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                    if let lim = input?.limit {
+                        Text("lines \(off)–\(off + lim)")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        Text("from line \(off)")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
         } body: {
