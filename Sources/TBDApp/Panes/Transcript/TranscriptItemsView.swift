@@ -4,7 +4,7 @@ import TBDShared
 /// Tool names whose activity is hidden from the timeline. Keep small;
 /// these are tools whose existence in the transcript adds no signal
 /// for the reader.
-private let hiddenToolNames: Set<String> = ["TodoWrite", "TaskUpdate", "TaskCreate"]
+private let hiddenToolNames: Set<String> = ["TodoWrite", "TaskUpdate", "TaskCreate", "Skill"]
 
 /// Renders an ordered list of transcript items by dispatching each to its
 /// per-case view. Used by both the live transcript pane (top-level depth=0)
