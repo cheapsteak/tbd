@@ -35,7 +35,7 @@ struct ActivityRowChrome<Header: View, BodyContent: View>: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 14)
                     headerContent()
-                        .font(.system(.callout, design: .monospaced))
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
                     if let ts = timestamp {
