@@ -160,24 +160,7 @@ struct WorktreeRowView: View {
         }
         .padding(.vertical, 2)
         .padding(.horizontal, 4)
-        .expandingRow(
-            isTruncated: isNameTruncated && !isEditing,
-            onClick: {
-                if !isMain && appState.selectedWorktreeIDs == [worktree.id] {
-                    startRename()
-                }
-            }
-        ) {
-            HStack(spacing: 6) {
-                rowIcons()
-                Text(worktree.displayName)
-                    .fontWeight(hasBoldNotification ? .bold : .regular)
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .padding(.vertical, 2)
-            .padding(.horizontal, 4)
-        }
+        .help(worktree.displayName)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
