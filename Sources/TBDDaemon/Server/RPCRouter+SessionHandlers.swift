@@ -20,7 +20,13 @@ extension RPCRouter {
 
     func handleSessionMessages(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(SessionMessagesParams.self, from: paramsData)
-        let messages = TranscriptParser.parse(filePath: params.filePath)
+        let messages: [TranscriptItem]
+        if let cached = await TranscriptParseCache.shared.get(filePath: params.filePath) {
+            messages = cached
+        } else {
+            messages = TranscriptParser.parse(filePath: params.filePath)
+            await TranscriptParseCache.shared.put(filePath: params.filePath, result: messages)
+        }
         return try RPCResponse(result: messages)
     }
 }

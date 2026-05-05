@@ -4,6 +4,46 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "terminalHandlers")
 
+// MARK: - Transcript parse cache
+
+private struct TranscriptParseCacheEntry {
+    let mtime: Date
+    let size: Int64
+    let result: [TranscriptItem]
+}
+
+/// Caches the last `TranscriptParser.parse` result per session file path.
+/// The fingerprint is the parent JSONL's mtime+size. Subagent files are
+/// re-read on cache miss, so the cache is invalidated whenever the parent
+/// gains a new tool_result line — which is the only signal we have at the
+/// daemon level that subagent activity advanced.
+actor TranscriptParseCache {
+    static let shared = TranscriptParseCache()
+    private var entries: [String: TranscriptParseCacheEntry] = [:]
+
+    func get(filePath: String) -> [TranscriptItem]? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
+              let mtime = attrs[.modificationDate] as? Date,
+              let size = (attrs[.size] as? NSNumber)?.int64Value else {
+            return nil
+        }
+        guard let entry = entries[filePath],
+              entry.mtime == mtime, entry.size == size else {
+            return nil
+        }
+        return entry.result
+    }
+
+    func put(filePath: String, result: [TranscriptItem]) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
+              let mtime = attrs[.modificationDate] as? Date,
+              let size = (attrs[.size] as? NSNumber)?.int64Value else {
+            return
+        }
+        entries[filePath] = TranscriptParseCacheEntry(mtime: mtime, size: size, result: result)
+    }
+}
+
 extension RPCRouter {
 
     // MARK: - Terminal Handlers
@@ -775,7 +815,13 @@ extension RPCRouter {
         }
 
         let filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
-        let messages = TranscriptParser.parse(filePath: filePath)
+        let messages: [TranscriptItem]
+        if let cached = await TranscriptParseCache.shared.get(filePath: filePath) {
+            messages = cached
+        } else {
+            messages = TranscriptParser.parse(filePath: filePath)
+            await TranscriptParseCache.shared.put(filePath: filePath, result: messages)
+        }
         return try RPCResponse(result: TerminalTranscriptResult(messages: messages, sessionID: sessionID))
     }
 
