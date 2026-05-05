@@ -122,7 +122,11 @@ public struct CLIInstaller: Sendable {
         do {
             destination = try fm.destinationOfSymbolicLink(atPath: symlinkPath)
         } catch {
-            return .notInstalled
+            // Symlink confirmed present but unreadable (exotic permission
+            // failure). Treat as stale so the prompt still fires even when
+            // the user has previously dismissed the .notInstalled prompt —
+            // .notInstalled would be silently swallowed by the dismissal flag.
+            return .stale(currentTarget: symlinkPath)
         }
 
         let resolvedDest = Self.absolutize(
