@@ -114,9 +114,15 @@ struct UserMessageClassifierClassifyTests {
         #expect(UserMessageClassifier.classify(line) == .hookOutput)
     }
 
-    @Test func unknown_tag_prefix_returns_other() {
+    @Test func unknown_tag_prefix_returns_nil() {
+        // Previously this returned .other via a speculative tag-shape
+        // heuristic. We now bias toward user-typed XML: if a line passes
+        // isRealUserMessage (i.e. its text doesn't match a known system
+        // prefix), it's treated as a real prompt. Future unknown injections
+        // degrade to plain user prompts rather than being hidden as system
+        // noise — see user_typed_xml_prompt_returns_nil.
         let line = userLine("<diagnostics>some payload</diagnostics>")
-        #expect(UserMessageClassifier.classify(line) == .other)
+        #expect(UserMessageClassifier.classify(line) == nil)
     }
 
     @Test func git_repository_context_returns_environmentDetails() {
@@ -146,5 +152,16 @@ struct UserMessageClassifierClassifyTests {
     @Test func skill_body_returns_skillBody() {
         let line = userLine("Base directory for this skill: /Users/chang/.claude/skills/pr\n\n# Commit, Push, and Open a PR\n\n## Step 1: …")
         #expect(UserMessageClassifier.classify(line) == .skillBody)
+    }
+
+    @Test func user_typed_xml_prompt_returns_nil() {
+        // A user typing `<html>...` is a real prompt, not a system injection.
+        let line = userLine("<html>my page</html> please review")
+        #expect(UserMessageClassifier.classify(line) == nil)
+    }
+
+    @Test func user_typed_data_tag_prompt_returns_nil() {
+        let line = userLine("<data>some xml</data>")
+        #expect(UserMessageClassifier.classify(line) == nil)
     }
 }

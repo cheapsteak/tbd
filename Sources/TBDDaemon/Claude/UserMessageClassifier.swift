@@ -110,6 +110,15 @@ enum UserMessageClassifier {
             return .environmentDetails
         }
 
+        // The known prefixes above match real Claude Code injections. The
+        // generic-tag heuristic below is for future injections we haven't
+        // seen yet — but it also catches user-typed XML/HTML prompts. If
+        // isRealUserMessage already accepts this line as a real user
+        // message, prefer that over the speculative system-injection
+        // catch-all. New unknown injections degrade to plain user prompts
+        // rather than being hidden as system noise.
+        if isRealUserMessage(line) { return nil }
+
         // Unknown tag-like prefix → generic "other" injection. The tag must
         // start with `<`, contain only letters/underscores/hyphens, and end at
         // a `>` or whitespace.
