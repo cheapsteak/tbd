@@ -52,13 +52,23 @@ enum TranscriptParser {
             if json["type"] as? String == "user",
                let message = json["message"] as? [String: Any],
                let array = message["content"] as? [[String: Any]] {
-                for block in array where block["type"] as? String == "tool_result" {
+                let toolResultBlocks = array.filter { ($0["type"] as? String) == "tool_result" }
+                for block in toolResultBlocks {
                     guard let id = block["tool_use_id"] as? String else { continue }
                     toolResultsByID[id] = extractToolResult(from: block)
-                    if let resultMeta = json["toolUseResult"] as? [String: Any],
-                       let agentID = resultMeta["agentId"] as? String {
-                        agentIDByToolUseID[id] = agentID
-                    }
+                }
+                // `toolUseResult` is a top-level per-line field, so we can only attribute
+                // its `agentId` unambiguously when there's exactly one tool_result block
+                // in the line. Multi-block lines (parallel Task dispatches in the same
+                // user message) skip the mapping; the parent Task tool_use will render
+                // without a subagent disclosure rather than misattribute the inner
+                // conversation. Single-block lines are the common case in practice.
+                if toolResultBlocks.count == 1,
+                   let block = toolResultBlocks.first,
+                   let id = block["tool_use_id"] as? String,
+                   let resultMeta = json["toolUseResult"] as? [String: Any],
+                   let agentID = resultMeta["agentId"] as? String {
+                    agentIDByToolUseID[id] = agentID
                 }
             }
         }
