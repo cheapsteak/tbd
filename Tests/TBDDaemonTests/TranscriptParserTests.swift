@@ -213,6 +213,57 @@ struct TranscriptParserTests {
         #expect(inner?.items.count == 2)
     }
 
+    @Test func tool_result_truncated_when_over_char_cap() throws {
+        let bigText = String(repeating: "x", count: 5000)
+        let lines = [
+            #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"echo big"}}]}}"#,
+            "{\"type\":\"user\",\"uuid\":\"u1\",\"timestamp\":\"2026-05-05T10:00:01Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"\(bigText)\"}]}}",
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        guard case .toolCall(_, _, _, let r, _, _) = items[0] else {
+            Issue.record("expected .toolCall"); return
+        }
+        #expect(r?.text.count == 2000)
+        #expect(r?.truncatedTo == 5000)
+    }
+
+    @Test func tool_result_truncated_when_over_line_cap() throws {
+        // 60 short lines joined with \n inside a JSON string literal.
+        let bigLines = (0..<60).map { "line \($0)" }.joined(separator: "\\n")
+        let lines = [
+            #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#,
+            "{\"type\":\"user\",\"uuid\":\"u1\",\"timestamp\":\"2026-05-05T10:00:01Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"\(bigLines)\"}]}}",
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        guard case .toolCall(_, _, _, let r, _, _) = items[0] else {
+            Issue.record("expected .toolCall"); return
+        }
+        #expect(r?.text.split(separator: "\n").count == 30)
+        #expect(r?.truncatedTo != nil)
+    }
+
+    @Test func tool_result_under_cap_is_not_truncated() throws {
+        let lines = [
+            #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#,
+            #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T10:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"short"}]}}"#,
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        guard case .toolCall(_, _, _, let r, _, _) = items[0] else {
+            Issue.record("expected .toolCall"); return
+        }
+        #expect(r?.text == "short")
+        #expect(r?.truncatedTo == nil)
+    }
+
     // MARK: - helpers
 
     private func writeTempJSONL(_ contents: String) throws -> String {

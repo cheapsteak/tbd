@@ -203,17 +203,41 @@ enum TranscriptParser {
 
     // MARK: - helpers
 
+    static let bodyCharCap = 2000
+    static let bodyLineCap = 30
+
     static func extractToolResult(from block: [String: Any]) -> ToolResult {
         let isError = (block["is_error"] as? Bool) ?? false
-        let text: String
+        let raw: String
         if let s = block["content"] as? String {
-            text = s
+            raw = s
         } else if let array = block["content"] as? [[String: Any]] {
-            text = array.compactMap { $0["text"] as? String }.joined(separator: "\n")
+            raw = array.compactMap { $0["text"] as? String }.joined(separator: "\n")
         } else {
-            text = ""
+            raw = ""
         }
-        return ToolResult(text: text, truncatedTo: nil, isError: isError)
+
+        let (truncated, originalCount) = truncate(raw)
+        return ToolResult(
+            text: truncated,
+            truncatedTo: originalCount == truncated.count ? nil : originalCount,
+            isError: isError
+        )
+    }
+
+    /// Returns (truncatedText, originalCharLength). The caller compares
+    /// lengths to decide whether to set `truncatedTo`.
+    static func truncate(_ text: String) -> (String, Int) {
+        let originalCount = text.count
+        var capped = text
+        if originalCount > bodyCharCap {
+            capped = String(text.prefix(bodyCharCap))
+        }
+        let lines = capped.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.count > bodyLineCap {
+            capped = lines.prefix(bodyLineCap).joined(separator: "\n")
+        }
+        return (capped, originalCount)
     }
 
     static func extractUserText(from json: [String: Any]) -> String? {
