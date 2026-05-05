@@ -863,6 +863,17 @@ actor DaemonClient {
         )
     }
 
+    /// Load the full chat transcript for a terminal's current Claude session.
+    /// Returns empty messages and nil sessionID if the terminal has no session yet;
+    /// returns empty messages and a sessionID if the session JSONL doesn't exist yet.
+    func terminalTranscript(terminalID: UUID) async throws -> TerminalTranscriptResult {
+        return try await callAsync(
+            method: RPCMethod.terminalTranscript,
+            params: TerminalTranscriptParams(terminalID: terminalID),
+            resultType: TerminalTranscriptResult.self
+        )
+    }
+
     /// Notify the daemon whether the app is in the foreground (drives usage poller).
     func setAppForegroundState(isForeground: Bool) async throws {
         try await callVoidAsync(
