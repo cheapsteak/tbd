@@ -338,23 +338,36 @@ struct SessionTranscriptView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(messages) { message in
-                            ChatMessageView(message: message)
-                        }
-                    }
-                    .padding(.vertical, 8)
-                }
+                TranscriptMessagesView(messages: messages)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
+// MARK: - TranscriptMessagesView
+
+/// The chat-bubble list used by both SessionTranscriptView (in the
+/// History pane) and LiveTranscriptPaneView (the live-following pane).
+/// Pure presentation: takes pre-loaded messages and renders them.
+struct TranscriptMessagesView: View {
+    let messages: [ChatMessage]
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(messages) { message in
+                    ChatMessageView(message: message)
+                }
+            }
+            .padding(.vertical, 8)
+        }
+    }
+}
+
 // MARK: - ChatMessageView
 
-private struct ChatMessageView: View {
+struct ChatMessageView: View {
     let message: ChatMessage
 
     private var isUser: Bool { message.role == .user }
