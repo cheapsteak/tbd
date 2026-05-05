@@ -8,7 +8,7 @@ struct BashCard: View {
     let timestamp: Date?
     let terminalID: UUID?
 
-    @State private var expanded = true
+    @State private var expanded = false
     @State private var fullResultText: String? = nil
     @State private var containerExpanded = false
     @State private var commandContainerExpanded = false
