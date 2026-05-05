@@ -39,7 +39,7 @@ struct ReadCard: View {
                     .truncationMode(.middle)
                 if let off = input?.offset {
                     if let lim = input?.limit {
-                        Text("lines \(off)–\(off + lim)")
+                        Text("lines \(off)–\(off + lim - 1)")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     } else {
