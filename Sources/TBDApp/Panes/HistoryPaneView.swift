@@ -357,20 +357,41 @@ private extension Int64 {
 }
 
 extension Date {
+    /// Cached DateFormatters. DateFormatter is expensive to construct;
+    /// reuse across calls. Reading a DateFormatter is thread-safe.
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"
+        return f
+    }()
+    private static let weekdayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE"
+        return f
+    }()
+    private static let monthDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f
+    }()
+    private static let monthDayYearFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d, yyyy"
+        return f
+    }()
+
     /// Absolute local time. "3:42 PM" for today; "May 3, 3:42 PM" for the
     /// current year; "May 3, 2025, 3:42 PM" for older. Never relative.
     var absoluteShort: String {
         let cal = Calendar.current
         let now = Date()
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "h:mm a"
-        let timeStr = timeFmt.string(from: self)
-
+        let timeStr = Self.timeFormatter.string(from: self)
         if cal.isDateInToday(self) {
             return timeStr
         }
-        let dateFmt = DateFormatter()
-        dateFmt.dateFormat = cal.isDate(self, equalTo: now, toGranularity: .year) ? "MMM d" : "MMM d, yyyy"
+        let dateFmt = cal.isDate(self, equalTo: now, toGranularity: .year)
+            ? Self.monthDayFormatter
+            : Self.monthDayYearFormatter
         return "\(dateFmt.string(from: self)), \(timeStr)"
     }
 
@@ -378,22 +399,15 @@ extension Date {
     var smartFormatted: String {
         let cal = Calendar.current
         let now = Date()
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "h:mm a"
-        let timeStr = timeFmt.string(from: self)
-
+        let timeStr = Self.timeFormatter.string(from: self)
         if cal.isDateInToday(self) {
             return "Today \(timeStr)"
         } else if cal.isDateInYesterday(self) {
             return "Yesterday \(timeStr)"
         } else if let days = cal.dateComponents([.day], from: self, to: now).day, days < 7 {
-            let weekdayFmt = DateFormatter()
-            weekdayFmt.dateFormat = "EEE"
-            return "\(weekdayFmt.string(from: self)) \(timeStr)"
+            return "\(Self.weekdayFormatter.string(from: self)) \(timeStr)"
         } else {
-            let dateFmt = DateFormatter()
-            dateFmt.dateFormat = "MMM d"
-            return "\(dateFmt.string(from: self)), \(timeStr)"
+            return "\(Self.monthDayFormatter.string(from: self)), \(timeStr)"
         }
     }
 }
