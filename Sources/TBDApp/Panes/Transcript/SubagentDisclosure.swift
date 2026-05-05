@@ -10,8 +10,7 @@ struct SubagentDisclosure: View {
 
     @State private var expanded = false
 
-    private var label: String {
-        let count = subagent.items.lazy.filter { !isHiddenInTranscript($0) }.count
+    private func label(for count: Int) -> String {
         if let agentType = subagent.agentType {
             return "Show \(count) subagent \(count == 1 ? "activity" : "activities") · \(agentType)"
         }
@@ -19,19 +18,20 @@ struct SubagentDisclosure: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let visible = subagent.items.filter { !isHiddenInTranscript($0) }
+        return VStack(alignment: .leading, spacing: 6) {
             Button(action: { expanded.toggle() }) {
                 HStack(spacing: 4) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    Text(label)
+                    Text(label(for: visible.count))
                 }
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
-            .disabled(subagent.items.lazy.filter { !isHiddenInTranscript($0) }.isEmpty)
+            .disabled(visible.isEmpty)
 
-            if expanded && !subagent.items.isEmpty {
+            if expanded && !visible.isEmpty {
                 HStack(spacing: 0) {
                     Rectangle()
                         .fill(Color(nsColor: .tertiaryLabelColor))
