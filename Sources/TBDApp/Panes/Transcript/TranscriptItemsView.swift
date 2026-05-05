@@ -4,7 +4,22 @@ import TBDShared
 /// Tool names whose activity is hidden from the timeline. Keep small;
 /// these are tools whose existence in the transcript adds no signal
 /// for the reader.
-private let hiddenToolNames: Set<String> = ["TodoWrite", "TaskUpdate", "TaskCreate", "Skill"]
+let hiddenToolNames: Set<String> = ["TodoWrite", "TaskUpdate", "TaskCreate", "Skill"]
+
+/// True if this item is hidden from the timeline (by the dispatch logic in
+/// `TranscriptItemsView.rowFor`). Centralized so callers like
+/// `SubagentDisclosure` can compute accurate counts without duplicating the
+/// rule.
+func isHiddenInTranscript(_ item: TranscriptItem) -> Bool {
+    switch item {
+    case .thinking:
+        return true
+    case .toolCall(_, let name, _, _, _, _):
+        return hiddenToolNames.contains(name)
+    default:
+        return false
+    }
+}
 
 /// Renders an ordered list of transcript items by dispatching each to its
 /// per-case view. Used by both the live transcript pane (top-level depth=0)

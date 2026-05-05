@@ -11,7 +11,7 @@ struct SubagentDisclosure: View {
     @State private var expanded = false
 
     private var label: String {
-        let count = subagent.items.count
+        let count = subagent.items.lazy.filter { !isHiddenInTranscript($0) }.count
         if let agentType = subagent.agentType {
             return "Show \(count) subagent \(count == 1 ? "activity" : "activities") · \(agentType)"
         }
@@ -29,7 +29,7 @@ struct SubagentDisclosure: View {
                 .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
-            .disabled(subagent.items.isEmpty)
+            .disabled(subagent.items.lazy.filter { !isHiddenInTranscript($0) }.isEmpty)
 
             if expanded && !subagent.items.isEmpty {
                 HStack(spacing: 0) {
