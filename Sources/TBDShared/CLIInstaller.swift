@@ -136,6 +136,10 @@ public struct CLIInstaller: Sendable {
         )
 
         if let expectedTarget {
+            // expectedTarget is always absolute (callers pass an absolute
+            // path resolved from the daemon's executable). `relativeTo`
+            // is therefore inert — pass `homeDir` only because absolutize
+            // requires the parameter.
             let expectedAbs = Self.absolutize(expectedTarget, relativeTo: homeDir, homeDir: homeDir)
             if resolvedDest == expectedAbs && fm.fileExists(atPath: resolvedDest) {
                 return .installed(target: resolvedDest)
