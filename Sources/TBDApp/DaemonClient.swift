@@ -362,6 +362,14 @@ actor DaemonClient {
         )
     }
 
+    /// Rename a repo's display name.
+    func renameRepo(id: UUID, displayName: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.repoRename,
+            params: RepoRenameParams(repoID: id, displayName: displayName)
+        )
+    }
+
     /// Update per-repo instruction fields.
     func repoUpdateInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async throws -> Repo {
         return try await callAsync(

@@ -6,12 +6,6 @@ struct WorktreeRowView: View {
     var isMain: Bool = false
     @EnvironmentObject var appState: AppState
     @State private var isEditing = false
-    @State private var editText = ""
-    @State private var cursorPosition = 0
-    @State private var isTextFieldFocused = false
-    @State private var emojiQuery: String?
-    @State private var emojiSelectedIndex = 0
-    @State private var frecency = EmojiFrecency.load()
     @State private var isNameTruncated = false
 
     private var isPending: Bool {
@@ -118,59 +112,23 @@ struct WorktreeRowView: View {
         HStack(spacing: 6) {
             rowIcons()
                 .allowsHitTesting(false)
-            if isEditing {
-                InlineTextField(
-                    text: $editText,
-                    cursorPosition: $cursorPosition,
-                    isFocused: $isTextFieldFocused,
-                    onSubmit: {
-                        if emojiQuery != nil, let emoji = selectedEmoji() {
-                            replaceColonQuery(with: emoji)
-                        } else {
-                            commitRename()
+            RenameableLabel(
+                text: worktree.displayName,
+                isEditing: $isEditing,
+                onCommit: { newName in
+                    // Optimistic local update so the UI reflects the new name before the RPC returns
+                    for repoID in appState.worktrees.keys {
+                        if let idx = appState.worktrees[repoID]?.firstIndex(where: { $0.id == worktree.id }) {
+                            appState.worktrees[repoID]?[idx].displayName = newName
                         }
-                    },
-                    onCancel: {
-                        if emojiQuery != nil {
-                            emojiQuery = nil
-                        } else {
-                            cancelRename()
-                        }
-                    },
-                    onKeyDown: { keyCode in
-                        guard emojiQuery != nil else { return false }
-                        switch keyCode {
-                        case 125: emojiSelectedIndex += 7; return true  // down
-                        case 126: emojiSelectedIndex = max(0, emojiSelectedIndex - 7); return true // up
-                        case 124: emojiSelectedIndex += 1; return true  // right
-                        case 123: emojiSelectedIndex = max(0, emojiSelectedIndex - 1); return true // left
-                        default: return false
-                        }
-                    },
-                    onSpecialKey: { key in
-                        guard emojiQuery != nil, let emoji = selectedEmoji() else { return false }
-                        replaceColonQuery(with: emoji)
-                        return true
                     }
-                )
-                .onChange(of: editText) { _, newValue in
-                    updateEmojiQuery(newValue)
-                }
-                .onChange(of: isTextFieldFocused) { _, focused in
-                    if !focused {
-                        emojiQuery = nil
-                        commitRename()
+                    Task {
+                        await appState.renameWorktree(id: worktree.id, displayName: newName)
                     }
-                }
-                .background(
-                    EmojiPanelAnchor(
-                        isPresented: emojiQuery != nil,
-                        query: emojiQuery ?? "",
-                        selectedIndex: $emojiSelectedIndex,
-                        onSelect: { emoji in replaceColonQuery(with: emoji) }
-                    )
-                )
-            } else {
+                },
+                onStartEditing: { appState.isRenamingWorktree = true },
+                onStopEditing: { appState.isRenamingWorktree = false }
+            ) {
                 VStack(alignment: .leading, spacing: 2) {
                     ExpandingTextField(
                         text: worktree.displayName,
@@ -237,82 +195,7 @@ struct WorktreeRowView: View {
 
     func startRename() {
         guard !isMain else { return }
-        editText = worktree.displayName
         isEditing = true
-        isTextFieldFocused = true
-        appState.isRenamingWorktree = true
-        // Re-assert focus after a delay to win any focus race with terminal views
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            isTextFieldFocused = true
-        }
-    }
-
-    private func commitRename() {
-        let trimmed = editText.trimmingCharacters(in: .whitespaces)
-        isEditing = false
-        appState.isRenamingWorktree = false
-        guard !trimmed.isEmpty, trimmed != worktree.displayName else { return }
-        // Update local model immediately so the UI reflects the new name
-        for repoID in appState.worktrees.keys {
-            if let idx = appState.worktrees[repoID]?.firstIndex(where: { $0.id == worktree.id }) {
-                appState.worktrees[repoID]?[idx].displayName = trimmed
-            }
-        }
-        // Then persist to daemon
-        Task {
-            await appState.renameWorktree(id: worktree.id, displayName: trimmed)
-        }
-    }
-
-    private func cancelRename() {
-        isEditing = false
-        appState.isRenamingWorktree = false
-    }
-
-    // MARK: - Emoji autocomplete
-
-    /// Find the `:` before the cursor with no space between it and the cursor.
-    private var activeColonRange: Range<String.Index>? {
-        let text = editText
-        // Clamp cursor to valid UTF-16 range, convert to String.Index
-        let utf16Pos = min(cursorPosition, text.utf16.count)
-        let cursorIndex = String.Index(utf16Offset: utf16Pos, in: text)
-        // Search backwards from cursor for `:`
-        let beforeCursor = text[text.startIndex..<cursorIndex]
-        guard let colonIndex = beforeCursor.lastIndex(of: ":") else { return nil }
-        // Check no space between colon and cursor
-        let between = text[text.index(after: colonIndex)..<cursorIndex]
-        if between.contains(" ") || between.contains(":") { return nil }
-        return colonIndex..<cursorIndex
-    }
-
-    private func updateEmojiQuery(_ text: String) {
-        if let range = activeColonRange {
-            let query = String(editText[editText.index(after: range.lowerBound)..<range.upperBound])
-            emojiQuery = query
-            emojiSelectedIndex = 0
-        } else {
-            emojiQuery = nil
-        }
-    }
-
-    private func replaceColonQuery(with emoji: String) {
-        guard let range = activeColonRange else { return }
-        let newCursorUTF16 = editText[editText.startIndex..<range.lowerBound].utf16.count + emoji.utf16.count
-        editText.replaceSubrange(range, with: emoji)
-        cursorPosition = newCursorUTF16
-        emojiQuery = nil
-        frecency.record(emoji)
-    }
-
-    private func selectedEmoji() -> String? {
-        guard let query = emojiQuery else { return nil }
-        let results = query.isEmpty
-            ? frecency.defaults()
-            : frecency.search(query, limit: 21)
-        guard !results.isEmpty else { return nil }
-        let index = min(emojiSelectedIndex, results.count - 1)
-        return results[index].emoji
     }
 
     private func loadIcon(_ name: String) -> NSImage? {

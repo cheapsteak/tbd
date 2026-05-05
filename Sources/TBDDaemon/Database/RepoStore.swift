@@ -136,6 +136,17 @@ public struct RepoStore: Sendable {
         }
     }
 
+    /// Rename a repo's display name.
+    public func rename(id: UUID, displayName: String) async throws {
+        try await writer.write { db in
+            guard var record = try RepoRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Repo not found")
+            }
+            record.displayName = displayName
+            try record.update(db)
+        }
+    }
+
     /// Set or clear the model profile override for a repo.
     public func setProfileOverride(id: UUID, profileID: UUID?) async throws {
         try await writer.write { db in

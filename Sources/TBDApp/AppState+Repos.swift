@@ -51,6 +51,21 @@ extension AppState {
         }
     }
 
+    /// Rename a repo's display name. Updates local state optimistically before issuing the RPC.
+    func renameRepo(id: UUID, displayName: String) async {
+        if let idx = repos.firstIndex(where: { $0.id == id }) {
+            var repo = repos[idx]
+            repo.displayName = displayName
+            repos[idx] = repo
+        }
+        do {
+            try await daemonClient.renameRepo(id: id, displayName: displayName)
+        } catch {
+            logger.error("Failed to rename repo: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
     /// Update per-repo instruction fields. Returns true on success.
     @discardableResult
     func updateRepoInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async -> Bool {

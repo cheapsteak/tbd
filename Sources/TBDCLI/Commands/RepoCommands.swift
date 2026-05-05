@@ -6,7 +6,7 @@ struct RepoCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "repo",
         abstract: "Manage repositories",
-        subcommands: [RepoAdd.self, RepoRemove.self, RepoList.self, RepoRelocate.self]
+        subcommands: [RepoAdd.self, RepoRemove.self, RepoList.self, RepoRelocate.self, RepoRename.self]
     )
 }
 
@@ -157,6 +157,41 @@ struct RepoRelocate: AsyncParsableCommand {
             if !result.worktreesFailed.isEmpty {
                 print("  Failed worktrees:   \(result.worktreesFailed.count) (marked .failed; manual cleanup required)")
             }
+        }
+    }
+}
+
+// MARK: - repo rename
+
+struct RepoRename: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rename",
+        abstract: "Rename a repository's display name"
+    )
+
+    @Argument(help: "Repository ID")
+    var id: String
+
+    @Argument(help: "New display name")
+    var newName: String
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let repoID = UUID(uuidString: id) else {
+            throw CLIError.invalidArgument("Invalid repository ID: \(id)")
+        }
+        let client = SocketClient()
+        try client.callVoid(
+            method: RPCMethod.repoRename,
+            params: RepoRenameParams(repoID: repoID, displayName: newName)
+        )
+
+        if json {
+            printJSON(["status": "renamed", "id": id, "displayName": newName])
+        } else {
+            print("Repository renamed to: \(newName)")
         }
     }
 }
