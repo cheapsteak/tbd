@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TBDShared
 @testable import TBDDaemonLib
 
 @Suite("UserMessageClassifier")
@@ -76,5 +77,50 @@ struct UserMessageClassifierTests {
         let l = line("user", role: "user", content: "")
         #expect(UserMessageClassifier.isRealUserMessage(l) == true)
         #expect(UserMessageClassifier.extractText(l) == nil)
+    }
+}
+
+@Suite("UserMessageClassifier.classify")
+struct UserMessageClassifierClassifyTests {
+    private func userLine(_ text: String) -> [String: Any] {
+        return [
+            "type": "user",
+            "message": ["role": "user", "content": text],
+        ]
+    }
+
+    @Test func real_user_message_returns_nil() {
+        let line = userLine("Hi Claude, please help.")
+        #expect(UserMessageClassifier.classify(line) == nil)
+    }
+
+    @Test func system_reminder_returns_toolReminder() {
+        let line = userLine("<system-reminder>The task tools haven't been used recently...</system-reminder>")
+        #expect(UserMessageClassifier.classify(line) == .toolReminder)
+    }
+
+    @Test func command_envelope_returns_slashEnvelope() {
+        let line = userLine("<command-name>/rebase</command-name>")
+        #expect(UserMessageClassifier.classify(line) == .slashEnvelope)
+    }
+
+    @Test func environment_details_returns_environmentDetails() {
+        let line = userLine("<environment_details>cwd: /Users/x</environment_details>")
+        #expect(UserMessageClassifier.classify(line) == .environmentDetails)
+    }
+
+    @Test func local_command_output_returns_hookOutput() {
+        let line = userLine("<local-command-stdout>hello</local-command-stdout>")
+        #expect(UserMessageClassifier.classify(line) == .hookOutput)
+    }
+
+    @Test func unknown_tag_prefix_returns_other() {
+        let line = userLine("<diagnostics>some payload</diagnostics>")
+        #expect(UserMessageClassifier.classify(line) == .other)
+    }
+
+    @Test func git_repository_context_returns_environmentDetails() {
+        let line = userLine("# Git repository context\nbranch: main")
+        #expect(UserMessageClassifier.classify(line) == .environmentDetails)
     }
 }
