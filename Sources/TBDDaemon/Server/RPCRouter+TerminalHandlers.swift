@@ -754,4 +754,28 @@ extension RPCRouter {
         let result = ResolvedPathResult(repoID: nil, worktreeID: nil)
         return try RPCResponse(result: result)
     }
+
+    func handleTerminalTranscript(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalTranscriptParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+
+        guard let sessionID = terminal.claudeSessionID else {
+            return try RPCResponse(result: TerminalTranscriptResult(messages: [], sessionID: nil))
+        }
+
+        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+
+        guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
+            return try RPCResponse(result: TerminalTranscriptResult(messages: [], sessionID: sessionID))
+        }
+
+        let filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
+        let messages = ClaudeSessionScanner.loadMessages(filePath: filePath)
+        return try RPCResponse(result: TerminalTranscriptResult(messages: messages, sessionID: sessionID))
+    }
 }
