@@ -700,10 +700,29 @@ extension RPCRouter {
         let status = DaemonStatusResult(
             version: TBDConstants.version,
             uptime: uptime,
-            connectedClients: 0  // Will be updated when socket server is implemented
+            connectedClients: 0,  // Will be updated when socket server is implemented
+            executablePath: Self.resolvedExecutablePath
         )
         return try RPCResponse(result: status)
     }
+
+    /// Daemon's own executable path, resolved once at module load. Captures
+    /// CWD at startup (rather than at each `daemon.status` RPC) so a later
+    /// `chdir` can't make the resolution wrong if `argv[0]` is relative.
+    /// Symlinks are followed so we return the real binary path — `cliPath()`
+    /// looks for `TBDCLI` next to the actual TBDDaemon binary, not next to
+    /// a symlink that points at it.
+    private static let resolvedExecutablePath: String? = {
+        guard let argv0 = CommandLine.arguments.first, !argv0.isEmpty else { return nil }
+        let url: URL
+        if argv0.hasPrefix("/") {
+            url = URL(fileURLWithPath: argv0)
+        } else {
+            let cwd = FileManager.default.currentDirectoryPath
+            url = URL(fileURLWithPath: argv0, relativeTo: URL(fileURLWithPath: cwd))
+        }
+        return url.resolvingSymlinksInPath().standardizedFileURL.path
+    }()
 
     // MARK: - Resolve Path
 

@@ -5,6 +5,14 @@ struct TBDCommands: Commands {
     @ObservedObject var appState: AppState
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Install Command-Line Tool…") {
+                Task { @MainActor in
+                    await appState.installCLITool()
+                }
+            }
+        }
+
         // Worktree commands
         CommandMenu("Worktree") {
             Button("New Worktree") {
