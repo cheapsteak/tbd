@@ -123,4 +123,23 @@ struct UserMessageClassifierClassifyTests {
         let line = userLine("# Git repository context\nbranch: main")
         #expect(UserMessageClassifier.classify(line) == .environmentDetails)
     }
+
+    @Test func pure_tool_result_array_returns_nil() {
+        let line: [String: Any] = [
+            "type": "user",
+            "message": [
+                "role": "user",
+                "content": [
+                    ["type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"]
+                ] as [[String: Any]],
+            ],
+        ]
+        #expect(UserMessageClassifier.classify(line) == nil)
+    }
+
+    @Test func digit_led_pseudo_tag_does_not_match_other() {
+        // "<3 hearts" — looks tag-shaped but body "3" isn't a letter; must NOT match.
+        let line = userLine("<3 hearts to you")
+        #expect(UserMessageClassifier.classify(line) == nil)
+    }
 }
