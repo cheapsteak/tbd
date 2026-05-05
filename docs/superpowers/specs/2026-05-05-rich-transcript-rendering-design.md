@@ -14,6 +14,7 @@ The live transcript pane and the history pane currently render only user prompts
 - Tool calls render as discrete activity rows with curated layouts for the high-frequency tools (`Read`, `Edit`, `MultiEdit`, `Write`, `Bash`, `Grep`, `Glob`); a generic fallback for everything else (MCP, custom skills, `Task`, etc.).
 - "Audit by default" body density: cards show real content (diffs, command + output, file paths), bounded by a single truncation cap with on-demand "Show full output."
 - Thinking, system reminders, and slash commands are visible inline at low contrast — no toggle, no jumping around.
+- Chat bubbles (user prompts and assistant prose) render markdown — inline emphasis (`**bold**`, `*italic*`, `` `code` ``), links, and fenced code blocks — so responses read as Claude formatted them rather than as raw markdown source.
 - Both panes (live `LiveTranscriptPaneView` and historical `SessionTranscriptView`) get the upgrade simultaneously through shared rendering primitives.
 
 ## Non-goals
@@ -23,7 +24,7 @@ The live transcript pane and the history pane currently render only user prompts
 - Streaming / token-by-token live updates. The polling cadence stays 1.5 s; the daemon parses committed JSONL lines.
 - Persisting per-card expand/collapse state across pane re-opens. State lives in `@State`; closing and reopening resets.
 - Daemon → app push notifications. The polling architecture from the prior design carries over.
-- Markdown / inline code / LaTeX rendering inside chat bubbles. Bubbles still show plain text. Tool cards use monospace where appropriate.
+- Block-level markdown beyond fenced code blocks: lists (bulleted / numbered), headings, tables, blockquotes, HTML inline tags, LaTeX math. Inline emphasis, inline code, links, and triple-backtick code blocks are in scope (see "Chat bubble formatting"); richer block-level markdown is not — those constructs render as plain inline text with their syntax visible. Adding them would require a third-party SwiftUI markdown library.
 
 ## Design
 
@@ -89,6 +90,31 @@ Activity rows from the same Claude turn pack tightly (no inter-row spacing). Spa
 4. Thinking, system reminders, slash command echoes — `.tertiary`, smaller font, italic for thinking.
 
 Empty pane / loading / no-session states: unchanged from the existing live transcript pane.
+
+### Chat bubble formatting
+
+`.userPrompt` and `.assistantText` bubbles render their `text` as markdown rather than plain text. Tool call bodies, thinking blocks, system reminders, and slash commands keep plain monospace / plain text — those are typically logs, JSON, or system noise where markdown would mis-render.
+
+**Inline formatting** (built-in `AttributedString(markdown:)`):
+- `**bold**`, `*italic*`, `` `inline code` ``
+- `[links](https://example.com)` — clickable, use the system accent color, open in the user's default browser via `NSWorkspace.shared.open(url)`.
+- Hard line breaks preserved by parsing with `.full` (rather than the default `.inlineOnly`) interpreted-syntax options where supported, falling back to `.inlineOnlyPreservingWhitespace` on older toolchains.
+
+**Fenced code blocks** (custom split, no third-party lib):
+- A small helper splits a message's `text` on `^```` fences (with optional language tag like ` ```swift `), producing an ordered array of segments: `.prose(String)` and `.code(language: String?, content: String)`.
+- The bubble renders each segment in order: `.prose` segments via `Text(AttributedString(markdown:))`; `.code` segments as a monospace `Text` inside a `RoundedRectangle` with a subtle tinted background and small inset padding, using `.font(.system(.body, design: .monospaced))` and `.textSelection(.enabled)`.
+- Language tag is currently informational only — no syntax highlighting in v1. The tag is shown as a small chip above the code block (`swift`, `bash`, `json`, …). Highlighting can graduate from generic fallback later.
+- Unterminated fences (no closing ``` ` ```) treat the rest of the text as a single code segment.
+
+**Where markdown does NOT apply:**
+- `.toolCall` input/output bodies (always monospace plain text).
+- `.thinking` (italic plain text).
+- `.systemReminder` (faint plain text).
+- `.slashCommand` chip and args (plain text / monospace).
+
+**Performance:** `AttributedString(markdown:)` parsing is fast and synchronous. Re-running per render is acceptable at chat-pane scale; no caching needed for v1. The fence-splitter is a single linear pass over the string.
+
+**Out-of-scope rendering** (lists, headings, tables, blockquotes, HTML, math) degrade to plain inline text — `# Heading`, `- bullet`, etc. show their syntax verbatim. Acceptable for v1 since these are rare in conversational responses.
 
 ### Curated tool renderers
 
@@ -190,7 +216,8 @@ If a single session ever becomes large enough to make polling expensive, the upg
 - `Sources/TBDApp/Panes/LiveTranscriptPaneView.swift` — switch to `TranscriptItemsView`; polling, autoscroll, error logic unchanged.
 - New directory `Sources/TBDApp/Panes/Transcript/`:
   - `TranscriptItemsView.swift` — top-level renderer that maps each item to the right view.
-  - `ChatBubbleView.swift` — extracted from current `ChatMessageView`, takes a single user/assistant prose item.
+  - `ChatBubbleView.swift` — extracted from current `ChatMessageView`, takes a single user/assistant prose item; renders markdown via the segment splitter and `AttributedString(markdown:)`.
+  - `MarkdownSegments.swift` — pure helper that splits a message's text into ordered `.prose` / `.code` segments by triple-backtick fences. Unit-testable.
   - `ActivityRowChrome.swift` — shared header (icon, title, timestamp), expand/collapse toggle, truncation footer.
   - `ReadCard.swift`, `EditCard.swift`, `WriteCard.swift`, `BashCard.swift`, `GrepCard.swift`, `GlobCard.swift` — one curated tool renderer per file.
   - `GenericToolCard.swift` — fallback.
@@ -200,6 +227,7 @@ If a single session ever becomes large enough to make polling expensive, the upg
 - `Tests/TBDDaemonTests/ClaudeSessionScannerTests.swift` — extended fixture coverage for tool_use/tool_result pairing, multi-block assistant messages, system marker classification, sidechain skipping, truncation behavior.
 - `Tests/TBDDaemonTests/TerminalTranscriptHandlerTests.swift` — adapt existing tests to the new return type; add coverage for the full-body RPC.
 - `Tests/TBDSharedTests/TranscriptItemTests.swift` — Codable round-trips for each case.
+- `Tests/TBDAppTests/MarkdownSegmentsTests.swift` — fence-splitter coverage: prose only; one fenced block; fenced block with language tag; multiple fenced blocks; unterminated fence; adjacent fences; backticks inside prose (escaping/false-positive avoidance for inline backticks vs block fences — block fences must start at line beginning).
 
 ## Testing
 
