@@ -15,11 +15,11 @@ The live transcript pane and the history pane currently render only user prompts
 - "Audit by default" body density: cards show real content (diffs, command + output, file paths), bounded by a single truncation cap with on-demand "Show full output."
 - Thinking, system reminders, and slash commands are visible inline at low contrast — no toggle, no jumping around.
 - Chat bubbles (user prompts and assistant prose) render markdown — inline emphasis (`**bold**`, `*italic*`, `` `code` ``), links, and fenced code blocks — so responses read as Claude formatted them rather than as raw markdown source.
+- Subagent (sidechain) conversations dispatched via the `Task` tool are renderable inline as a nested timeline beneath the parent `Task` card. Collapsed by default; expanding shows the subagent's full activity (its own tool calls, prose, thinking) using the same renderers, recursively (subagents that dispatch subagents nest further).
 - Both panes (live `LiveTranscriptPaneView` and historical `SessionTranscriptView`) get the upgrade simultaneously through shared rendering primitives.
 
 ## Non-goals
 
-- Sidechain (`isSidechain: true`, subagent dispatches) rendering. The parent `Task` tool call still renders as a generic card; the inner conversation is out of scope. Worth a follow-up.
 - Rich rendering for tools we haven't seen yet beyond the generic card. Curated renderers can be added incrementally as use cases warrant.
 - Streaming / token-by-token live updates. The polling cadence stays 1.5 s; the daemon parses committed JSONL lines.
 - Persisting per-card expand/collapse state across pane re-opens. State lives in `@State`; closing and reopening resets.
@@ -33,14 +33,20 @@ The live transcript pane and the history pane currently render only user prompts
 The current `ChatMessage` (one role + one text) can't carry tool calls or non-prose content. Replace the transcript payload with a structured `TranscriptItem` enum, parsed daemon-side.
 
 ```swift
-public enum TranscriptItem: Codable, Sendable, Identifiable {
+public indirect enum TranscriptItem: Codable, Sendable, Identifiable {
     case userPrompt(id: String, text: String, timestamp: Date?)
     case assistantText(id: String, text: String, timestamp: Date?)
     case toolCall(id: String, name: String, inputJSON: String,
-                  result: ToolResult?, timestamp: Date?)
+                  result: ToolResult?, subagent: Subagent?, timestamp: Date?)
     case thinking(id: String, text: String, timestamp: Date?)
     case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?)
     case slashCommand(id: String, name: String, args: String?, timestamp: Date?)
+}
+
+public struct Subagent: Codable, Sendable {
+    public let agentID: String           // matches the subagent JSONL file name
+    public let agentType: String?        // from meta JSON, e.g. "feature-dev:code-explorer"
+    public let items: [TranscriptItem]   // recursive — subagents may have their own .toolCall(subagent:)
 }
 
 public struct ToolResult: Codable, Sendable {
@@ -62,9 +68,9 @@ public enum SystemKind: String, Codable, Sendable {
 
 - Iterate JSONL lines in order. Each line emits 0..N `TranscriptItem`s.
 - Assistant lines may have multiple content blocks (`thinking`, `tool_use`, `text`); emit one item per block in order, sharing the line timestamp.
-- Pair `tool_use` with the matching `tool_result` (in a later JSONL line) by `tool_use_id` in a single forward pass with a dictionary. A `tool_use` without a matching result becomes `.toolCall(result: nil)` (in-flight or interrupted).
+- Pair `tool_use` with the matching `tool_result` (in a later JSONL line) by `tool_use_id` in a single forward pass with a dictionary. A `tool_use` without a matching result becomes `.toolCall(result: nil, subagent: nil)` (in-flight or interrupted).
 - Parse user-role lines that begin with known system markers into typed `.systemReminder` / `.slashCommand` items rather than dropping them. Generic "looks-like-an-injection" fallback (text starts with `<` followed by a tag-like word) maps unknown markers to `.systemReminder(kind: .other)` so future Claude Code injections render as faint generic rows instead of getting mis-parsed as user prompts.
-- Skip `isSidechain: true` lines entirely; their parent `Task` tool call still renders.
+- For each `Task` tool_use: when its tool_result lands and contains `toolUseResult.agentId`, locate the subagent JSONL at `<projectDir>/<sessionID>/subagents/agent-<agentID>.jsonl`, recursively parse it into a `Subagent`, and attach it to the `.toolCall`. The recursive parse uses the same parser (sidechain files have the same line schema). Sibling `agent-<agentID>.meta.json` provides `agentType` if present; absent or unparseable `.meta.json` is non-fatal (`agentType: nil`).
 - Apply a body-content cap (2 KB OR 30 lines, whichever hits first) per text/output field. When truncated, set `ToolResult.truncatedTo` to the original length so the app can show `… N more chars · Show full output`.
 
 The daemon parser is the single source of truth for the JSONL contract. Render *style* lives in the app; render *structure* lives in shared types.
@@ -180,6 +186,38 @@ The full-body RPC re-reads the JSONL for the worktree's project dir, finds the l
 
 No merging of adjacent identical reminders. Rare in practice; merging would hide actual frequency.
 
+### Subagent (sidechain) conversations
+
+When Claude dispatches a subagent via the `Task` tool, Claude Code writes the inner conversation into a sibling file rather than inlining it into the parent session. Path scheme:
+
+- Parent session: `~/.claude/projects/<encoded-cwd>/<sessionID>.jsonl`
+- Subagent file: `~/.claude/projects/<encoded-cwd>/<sessionID>/subagents/agent-<agentID>.jsonl`
+- Subagent meta: `~/.claude/projects/<encoded-cwd>/<sessionID>/subagents/agent-<agentID>.meta.json`
+
+**Correlation.** Each `Task` tool_use has a `tool_use_id`. The matching tool_result line (in the parent file) carries a `toolUseResult` blob whose `agentId` field names the subagent's JSONL file. The parser uses that to load the subagent on demand during the parent's parse pass, recursively parsing the subagent file with the same logic so its own tool_use/tool_result pairing, multi-block messages, system blocks, and nested `Task` calls all resolve.
+
+**Recursion.** A subagent that dispatches its own subagent has its child file at the same path scheme keyed by the inner agent's id. The recursive parser handles arbitrary depth; in practice depths beyond 3–4 are unusual.
+
+**View.** A `.toolCall` item with `subagent != nil` renders as a `Task` card (generic-toolcard chrome) plus, in its body footer, a single affordance:
+
+`▶ Show N subagent activities · feature-dev:code-explorer`
+
+(`agentType` from `.meta.json` is shown after the count when present; otherwise just the activity count.)
+
+Clicking expands the body to show the subagent's `items` rendered through the same `TranscriptItemsView`, beneath the parent card. Visual depth indicator: 24 px left indent per nesting level plus a 1 px vertical accent bar in `.tertiary` opacity along the indent guide. Re-collapsing hides the inner timeline. State is per-card `@State` (not persisted), keyed by the parent `tool_use_id`.
+
+The collapsed parent card still shows the subagent's final return text in the `result.text` slot — that's the current behavior of the generic Task card. Expansion adds the *journey*; the *outcome* is visible without expanding.
+
+**Recursion in the view** uses the same `TranscriptItemsView`, called recursively on `subagent.items`. Curated renderers (Edit, Read, Bash, etc.) work identically inside subagent timelines. Nested `.toolCall(subagent: .some)` rows get their own "Show subagent activities" affordance, expanding deeper.
+
+**Edge cases:**
+- *Subagent file missing or unreadable* (race during write, file deleted): `.toolCall(subagent: nil)` and the affordance doesn't appear. The parent card still shows the result text.
+- *Subagent file present but parser sees no completed tool_result yet for the parent Task*: parent renders as in-flight (`Running…`); subagent body still attached and expandable since the subagent file may have its own internal activity already.
+- *Empty subagent file* (just opened, before first line written): `Subagent.items == []`; affordance shows "Show 0 subagent activities" — render as a no-op disabled chip rather than hiding, so the user knows a subagent was dispatched.
+- *Recursive cycle* (shouldn't happen given file naming, but defensively): the parser tracks visited agent IDs in the recursion stack and stops at a re-visit, attaching `Subagent.items: []` and a `.systemReminder(kind: .other)` noting the cycle.
+
+**Performance.** Subagent items are shipped as part of the main transcript payload (eager), not lazy via a separate RPC. The truncation cap applies per-item across the recursion, so total size scales with total items, not depth. For unusually heavy multi-agent sessions, the lazy-fetch upgrade (a `terminal.subagentTranscript(parentToolUseID)` RPC) is a future optimization — out of scope for v1.
+
 ### In-flight tool calls and pollability
 
 A `tool_use` JSONL line written without a matching `tool_result` becomes a `.toolCall(result: nil)` item. On the next 1.5 s poll, the parser sees the new `tool_result` line and emits a `.toolCall(result: .some)` item with the same `id` (= `tool_use_id`). SwiftUI `ForEach` keyed on the item id swaps the body in place without reordering — the row stays visually stable.
@@ -204,7 +242,7 @@ If a single session ever becomes large enough to make polling expensive, the upg
 
 - `Sources/TBDShared/Models.swift` — add `TranscriptItem`, `ToolResult`, `SystemKind`; remove `ChatMessage` (and `ChatRole`).
 - `Sources/TBDShared/RPCProtocol.swift` — `TerminalTranscriptResult.messages: [ChatMessage]` → `[TranscriptItem]`. `SessionMessages` result type the same. Add `terminal.transcriptItemFullBody` method, params, result.
-- `Sources/TBDDaemon/Claude/ClaudeSessionScanner.swift` — replace `loadMessages` with a structured parser. New helpers for content-block iteration, tool_use/tool_result correlation, system-marker classification, body truncation.
+- `Sources/TBDDaemon/Claude/ClaudeSessionScanner.swift` — replace `loadMessages` with a structured parser. New helpers for content-block iteration, tool_use/tool_result correlation, system-marker classification, body truncation, subagent file resolution + recursive parse with cycle detection.
 - `Sources/TBDDaemon/Claude/UserMessageClassifier.swift` — extend to return `SystemKind` for matched markers, with a generic-injection fallback for unknown `<tag>` prefixes.
 - `Sources/TBDDaemon/Server/RPCRouter+TerminalHandlers.swift` — `handleTerminalTranscript` returns the new payload. New `handleTerminalTranscriptItemFullBody`.
 - `Sources/TBDDaemon/Server/RPCRouter+SessionHandlers.swift` — `handleSessionMessages` returns `[TranscriptItem]`.
@@ -222,6 +260,7 @@ If a single session ever becomes large enough to make polling expensive, the upg
   - `ReadCard.swift`, `EditCard.swift`, `WriteCard.swift`, `BashCard.swift`, `GrepCard.swift`, `GlobCard.swift` — one curated tool renderer per file.
   - `GenericToolCard.swift` — fallback.
   - `ThinkingRow.swift`, `SystemReminderRow.swift`, `SlashCommandRow.swift` — non-tool activity rows.
+  - `SubagentDisclosure.swift` — the "▶ Show N subagent activities" affordance plus the indented expanded body that recursively renders the inner `TranscriptItemsView` with a depth indicator.
 
 `Tests/`:
 - `Tests/TBDDaemonTests/ClaudeSessionScannerTests.swift` — extended fixture coverage for tool_use/tool_result pairing, multi-block assistant messages, system marker classification, sidechain skipping, truncation behavior.
@@ -237,8 +276,12 @@ Unit:
 - Parser: in-flight `tool_use` (no matching result) → `.toolCall(result: nil)`.
 - Parser: multi-block assistant message → multiple items in order.
 - Parser: known system markers (`<system-reminder>`, `<command-…>`, `<environment_details>`) → typed `SystemKind`; unknown `<tag>` prefix → `.other`.
-- Parser: sidechain lines skipped; parent `Task` tool call preserved.
 - Parser: body truncation sets `truncatedTo` correctly.
+- Parser: subagent correlation — parent Task tool_result with `toolUseResult.agentId` resolves to a `Subagent` carrying recursively-parsed items.
+- Parser: subagent meta.json missing or unparseable → `agentType: nil`; non-fatal.
+- Parser: subagent JSONL missing → `subagent: nil`; parent card unaffected.
+- Parser: recursion-cycle defensive check stops the recursion and surfaces a `.systemReminder(kind: .other)` cycle notice.
+- Parser: depth-3 nested subagent (a → b → c) parses end-to-end, items reachable through `subagent.items[*].toolCall.subagent.items[*]`.
 - Full-body RPC: returns full text; missing-line case returns the placeholder.
 
 Manual / integration:
@@ -252,11 +295,11 @@ Manual / integration:
 
 ## Follow-ups (out of scope for this design)
 
-- **Sidechain rendering.** Currently skipped; `Task` parent renders only its result string. A future view should let you expand the parent into the inner subagent conversation.
-- **Markdown / inline code in chat bubbles.** Bubbles still render plain text. A markdown renderer benefits both panes.
-- **Daemon → app push.** Polling is fine for now; FSEvents-based push would reduce idle work.
+- **Daemon → app push.** Polling is fine for now; FSEvents-based push would reduce idle work, and would naturally extend to watching subagent files for live-updating nested timelines.
+- **Lazy subagent fetch.** v1 ships subagent items eagerly inside the main transcript payload. If real-world sessions get very heavy, a `terminal.subagentTranscript(parentToolUseID)` RPC could fetch on expand instead.
 - **Per-card persistent expand state.** Closing the pane resets expansion. Persistence (per session, in `appState`) could be added if users find themselves re-expanding the same cards.
-- **Promotion of common generic-rendered tools to curated.** `Task`, `WebFetch`, `TodoWrite` are likely candidates.
+- **Promotion of common generic-rendered tools to curated.** `Task`, `WebFetch`, `TodoWrite` are likely candidates. Note that `Task` already gets the subagent disclosure via the `subagent` field — promoting it to "curated" would mean a tailored header (agent type chip, prompt preview) on top of that.
+- **Syntax highlighting for fenced code blocks** in chat bubbles. v1 shows the language tag as a chip but renders content as plain monospace.
 
 ## Open questions
 
