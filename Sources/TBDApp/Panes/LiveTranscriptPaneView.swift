@@ -21,11 +21,9 @@ struct LiveTranscriptPaneView: View {
     @State private var hasShownInitialMessages = false
     @State private var lastSessionID: String?
     @State private var retryToken = 0
-    // NOTE: Autoscroll-freeze-on-user-scroll detection is deliberately deferred.
-    // SwiftUI doesn't expose ScrollView scroll position cleanly without
-    // `.scrollPosition` (macOS 14+) or GeometryReader hacks. For v1, autoscroll
-    // is always on; the "Jump to latest" pill never appears in practice. Wire
-    // `.scrollPosition` later to flip this to false on manual scroll-up.
+    // TODO: scroll-position detection is deferred; autoscrollEnabled is
+    // always true in v1. Wire to .scrollPosition (macOS 14+) when the
+    // "freeze autoscroll when user scrolls up" feature lands.
     @State private var autoscrollEnabled = true
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
@@ -117,21 +115,6 @@ struct LiveTranscriptPaneView: View {
                 }
             }
 
-            if !autoscrollEnabled {
-                Button(action: { autoscrollEnabled = true }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.down")
-                        Text("Jump to latest")
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.thinMaterial)
-                    .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .padding(12)
-            }
         }
     }
 
