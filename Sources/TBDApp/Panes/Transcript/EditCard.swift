@@ -95,22 +95,22 @@ struct EditCard: View {
             ForEach(Array(hunk.old_string.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, line in
                 HStack(spacing: 4) {
                     Text("-").foregroundStyle(.red)
-                    Text(String(line)).foregroundStyle(.red.opacity(0.85))
+                    Text(String(line)).foregroundStyle(.primary)
                 }
                 .font(.system(.caption, design: .monospaced))
                 .padding(.horizontal, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.red.opacity(0.08))
+                .background(Color.red.opacity(0.10))
             }
             ForEach(Array(hunk.new_string.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, line in
                 HStack(spacing: 4) {
                     Text("+").foregroundStyle(.green)
-                    Text(String(line)).foregroundStyle(.green.opacity(0.85))
+                    Text(String(line)).foregroundStyle(.primary)
                 }
                 .font(.system(.caption, design: .monospaced))
                 .padding(.horizontal, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.green.opacity(0.08))
+                .background(Color.green.opacity(0.10))
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 4))
