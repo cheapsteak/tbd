@@ -89,9 +89,9 @@ struct EditCard: View {
                     .textSelection(.enabled)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(hunks.enumerated()), id: \.offset) { _, hunk in
+                    ForEach(Array(hunks.enumerated()), id: \.offset) { idx, hunk in
                         diffHunk(hunk, language: language)
-                        if hunk != hunks.last { Divider() }
+                        if idx < hunks.count - 1 { Divider() }
                     }
                 }
             }
