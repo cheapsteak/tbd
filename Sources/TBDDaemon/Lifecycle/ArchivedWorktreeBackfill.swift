@@ -102,7 +102,12 @@ public struct ArchivedWorktreeBackfill: Sendable {
             return
         }
 
-        // Populate archivedHeadSHA from the renamed branch's HEAD if not already set.
+        // Populate archivedHeadSHA from the renamed branch's *current* HEAD —
+        // not the commit the worktree was on at archive time, which we can't
+        // recover after the fact. If the user committed on the renamed branch
+        // post-archive, a later SHA-fallback revive will land on the newer
+        // commit. Acceptable: the fallback only fires when the branch is also
+        // gone, and a slightly newer starting point beats outright failure.
         if worktree.archivedHeadSHA == nil {
             do {
                 let sha = try await git.headSHA(repoPath: repo.path, ref: current)
@@ -133,6 +138,12 @@ public struct ArchivedWorktreeBackfill: Sendable {
     }
 
     /// Pure parser — public for tests.
+    ///
+    /// The needle is case-sensitive: git's reflog message for `git branch -m`
+    /// has been `"Branch: renamed ..."` (capital B) for many years, but isn't
+    /// formally guaranteed. If git ever changes the message, the parser
+    /// silently returns an empty map and the backfill leaves rows untouched —
+    /// in line with the best-effort, never-throws contract.
     public static func parseReflogRenames(_ output: String) -> [String: String] {
         var map: [String: String] = [:]
         let prefix = "refs/heads/"
