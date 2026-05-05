@@ -6,6 +6,13 @@ import Highlightr
 /// elsewhere in the transcript view. Construction is lazy + once-per-app.
 enum DiffSyntaxHighlighter {
 
+    /// `Highlightr` is not declared `Sendable`, but `highlight(_:as:)` is
+    /// internally serialized (NSRegularExpression + a single JSCore VM).
+    /// All current callers run on the main actor (SwiftUI view bodies),
+    /// so there is no live race today. `nonisolated(unsafe)` matches the
+    /// constraint at the type system level — keep the call sites
+    /// main-actor-only or wrap in a serial queue if a future caller goes
+    /// off-main.
     nonisolated(unsafe) private static let shared: Highlightr? = {
         let h = Highlightr()
         h?.setTheme(to: "github")
