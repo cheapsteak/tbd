@@ -198,6 +198,26 @@ final class AppState: ObservableObject {
     @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
     @Published var sessionTranscriptLoading: Set<String> = []
 
+    /// Insertion/access order for `sessionTranscripts`. The most recently
+    /// touched sessionID is at the END. Evict from the FRONT when the cap
+    /// is exceeded.
+    private var sessionTranscriptOrder: [String] = []
+    private let sessionTranscriptCap = 50
+
+    /// Touch a sessionID — moves it to most-recently-used, evicts the LRU
+    /// entry if we're over the cap. Call this whenever an entry in
+    /// sessionTranscripts is added or updated.
+    func touchSessionTranscript(_ sessionID: String) {
+        if let existingIdx = sessionTranscriptOrder.firstIndex(of: sessionID) {
+            sessionTranscriptOrder.remove(at: existingIdx)
+        }
+        sessionTranscriptOrder.append(sessionID)
+        while sessionTranscriptOrder.count > sessionTranscriptCap {
+            let evict = sessionTranscriptOrder.removeFirst()
+            sessionTranscripts.removeValue(forKey: evict)
+        }
+    }
+
     /// Selected archived worktree per repo (left rail of the archived view's nested master-detail).
     @Published var selectedArchivedWorktreeIDs: [UUID: UUID] = [:]
 

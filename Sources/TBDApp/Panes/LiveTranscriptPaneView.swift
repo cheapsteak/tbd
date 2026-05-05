@@ -167,6 +167,7 @@ struct LiveTranscriptPaneView: View {
                 let prev = appState.sessionTranscripts[resolvedSID] ?? []
                 if !messagesEqual(prev, result.messages) {
                     appState.sessionTranscripts[resolvedSID] = result.messages
+                    appState.touchSessionTranscript(resolvedSID)
                 }
                 if !result.messages.isEmpty {
                     hasShownInitialMessages = true

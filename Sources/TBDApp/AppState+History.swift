@@ -84,6 +84,7 @@ extension AppState {
         do {
             let messages = try await daemonClient.sessionMessages(filePath: summary.filePath)
             sessionTranscripts[summary.sessionId] = messages
+            touchSessionTranscript(summary.sessionId)
         } catch {
             // leave empty, user can try again
         }
