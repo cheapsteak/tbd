@@ -36,6 +36,11 @@ struct TranscriptItemsView: View {
             case .userPrompt, .assistantText:
                 ChatBubbleView(item: item)
             case .thinking:
+                // Hidden by design. Claude Code emits .thinking blocks with empty
+                // text fields in practice (the actual reasoning is server-side
+                // cached), so a visible row would always show "Thinking" with no
+                // body. Re-enable here if extended-thinking content ever ships
+                // inline in the JSONL.
                 EmptyView()
             case .systemReminder(let id, let kind, let text, let ts):
                 if kind == .skillBody {
