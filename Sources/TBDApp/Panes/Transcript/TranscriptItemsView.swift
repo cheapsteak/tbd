@@ -49,8 +49,12 @@ struct TranscriptItemsView: View {
             } else {
                 SystemReminderRow(id: id, kind: kind, text: text, timestamp: ts)
             }
-        case .slashCommand(let id, let name, let args, let ts):
-            SlashCommandRow(id: id, name: name, args: args, timestamp: ts)
+        case .slashCommand:
+            // Dead branch: TranscriptParser folds <command-name> envelopes into
+            // .userPrompt items so they render as user chat bubbles. The enum
+            // case stays in the wire format for Codable safety, but no parser
+            // path emits it today.
+            EmptyView()
         case .toolCall(let id, let name, let inputJSON, let result, let subagent, let ts):
             if hiddenToolNames.contains(name) {
                 EmptyView()
