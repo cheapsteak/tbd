@@ -15,7 +15,7 @@ struct TranscriptItemsView: View {
     var depth: Int = 0
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 4) {
             ForEach(items) { item in
                 rowFor(item)
             }
