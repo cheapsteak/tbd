@@ -6,7 +6,6 @@ struct WorktreeRowView: View {
     var isMain: Bool = false
     @EnvironmentObject var appState: AppState
     @State private var isEditing = false
-    @State private var isNameTruncated = false
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -130,11 +129,10 @@ struct WorktreeRowView: View {
                 onStopEditing: { appState.isRenamingWorktree = false }
             ) {
                 VStack(alignment: .leading, spacing: 2) {
-                    ExpandingTextField(
-                        text: worktree.displayName,
-                        font: .systemFont(ofSize: NSFont.systemFontSize, weight: hasBoldNotification ? .bold : .regular),
-                        isTruncated: $isNameTruncated
-                    )
+                    Text(worktree.displayName)
+                        .fontWeight(hasBoldNotification ? .bold : .regular)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     if isPending {
                         Text("Creating worktree…")
                             .font(.caption)
