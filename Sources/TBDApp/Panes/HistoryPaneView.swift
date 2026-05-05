@@ -338,7 +338,9 @@ struct SessionTranscriptView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TranscriptItemsView(items: messages, terminalID: nil)
+                ScrollView {
+                    TranscriptItemsView(items: messages, terminalID: nil)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

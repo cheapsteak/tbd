@@ -15,14 +15,12 @@ struct TranscriptItemsView: View {
     var depth: Int = 0
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 4) {
-                ForEach(items) { item in
-                    rowFor(item)
-                }
+        LazyVStack(alignment: .leading, spacing: 4) {
+            ForEach(items) { item in
+                rowFor(item)
             }
-            .padding(.vertical, 8)
         }
+        .padding(.vertical, 8)
     }
 
     @ViewBuilder

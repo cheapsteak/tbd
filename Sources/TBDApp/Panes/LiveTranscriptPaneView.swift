@@ -103,16 +103,18 @@ struct LiveTranscriptPaneView: View {
     private var transcriptWithAutoscroll: some View {
         ZStack(alignment: .bottomTrailing) {
             ScrollViewReader { proxy in
-                TranscriptItemsView(items: messages, terminalID: terminalID)
-                    .onChange(of: messages.last?.id) { _, newID in
-                        guard autoscrollEnabled, let id = newID else { return }
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            proxy.scrollTo(id, anchor: .bottom)
-                        }
+                ScrollView {
+                    TranscriptItemsView(items: messages, terminalID: terminalID)
+                }
+                .onChange(of: messages.last?.id) { _, newID in
+                    guard autoscrollEnabled, let id = newID else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo(id, anchor: .bottom)
                     }
-                    .onAppear {
-                        if let id = messages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
-                    }
+                }
+                .onAppear {
+                    if let id = messages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+                }
             }
 
             if !autoscrollEnabled {
