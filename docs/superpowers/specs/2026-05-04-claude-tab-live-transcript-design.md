@@ -13,7 +13,7 @@ We can't replace the terminal — Claude Code's TUI handles input, slash command
 
 - Add a header action on Claude terminal panes that opens a chat-style live transcript next to the terminal.
 - Reuse the existing JSONL transcript renderer used by `HistoryPaneView`.
-- No changes to the daemon — the existing `terminal.conversation` RPC and `Terminal.claudeSessionID` tracking are sufficient.
+- One small daemon-side addition: a new `terminal.transcript` RPC that returns the full `[ChatMessage]` for a terminal's current Claude session. The existing `terminal.conversation` RPC is shaped for last-N-messages activity tracking, not transcripts; `session.messages` needs a file path the app doesn't have. The new RPC is ~15 lines of daemon code that resolves terminal → session ID → project dir → JSONL → messages, reusing the parsing already used by `session.messages`.
 - Survive Claude session rollover (`/clear`, `/compact`, suspend/resume) without user intervention.
 
 ## Non-goals
@@ -92,7 +92,7 @@ private func openTranscript(terminalID: UUID) {
 **Data layer:**
 
 - Observes `appState.terminals` to read the current `Terminal.claudeSessionID` for `terminalID`.
-- Calls the existing `terminal.conversation` RPC (no new RPC needed). Result writes into `appState.sessionTranscripts[sessionId]` — the same store `HistoryPaneView` already uses, so multiple consumers of the same session converge.
+- Calls the new `terminal.transcript` RPC (takes `terminalID`, returns `[ChatMessage]` and the resolved sessionID). Result writes into `appState.sessionTranscripts[sessionId]` — the same store `HistoryPaneView` already uses, so multiple consumers of the same session converge.
 - A polling loop runs while the view is visible:
   - Started in a `.task` modifier — cancelled automatically when the view disappears.
   - Cycle: fetch → sleep 1.5s → fetch.
@@ -123,12 +123,15 @@ A typical session JSONL is at most a few MB and the daemon already parses it for
 
 ## Files affected
 
+- `Sources/TBDShared/RPCProtocol.swift` — declare the new `terminal.transcript` method, its `TerminalTranscriptParams` (`terminalID: UUID`), and its `TerminalTranscriptResult` (`messages: [ChatMessage]`, `sessionID: String?`).
+- `Sources/TBDDaemon/Server/RPCRouter+TerminalHandlers.swift` — handler that resolves terminal → claudeSessionID → worktree path → project dir → JSONL, parsing through the same path used by `session.messages`. Register the route in the router setup.
+- `Sources/TBDApp/DaemonClient.swift` — `terminalTranscript(terminalID:)` async wrapper.
 - `Sources/TBDApp/Terminal/PaneContent.swift` — add `.liveTranscript(id:terminalID:)` case and update the `paneID` switch.
 - `Sources/TBDApp/Panes/PanePlaceholder.swift` — new toolbar button (visibility-gated to Claude terminals), new `paneBody` routing case, `openTranscript` helper.
 - `Sources/TBDApp/Panes/HistoryPaneView.swift` — extract the bubble list block into a `TranscriptMessagesView`; promote `ChatMessageView` from `private` to file-internal so the new view can use it. `SessionTranscriptView` continues to wrap `TranscriptMessagesView`.
 - `Sources/TBDApp/Panes/LiveTranscriptPaneView.swift` — new file; the view, polling loop, autoscroll state, error/empty states.
 
-`PaneContent` is app-only and never crosses the daemon RPC boundary, so no daemon changes, no new RPC, no DB migration. Existing persisted layouts decode unchanged because the new case is additive.
+`PaneContent` is app-only and never crosses the daemon RPC boundary, so existing persisted layouts decode unchanged because the new case is additive. Daemon and shared code change requires a full restart per `Sources/TBDDaemon/CLAUDE.md` — `scripts/restart.sh`, not `scripts/restart.sh --app`. No DB migration.
 
 ## Testing
 
