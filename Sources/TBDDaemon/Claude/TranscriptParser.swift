@@ -250,6 +250,68 @@ enum TranscriptParser {
         return nil
     }
 
+    /// Returns the un-truncated body text for an item id, or nil if not found.
+    /// itemID forms:
+    ///  - `tool_use_id` (e.g. "toolu_abc") → returns the matching tool_result content
+    ///  - `<lineUUID>#<blockIndex>` → returns the assistant block's text/thinking
+    ///  - bare `lineUUID` → returns the user message content
+    static func lookupFullBody(filePath: String, itemID: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: filePath),
+              let content = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        // Parse the composite id form first.
+        let lineUUID: String
+        let blockIndex: Int?
+        if let hashIdx = itemID.firstIndex(of: "#") {
+            lineUUID = String(itemID[..<hashIdx])
+            blockIndex = Int(itemID[itemID.index(after: hashIdx)...])
+        } else {
+            lineUUID = itemID
+            blockIndex = nil
+        }
+
+        for line in content.components(separatedBy: "\n") where !line.isEmpty {
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                continue
+            }
+
+            // tool_use_id match — search tool_result blocks within user lines.
+            if let message = json["message"] as? [String: Any],
+               let array = message["content"] as? [[String: Any]] {
+                for block in array where block["type"] as? String == "tool_result" {
+                    if (block["tool_use_id"] as? String) == itemID {
+                        if let s = block["content"] as? String { return s }
+                        if let inner = block["content"] as? [[String: Any]] {
+                            return inner.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                        }
+                    }
+                }
+            }
+
+            // line UUID match.
+            if (json["uuid"] as? String) == lineUUID {
+                if let blockIndex,
+                   let message = json["message"] as? [String: Any],
+                   let blocks = message["content"] as? [[String: Any]],
+                   blockIndex < blocks.count {
+                    let block = blocks[blockIndex]
+                    return (block["text"] as? String) ?? (block["thinking"] as? String)
+                }
+                if let message = json["message"] as? [String: Any] {
+                    if let s = message["content"] as? String { return s }
+                    if let array = message["content"] as? [[String: Any]] {
+                        return array.first(where: { $0["type"] as? String == "text" })
+                            .flatMap { $0["text"] as? String }
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     /// Parse `<command-name>foo</command-name><command-args>bar</command-args>` envelopes.
     /// Returns the command name (without leading `/`) and optional args text.
     static func parseSlashEnvelope(_ text: String) -> (name: String, args: String?) {

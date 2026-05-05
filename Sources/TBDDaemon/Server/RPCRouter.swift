@@ -148,6 +148,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalConversation(request.paramsData)
             case RPCMethod.terminalTranscript:
                 return try await handleTerminalTranscript(request.paramsData)
+            case RPCMethod.terminalTranscriptItemFullBody:
+                return try await handleTerminalTranscriptItemFullBody(request.paramsData)
             case RPCMethod.conductorSetup:
                 return try await handleConductorSetup(request.paramsData)
             case RPCMethod.conductorStart:
