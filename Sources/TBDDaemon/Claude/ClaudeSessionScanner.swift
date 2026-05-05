@@ -304,12 +304,16 @@ enum ClaudeSessionScanner {
             else { return }
 
             let timestamp: Date? = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
+            // Stable per-line ID from the JSONL — keeps SwiftUI ForEach diffing
+            // and live-pane equality checks correct across re-parses. Falls back
+            // to a fresh UUID for older lines that predate the field.
+            let lineID = (json["uuid"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
 
             let typeStr = json["type"] as? String
 
             if typeStr == "user" && UserMessageClassifier.isRealUserMessage(json),
                let text = UserMessageClassifier.extractText(json) {
-                messages.append(ChatMessage(role: .user, text: text, timestamp: timestamp))
+                messages.append(ChatMessage(id: lineID, role: .user, text: text, timestamp: timestamp))
                 return
             }
 
@@ -327,7 +331,7 @@ enum ClaudeSessionScanner {
                     text = nil
                 }
                 if let text {
-                    messages.append(ChatMessage(role: .assistant, text: text, timestamp: timestamp))
+                    messages.append(ChatMessage(id: lineID, role: .assistant, text: text, timestamp: timestamp))
                 }
             }
         }
