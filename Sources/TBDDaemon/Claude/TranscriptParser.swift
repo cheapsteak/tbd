@@ -39,15 +39,25 @@ enum TranscriptParser {
 
         // First pass: collect raw line dicts; index tool_results and agent ids.
         var rawLines: [[String: Any]] = []
+        // Parallel to rawLines. Stable per-line identifier used as a fallback
+        // when a line is missing the `uuid` field. Using a fresh UUID() here
+        // would make messagesEqual permanently false for that item (forcing a
+        // @Published write on every poll). Line index is process-stable and
+        // cheap; in practice every Claude JSONL line carries a `uuid` so this
+        // fallback is defensive.
+        var stableIDs: [String] = []
         var toolResultsByID: [String: ToolResult] = [:]
         var agentIDByToolUseID: [String: String] = [:]
 
+        var lineIndex = 0
         for line in content.components(separatedBy: "\n") where !line.isEmpty {
+            defer { lineIndex += 1 }
             guard let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
                 continue
             }
             rawLines.append(json)
+            stableIDs.append((json["uuid"] as? String) ?? "line-\(lineIndex)")
 
             if json["type"] as? String == "user",
                let message = json["message"] as? [String: Any],
@@ -92,10 +102,10 @@ enum TranscriptParser {
 
         var items: [TranscriptItem] = []
 
-        for json in rawLines {
+        for (i, json) in rawLines.enumerated() {
             if skipSidechain, json["isSidechain"] as? Bool == true { continue }
 
-            let lineUUID = (json["uuid"] as? String) ?? UUID().uuidString
+            let lineUUID = stableIDs[i]
             let timestamp = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
             let typeStr = json["type"] as? String
 
