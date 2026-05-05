@@ -424,7 +424,7 @@ private extension Int64 {
     }
 }
 
-private extension Date {
+extension Date {
     /// Absolute local time. "3:42 PM" for today; "May 3, 3:42 PM" for the
     /// current year; "May 3, 2025, 3:42 PM" for older. Never relative.
     var absoluteShort: String {
