@@ -28,6 +28,14 @@ enum DiffSyntaxHighlighter {
         return h
     }()
 
+    /// Cache of highlight results keyed by (isDark, language, content).
+    /// Reads from SwiftUI view bodies (main actor) only; the
+    /// `nonisolated(unsafe)` pattern is consistent with the highlighter
+    /// statics above and the cache mutations are likewise main-actor-only.
+    nonisolated(unsafe) private static var resultCache: [String: [NSAttributedString]] = [:]
+    private static let resultCacheCap = 500
+    nonisolated(unsafe) private static var resultCacheOrder: [String] = []
+
     /// Map file extensions → highlight.js language identifiers. Ported
     /// verbatim from gh-review (cheapsteak/gh-review).
     static func languageForFilename(_ filename: String) -> String? {
@@ -64,6 +72,13 @@ enum DiffSyntaxHighlighter {
             from: [.darkAqua, .aqua, .vibrantDark, .vibrantLight]
         )?.rawValue.contains("Dark") == true
 
+        // Cache key: appearance + language + content. Different appearance
+        // means a different theme means different attributed colors.
+        let cacheKey = "\(isDark ? "D" : "L")|\(language ?? "")|\(code)"
+        if let cached = resultCache[cacheKey] {
+            return cached
+        }
+
         guard let highlightr = isDark ? darkShared : lightShared, let language else {
             return plainLines()
         }
@@ -92,6 +107,17 @@ enum DiffSyntaxHighlighter {
         }
         let tailRange = NSRange(location: lineStart, length: nsCode.length - lineStart)
         result.append(mutable.attributedSubstring(from: tailRange))
+
+        // Touch / cap.
+        if let existingIdx = resultCacheOrder.firstIndex(of: cacheKey) {
+            resultCacheOrder.remove(at: existingIdx)
+        }
+        resultCacheOrder.append(cacheKey)
+        resultCache[cacheKey] = result
+        while resultCacheOrder.count > resultCacheCap {
+            let evict = resultCacheOrder.removeFirst()
+            resultCache.removeValue(forKey: evict)
+        }
         return result
     }
 
