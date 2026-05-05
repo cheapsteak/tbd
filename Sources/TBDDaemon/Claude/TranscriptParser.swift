@@ -8,17 +8,30 @@ import TBDShared
 /// skipped rather than failing the whole session. JSONL writes from Claude
 /// Code may be partial during live polling; we tolerate that.
 enum TranscriptParser {
-    /// Parse a JSONL file into transcript items in file order.
-    /// (Subagent recursion and body truncation land in Tasks 5 and 6.)
+    /// Parse a top-level Claude session JSONL into transcript items in file order.
+    /// Subagent (sidechain) JSONLs referenced by Task tool_results are recursively
+    /// parsed and attached to the corresponding `.toolCall` items.
     static func parse(filePath: String) -> [TranscriptItem] {
+        return parse(filePath: filePath, visitedAgentIDs: [], skipSidechain: true)
+    }
+
+    /// Recursive worker. `visitedAgentIDs` prevents cycles between subagent files.
+    /// `skipSidechain == true` for the parent (top-level) JSONL; `false` when
+    /// parsing a subagent file (whose lines all carry `isSidechain: true`).
+    private static func parse(
+        filePath: String,
+        visitedAgentIDs: Set<String>,
+        skipSidechain: Bool
+    ) -> [TranscriptItem] {
         guard let data = FileManager.default.contents(atPath: filePath),
               let content = String(data: data, encoding: .utf8) else {
             return []
         }
 
-        // First pass: collect raw JSON dicts in order, indexing tool_results by tool_use_id.
+        // First pass: collect raw line dicts; index tool_results and agent ids.
         var rawLines: [[String: Any]] = []
         var toolResultsByID: [String: ToolResult] = [:]
+        var agentIDByToolUseID: [String: String] = [:]
 
         for line in content.components(separatedBy: "\n") where !line.isEmpty {
             guard let lineData = line.data(using: .utf8),
@@ -33,24 +46,41 @@ enum TranscriptParser {
                 for block in array where block["type"] as? String == "tool_result" {
                     guard let id = block["tool_use_id"] as? String else { continue }
                     toolResultsByID[id] = extractToolResult(from: block)
+                    if let resultMeta = json["toolUseResult"] as? [String: Any],
+                       let agentID = resultMeta["agentId"] as? String {
+                        agentIDByToolUseID[id] = agentID
+                    }
                 }
             }
         }
 
-        // Second pass: emit TranscriptItems for non-sidechain lines.
+        // Resolve subagent paths relative to the parent file.
+        // Path scheme: <projectDir>/<sessionID>.jsonl   ↔
+        //              <projectDir>/<sessionID>/subagents/agent-<agentID>.jsonl
+        let parentURL = URL(fileURLWithPath: filePath)
+        let projectDir = parentURL.deletingLastPathComponent()
+        let sessionID = parentURL.deletingPathExtension().lastPathComponent
+        // For top-level files, the subagents dir is keyed by sessionID.
+        // For subagent files (already inside .../<sessionID>/subagents/), we need
+        // to use the SAME subagents dir for nested subagent resolution.
+        let subagentsDir: URL
+        if skipSidechain {
+            subagentsDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
+        } else {
+            // We're already inside a subagents/ dir; reuse it for nested agents.
+            subagentsDir = projectDir
+        }
+
         let iso = ISO8601DateFormatter()
         var items: [TranscriptItem] = []
 
         for json in rawLines {
-            // Sidechain lines are handled by the recursive subagent parser (Task 5).
-            // Skip them here — the parent Task tool_use is what surfaces subagent presence.
-            if json["isSidechain"] as? Bool == true { continue }
+            if skipSidechain, json["isSidechain"] as? Bool == true { continue }
 
             let lineUUID = (json["uuid"] as? String) ?? UUID().uuidString
             let timestamp = (json["timestamp"] as? String).flatMap { iso.date(from: $0) }
             let typeStr = json["type"] as? String
 
-            // System / slash command / environment classification first.
             if typeStr == "user", let kind = UserMessageClassifier.classify(json) {
                 let text = extractUserText(from: json) ?? ""
                 if kind == .slashEnvelope {
@@ -68,15 +98,24 @@ enum TranscriptParser {
                 continue
             }
 
+            // Sidechain user lines that aren't classified as system reminders and
+            // aren't a "real" user message under isRealUserMessage's heuristics
+            // (which is keyed on the array form) — fall back to treating string
+            // content as a user prompt.
+            if !skipSidechain, typeStr == "user",
+               let message = json["message"] as? [String: Any],
+               let s = message["content"] as? String, !s.isEmpty {
+                items.append(.userPrompt(id: lineUUID, text: s, timestamp: timestamp))
+                continue
+            }
+
             if typeStr == "assistant" {
                 guard let message = json["message"] as? [String: Any] else { continue }
 
-                // Some sessions (and our minimal fixture) store assistant content
-                // as a plain string instead of an array of blocks. Treat that as
-                // a single text block.
-                if let contentString = message["content"] as? String {
-                    if !contentString.isEmpty {
-                        items.append(.assistantText(id: "\(lineUUID)#0", text: contentString, timestamp: timestamp))
+                // String-content fallback (matches existing scanner behavior).
+                if let s = message["content"] as? String {
+                    if !s.isEmpty {
+                        items.append(.assistantText(id: "\(lineUUID)#0", text: s, timestamp: timestamp))
                     }
                     continue
                 }
@@ -101,9 +140,19 @@ enum TranscriptParser {
                         let inputData = (try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys])) ?? Data()
                         let inputJSON = String(data: inputData, encoding: .utf8) ?? "{}"
                         let result = toolResultsByID[toolID]
+
+                        var subagent: Subagent? = nil
+                        if name == "Task", let agentID = agentIDByToolUseID[toolID] {
+                            subagent = resolveSubagent(
+                                agentID: agentID,
+                                subagentsDir: subagentsDir,
+                                visitedAgentIDs: visitedAgentIDs
+                            )
+                        }
+
                         items.append(.toolCall(
                             id: toolID, name: name, inputJSON: inputJSON,
-                            result: result, subagent: nil, timestamp: timestamp
+                            result: result, subagent: subagent, timestamp: timestamp
                         ))
                     default:
                         continue
@@ -113,6 +162,43 @@ enum TranscriptParser {
         }
 
         return items
+    }
+
+    private static func resolveSubagent(
+        agentID: String,
+        subagentsDir: URL,
+        visitedAgentIDs: Set<String>
+    ) -> Subagent? {
+        if visitedAgentIDs.contains(agentID) {
+            // Cycle detected — surface a single system reminder noting it.
+            let cycleNote: TranscriptItem = .systemReminder(
+                id: "cycle-\(agentID)",
+                kind: .other,
+                text: "Subagent recursion cycle detected for agent \(agentID); halting nested parse.",
+                timestamp: nil
+            )
+            return Subagent(agentID: agentID, agentType: nil, items: [cycleNote])
+        }
+
+        let jsonlPath = subagentsDir.appendingPathComponent("agent-\(agentID).jsonl").path
+        guard FileManager.default.fileExists(atPath: jsonlPath) else { return nil }
+
+        var nextVisited = visitedAgentIDs
+        nextVisited.insert(agentID)
+        let items = parse(filePath: jsonlPath, visitedAgentIDs: nextVisited, skipSidechain: false)
+
+        let metaPath = subagentsDir.appendingPathComponent("agent-\(agentID).meta.json").path
+        let agentType = readAgentType(from: metaPath)
+
+        return Subagent(agentID: agentID, agentType: agentType, items: items)
+    }
+
+    private static func readAgentType(from metaPath: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: metaPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json["agentType"] as? String ?? json["agent_type"] as? String
     }
 
     // MARK: - helpers
