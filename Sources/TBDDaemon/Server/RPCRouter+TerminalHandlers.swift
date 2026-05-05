@@ -796,6 +796,7 @@ extension RPCRouter {
         if let subFiles = try? FileManager.default.contentsOfDirectory(at: subagentsDir, includingPropertiesForKeys: nil) {
             paths.append(contentsOf: subFiles
                 .filter { $0.pathExtension == "jsonl" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
                 .map { $0.path })
         }
         let text = TranscriptParser.lookupFullBody(filePaths: paths, itemID: params.itemID)
