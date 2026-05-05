@@ -61,7 +61,7 @@ struct EditCard: View {
                 Text(input?.file_path ?? "…")
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if hunks.contains(where: { $0.replace_all == true }) {
+                if !hunks.isEmpty && hunks.allSatisfy({ $0.replace_all == true }) {
                     Text("all").font(.caption2).foregroundStyle(.tertiary)
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(Color(nsColor: .quaternaryLabelColor).opacity(0.5))
