@@ -377,10 +377,20 @@ struct ChatMessageView: View {
             if isUser { Spacer(minLength: 52) }
 
             VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
-                Text(isUser ? "You" : "Claude")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 4)
+                HStack(spacing: 4) {
+                    if isUser, let ts = message.timestamp {
+                        Text(ts.absoluteShort).font(.caption2).foregroundStyle(.tertiary)
+                        Text("·").foregroundStyle(.quaternary).font(.caption2)
+                    }
+                    Text(isUser ? "You" : "Claude")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    if !isUser, let ts = message.timestamp {
+                        Text("·").foregroundStyle(.quaternary).font(.caption2)
+                        Text(ts.absoluteShort).font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(.horizontal, 4)
 
                 Text(message.text)
                     .font(.body)
@@ -415,6 +425,23 @@ private extension Int64 {
 }
 
 private extension Date {
+    /// Absolute local time. "3:42 PM" for today; "May 3, 3:42 PM" for the
+    /// current year; "May 3, 2025, 3:42 PM" for older. Never relative.
+    var absoluteShort: String {
+        let cal = Calendar.current
+        let now = Date()
+        let timeFmt = DateFormatter()
+        timeFmt.dateFormat = "h:mm a"
+        let timeStr = timeFmt.string(from: self)
+
+        if cal.isDateInToday(self) {
+            return timeStr
+        }
+        let dateFmt = DateFormatter()
+        dateFmt.dateFormat = cal.isDate(self, equalTo: now, toGranularity: .year) ? "MMM d" : "MMM d, yyyy"
+        return "\(dateFmt.string(from: self)), \(timeStr)"
+    }
+
     /// "Today 3:42 PM", "Yesterday 5:12 PM", "Mon 3:42 PM", "Apr 6, 3:42 PM"
     var smartFormatted: String {
         let cal = Calendar.current
