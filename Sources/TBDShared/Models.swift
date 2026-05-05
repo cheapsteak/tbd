@@ -439,3 +439,68 @@ public struct SessionMessagesParams: Codable, Sendable {
     public let filePath: String
     public init(filePath: String) { self.filePath = filePath }
 }
+
+// MARK: - Transcript Items (rich rendering)
+
+public enum SystemKind: String, Codable, Sendable {
+    case toolReminder
+    case hookOutput
+    case environmentDetails
+    case slashEnvelope
+    case other
+}
+
+public struct ToolResult: Codable, Sendable {
+    public let text: String
+    public let truncatedTo: Int?
+    public let isError: Bool
+    public init(text: String, truncatedTo: Int?, isError: Bool) {
+        self.text = text
+        self.truncatedTo = truncatedTo
+        self.isError = isError
+    }
+}
+
+public struct Subagent: Codable, Sendable {
+    public let agentID: String
+    public let agentType: String?
+    public let items: [TranscriptItem]
+    public init(agentID: String, agentType: String?, items: [TranscriptItem]) {
+        self.agentID = agentID
+        self.agentType = agentType
+        self.items = items
+    }
+}
+
+public indirect enum TranscriptItem: Codable, Sendable, Identifiable {
+    case userPrompt(id: String, text: String, timestamp: Date?)
+    case assistantText(id: String, text: String, timestamp: Date?)
+    case toolCall(id: String, name: String, inputJSON: String,
+                  result: ToolResult?, subagent: Subagent?, timestamp: Date?)
+    case thinking(id: String, text: String, timestamp: Date?)
+    case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?)
+    case slashCommand(id: String, name: String, args: String?, timestamp: Date?)
+
+    public var id: String {
+        switch self {
+        case .userPrompt(let id, _, _): return id
+        case .assistantText(let id, _, _): return id
+        case .toolCall(let id, _, _, _, _, _): return id
+        case .thinking(let id, _, _): return id
+        case .systemReminder(let id, _, _, _): return id
+        case .slashCommand(let id, _, _, _): return id
+        }
+    }
+
+    public var timestamp: Date? {
+        switch self {
+        case .userPrompt(_, _, let t),
+             .assistantText(_, _, let t),
+             .toolCall(_, _, _, _, _, let t),
+             .thinking(_, _, let t),
+             .systemReminder(_, _, _, let t),
+             .slashCommand(_, _, _, let t):
+            return t
+        }
+    }
+}
