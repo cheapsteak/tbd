@@ -36,6 +36,17 @@ enum DiffSyntaxHighlighter {
     private static let resultCacheCap = 500
     nonisolated(unsafe) private static var resultCacheOrder: [String] = []
 
+    /// Pre-warm both Highlightr instances on a background thread so the
+    /// JSCore VM is initialized before the first main-actor `highlightLines`
+    /// call. Cheap to call multiple times — subsequent invocations are no-ops
+    /// because the static lets are already populated.
+    static func warmUp() {
+        Task.detached(priority: .background) {
+            _ = lightShared
+            _ = darkShared
+        }
+    }
+
     /// Map file extensions → highlight.js language identifiers. Ported
     /// verbatim from gh-review (cheapsteak/gh-review).
     static func languageForFilename(_ filename: String) -> String? {
