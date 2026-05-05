@@ -264,6 +264,17 @@ struct TranscriptParserTests {
         #expect(r?.truncatedTo == nil)
     }
 
+    @Test func parses_iso8601_with_fractional_seconds() throws {
+        let line = #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T03:06:16.813Z","message":{"role":"user","content":"hi"}}"#
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+        let items = TranscriptParser.parse(filePath: tmp)
+        guard case .userPrompt(_, _, let ts) = items[0] else {
+            Issue.record("expected .userPrompt"); return
+        }
+        #expect(ts != nil, "timestamp with fractional seconds should parse")
+    }
+
     // MARK: - helpers
 
     private func writeTempJSONL(_ contents: String) throws -> String {

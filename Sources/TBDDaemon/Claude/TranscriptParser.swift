@@ -7,6 +7,16 @@ import TBDShared
 /// skipped rather than failing the whole session. JSONL writes from Claude
 /// Code may be partial during live polling; we tolerate that.
 enum TranscriptParser {
+    /// Shared ISO8601 formatter that accepts Claude Code's fractional-seconds
+    /// timestamps (e.g. `2026-05-05T03:06:16.813Z`). Without
+    /// `.withFractionalSeconds`, every such timestamp silently fails to parse.
+    /// `ISO8601DateFormatter` is documented as thread-safe for read-only use.
+    nonisolated(unsafe) private static let iso8601: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
     /// Parse a top-level Claude session JSONL into transcript items in file order.
     /// Subagent (sidechain) JSONLs referenced by Task tool_results are recursively
     /// parsed and attached to the corresponding `.toolCall` items.
@@ -70,14 +80,13 @@ enum TranscriptParser {
             subagentsDir = projectDir
         }
 
-        let iso = ISO8601DateFormatter()
         var items: [TranscriptItem] = []
 
         for json in rawLines {
             if skipSidechain, json["isSidechain"] as? Bool == true { continue }
 
             let lineUUID = (json["uuid"] as? String) ?? UUID().uuidString
-            let timestamp = (json["timestamp"] as? String).flatMap { iso.date(from: $0) }
+            let timestamp = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
             let typeStr = json["type"] as? String
 
             if typeStr == "user", let kind = UserMessageClassifier.classify(json) {
