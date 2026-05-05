@@ -29,6 +29,7 @@ struct RepoSectionView: View {
     @EnvironmentObject var appState: AppState
 
     @State private var isExpanded = true
+    @State private var isEditing = false
 
     var mainWorktree: Worktree? {
         (appState.worktrees[repo.id] ?? [])
@@ -51,13 +52,23 @@ struct RepoSectionView: View {
             .buttonStyle(HoverPressButtonStyle())
             .help(isExpanded ? "Collapse" : "Expand")
 
-            Text(repo.displayName)
-                .font(.headline)
-                .foregroundStyle(
-                    repo.status == .missing
-                        ? AnyShapeStyle(Color.secondary.opacity(0.5))
-                        : AnyShapeStyle(appState.selectedRepoID == repo.id ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
-                )
+            RenameableLabel(
+                text: repo.displayName,
+                isEditing: $isEditing,
+                onCommit: { newName in
+                    Task {
+                        await appState.renameRepo(id: repo.id, displayName: newName)
+                    }
+                }
+            ) {
+                Text(repo.displayName)
+                    .font(.headline)
+                    .foregroundStyle(
+                        repo.status == .missing
+                            ? AnyShapeStyle(Color.secondary.opacity(0.5))
+                            : AnyShapeStyle(appState.selectedRepoID == repo.id ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
+                    )
+            }
 
             if repo.status == .missing {
                 Text("[missing]")
@@ -84,6 +95,11 @@ struct RepoSectionView: View {
         .contentShape(Rectangle())
         .onTapGesture {
             appState.selectRepo(id: repo.id)
+        }
+        .contextMenu {
+            Button("Rename...") {
+                isEditing = true
+            }
         }
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         .tag(repo.id)
