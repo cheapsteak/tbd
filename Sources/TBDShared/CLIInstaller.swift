@@ -69,6 +69,19 @@ public enum CLIInstallerError: Error, Equatable {
     case symlinkCreationFailed(String)
 }
 
+extension CLIInstallerError: LocalizedError {
+    // Without this, error.localizedDescription returns the NSError bridge
+    // string ("The operation couldn't be completed…") and the actual reason
+    // (e.g. "create parent: …", "remove existing: …") is lost in both the
+    // user-facing alert and the os.Logger error line.
+    public var errorDescription: String? {
+        switch self {
+        case .symlinkCreationFailed(let reason):
+            return "Symlink creation failed: \(reason)"
+        }
+    }
+}
+
 public struct CLIInstaller: Sendable {
     public let symlinkPath: String
     public let pathProbe: @Sendable () async -> String?
