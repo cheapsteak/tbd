@@ -74,16 +74,14 @@ extension WorktreeLifecycle {
                 archiveLogger.warning("archive: failed to capture HEAD SHA for \(worktreeID, privacy: .public) at \(worktree.path, privacy: .public): \(error, privacy: .public)")
             }
         }
-        if let sha = capturedSHA {
-            do {
-                try await db.worktrees.updateArchivedHeadSHA(id: worktreeID, sha: sha)
-            } catch {
-                archiveLogger.warning("archive: failed to persist archivedHeadSHA for \(worktreeID, privacy: .public): \(error, privacy: .public)")
-            }
-        }
 
-        // Update DB status and save sessions in one transaction
-        try await db.worktrees.archive(id: worktreeID, claudeSessionIDs: claudeSessionIDs)
+        // Status flip, session save, and SHA persist all in one transaction —
+        // a crash mid-archive can't leave the row half-updated.
+        try await db.worktrees.archive(
+            id: worktreeID,
+            claudeSessionIDs: claudeSessionIDs,
+            archivedHeadSHA: capturedSHA
+        )
 
         // Kill all tmux windows for this worktree
         for terminal in terminals {

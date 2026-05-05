@@ -174,9 +174,14 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Archive a worktree (set status to archived and record the timestamp).
-    /// Optionally saves Claude session IDs in the same transaction so they survive terminal deletion.
+    /// Optionally saves Claude session IDs and the captured HEAD SHA in the
+    /// same transaction so they survive terminal deletion and crashes.
     /// Refuses to archive worktrees with `.main` status.
-    public func archive(id: UUID, claudeSessionIDs: [String]? = nil) async throws {
+    public func archive(
+        id: UUID,
+        claudeSessionIDs: [String]? = nil,
+        archivedHeadSHA: String? = nil
+    ) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Worktree not found")
@@ -192,6 +197,9 @@ public struct WorktreeStore: Sendable {
             if let sessions = claudeSessionIDs, !sessions.isEmpty {
                 record.archivedClaudeSessions = try String(
                     data: JSONEncoder().encode(sessions), encoding: .utf8)
+            }
+            if let sha = archivedHeadSHA {
+                record.archivedHeadSHA = sha
             }
             try record.update(db)
         }
