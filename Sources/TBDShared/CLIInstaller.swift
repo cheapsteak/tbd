@@ -243,7 +243,7 @@ public struct CLIInstaller: Sendable {
         return path
     }
 
-    static func absolutize(_ path: String, relativeTo base: String, homeDir: String = NSHomeDirectory()) -> String {
+    static func absolutize(_ path: String, relativeTo base: String, homeDir: String) -> String {
         let expanded = expandTilde(path, homeDir: homeDir)
         let nsPath = expanded as NSString
         if nsPath.isAbsolutePath {
