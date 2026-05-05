@@ -120,6 +120,7 @@ public enum RPCMethod {
     public static let conductorSuggest = "conductor.suggest"
     public static let conductorClearSuggestion = "conductor.clearSuggestion"
     public static let terminalConversation = "terminal.conversation"
+    public static let terminalTranscript = "terminal.transcript"
     public static let repoUpdateInstructions = "repo.updateInstructions"
     public static let modelProfileList = "modelProfile.list"
     public static let modelProfileAdd = "modelProfile.add"
@@ -717,5 +718,23 @@ public struct SkillInstallResultRPC: Codable, Sendable {
     public init(action: SkillInstallResult.Action, path: String) {
         self.action = action
         self.path = path
+    }
+}
+
+// MARK: - Terminal Transcript
+
+public struct TerminalTranscriptParams: Codable, Sendable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) {
+        self.terminalID = terminalID
+    }
+}
+
+public struct TerminalTranscriptResult: Codable, Sendable {
+    public let messages: [ChatMessage]
+    public let sessionID: String?
+    public init(messages: [ChatMessage], sessionID: String?) {
+        self.messages = messages
+        self.sessionID = sessionID
     }
 }
