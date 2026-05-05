@@ -306,6 +306,42 @@ struct TranscriptParserTests {
         }
     }
 
+    @Test func lookupFullBody_searches_subagent_files_via_multipath_overload() throws {
+        // Parent JSONL contains a Task tool_use; the inner Bash tool_use_id and
+        // its tool_result live ONLY in the subagent JSONL. The multi-path
+        // overload must find the inner id by falling back to the second file.
+        let parentLine = #"{"type":"user","uuid":"u-parent","timestamp":"2026-05-05T10:00:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_task","content":"agent done"}]},"toolUseResult":{"agentId":"agent-1"}}"#
+        let parentTmp = try writeTempJSONL(parentLine)
+        defer { try? FileManager.default.removeItem(atPath: parentTmp) }
+
+        let bigPayload = String(repeating: "z", count: 5000)
+        let escaped = bigPayload // no newlines, safe to embed
+        let subLine = "{\"type\":\"user\",\"uuid\":\"u-sub\",\"timestamp\":\"2026-05-05T10:00:01Z\",\"isSidechain\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_inner_bash\",\"content\":\"\(escaped)\"}]}}"
+        let subTmp = try writeTempJSONL(subLine)
+        defer { try? FileManager.default.removeItem(atPath: subTmp) }
+
+        // Inner id is NOT in the parent — must fall through to the subagent file.
+        let hit = TranscriptParser.lookupFullBody(
+            filePaths: [parentTmp, subTmp],
+            itemID: "toolu_inner_bash"
+        )
+        #expect(hit == bigPayload)
+
+        // And when the id IS in the parent, the parent is returned (order matters).
+        let parentHit = TranscriptParser.lookupFullBody(
+            filePaths: [parentTmp, subTmp],
+            itemID: "toolu_task"
+        )
+        #expect(parentHit == "agent done")
+
+        // Missing in both → nil.
+        let miss = TranscriptParser.lookupFullBody(
+            filePaths: [parentTmp, subTmp],
+            itemID: "toolu_nope"
+        )
+        #expect(miss == nil)
+    }
+
     // MARK: - helpers
 
     private func writeTempJSONL(_ contents: String) throws -> String {

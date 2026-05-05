@@ -791,8 +791,14 @@ extension RPCRouter {
             return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
         }
 
-        let path = projectDir.appendingPathComponent("\(sessionID).jsonl").path
-        let text = TranscriptParser.lookupFullBody(filePath: path, itemID: params.itemID)
+        var paths = [projectDir.appendingPathComponent("\(sessionID).jsonl").path]
+        let subagentsDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
+        if let subFiles = try? FileManager.default.contentsOfDirectory(at: subagentsDir, includingPropertiesForKeys: nil) {
+            paths.append(contentsOf: subFiles
+                .filter { $0.pathExtension == "jsonl" }
+                .map { $0.path })
+        }
+        let text = TranscriptParser.lookupFullBody(filePaths: paths, itemID: params.itemID)
             ?? "Output no longer available."
 
         return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: text))

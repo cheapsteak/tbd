@@ -268,6 +268,18 @@ enum TranscriptParser {
         return nil
     }
 
+    /// Returns the un-truncated body text for an item id by searching the
+    /// supplied JSONL files in order. Returns nil if the id isn't found in
+    /// any of them.
+    static func lookupFullBody(filePaths: [String], itemID: String) -> String? {
+        for path in filePaths {
+            if let hit = lookupFullBody(filePath: path, itemID: itemID) {
+                return hit
+            }
+        }
+        return nil
+    }
+
     /// Returns the un-truncated body text for an item id, or nil if not found.
     /// itemID forms:
     ///  - `tool_use_id` (e.g. "toolu_abc") → returns the matching tool_result content
