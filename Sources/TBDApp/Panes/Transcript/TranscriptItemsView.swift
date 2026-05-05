@@ -15,16 +15,6 @@ struct TranscriptItemsView: View {
     var depth: Int = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(items) { item in
-                rowFor(item)
-            }
-        }
-        .padding(.vertical, 8)
-    }
-
-    @ViewBuilder
-    private func rowFor(_ item: TranscriptItem) -> some View {
         if depth >= 8 {
             Text("… nested too deep")
                 .font(.caption2)
@@ -32,34 +22,44 @@ struct TranscriptItemsView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 4)
         } else {
-            switch item {
-            case .userPrompt, .assistantText:
-                ChatBubbleView(item: item)
-            case .thinking:
-                // Hidden by design. Claude Code emits .thinking blocks with empty
-                // text fields in practice (the actual reasoning is server-side
-                // cached), so a visible row would always show "Thinking" with no
-                // body. Re-enable here if extended-thinking content ever ships
-                // inline in the JSONL.
-                EmptyView()
-            case .systemReminder(let id, let kind, let text, let ts):
-                if kind == .skillBody {
-                    SkillBodyRow(id: id, text: text, timestamp: ts)
-                } else {
-                    SystemReminderRow(id: id, kind: kind, text: text, timestamp: ts)
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(items) { item in
+                    rowFor(item)
                 }
-            case .slashCommand(let id, let name, let args, let ts):
-                SlashCommandRow(id: id, name: name, args: args, timestamp: ts)
-            case .toolCall(let id, let name, let inputJSON, let result, let subagent, let ts):
-                if hiddenToolNames.contains(name) {
-                    EmptyView()
-                } else {
-                    VStack(alignment: .leading, spacing: 4) {
-                        toolCardFor(name: name, id: id, inputJSON: inputJSON, result: result, timestamp: ts)
-                        if let subagent {
-                            SubagentDisclosure(subagent: subagent, terminalID: terminalID, depth: depth)
-                                .padding(.leading, 32)
-                        }
+            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    @ViewBuilder
+    private func rowFor(_ item: TranscriptItem) -> some View {
+        switch item {
+        case .userPrompt, .assistantText:
+            ChatBubbleView(item: item)
+        case .thinking:
+            // Hidden by design. Claude Code emits .thinking blocks with empty
+            // text fields in practice (the actual reasoning is server-side
+            // cached), so a visible row would always show "Thinking" with no
+            // body. Re-enable here if extended-thinking content ever ships
+            // inline in the JSONL.
+            EmptyView()
+        case .systemReminder(let id, let kind, let text, let ts):
+            if kind == .skillBody {
+                SkillBodyRow(id: id, text: text, timestamp: ts)
+            } else {
+                SystemReminderRow(id: id, kind: kind, text: text, timestamp: ts)
+            }
+        case .slashCommand(let id, let name, let args, let ts):
+            SlashCommandRow(id: id, name: name, args: args, timestamp: ts)
+        case .toolCall(let id, let name, let inputJSON, let result, let subagent, let ts):
+            if hiddenToolNames.contains(name) {
+                EmptyView()
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    toolCardFor(name: name, id: id, inputJSON: inputJSON, result: result, timestamp: ts)
+                    if let subagent {
+                        SubagentDisclosure(subagent: subagent, terminalID: terminalID, depth: depth)
+                            .padding(.leading, 32)
                     }
                 }
             }
