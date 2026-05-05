@@ -76,35 +76,33 @@ public struct DefaultSkillFileSystem: SkillFileSystem {
 /// Pure logic for installing the TBD skill. No daemon, no DB, no `os.Logger`.
 public struct SkillInstaller: Sendable {
     private let fileSystem: SkillFileSystem
-    private let claudeSkillsRoot: String
+    private let claudeRoot: String
 
-    /// Default home-relative paths used in production.
-    public static func defaultClaudeSkillsRoot() -> String {
+    /// Default home-relative path to the Claude Code root config dir.
+    public static func defaultClaudeRoot() -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return home + "/.claude/skills"
+        return home + "/.claude"
     }
 
     public init(
         fileSystem: SkillFileSystem = DefaultSkillFileSystem(),
-        claudeSkillsRoot: String = SkillInstaller.defaultClaudeSkillsRoot()
+        claudeRoot: String = SkillInstaller.defaultClaudeRoot()
     ) {
         self.fileSystem = fileSystem
-        self.claudeSkillsRoot = claudeSkillsRoot
+        self.claudeRoot = claudeRoot
     }
 
     public func targetPath(for harness: Harness) -> String {
         switch harness {
         case .claudeCode:
-            return claudeSkillsRoot + "/tbd/SKILL.md"
+            return claudeRoot + "/skills/tbd/SKILL.md"
         }
     }
 
     private func harnessRootPath(for harness: Harness) -> String {
         switch harness {
         case .claudeCode:
-            // `~/.claude/` — parent of `~/.claude/skills/`.
-            // Strip "/skills" suffix off claudeSkillsRoot.
-            return (claudeSkillsRoot as NSString).deletingLastPathComponent
+            return claudeRoot
         }
     }
 

@@ -31,14 +31,14 @@ final class FakeFileSystem: SkillFileSystem, @unchecked Sendable {
     }
 }
 
-private func make(installed claudeRoot: Bool = true) -> (SkillInstaller, FakeFileSystem) {
+private func make(installed claudeRootExists: Bool = true) -> (SkillInstaller, FakeFileSystem) {
     let fs = FakeFileSystem()
-    if claudeRoot {
+    if claudeRootExists {
         fs.directories.insert("/home/u/.claude")
     }
     let installer = SkillInstaller(
         fileSystem: fs,
-        claudeSkillsRoot: "/home/u/.claude/skills"
+        claudeRoot: "/home/u/.claude"
     )
     return (installer, fs)
 }
