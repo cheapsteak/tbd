@@ -1,14 +1,6 @@
 import SwiftUI
 import TBDShared
 
-/// Predicate for showing a per-tab profile badge: only when the terminal has
-/// a non-nil profileID that differs from the resolved default for its
-/// worktree (repo override → global default). Extracted as a free function
-/// to keep the test independent of SwiftUI rendering.
-func shouldShowProfileBadge(terminalProfileID: UUID?, resolvedDefaultID: UUID?) -> Bool {
-    return terminalProfileID != nil && terminalProfileID != resolvedDefaultID
-}
-
 // MARK: - TabBar
 
 /// Generic tab bar that renders Tab items with type-appropriate icons and labels.
@@ -240,15 +232,6 @@ private struct TabBarItem: View {
                         .lineLimit(1)
                         .fixedSize()
                         .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
-
-                    if let badgeName = profileBadgeName {
-                        Text(badgeName)
-                            .font(.caption2)
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.15)))
-                            .foregroundStyle(.secondary)
-                            .padding(.leading, 4)
-                    }
                 }
             }
             .buttonStyle(.plain)
@@ -285,33 +268,6 @@ private struct TabBarItem: View {
         .onHover { hovering in
             isHovering = hovering
         }
-    }
-
-    private func resolvedDefaultProfileID(for worktreeID: UUID) -> UUID? {
-        // Find the repo for this worktree.
-        for (_, list) in appState.worktrees {
-            if let wt = list.first(where: { $0.id == worktreeID }) {
-                if let repo = appState.repos.first(where: { $0.id == wt.repoID }),
-                   let override = repo.profileOverrideID {
-                    return override
-                }
-                break
-            }
-        }
-        return appState.defaultProfileID
-    }
-
-    private var profileBadgeName: String? {
-        guard let terminal else { return nil }
-        let resolved = resolvedDefaultProfileID(for: terminal.worktreeID)
-        guard shouldShowProfileBadge(terminalProfileID: terminal.profileID, resolvedDefaultID: resolved) else {
-            return nil
-        }
-        guard let id = terminal.profileID,
-              let entry = appState.modelProfiles.first(where: { $0.profile.id == id }) else {
-            return nil
-        }
-        return entry.profile.name
     }
 
     private func formatProfileHeader(_ profileID: UUID?) -> String {
