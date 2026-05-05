@@ -80,6 +80,9 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var tmuxServer: String
     public var archivedClaudeSessions: [String]?
     public var sortOrder: Int = 0
+    /// HEAD SHA captured at archive time. Used as a fallback when reviving a
+    /// worktree whose branch was renamed or deleted before archive ran.
+    public var archivedHeadSHA: String?
     /// Transient enrichment populated by the daemon's `worktree.list` handler
     /// for archived worktrees: count of actual session JSONL files in the
     /// resolved Claude project directory. Not persisted in the DB. nil when
@@ -92,6 +95,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 hasConflicts: Bool = false,
                 createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String,
                 archivedClaudeSessions: [String]? = nil, sortOrder: Int = 0,
+                archivedHeadSHA: String? = nil,
                 liveClaudeSessionCount: Int? = nil) {
         self.id = id
         self.repoID = repoID
@@ -106,6 +110,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.tmuxServer = tmuxServer
         self.archivedClaudeSessions = archivedClaudeSessions
         self.sortOrder = sortOrder
+        self.archivedHeadSHA = archivedHeadSHA
         self.liveClaudeSessionCount = liveClaudeSessionCount
     }
 
@@ -124,6 +129,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         tmuxServer = try c.decode(String.self, forKey: .tmuxServer)
         archivedClaudeSessions = try c.decodeIfPresent([String].self, forKey: .archivedClaudeSessions)
         sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        archivedHeadSHA = try c.decodeIfPresent(String.self, forKey: .archivedHeadSHA)
         liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
     }
 }

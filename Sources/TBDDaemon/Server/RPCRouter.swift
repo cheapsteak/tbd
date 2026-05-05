@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let routerLogger = Logger(subsystem: "com.tbd.daemon", category: "rpcRouter")
 
 /// Maps RPC method names to handler functions.
 /// Decodes raw JSON params, dispatches to the appropriate subsystem, and returns an RPCResponse.
@@ -197,6 +200,7 @@ public final class RPCRouter: Sendable {
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
         } catch {
+            routerLogger.error("RPC \(request.method, privacy: .public) failed: \(error, privacy: .public)")
             return RPCResponse(error: "\(error)")
         }
     }

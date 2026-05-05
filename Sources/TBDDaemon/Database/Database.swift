@@ -329,6 +329,14 @@ public final class TBDDatabase: Sendable {
             try db.execute(sql: "ALTER TABLE model_profile_usage RENAME COLUMN token_id TO profile_id")
         }
 
+        // Track HEAD SHA captured at archive time so revive can fall back when
+        // the archived branch was renamed/deleted on disk before archive captured it.
+        migrator.registerMigration("v16_archived_head_sha") { db in
+            try db.alter(table: "worktree") { t in
+                t.add(column: "archivedHeadSHA", .text)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }
