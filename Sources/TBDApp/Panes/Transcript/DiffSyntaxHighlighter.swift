@@ -2,26 +2,34 @@ import Foundation
 import AppKit
 import Highlightr
 
-/// Shared `Highlightr` instance themed to match the GitHub palette used
-/// elsewhere in the transcript view. Construction is lazy + once-per-app.
+/// Shared `Highlightr` instances themed to match the GitHub palette
+/// elsewhere in the transcript view. Two cached instances (light + dark)
+/// so we can pick at call time based on the current appearance without
+/// rebuilding on every render.
 enum DiffSyntaxHighlighter {
 
-    /// `Highlightr` is not declared `Sendable`, but `highlight(_:as:)` is
-    /// internally serialized (NSRegularExpression + a single JSCore VM).
-    /// All current callers run on the main actor (SwiftUI view bodies),
-    /// so there is no live race today. `nonisolated(unsafe)` matches the
-    /// constraint at the type system level — keep the call sites
-    /// main-actor-only or wrap in a serial queue if a future caller goes
-    /// off-main.
-    nonisolated(unsafe) private static let shared: Highlightr? = {
+    /// Light-mode highlighter. `Highlightr` is not declared `Sendable`,
+    /// but `highlight(_:as:)` is internally serialized (NSRegularExpression
+    /// + a single JSCore VM). All current callers run on the main actor
+    /// (SwiftUI view bodies). Keep call sites main-actor-only.
+    nonisolated(unsafe) private static let lightShared: Highlightr? = {
         let h = Highlightr()
         h?.setTheme(to: "github")
         return h
     }()
 
+    /// Dark-mode highlighter. Uses `github-dark` (Highlightr ships it as a
+    /// theme; if missing, fall back to `atom-one-dark` at runtime).
+    nonisolated(unsafe) private static let darkShared: Highlightr? = {
+        let h = Highlightr()
+        if h?.setTheme(to: "github-dark") != true {
+            _ = h?.setTheme(to: "atom-one-dark")
+        }
+        return h
+    }()
+
     /// Map file extensions → highlight.js language identifiers. Ported
-    /// verbatim from gh-review (cheapsteak/gh-review). Covers the 30 most
-    /// common languages we expect to see in worktrees.
+    /// verbatim from gh-review (cheapsteak/gh-review).
     static func languageForFilename(_ filename: String) -> String? {
         let ext = (filename as NSString).pathExtension.lowercased()
         let map: [String: String] = [
@@ -37,10 +45,10 @@ enum DiffSyntaxHighlighter {
     }
 
     /// Highlight a multi-line code block. Returns one `NSAttributedString`
-    /// per input line (split by '\n' from the highlighted block so multi-line
-    /// constructs like strings and comments are colorized correctly).
-    /// Returns plain monospace lines if the highlighter is unavailable, the
-    /// language is unknown, or highlight.js fails on the snippet.
+    /// per input line. Picks a theme based on the current appearance.
+    /// Main-actor-only because it reads `NSApp.effectiveAppearance`; all
+    /// current callers are SwiftUI view bodies.
+    @MainActor
     static func highlightLines(_ code: String, language: String?) -> [NSAttributedString] {
         let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let plainLines: () -> [NSAttributedString] = {
@@ -52,45 +60,47 @@ enum DiffSyntaxHighlighter {
             }
         }
 
-        guard let highlightr = shared, let language else { return plainLines() }
+        let isDark = NSApp.effectiveAppearance.bestMatch(
+            from: [.darkAqua, .aqua, .vibrantDark, .vibrantLight]
+        )?.rawValue.contains("Dark") == true
+
+        guard let highlightr = isDark ? darkShared : lightShared, let language else {
+            return plainLines()
+        }
         guard let highlighted = highlightr.highlight(code, as: language) else {
             return plainLines()
         }
 
-        // Override font and clamp pale colors against light backgrounds.
         let mutable = NSMutableAttributedString(attributedString: highlighted)
         let fullRange = NSRange(location: 0, length: mutable.length)
         mutable.addAttribute(.font, value: monoFont, range: fullRange)
         mutable.enumerateAttribute(.foregroundColor, in: fullRange) { value, attrRange, _ in
-            if let color = value as? NSColor, colorIsTooPale(color) {
+            if let color = value as? NSColor, colorIsHardToRead(color, onDarkBackground: isDark) {
                 mutable.addAttribute(.foregroundColor, value: NSColor.labelColor, range: attrRange)
             }
         }
 
-        // Split by '\n' into per-line attributed substrings. The original
-        // `code` and the highlighted string have identical character content,
-        // so we can use the original string's '\n' offsets directly.
         let nsCode = mutable.string as NSString
         var result: [NSAttributedString] = []
         var lineStart = 0
         for i in 0..<nsCode.length {
-            if nsCode.character(at: i) == 0x0A { // '\n'
+            if nsCode.character(at: i) == 0x0A {
                 let range = NSRange(location: lineStart, length: i - lineStart)
                 result.append(mutable.attributedSubstring(from: range))
                 lineStart = i + 1
             }
         }
-        // Trailing line (no terminating '\n' — matches `split(omittingEmptySubsequences: false)`).
         let tailRange = NSRange(location: lineStart, length: nsCode.length - lineStart)
         result.append(mutable.attributedSubstring(from: tailRange))
         return result
     }
 
-    /// WCAG relative luminance — returns true for colors so pale they'd
-    /// vanish against a light system background. Threshold matches gh-review.
-    private static func colorIsTooPale(_ color: NSColor) -> Bool {
+    /// Symmetric WCAG luminance clamp. In light mode, replace overly-pale
+    /// colors that vanish against white. In dark mode, replace overly-dark
+    /// colors that vanish against black.
+    private static func colorIsHardToRead(_ color: NSColor, onDarkBackground: Bool) -> Bool {
         guard let rgb = color.usingColorSpace(.sRGB) else { return false }
         let luminance = 0.2126 * rgb.redComponent + 0.7152 * rgb.greenComponent + 0.0722 * rgb.blueComponent
-        return luminance > 0.6
+        return onDarkBackground ? luminance < 0.15 : luminance > 0.6
     }
 }
