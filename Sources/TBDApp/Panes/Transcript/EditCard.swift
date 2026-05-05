@@ -41,6 +41,11 @@ struct EditCard: View {
         return []
     }
 
+    private var language: String? {
+        guard let path = input?.file_path else { return nil }
+        return DiffSyntaxHighlighter.languageForFilename(path)
+    }
+
     var body: some View {
         ActivityRowChrome(
             icon: "pencil",
@@ -81,7 +86,7 @@ struct EditCard: View {
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(hunks.enumerated()), id: \.offset) { _, hunk in
-                        diffHunk(hunk)
+                        diffHunk(hunk, language: language)
                         if hunk != hunks.last { Divider() }
                     }
                 }
@@ -90,22 +95,25 @@ struct EditCard: View {
     }
 
     @ViewBuilder
-    private func diffHunk(_ hunk: EditHunk) -> some View {
+    private func diffHunk(_ hunk: EditHunk, language: String?) -> some View {
+        let oldLines = DiffSyntaxHighlighter.highlightLines(hunk.old_string, language: language)
+        let newLines = DiffSyntaxHighlighter.highlightLines(hunk.new_string, language: language)
+
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(hunk.old_string.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, line in
+            ForEach(Array(oldLines.enumerated()), id: \.offset) { _, line in
                 HStack(spacing: 4) {
                     Text("-").foregroundStyle(.red)
-                    Text(String(line)).foregroundStyle(.primary)
+                    Text(AttributedString(line))
                 }
                 .font(.system(.caption, design: .monospaced))
                 .padding(.horizontal, 6)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.red.opacity(0.10))
             }
-            ForEach(Array(hunk.new_string.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, line in
+            ForEach(Array(newLines.enumerated()), id: \.offset) { _, line in
                 HStack(spacing: 4) {
                     Text("+").foregroundStyle(.green)
-                    Text(String(line)).foregroundStyle(.primary)
+                    Text(AttributedString(line))
                 }
                 .font(.system(.caption, design: .monospaced))
                 .padding(.horizontal, 6)
