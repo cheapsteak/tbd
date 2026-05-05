@@ -10,11 +10,9 @@ extension RPCRouter {
 
     func handleModelProfileList() async throws -> RPCResponse {
         let profiles = try await db.modelProfiles.list()
-        var result: [ModelProfileWithUsage] = []
-        result.reserveCapacity(profiles.count)
-        for profile in profiles {
-            let usage = try await db.modelProfileUsage.get(profileID: profile.id)
-            result.append(ModelProfileWithUsage(profile: profile, usage: usage))
+        let usageByID = try await db.modelProfileUsage.fetchAll()
+        let result = profiles.map { profile in
+            ModelProfileWithUsage(profile: profile, usage: usageByID[profile.id])
         }
         let config = try await db.config.get()
         return try RPCResponse(result: ModelProfileListResult(profiles: result, defaultID: config.defaultProfileID))

@@ -56,6 +56,19 @@ public struct ModelProfileUsageStore: Sendable {
         }
     }
 
+    public func fetchAll() async throws -> [UUID: ModelProfileUsage] {
+        try await writer.read { db in
+            let records = try ModelProfileUsageRecord.fetchAll(db)
+            var byProfileID: [UUID: ModelProfileUsage] = [:]
+            byProfileID.reserveCapacity(records.count)
+            for record in records {
+                let usage = record.toModel()
+                byProfileID[usage.profileID] = usage
+            }
+            return byProfileID
+        }
+    }
+
     public func deleteForProfile(id: UUID) async throws {
         _ = try await writer.write { db in
             try ModelProfileUsageRecord.deleteOne(db, key: id.uuidString)
