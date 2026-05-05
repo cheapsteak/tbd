@@ -195,7 +195,7 @@ final class AppState: ObservableObject {
     @Published var historyActiveWorktrees: Set<UUID> = []
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
-    @Published var sessionTranscripts: [String: [ChatMessage]] = [:]  // sessionId → messages
+    @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
     @Published var sessionTranscriptLoading: Set<String> = []
 
     /// Selected archived worktree per repo (left rail of the archived view's nested master-detail).

@@ -2,7 +2,6 @@ import Foundation
 import TBDShared
 
 /// Loads a Claude Code session JSONL into a structured `[TranscriptItem]`.
-/// Replaces `ClaudeSessionScanner.loadMessages` once the cutover task lands.
 ///
 /// This parser is deliberately permissive — malformed or unknown lines are
 /// skipped rather than failing the whole session. JSONL writes from Claude

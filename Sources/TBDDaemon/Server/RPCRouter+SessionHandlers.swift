@@ -20,7 +20,7 @@ extension RPCRouter {
 
     func handleSessionMessages(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(SessionMessagesParams.self, from: paramsData)
-        let messages = ClaudeSessionScanner.loadMessages(filePath: params.filePath)
+        let messages = TranscriptParser.parse(filePath: params.filePath)
         return try RPCResponse(result: messages)
     }
 }

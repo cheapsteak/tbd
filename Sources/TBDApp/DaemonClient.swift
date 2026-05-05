@@ -855,11 +855,11 @@ actor DaemonClient {
     }
 
     /// Load full chat messages for a session file.
-    func sessionMessages(filePath: String) async throws -> [ChatMessage] {
+    func sessionMessages(filePath: String) async throws -> [TranscriptItem] {
         return try await callAsync(
             method: RPCMethod.sessionMessages,
             params: SessionMessagesParams(filePath: filePath),
-            resultType: [ChatMessage].self
+            resultType: [TranscriptItem].self
         )
     }
 

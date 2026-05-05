@@ -276,7 +276,7 @@ struct SessionTranscriptView: View {
     let action: TranscriptAction
     @EnvironmentObject var appState: AppState
 
-    private var messages: [ChatMessage] {
+    private var messages: [TranscriptItem] {
         appState.sessionTranscripts[sessionId] ?? []
     }
 
@@ -338,78 +338,10 @@ struct SessionTranscriptView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TranscriptMessagesView(messages: messages)
+                TranscriptItemsView(items: messages, terminalID: nil)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-// MARK: - TranscriptMessagesView
-
-/// The chat-bubble list used by both SessionTranscriptView (in the
-/// History pane) and LiveTranscriptPaneView (the live-following pane).
-/// Pure presentation: takes pre-loaded messages and renders them.
-struct TranscriptMessagesView: View {
-    let messages: [ChatMessage]
-
-    var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(messages) { message in
-                    ChatMessageView(message: message)
-                }
-            }
-            .padding(.vertical, 8)
-        }
-    }
-}
-
-// MARK: - ChatMessageView
-
-struct ChatMessageView: View {
-    let message: ChatMessage
-
-    private var isUser: Bool { message.role == .user }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            if isUser { Spacer(minLength: 52) }
-
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
-                HStack(spacing: 4) {
-                    if isUser, let ts = message.timestamp {
-                        Text(ts.absoluteShort).font(.caption2).foregroundStyle(.tertiary)
-                        Text("·").foregroundStyle(.quaternary).font(.caption2)
-                    }
-                    Text(isUser ? "You" : "Claude")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    if !isUser, let ts = message.timestamp {
-                        Text("·").foregroundStyle(.quaternary).font(.caption2)
-                        Text(ts.absoluteShort).font(.caption2).foregroundStyle(.tertiary)
-                    }
-                }
-                .padding(.horizontal, 4)
-
-                Text(message.text)
-                    .font(.body)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 8)
-                    .background(
-                        isUser
-                            ? Color.accentColor.opacity(0.15)
-                            : Color(nsColor: .controlBackgroundColor)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-
-            if !isUser { Spacer(minLength: 52) }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 4)
     }
 }
 

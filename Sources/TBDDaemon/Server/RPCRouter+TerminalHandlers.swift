@@ -775,7 +775,7 @@ extension RPCRouter {
         }
 
         let filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
-        let messages = ClaudeSessionScanner.loadMessages(filePath: filePath)
+        let messages = TranscriptParser.parse(filePath: filePath)
         return try RPCResponse(result: TerminalTranscriptResult(messages: messages, sessionID: sessionID))
     }
 

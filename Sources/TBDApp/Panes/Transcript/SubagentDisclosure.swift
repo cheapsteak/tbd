@@ -5,7 +5,7 @@ import TBDShared
 /// that recursively renders TranscriptItemsView with a depth indicator.
 struct SubagentDisclosure: View {
     let subagent: Subagent
-    let terminalID: UUID
+    let terminalID: UUID?
     let depth: Int
 
     @State private var expanded = false

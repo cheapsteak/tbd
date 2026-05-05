@@ -6,7 +6,7 @@ struct WriteCard: View {
     let inputJSON: String
     let result: ToolResult?
     let timestamp: Date?
-    let terminalID: UUID
+    let terminalID: UUID?
 
     @State private var expanded = true
     @EnvironmentObject var appState: AppState

@@ -732,9 +732,9 @@ public struct TerminalTranscriptParams: Codable, Sendable {
 }
 
 public struct TerminalTranscriptResult: Codable, Sendable {
-    public let messages: [ChatMessage]
+    public let messages: [TranscriptItem]
     public let sessionID: String?
-    public init(messages: [ChatMessage], sessionID: String?) {
+    public init(messages: [TranscriptItem], sessionID: String?) {
         self.messages = messages
         self.sessionID = sessionID
     }

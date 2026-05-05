@@ -6,7 +6,7 @@ struct GrepCard: View {
     let inputJSON: String
     let result: ToolResult?
     let timestamp: Date?
-    let terminalID: UUID
+    let terminalID: UUID?
 
     @State private var expanded = true
     @State private var fullResultText: String? = nil
@@ -43,7 +43,7 @@ struct GrepCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                if let cap = r.truncatedTo, fullResultText == nil {
+                if let cap = r.truncatedTo, fullResultText == nil, terminalID != nil {
                     TruncationFooter(truncatedTo: cap, currentLength: r.text.count) {
                         Task { await fetchFull() }
                     }
@@ -58,6 +58,7 @@ struct GrepCard: View {
     }
 
     private func fetchFull() async {
+        guard let terminalID else { return }
         if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id) {
             await MainActor.run { fullResultText = r.text }
         }

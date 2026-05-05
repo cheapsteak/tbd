@@ -6,7 +6,7 @@ import TBDShared
 /// and recursively by SubagentDisclosure (depth=N) for nested subagent timelines.
 struct TranscriptItemsView: View {
     let items: [TranscriptItem]
-    let terminalID: UUID
+    let terminalID: UUID?
     var depth: Int = 0
 
     var body: some View {

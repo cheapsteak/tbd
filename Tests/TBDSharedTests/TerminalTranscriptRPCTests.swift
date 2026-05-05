@@ -16,9 +16,9 @@ struct TerminalTranscriptRPCTests {
     }
 
     @Test func result_codable_roundtrip_with_messages() throws {
-        let messages = [
-            ChatMessage(role: .user, text: "hello", timestamp: Date()),
-            ChatMessage(role: .assistant, text: "hi there", timestamp: Date()),
+        let messages: [TranscriptItem] = [
+            .userPrompt(id: "u1", text: "hello", timestamp: Date()),
+            .assistantText(id: "a1", text: "hi there", timestamp: Date()),
         ]
         let original = TerminalTranscriptResult(messages: messages, sessionID: "abc-123")
         let data = try JSONEncoder().encode(original)

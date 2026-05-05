@@ -38,7 +38,7 @@ struct LiveTranscriptPaneView: View {
         terminal?.claudeSessionID
     }
 
-    private var messages: [ChatMessage] {
+    private var messages: [TranscriptItem] {
         guard let sid = currentSessionID else { return [] }
         return appState.sessionTranscripts[sid] ?? []
     }
@@ -103,7 +103,7 @@ struct LiveTranscriptPaneView: View {
     private var transcriptWithAutoscroll: some View {
         ZStack(alignment: .bottomTrailing) {
             ScrollViewReader { proxy in
-                TranscriptMessagesView(messages: messages)
+                TranscriptItemsView(items: messages, terminalID: terminalID)
                     .onChange(of: messages.last?.id) { _, newID in
                         guard autoscrollEnabled, let id = newID else { return }
                         withAnimation(.easeOut(duration: 0.15)) {
@@ -178,7 +178,7 @@ struct LiveTranscriptPaneView: View {
         }
     }
 
-    private func messagesEqual(_ a: [ChatMessage], _ b: [ChatMessage]) -> Bool {
+    private func messagesEqual(_ a: [TranscriptItem], _ b: [TranscriptItem]) -> Bool {
         guard a.count == b.count else { return false }
         return zip(a, b).allSatisfy { $0.id == $1.id }
     }

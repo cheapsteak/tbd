@@ -417,23 +417,7 @@ public struct SessionSummary: Codable, Sendable, Identifiable {
     }
 }
 
-// MARK: - Chat Types
-
-public enum ChatRole: String, Codable, Sendable {
-    case user
-    case assistant
-}
-
-public struct ChatMessage: Codable, Sendable, Identifiable {
-    public let id: UUID
-    public let role: ChatRole
-    public let text: String
-    public let timestamp: Date?
-
-    public init(id: UUID = UUID(), role: ChatRole, text: String, timestamp: Date? = nil) {
-        self.id = id; self.role = role; self.text = text; self.timestamp = timestamp
-    }
-}
+// MARK: - Session Messages Params
 
 public struct SessionMessagesParams: Codable, Sendable {
     public let filePath: String
