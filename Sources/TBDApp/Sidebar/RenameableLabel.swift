@@ -61,8 +61,8 @@ struct RenameableLabel<DisplayContent: View>: View {
                     return true
                 }
             )
-            .onChange(of: editText) { _, newValue in
-                updateEmojiQuery(newValue)
+            .onChange(of: editText) { _, _ in
+                updateEmojiQuery()
             }
             .onChange(of: isTextFieldFocused) { _, focused in
                 if !focused {
@@ -70,7 +70,8 @@ struct RenameableLabel<DisplayContent: View>: View {
                     commit()
                 }
             }
-            .onAppear {
+            .onChange(of: isEditing, initial: true) { _, editing in
+                guard editing else { return }
                 editText = text
                 onStartEditing()
                 isTextFieldFocused = true
@@ -118,7 +119,7 @@ struct RenameableLabel<DisplayContent: View>: View {
         return colonIndex..<cursorIndex
     }
 
-    private func updateEmojiQuery(_ text: String) {
+    private func updateEmojiQuery() {
         if let range = activeColonRange {
             emojiQuery = String(editText[editText.index(after: range.lowerBound)..<range.upperBound])
             emojiSelectedIndex = 0
