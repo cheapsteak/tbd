@@ -10,6 +10,8 @@ struct BashCard: View {
 
     @State private var expanded = true
     @State private var fullResultText: String? = nil
+    @State private var containerExpanded = false
+    @State private var commandContainerExpanded = false
     @EnvironmentObject var appState: AppState
 
     private struct Input: Decodable { let command: String; let description: String? }
@@ -50,23 +52,61 @@ struct BashCard: View {
         } body: {
             VStack(alignment: .leading, spacing: 8) {
                 if let cmd = input?.command {
-                    Text(cmd)
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ZStack(alignment: .topTrailing) {
+                        ScrollView(.vertical) {
+                            Text(cmd)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: commandContainerExpanded ? .infinity : 120)
                         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
+
+                        Button(action: { commandContainerExpanded.toggle() }) {
+                            Image(systemName: commandContainerExpanded
+                                ? "arrow.down.right.and.arrow.up.left"
+                                : "arrow.up.left.and.arrow.down.right")
+                                .font(.caption2)
+                                .padding(4)
+                                .background(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .padding(4)
+                        .help(commandContainerExpanded ? "Collapse container" : "Expand container")
+                    }
                 }
                 if let r = result {
-                    Text(fullResultText ?? r.text)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(r.isError ? .red.opacity(0.85) : .secondary)
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ZStack(alignment: .topTrailing) {
+                        ScrollView(.vertical) {
+                            Text(fullResultText ?? r.text)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(r.isError ? .red.opacity(0.85) : .secondary)
+                                .textSelection(.enabled)
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: containerExpanded ? .infinity : 120)
                         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
+
+                        Button(action: { containerExpanded.toggle() }) {
+                            Image(systemName: containerExpanded
+                                ? "arrow.down.right.and.arrow.up.left"
+                                : "arrow.up.left.and.arrow.down.right")
+                                .font(.caption2)
+                                .padding(4)
+                                .background(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .padding(4)
+                        .help(containerExpanded ? "Collapse container" : "Expand container")
+                    }
                     if let cap = r.truncatedTo, fullResultText == nil, terminalID != nil {
                         TruncationFooter(truncatedTo: cap, currentLength: r.text.count) {
                             Task { await fetchFull() }

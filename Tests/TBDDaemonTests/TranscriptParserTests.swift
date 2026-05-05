@@ -244,7 +244,7 @@ struct TranscriptParserTests {
         guard case .toolCall(_, _, _, let r, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
-        #expect(r?.text.split(separator: "\n").count == 30)
+        #expect(r?.text.split(separator: "\n").count == 20)
         #expect(r?.truncatedTo != nil)
     }
 

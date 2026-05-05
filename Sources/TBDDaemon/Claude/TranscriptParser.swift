@@ -212,7 +212,7 @@ enum TranscriptParser {
     // MARK: - helpers
 
     static let bodyCharCap = 2000
-    static let bodyLineCap = 30
+    static let bodyLineCap = 20
 
     static func extractToolResult(from block: [String: Any]) -> ToolResult {
         let isError = (block["is_error"] as? Bool) ?? false
