@@ -16,14 +16,14 @@ struct BashCard: View {
 
     private struct Input: Decodable { let command: String; let description: String? }
 
-    private var input: Input? {
+    private func decodeInput() -> Input? {
         guard let data = inputJSON.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(Input.self, from: data)
     }
 
-    private var headerSummary: String {
-        if let desc = input?.description, !desc.isEmpty { return desc }
-        if let cmd = input?.command {
+    private func headerSummary(for parsed: Input?) -> String {
+        if let desc = parsed?.description, !desc.isEmpty { return desc }
+        if let cmd = parsed?.command {
             let trimmed = cmd.replacingOccurrences(of: "\n", with: " ")
             if trimmed.count > 60 {
                 return "$(\(String(trimmed.prefix(60)))…)"
@@ -34,14 +34,15 @@ struct BashCard: View {
     }
 
     var body: some View {
-        ActivityRowChrome(
+        let parsedInput = decodeInput()
+        return ActivityRowChrome(
             icon: "terminal",
             timestamp: timestamp,
             expanded: $expanded
         ) {
             HStack(spacing: 6) {
                 Text("Bash")
-                Text(headerSummary)
+                Text(headerSummary(for: parsedInput))
                     .lineLimit(1)
                 if result?.isError == true {
                     Text("failed")
@@ -54,7 +55,7 @@ struct BashCard: View {
             }
         } body: {
             VStack(alignment: .leading, spacing: 8) {
-                if let cmd = input?.command {
+                if let cmd = parsedInput?.command {
                     ZStack(alignment: .topTrailing) {
                         ScrollView(.vertical) {
                             Text(cmd)

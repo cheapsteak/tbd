@@ -20,13 +20,14 @@ struct ReadCard: View {
         let limit: Int?
     }
 
-    private var input: Input? {
+    private func decodeInput() -> Input? {
         guard let data = inputJSON.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(Input.self, from: data)
     }
 
     var body: some View {
-        ActivityRowChrome(
+        let parsedInput = decodeInput()
+        return ActivityRowChrome(
             icon: "doc.text",
             timestamp: timestamp,
             expanded: $expanded
@@ -34,11 +35,11 @@ struct ReadCard: View {
             HStack(spacing: 6) {
                 Text("Read")
                     .foregroundStyle(.primary)
-                Text(input?.file_path ?? "…")
+                Text(parsedInput?.file_path ?? "…")
                     .lineLimit(1)
                     .truncationMode(.middle)
-                if let off = input?.offset {
-                    if let lim = input?.limit {
+                if let off = parsedInput?.offset {
+                    if let lim = parsedInput?.limit {
                         Text("lines \(off)–\(off + lim - 1)")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)

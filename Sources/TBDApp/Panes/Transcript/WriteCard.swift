@@ -14,30 +14,31 @@ struct WriteCard: View {
 
     private struct Input: Decodable { let file_path: String; let content: String }
 
-    private var input: Input? {
+    private func decodeInput() -> Input? {
         guard let data = inputJSON.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(Input.self, from: data)
     }
 
-    private var lineCount: Int {
-        input?.content.split(separator: "\n", omittingEmptySubsequences: false).count ?? 0
+    private func lineCount(for parsed: Input?) -> Int {
+        parsed?.content.split(separator: "\n", omittingEmptySubsequences: false).count ?? 0
     }
 
     var body: some View {
-        ActivityRowChrome(
+        let parsedInput = decodeInput()
+        return ActivityRowChrome(
             icon: "square.and.pencil",
             timestamp: timestamp,
             expanded: $expanded
         ) {
             HStack(spacing: 6) {
                 Text("Write")
-                Text(input?.file_path ?? "…")
+                Text(parsedInput?.file_path ?? "…")
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text("\(lineCount) lines").font(.caption2).foregroundStyle(.tertiary)
+                Text("\(lineCount(for: parsedInput)) lines").font(.caption2).foregroundStyle(.tertiary)
             }
         } body: {
-            if let content = input?.content {
+            if let content = parsedInput?.content {
                 ZStack(alignment: .topTrailing) {
                     ScrollView(.vertical) {
                         Text(content)

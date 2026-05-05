@@ -14,22 +14,23 @@ struct GrepCard: View {
 
     private struct Input: Decodable { let pattern: String; let path: String? }
 
-    private var input: Input? {
+    private func decodeInput() -> Input? {
         guard let data = inputJSON.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(Input.self, from: data)
     }
 
     var body: some View {
-        ActivityRowChrome(
+        let parsedInput = decodeInput()
+        return ActivityRowChrome(
             icon: "magnifyingglass",
             timestamp: timestamp,
             expanded: $expanded
         ) {
             HStack(spacing: 6) {
                 Text("Grep")
-                Text(input?.pattern ?? "…")
+                Text(parsedInput?.pattern ?? "…")
                     .font(.system(.callout, design: .monospaced))
-                if let p = input?.path {
+                if let p = parsedInput?.path {
                     Text("in \(p)").font(.caption2).foregroundStyle(.tertiary)
                 }
             }

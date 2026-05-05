@@ -22,31 +22,32 @@ struct AgentCard: View {
         let subagent_type: String?
     }
 
-    private var input: Input? {
+    private func decodeInput() -> Input? {
         guard let data = inputJSON.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(Input.self, from: data)
     }
 
-    private var headerSummary: String {
-        if let desc = input?.description, !desc.isEmpty { return desc }
+    private func headerSummary(for parsed: Input?) -> String {
+        if let desc = parsed?.description, !desc.isEmpty { return desc }
         return "(no description)"
     }
 
-    private var promptPreview: String? {
-        guard let p = input?.prompt, !p.isEmpty else { return nil }
+    private func promptPreview(for parsed: Input?) -> String? {
+        guard let p = parsed?.prompt, !p.isEmpty else { return nil }
         let lines = p.split(separator: "\n", omittingEmptySubsequences: false).prefix(3)
         return lines.map(String.init).joined(separator: "\n")
     }
 
     var body: some View {
-        ActivityRowChrome(
+        let parsedInput = decodeInput()
+        return ActivityRowChrome(
             icon: "sparkles",
             timestamp: timestamp,
             expanded: $expanded
         ) {
             HStack(spacing: 6) {
                 Text("Agent")
-                Text(headerSummary)
+                Text(headerSummary(for: parsedInput))
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if result?.isError == true {
@@ -60,7 +61,7 @@ struct AgentCard: View {
             }
         } body: {
             VStack(alignment: .leading, spacing: 8) {
-                if let agentType = input?.subagent_type, !agentType.isEmpty {
+                if let agentType = parsedInput?.subagent_type, !agentType.isEmpty {
                     Text(agentType)
                         .font(.caption2)
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -68,7 +69,7 @@ struct AgentCard: View {
                         .clipShape(Capsule())
                         .foregroundStyle(.secondary)
                 }
-                if let preview = promptPreview {
+                if let preview = promptPreview(for: parsedInput) {
                     Text(preview)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.tertiary)

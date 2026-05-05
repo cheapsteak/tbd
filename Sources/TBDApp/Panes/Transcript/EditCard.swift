@@ -28,26 +28,30 @@ struct EditCard: View {
         let edits: [EditHunk]?
     }
 
-    private var input: EditInput? {
+    private static let decoder = JSONDecoder()
+
+    private func decodeInput() -> EditInput? {
         guard let data = inputJSON.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(EditInput.self, from: data)
-    }
-
-    private var hunks: [EditHunk] {
-        if let multi = input?.edits, !multi.isEmpty { return multi }
-        if let i = input, let oldS = i.old_string, let newS = i.new_string {
-            return [EditHunk(old_string: oldS, new_string: newS, replace_all: i.replace_all)]
-        }
-        return []
-    }
-
-    private var language: String? {
-        guard let path = input?.file_path else { return nil }
-        return DiffSyntaxHighlighter.languageForFilename(path)
+        return try? Self.decoder.decode(EditInput.self, from: data)
     }
 
     var body: some View {
-        ActivityRowChrome(
+        let parsedInput = decodeInput()
+        let language: String? = {
+            if let path = parsedInput?.file_path {
+                return DiffSyntaxHighlighter.languageForFilename(path)
+            }
+            return nil
+        }()
+        let hunks: [EditHunk] = {
+            if let multi = parsedInput?.edits, !multi.isEmpty { return multi }
+            if let i = parsedInput, let oldS = i.old_string, let newS = i.new_string {
+                return [EditHunk(old_string: oldS, new_string: newS, replace_all: i.replace_all)]
+            }
+            return []
+        }()
+
+        return ActivityRowChrome(
             icon: "pencil",
             timestamp: timestamp,
             expanded: $expanded
@@ -58,7 +62,7 @@ struct EditCard: View {
                 } else {
                     Text("Edit")
                 }
-                Text(input?.file_path ?? "…")
+                Text(parsedInput?.file_path ?? "…")
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if !hunks.isEmpty && hunks.allSatisfy({ $0.replace_all == true }) {
