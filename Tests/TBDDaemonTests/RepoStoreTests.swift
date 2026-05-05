@@ -27,4 +27,21 @@ import Foundation
         let fetched = try await db.repos.get(id: repo.id)
         #expect(fetched?.path == "/tmp/new")
     }
+
+    @Test func repoStoreRenamesDisplayName() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/r-\(UUID())", displayName: "old", defaultBranch: "main"
+        )
+        try await db.repos.rename(id: repo.id, displayName: "✨ new")
+        let fetched = try await db.repos.get(id: repo.id)
+        #expect(fetched?.displayName == "✨ new")
+    }
+
+    @Test func repoStoreRenameThrowsForUnknownID() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        await #expect(throws: Error.self) {
+            try await db.repos.rename(id: UUID(), displayName: "anything")
+        }
+    }
 }
