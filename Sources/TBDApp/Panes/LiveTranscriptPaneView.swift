@@ -179,8 +179,7 @@ struct LiveTranscriptPaneView: View {
     }
 
     private func messagesEqual(_ a: [TranscriptItem], _ b: [TranscriptItem]) -> Bool {
-        guard a.count == b.count else { return false }
-        return zip(a, b).allSatisfy { $0.id == $1.id }
+        return a == b
     }
 }
 

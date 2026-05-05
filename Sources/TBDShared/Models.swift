@@ -426,7 +426,7 @@ public struct SessionMessagesParams: Codable, Sendable {
 
 // MARK: - Transcript Items (rich rendering)
 
-public enum SystemKind: String, Codable, Sendable {
+public enum SystemKind: String, Codable, Sendable, Equatable {
     case toolReminder
     case hookOutput
     case environmentDetails
@@ -435,7 +435,7 @@ public enum SystemKind: String, Codable, Sendable {
     case other
 }
 
-public struct ToolResult: Codable, Sendable {
+public struct ToolResult: Codable, Sendable, Equatable {
     public let text: String
     public let truncatedTo: Int?
     public let isError: Bool
@@ -446,7 +446,7 @@ public struct ToolResult: Codable, Sendable {
     }
 }
 
-public struct Subagent: Codable, Sendable {
+public struct Subagent: Codable, Sendable, Equatable {
     public let agentID: String
     public let agentType: String?
     public let items: [TranscriptItem]
@@ -457,7 +457,7 @@ public struct Subagent: Codable, Sendable {
     }
 }
 
-public indirect enum TranscriptItem: Codable, Sendable, Identifiable {
+public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable {
     case userPrompt(id: String, text: String, timestamp: Date?)
     case assistantText(id: String, text: String, timestamp: Date?)
     case toolCall(id: String, name: String, inputJSON: String,
