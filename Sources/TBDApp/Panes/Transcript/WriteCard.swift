@@ -40,7 +40,9 @@ struct WriteCard: View {
                 Text(parsedInput?.file_path ?? "…")
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text("\(lineCount(for: parsedInput)) lines").font(.caption2).foregroundStyle(.tertiary)
+                let count = lineCount(for: parsedInput)
+                let prefix = (inputTruncatedTo != nil && fullInputJSON == nil) ? "≥" : ""
+                Text("\(prefix)\(count) lines").font(.caption2).foregroundStyle(.tertiary)
             }
         } body: {
             VStack(alignment: .leading, spacing: 8) {
