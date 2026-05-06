@@ -35,12 +35,13 @@ struct TranscriptItemTests {
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
-        guard case .toolCall(let id, let name, let inputJSON, _, let r, let sub, _) = decoded else {
+        guard case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let r, let sub, _) = decoded else {
             Issue.record("expected .toolCall"); return
         }
         #expect(id == "toolu_1")
         #expect(name == "Read")
         #expect(inputJSON == "{\"file_path\":\"/x\"}")
+        #expect(inputTruncatedTo == nil)
         #expect(r?.text == "stdout")
         #expect(sub == nil)
     }
@@ -54,16 +55,17 @@ struct TranscriptItemTests {
         )
         let sub = Subagent(agentID: "agent_x", agentType: "feature-dev:code-explorer", items: [inner])
         let outer: TranscriptItem = .toolCall(
-            id: "toolu_outer", name: "Task", inputJSON: "{}",
-            inputTruncatedTo: nil,
+            id: "toolu_outer", name: "Task", inputJSON: "{\"prompt\":\"…\"}",
+            inputTruncatedTo: 50_000,
             result: ToolResult(text: "done", truncatedTo: nil, isError: false),
             subagent: sub, timestamp: nil
         )
         let data = try JSONEncoder().encode(outer)
         let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
-        guard case .toolCall(_, _, _, _, _, let s, _) = decoded else {
+        guard case .toolCall(_, _, _, let outerTruncated, _, let s, _) = decoded else {
             Issue.record("expected .toolCall"); return
         }
+        #expect(outerTruncated == 50_000)
         #expect(s?.agentID == "agent_x")
         #expect(s?.items.count == 1)
     }
