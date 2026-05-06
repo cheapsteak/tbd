@@ -175,14 +175,17 @@ enum TranscriptParser {
                         let toolID = (block["id"] as? String) ?? blockID
                         let name = (block["name"] as? String) ?? ""
                         let rawInput = block["input"] ?? [:]
-                        let originalData = (try? JSONSerialization.data(withJSONObject: rawInput, options: [.sortedKeys])) ?? Data()
-                        let originalJSON = String(data: originalData, encoding: .utf8) ?? "{}"
                         let (truncatedInput, didTruncate) = truncateInputStrings(rawInput)
-                        let inputData = didTruncate
-                            ? ((try? JSONSerialization.data(withJSONObject: truncatedInput, options: [.sortedKeys])) ?? originalData)
-                            : originalData
+                        let inputData = (try? JSONSerialization.data(
+                            withJSONObject: didTruncate ? truncatedInput : rawInput,
+                            options: [.sortedKeys])) ?? Data()
                         let inputJSON = String(data: inputData, encoding: .utf8) ?? "{}"
-                        let inputTruncatedTo: Int? = didTruncate ? originalJSON.count : nil
+                        let inputTruncatedTo: Int? = {
+                            guard didTruncate,
+                                  let d = try? JSONSerialization.data(withJSONObject: rawInput, options: [.sortedKeys]),
+                                  let s = String(data: d, encoding: .utf8) else { return nil }
+                            return s.count
+                        }()
                         let result = toolResultsByID[toolID]
 
                         var subagent: Subagent? = nil
