@@ -84,21 +84,21 @@ struct EditCard: View {
                 }
             }
         } body: {
-            if result?.isError == true, let r = result {
-                Text(r.text)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
+                if result?.isError == true, let r = result {
+                    Text(r.text)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                } else {
                     ForEach(Array(hunks.enumerated()), id: \.offset) { idx, hunk in
                         diffHunk(hunk, language: language)
                         if idx < hunks.count - 1 { Divider() }
                     }
-                    if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
-                        TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
-                            Task { await fetchFullInput() }
-                        }
+                }
+                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
+                    TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
+                        Task { await fetchFullInput() }
                     }
                 }
             }
