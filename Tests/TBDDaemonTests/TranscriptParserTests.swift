@@ -58,7 +58,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: tmp)
         #expect(items.count == 1, "tool_result should fold into the tool_use, not be its own item")
-        if case .toolCall(_, _, _, let r, _, _) = items[0] {
+        if case .toolCall(_, _, _, _, let r, _, _) = items[0] {
             #expect(r?.text == "file contents")
             #expect(r?.isError == false)
         } else {
@@ -73,7 +73,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: tmp)
         #expect(items.count == 1)
-        if case .toolCall(_, _, _, let r, _, _) = items[0] {
+        if case .toolCall(_, _, _, _, let r, _, _) = items[0] {
             #expect(r == nil, "in-flight tool call should have nil result")
         } else {
             Issue.record("expected .toolCall")
@@ -120,7 +120,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: parentPath)
         #expect(items.count == 1)
-        guard case .toolCall(_, let name, _, _, let subagent, _) = items[0] else {
+        guard case .toolCall(_, let name, _, _, _, let subagent, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(name == "Task")
@@ -150,7 +150,7 @@ struct TranscriptParserTests {
             .write(toFile: subDir.appendingPathComponent("agent-AM.meta.json").path, atomically: true, encoding: .utf8)
 
         let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, let subagent, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, _, let subagent, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(subagent?.agentType == "feature-dev:code-reviewer")
@@ -170,7 +170,7 @@ struct TranscriptParserTests {
         try parent.write(toFile: parentPath, atomically: true, encoding: .utf8)
 
         let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, let subagent, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, _, let subagent, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(subagent == nil, "missing subagent file → nil subagent, parent still renders")
@@ -204,9 +204,9 @@ struct TranscriptParserTests {
         ].joined(separator: "\n").write(toFile: subDir.appendingPathComponent("agent-AINNER.jsonl").path, atomically: true, encoding: .utf8)
 
         let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, let outer, _) = items[0],
+        guard case .toolCall(_, _, _, _, _, let outer, _) = items[0],
               let outerItems = outer?.items, outerItems.count >= 2,
-              case .toolCall(_, _, _, _, let inner, _) = outerItems[1] else {
+              case .toolCall(_, _, _, _, _, let inner, _) = outerItems[1] else {
             Issue.record("recursive structure mismatched"); return
         }
         #expect(inner?.agentID == "AINNER")
@@ -223,7 +223,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, let r, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, let r, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(r?.text.count == 2000)
@@ -241,7 +241,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, let r, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, let r, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(r?.text.split(separator: "\n").count == 20)
@@ -257,7 +257,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, let r, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, let r, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(r?.text == "short")
@@ -340,6 +340,68 @@ struct TranscriptParserTests {
             itemID: "toolu_nope"
         )
         #expect(miss == nil)
+    }
+
+    @Test func inputTruncatesLargeStringField() throws {
+        let big = String(repeating: "a", count: 3000)
+        let line = "{\"type\":\"assistant\",\"uuid\":\"a1\",\"timestamp\":\"2026-05-05T10:00:00Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Write\",\"input\":{\"file_path\":\"/x.swift\",\"content\":\"\(big)\"}}]}}"
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _) = items[0] else {
+            Issue.record("expected .toolCall"); return
+        }
+        #expect(inputTruncatedTo != nil, "large input field should set inputTruncatedTo")
+        #expect(inputJSON.count < 3000, "truncated inputJSON should be smaller than original payload")
+        // The recorded original JSON length should match the count we report.
+        if let trunc = inputTruncatedTo {
+            #expect(trunc > inputJSON.count, "inputTruncatedTo should be the original full-JSON char count")
+        }
+    }
+
+    @Test func inputNotTruncatedWhenSmall() throws {
+        let line = #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"x.swift","content":"ok"}}]}}"#
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        guard case .toolCall(_, _, _, let inputTruncatedTo, _, _, _) = items[0] else {
+            Issue.record("expected .toolCall"); return
+        }
+        #expect(inputTruncatedTo == nil, "small inputs should not set inputTruncatedTo")
+    }
+
+    @Test func multiEditNestedStringIsTruncated() throws {
+        let big = String(repeating: "a", count: 3000)
+        let line = "{\"type\":\"assistant\",\"uuid\":\"a1\",\"timestamp\":\"2026-05-05T10:00:00Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"MultiEdit\",\"input\":{\"file_path\":\"/x.swift\",\"edits\":[{\"old_string\":\"foo\",\"new_string\":\"\(big)\"}]}}]}}"
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _) = items[0] else {
+            Issue.record("expected .toolCall"); return
+        }
+        #expect(inputTruncatedTo != nil, "nested oversized string should trigger truncation")
+        let needle = String(repeating: "a", count: 2500)
+        #expect(!inputJSON.contains(needle), "the nested array element's string should have been truncated below 2500 chars")
+    }
+
+    @Test func lookupFullBodyWithInputSuffix() throws {
+        let big = String(repeating: "a", count: 3000)
+        let line = "{\"type\":\"assistant\",\"uuid\":\"a1\",\"timestamp\":\"2026-05-05T10:00:00Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_xyz\",\"name\":\"Write\",\"input\":{\"file_path\":\"/x.swift\",\"content\":\"\(big)\"}}]}}"
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let hit = TranscriptParser.lookupFullBody(filePath: tmp, itemID: "toolu_xyz#input")
+        #expect(hit != nil, "lookupFullBody with #input suffix should resolve")
+        guard let hit else { return }
+        #expect(hit.count > 2000, "result should include the full un-truncated content (\(hit.count) chars)")
+        #expect(hit.contains(big), "result should contain the full original 3000-char content string")
+        // Sanity-check the result is JSON (parses to a dict).
+        let data = hit.data(using: .utf8) ?? Data()
+        let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed != nil, "result should be valid JSON")
     }
 
     // MARK: - helpers

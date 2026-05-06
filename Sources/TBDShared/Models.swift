@@ -461,6 +461,7 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable 
     case userPrompt(id: String, text: String, timestamp: Date?)
     case assistantText(id: String, text: String, timestamp: Date?)
     case toolCall(id: String, name: String, inputJSON: String,
+                  inputTruncatedTo: Int?,
                   result: ToolResult?, subagent: Subagent?, timestamp: Date?)
     case thinking(id: String, text: String, timestamp: Date?)
     case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?)
@@ -470,7 +471,7 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable 
         switch self {
         case .userPrompt(let id, _, _): return id
         case .assistantText(let id, _, _): return id
-        case .toolCall(let id, _, _, _, _, _): return id
+        case .toolCall(let id, _, _, _, _, _, _): return id
         case .thinking(let id, _, _): return id
         case .systemReminder(let id, _, _, _): return id
         case .slashCommand(let id, _, _, _): return id
@@ -481,7 +482,7 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable 
         switch self {
         case .userPrompt(_, _, let t),
              .assistantText(_, _, let t),
-             .toolCall(_, _, _, _, _, let t),
+             .toolCall(_, _, _, _, _, _, let t),
              .thinking(_, _, let t),
              .systemReminder(_, _, _, let t),
              .slashCommand(_, _, _, let t):

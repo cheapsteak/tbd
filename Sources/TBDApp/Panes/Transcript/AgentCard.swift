@@ -8,12 +8,14 @@ import TBDShared
 struct AgentCard: View {
     let id: String
     let inputJSON: String
+    let inputTruncatedTo: Int?
     let result: ToolResult?
     let timestamp: Date?
     let terminalID: UUID?
 
     @State private var expanded = false
     @State private var fullResultText: String? = nil
+    @State private var fullInputJSON: String? = nil
     @EnvironmentObject var appState: AppState
 
     private struct Input: Decodable {
@@ -22,9 +24,11 @@ struct AgentCard: View {
         let subagent_type: String?
     }
 
+    private static let decoder = JSONDecoder()
+
     private func decodeInput() -> Input? {
-        guard let data = inputJSON.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(Input.self, from: data)
+        guard let data = (fullInputJSON ?? inputJSON).data(using: .utf8) else { return nil }
+        return try? Self.decoder.decode(Input.self, from: data)
     }
 
     private func headerSummary(for parsed: Input?) -> String {
@@ -79,6 +83,11 @@ struct AgentCard: View {
                         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
+                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
+                    TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
+                        Task { await fetchFullInput() }
+                    }
+                }
                 if let r = result {
                     Text(fullResultText ?? r.text)
                         .font(.system(.caption, design: .monospaced))
@@ -107,6 +116,13 @@ struct AgentCard: View {
         guard let terminalID else { return }
         if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id) {
             await MainActor.run { fullResultText = r.text }
+        }
+    }
+
+    private func fetchFullInput() async {
+        guard let terminalID else { return }
+        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input") {
+            await MainActor.run { fullInputJSON = r.text }
         }
     }
 }

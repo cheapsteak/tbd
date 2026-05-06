@@ -174,9 +174,18 @@ enum TranscriptParser {
                     case "tool_use":
                         let toolID = (block["id"] as? String) ?? blockID
                         let name = (block["name"] as? String) ?? ""
-                        let input = block["input"] ?? [:]
-                        let inputData = (try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys])) ?? Data()
+                        let rawInput = block["input"] ?? [:]
+                        let (truncatedInput, didTruncate) = truncateInputStrings(rawInput)
+                        let inputData = (try? JSONSerialization.data(
+                            withJSONObject: didTruncate ? truncatedInput : rawInput,
+                            options: [.sortedKeys])) ?? Data()
                         let inputJSON = String(data: inputData, encoding: .utf8) ?? "{}"
+                        let inputTruncatedTo: Int? = {
+                            guard didTruncate,
+                                  let d = try? JSONSerialization.data(withJSONObject: rawInput, options: [.sortedKeys]),
+                                  let s = String(data: d, encoding: .utf8) else { return nil }
+                            return s.count
+                        }()
                         let result = toolResultsByID[toolID]
 
                         var subagent: Subagent? = nil
@@ -190,6 +199,7 @@ enum TranscriptParser {
 
                         items.append(.toolCall(
                             id: toolID, name: name, inputJSON: inputJSON,
+                            inputTruncatedTo: inputTruncatedTo,
                             result: result, subagent: subagent, timestamp: timestamp
                         ))
                     default:
@@ -278,6 +288,36 @@ enum TranscriptParser {
         return (capped, originalCount)
     }
 
+    /// Walks `input` recursively and replaces any string value exceeding the
+    /// configured caps with its truncated form. Returns (newInput, anyTruncated).
+    static func truncateInputStrings(_ input: Any) -> (Any, Bool) {
+        if let s = input as? String {
+            let (capped, originalCount) = truncate(s)
+            return (capped, originalCount != capped.count)
+        }
+        if let dict = input as? [String: Any] {
+            var out: [String: Any] = [:]
+            var anyTrunc = false
+            for (k, v) in dict {
+                let (newV, t) = truncateInputStrings(v)
+                out[k] = newV
+                if t { anyTrunc = true }
+            }
+            return (out, anyTrunc)
+        }
+        if let arr = input as? [Any] {
+            var out: [Any] = []
+            var anyTrunc = false
+            for v in arr {
+                let (newV, t) = truncateInputStrings(v)
+                out.append(newV)
+                if t { anyTrunc = true }
+            }
+            return (out, anyTrunc)
+        }
+        return (input, false)
+    }
+
     static func extractUserText(from json: [String: Any]) -> String? {
         guard let message = json["message"] as? [String: Any] else { return nil }
         if let s = message["content"] as? String { return s }
@@ -303,6 +343,7 @@ enum TranscriptParser {
     /// Returns the un-truncated body text for an item id, or nil if not found.
     /// itemID forms:
     ///  - `tool_use_id` (e.g. "toolu_abc") → returns the matching tool_result content
+    ///  - `<tool_use_id>#input` → returns the un-truncated `tool_use.input` JSON
     ///  - `<lineUUID>#<blockIndex>` → returns the assistant block's text/thinking
     ///  - bare `lineUUID` → returns the user message content
     static func lookupFullBody(filePath: String, itemID: String) -> String? {
@@ -311,10 +352,20 @@ enum TranscriptParser {
             return nil
         }
 
-        // Parse the composite id form first.
+        // Detect the `#input` suffix variant first — when present, we ONLY scan
+        // assistant tool_use blocks for a matching id and return their full input
+        // JSON. Other branches are skipped because the unsuffixed id would
+        // otherwise fall into the tool_result / uuid scans.
+        let inputSuffix = "#input"
+        let isInputLookup = itemID.hasSuffix(inputSuffix)
+        let toolUseIDForInput: String? = isInputLookup
+            ? String(itemID.dropLast(inputSuffix.count))
+            : nil
+
+        // Parse the composite id form for the non-input branches.
         let lineUUID: String
         let blockIndex: Int?
-        if let hashIdx = itemID.firstIndex(of: "#") {
+        if !isInputLookup, let hashIdx = itemID.firstIndex(of: "#") {
             lineUUID = String(itemID[..<hashIdx])
             blockIndex = Int(itemID[itemID.index(after: hashIdx)...])
         } else {
@@ -325,6 +376,23 @@ enum TranscriptParser {
         for line in content.components(separatedBy: "\n") where !line.isEmpty {
             guard let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                continue
+            }
+
+            if let toolUseID = toolUseIDForInput {
+                // Only scan assistant tool_use blocks; ignore tool_result/uuid branches.
+                if let message = json["message"] as? [String: Any],
+                   let array = message["content"] as? [[String: Any]] {
+                    for block in array where block["type"] as? String == "tool_use" {
+                        if (block["id"] as? String) == toolUseID {
+                            let input = block["input"] ?? [:]
+                            if let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys]),
+                               let s = String(data: data, encoding: .utf8) {
+                                return s
+                            }
+                        }
+                    }
+                }
                 continue
             }
 

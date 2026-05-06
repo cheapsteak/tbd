@@ -7,11 +7,13 @@ struct EditCard: View {
     let id: String
     let name: String           // "Edit" or "MultiEdit"
     let inputJSON: String
+    let inputTruncatedTo: Int?
     let result: ToolResult?
     let timestamp: Date?
     let terminalID: UUID?
 
     @State private var expanded = true
+    @State private var fullInputJSON: String? = nil
     @EnvironmentObject var appState: AppState
 
     private struct EditHunk: Decodable, Equatable {
@@ -31,7 +33,7 @@ struct EditCard: View {
     private static let decoder = JSONDecoder()
 
     private func decodeInput() -> EditInput? {
-        guard let data = inputJSON.data(using: .utf8) else { return nil }
+        guard let data = (fullInputJSON ?? inputJSON).data(using: .utf8) else { return nil }
         return try? Self.decoder.decode(EditInput.self, from: data)
     }
 
@@ -82,19 +84,31 @@ struct EditCard: View {
                 }
             }
         } body: {
-            if result?.isError == true, let r = result {
-                Text(r.text)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
+                if result?.isError == true, let r = result {
+                    Text(r.text)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                } else {
                     ForEach(Array(hunks.enumerated()), id: \.offset) { idx, hunk in
                         diffHunk(hunk, language: language)
                         if idx < hunks.count - 1 { Divider() }
                     }
                 }
+                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
+                    TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
+                        Task { await fetchFullInput() }
+                    }
+                }
             }
+        }
+    }
+
+    private func fetchFullInput() async {
+        guard let terminalID else { return }
+        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input") {
+            await MainActor.run { fullInputJSON = r.text }
         }
     }
 

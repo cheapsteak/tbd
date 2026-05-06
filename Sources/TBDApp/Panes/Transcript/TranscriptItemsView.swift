@@ -14,7 +14,7 @@ func isHiddenInTranscript(_ item: TranscriptItem) -> Bool {
     switch item {
     case .thinking:
         return true
-    case .toolCall(_, let name, _, _, _, _):
+    case .toolCall(_, let name, _, _, _, _, _):
         return hiddenToolNames.contains(name)
     default:
         return false
@@ -70,12 +70,12 @@ struct TranscriptItemsView: View {
             // case stays in the wire format for Codable safety, but no parser
             // path emits it today.
             EmptyView()
-        case .toolCall(let id, let name, let inputJSON, let result, let subagent, let ts):
+        case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let subagent, let ts):
             if hiddenToolNames.contains(name) {
                 EmptyView()
             } else {
                 VStack(alignment: .leading, spacing: 4) {
-                    toolCardFor(name: name, id: id, inputJSON: inputJSON, result: result, timestamp: ts)
+                    toolCardFor(name: name, id: id, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts)
                     if let subagent {
                         SubagentDisclosure(subagent: subagent, terminalID: terminalID, depth: depth)
                             .padding(.leading, 32)
@@ -86,24 +86,24 @@ struct TranscriptItemsView: View {
     }
 
     @ViewBuilder
-    private func toolCardFor(name: String, id: String, inputJSON: String, result: ToolResult?, timestamp: Date?) -> some View {
+    private func toolCardFor(name: String, id: String, inputJSON: String, inputTruncatedTo: Int?, result: ToolResult?, timestamp: Date?) -> some View {
         switch name {
         case "Read":
             ReadCard(id: id, inputJSON: inputJSON, result: result, timestamp: timestamp, terminalID: terminalID)
         case "Edit", "MultiEdit":
-            EditCard(id: id, name: name, inputJSON: inputJSON, result: result, timestamp: timestamp, terminalID: terminalID)
+            EditCard(id: id, name: name, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
         case "Write":
-            WriteCard(id: id, inputJSON: inputJSON, result: result, timestamp: timestamp, terminalID: terminalID)
+            WriteCard(id: id, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
         case "Bash":
-            BashCard(id: id, inputJSON: inputJSON, result: result, timestamp: timestamp, terminalID: terminalID)
+            BashCard(id: id, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
         case "Grep":
             GrepCard(id: id, inputJSON: inputJSON, result: result, timestamp: timestamp, terminalID: terminalID)
         case "Glob":
             GlobCard(id: id, inputJSON: inputJSON, result: result, timestamp: timestamp, terminalID: terminalID)
         case "Task", "Agent":
-            AgentCard(id: id, inputJSON: inputJSON, result: result, timestamp: timestamp, terminalID: terminalID)
+            AgentCard(id: id, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
         default:
-            GenericToolCard(id: id, name: name, inputJSON: inputJSON, result: result, timestamp: timestamp, terminalID: terminalID)
+            GenericToolCard(id: id, name: name, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
         }
     }
 }

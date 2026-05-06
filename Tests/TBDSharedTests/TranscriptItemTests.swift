@@ -30,16 +30,18 @@ struct TranscriptItemTests {
         let result = ToolResult(text: "stdout", truncatedTo: nil, isError: false)
         let original: TranscriptItem = .toolCall(
             id: "toolu_1", name: "Read", inputJSON: "{\"file_path\":\"/x\"}",
+            inputTruncatedTo: nil,
             result: result, subagent: nil, timestamp: nil
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
-        guard case .toolCall(let id, let name, let inputJSON, let r, let sub, _) = decoded else {
+        guard case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let r, let sub, _) = decoded else {
             Issue.record("expected .toolCall"); return
         }
         #expect(id == "toolu_1")
         #expect(name == "Read")
         #expect(inputJSON == "{\"file_path\":\"/x\"}")
+        #expect(inputTruncatedTo == nil)
         #expect(r?.text == "stdout")
         #expect(sub == nil)
     }
@@ -47,20 +49,23 @@ struct TranscriptItemTests {
     @Test func roundtrip_toolCall_with_subagent_with_nested_toolcall() throws {
         let inner: TranscriptItem = .toolCall(
             id: "toolu_inner", name: "Bash", inputJSON: "{}",
+            inputTruncatedTo: nil,
             result: ToolResult(text: "ok", truncatedTo: nil, isError: false),
             subagent: nil, timestamp: nil
         )
         let sub = Subagent(agentID: "agent_x", agentType: "feature-dev:code-explorer", items: [inner])
         let outer: TranscriptItem = .toolCall(
-            id: "toolu_outer", name: "Task", inputJSON: "{}",
+            id: "toolu_outer", name: "Task", inputJSON: "{\"prompt\":\"…\"}",
+            inputTruncatedTo: 50_000,
             result: ToolResult(text: "done", truncatedTo: nil, isError: false),
             subagent: sub, timestamp: nil
         )
         let data = try JSONEncoder().encode(outer)
         let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
-        guard case .toolCall(_, _, _, _, let s, _) = decoded else {
+        guard case .toolCall(_, _, _, let outerTruncated, _, let s, _) = decoded else {
             Issue.record("expected .toolCall"); return
         }
+        #expect(outerTruncated == 50_000)
         #expect(s?.agentID == "agent_x")
         #expect(s?.items.count == 1)
     }
