@@ -312,6 +312,7 @@ struct TBDAppMain: App {
 
     init() {
         lifecycleLogger.info("TBDApp launching pid=\(getpid(), privacy: .public)")
+        DiffSyntaxHighlighter.warmUp()
     }
 
     var body: some Scene {

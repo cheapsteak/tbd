@@ -276,7 +276,7 @@ struct SessionTranscriptView: View {
     let action: TranscriptAction
     @EnvironmentObject var appState: AppState
 
-    private var messages: [ChatMessage] {
+    private var messages: [TranscriptItem] {
         appState.sessionTranscripts[sessionId] ?? []
     }
 
@@ -339,54 +339,11 @@ struct SessionTranscriptView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(messages) { message in
-                            ChatMessageView(message: message)
-                        }
-                    }
-                    .padding(.vertical, 8)
+                    TranscriptItemsView(items: messages, terminalID: nil)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-// MARK: - ChatMessageView
-
-private struct ChatMessageView: View {
-    let message: ChatMessage
-
-    private var isUser: Bool { message.role == .user }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            if isUser { Spacer(minLength: 52) }
-
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
-                Text(isUser ? "You" : "Claude")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 4)
-
-                Text(message.text)
-                    .font(.body)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 8)
-                    .background(
-                        isUser
-                            ? Color.accentColor.opacity(0.15)
-                            : Color(nsColor: .controlBackgroundColor)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-
-            if !isUser { Spacer(minLength: 52) }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 4)
     }
 }
 
@@ -401,27 +358,3 @@ private extension Int64 {
     }
 }
 
-private extension Date {
-    /// "Today 3:42 PM", "Yesterday 5:12 PM", "Mon 3:42 PM", "Apr 6, 3:42 PM"
-    var smartFormatted: String {
-        let cal = Calendar.current
-        let now = Date()
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "h:mm a"
-        let timeStr = timeFmt.string(from: self)
-
-        if cal.isDateInToday(self) {
-            return "Today \(timeStr)"
-        } else if cal.isDateInYesterday(self) {
-            return "Yesterday \(timeStr)"
-        } else if let days = cal.dateComponents([.day], from: self, to: now).day, days < 7 {
-            let weekdayFmt = DateFormatter()
-            weekdayFmt.dateFormat = "EEE"
-            return "\(weekdayFmt.string(from: self)) \(timeStr)"
-        } else {
-            let dateFmt = DateFormatter()
-            dateFmt.dateFormat = "MMM d"
-            return "\(dateFmt.string(from: self)), \(timeStr)"
-        }
-    }
-}

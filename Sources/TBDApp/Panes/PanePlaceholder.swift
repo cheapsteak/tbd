@@ -104,13 +104,22 @@ struct PanePlaceholder: View {
             Text(URL(fileURLWithPath: path).lastPathComponent)
         case .note(let noteID):
             EditableNoteTitle(noteID: noteID, worktreeID: worktree.id)
+        case .liveTranscript(_, let terminalID):
+            let term = terminal(for: terminalID)
+            HStack(spacing: 4) {
+                Image(systemName: "text.bubble")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 10)
+                Text(term?.label ?? "Transcript")
+            }
         }
     }
 
     @ViewBuilder
     private var toolbarActions: some View {
         switch content {
-        case .terminal:
+        case .terminal(let terminalID):
             Button(action: splitRight) {
                 HStack(spacing: 2) {
                     Image(systemName: "rectangle.split.1x2")
@@ -129,6 +138,18 @@ struct PanePlaceholder: View {
                 .font(.caption)
             }
             .buttonStyle(.borderless)
+
+            if terminal(for: terminalID)?.claudeSessionID != nil {
+                Button(action: { openTranscript(terminalID: terminalID) }) {
+                    HStack(spacing: 2) {
+                        Image(systemName: "text.bubble")
+                        Text("Transcript")
+                    }
+                    .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Open a chat-style live transcript pane")
+            }
 
         case .webview:
             // Placeholder for back/forward — will be wired in Task 6
@@ -159,6 +180,9 @@ struct PanePlaceholder: View {
 
         case .note:
             EmptyView()
+
+        case .liveTranscript:
+            EmptyView()
         }
     }
 
@@ -175,6 +199,8 @@ struct PanePlaceholder: View {
             CodeViewerPaneView(path: path, worktreePath: worktree.path, showSourceCode: showSourceCode)
         case .note(let noteID):
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
+        case .liveTranscript(_, let terminalID):
+            LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
         }
     }
 
@@ -307,6 +333,14 @@ struct PanePlaceholder: View {
         Task {
             await createTerminalSplit(direction: .vertical)
         }
+    }
+
+    private func openTranscript(terminalID: UUID) {
+        layout = layout.splitPane(
+            id: content.paneID,
+            direction: .horizontal,
+            newContent: .liveTranscript(id: UUID(), terminalID: terminalID)
+        )
     }
 
     /// Creates a real terminal via the daemon, then inserts it as a split pane.

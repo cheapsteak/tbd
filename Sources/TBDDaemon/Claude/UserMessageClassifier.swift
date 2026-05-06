@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// Determines whether a decoded JSONL line is a real user-authored message
 /// vs. a tool result, system reminder, or other system-generated content.
@@ -66,6 +67,66 @@ enum UserMessageClassifier {
                 .first(where: { $0["type"] as? String == "text" })
                 .flatMap { $0["text"] as? String }
                 .flatMap { $0.isEmpty ? nil : $0 }
+        }
+
+        return nil
+    }
+
+    /// Returns the typed system kind for a user-role JSONL line if it's a
+    /// system-injected envelope rather than a real user prompt; returns nil
+    /// for real user messages.
+    static func classify(_ line: [String: Any]) -> SystemKind? {
+        guard
+            line["type"] as? String == "user",
+            let message = line["message"] as? [String: Any],
+            message["role"] as? String == "user"
+        else { return nil }
+
+        let text: String
+        if let s = message["content"] as? String {
+            text = s
+        } else if let array = message["content"] as? [[String: Any]] {
+            // Pure tool_result blocks aren't user-typed messages and aren't system reminders either.
+            if array.allSatisfy({ $0["type"] as? String == "tool_result" }) {
+                return nil
+            }
+            text = (array.first(where: { $0["type"] as? String == "text" })?["text"] as? String) ?? ""
+        } else {
+            return nil
+        }
+
+        if text.hasPrefix("Base directory for this skill:") { return .skillBody }
+        if text.hasPrefix("<system-reminder") { return .toolReminder }
+        if text.hasPrefix("<command-") { return .slashEnvelope }
+        if text.hasPrefix("<environment_details") { return .environmentDetails }
+        if text.hasPrefix("<local-command-") { return .hookOutput }
+
+        // Heuristic injected-context detection (markdown headings stripped).
+        let stripped = text.hasPrefix("#")
+            ? String(text.drop(while: { $0 == "#" || $0 == " " }))
+            : text
+        let lower = stripped.lowercased()
+        if injectedContextPrefixes.contains(where: { lower.hasPrefix($0) }) {
+            return .environmentDetails
+        }
+
+        // The known prefixes above match real Claude Code injections. The
+        // generic-tag heuristic below is for future injections we haven't
+        // seen yet — but it also catches user-typed XML/HTML prompts. If
+        // isRealUserMessage already accepts this line as a real user
+        // message, prefer that over the speculative system-injection
+        // catch-all. New unknown injections degrade to plain user prompts
+        // rather than being hidden as system noise.
+        if isRealUserMessage(line) { return nil }
+
+        // Unknown tag-like prefix → generic "other" injection. The tag must
+        // start with `<`, contain only letters/underscores/hyphens, and end at
+        // a `>` or whitespace.
+        if text.hasPrefix("<"),
+           let endOfTag = text.firstIndex(where: { $0 == ">" || $0 == " " }),
+           text.distance(from: text.startIndex, to: endOfTag) > 1,
+           text[text.index(after: text.startIndex)..<endOfTag].allSatisfy({ $0.isLetter || $0 == "_" || $0 == "-" }) {
+            return .other
         }
 
         return nil

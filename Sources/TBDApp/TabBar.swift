@@ -365,6 +365,10 @@ private struct TabBarItem: View {
             Image(systemName: "note.text")
                 .font(.system(size: 10))
                 .foregroundStyle(style)
+        case .liveTranscript:
+            Image(systemName: "text.bubble")
+                .font(.system(size: 10))
+                .foregroundStyle(style)
         }
     }
 
@@ -405,6 +409,8 @@ private struct TabBarItem: View {
             return URL(fileURLWithPath: path).lastPathComponent
         case .note:
             return "Note \(index + 1)"
+        case .liveTranscript:
+            return "Transcript"
         }
     }
 }

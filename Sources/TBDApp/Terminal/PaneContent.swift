@@ -7,6 +7,7 @@ enum PaneContent: Codable, Equatable, Sendable {
     case webview(id: UUID, url: URL)
     case codeViewer(id: UUID, path: String)
     case note(noteID: UUID)
+    case liveTranscript(id: UUID, terminalID: UUID)
 
     var paneID: UUID {
         switch self {
@@ -14,6 +15,7 @@ enum PaneContent: Codable, Equatable, Sendable {
         case .webview(let id, _): return id
         case .codeViewer(let id, _): return id
         case .note(let id): return id
+        case .liveTranscript(let id, _): return id
         }
     }
 }

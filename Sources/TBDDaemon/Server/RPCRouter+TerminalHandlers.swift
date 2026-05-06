@@ -4,6 +4,61 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "terminalHandlers")
 
+// MARK: - Transcript parse cache
+
+private struct TranscriptParseCacheEntry {
+    let mtime: Date
+    let size: Int64
+    let result: [TranscriptItem]
+}
+
+/// Caches the last `TranscriptParser.parse` result per session file path.
+/// The fingerprint is the parent JSONL's mtime+size. Subagent files are
+/// re-read on cache miss, so the cache is invalidated whenever the parent
+/// gains a new tool_result line — which is the only signal we have at the
+/// daemon level that subagent activity advanced.
+actor TranscriptParseCache {
+    static let shared = TranscriptParseCache()
+    private var entries: [String: TranscriptParseCacheEntry] = [:]
+    private var order: [String] = []  // most-recently-used at the end
+    private let cap = 50
+
+    func get(filePath: String) -> [TranscriptItem]? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
+              let mtime = attrs[.modificationDate] as? Date,
+              let size = (attrs[.size] as? NSNumber)?.int64Value else {
+            return nil
+        }
+        guard let entry = entries[filePath],
+              entry.mtime == mtime, entry.size == size else {
+            return nil
+        }
+        // Touch — move to most-recently-used.
+        if let idx = order.firstIndex(of: filePath) {
+            order.remove(at: idx)
+        }
+        order.append(filePath)
+        return entry.result
+    }
+
+    func put(filePath: String, result: [TranscriptItem]) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
+              let mtime = attrs[.modificationDate] as? Date,
+              let size = (attrs[.size] as? NSNumber)?.int64Value else {
+            return
+        }
+        entries[filePath] = TranscriptParseCacheEntry(mtime: mtime, size: size, result: result)
+        if let idx = order.firstIndex(of: filePath) {
+            order.remove(at: idx)
+        }
+        order.append(filePath)
+        while order.count > cap {
+            let evict = order.removeFirst()
+            entries.removeValue(forKey: evict)
+        }
+    }
+}
+
 extension RPCRouter {
 
     // MARK: - Terminal Handlers
@@ -753,5 +808,61 @@ extension RPCRouter {
         // No match found
         let result = ResolvedPathResult(repoID: nil, worktreeID: nil)
         return try RPCResponse(result: result)
+    }
+
+    func handleTerminalTranscript(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalTranscriptParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+
+        guard let sessionID = terminal.claudeSessionID else {
+            return try RPCResponse(result: TerminalTranscriptResult(messages: [], sessionID: nil))
+        }
+
+        guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
+            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+        }
+
+        guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
+            return try RPCResponse(result: TerminalTranscriptResult(messages: [], sessionID: sessionID))
+        }
+
+        let filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
+        let messages: [TranscriptItem]
+        if let cached = await TranscriptParseCache.shared.get(filePath: filePath) {
+            messages = cached
+        } else {
+            messages = TranscriptParser.parse(filePath: filePath)
+            await TranscriptParseCache.shared.put(filePath: filePath, result: messages)
+        }
+        return try RPCResponse(result: TerminalTranscriptResult(messages: messages, sessionID: sessionID))
+    }
+
+    func handleTerminalTranscriptItemFullBody(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalTranscriptItemFullBodyParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+        }
+        guard let sessionID = terminal.claudeSessionID,
+              let worktree = try await db.worktrees.get(id: terminal.worktreeID),
+              let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
+            return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
+        }
+
+        var paths = [projectDir.appendingPathComponent("\(sessionID).jsonl").path]
+        let subagentsDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
+        if let subFiles = try? FileManager.default.contentsOfDirectory(at: subagentsDir, includingPropertiesForKeys: nil) {
+            paths.append(contentsOf: subFiles
+                .filter { $0.pathExtension == "jsonl" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+                .map { $0.path })
+        }
+        let text = TranscriptParser.lookupFullBody(filePaths: paths, itemID: params.itemID)
+            ?? "Output no longer available."
+
+        return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: text))
     }
 }
