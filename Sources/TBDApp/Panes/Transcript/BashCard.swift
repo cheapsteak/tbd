@@ -4,12 +4,14 @@ import TBDShared
 struct BashCard: View {
     let id: String
     let inputJSON: String
+    let inputTruncatedTo: Int?
     let result: ToolResult?
     let timestamp: Date?
     let terminalID: UUID?
 
     @State private var expanded = false
     @State private var fullResultText: String? = nil
+    @State private var fullInputJSON: String? = nil
     @State private var containerExpanded = false
     @State private var commandContainerExpanded = false
     @EnvironmentObject var appState: AppState
@@ -19,7 +21,7 @@ struct BashCard: View {
     private static let decoder = JSONDecoder()
 
     private func decodeInput() -> Input? {
-        guard let data = inputJSON.data(using: .utf8) else { return nil }
+        guard let data = (fullInputJSON ?? inputJSON).data(using: .utf8) else { return nil }
         return try? Self.decoder.decode(Input.self, from: data)
     }
 
@@ -85,6 +87,11 @@ struct BashCard: View {
                         .help(commandContainerExpanded ? "Collapse container" : "Expand container")
                     }
                 }
+                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
+                    TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
+                        Task { await fetchFullInput() }
+                    }
+                }
                 if let r = result {
                     ZStack(alignment: .topTrailing) {
                         ScrollView(.vertical) {
@@ -132,6 +139,13 @@ struct BashCard: View {
         guard let terminalID else { return }
         if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: id) {
             await MainActor.run { fullResultText = r.text }
+        }
+    }
+
+    private func fetchFullInput() async {
+        guard let terminalID else { return }
+        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input") {
+            await MainActor.run { fullInputJSON = r.text }
         }
     }
 }
