@@ -14,9 +14,11 @@ struct WriteCard: View {
 
     private struct Input: Decodable { let file_path: String; let content: String }
 
+    private static let decoder = JSONDecoder()
+
     private func decodeInput() -> Input? {
         guard let data = inputJSON.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(Input.self, from: data)
+        return try? Self.decoder.decode(Input.self, from: data)
     }
 
     private func lineCount(for parsed: Input?) -> Int {

@@ -16,9 +16,11 @@ struct BashCard: View {
 
     private struct Input: Decodable { let command: String; let description: String? }
 
+    private static let decoder = JSONDecoder()
+
     private func decodeInput() -> Input? {
         guard let data = inputJSON.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(Input.self, from: data)
+        return try? Self.decoder.decode(Input.self, from: data)
     }
 
     private func headerSummary(for parsed: Input?) -> String {
