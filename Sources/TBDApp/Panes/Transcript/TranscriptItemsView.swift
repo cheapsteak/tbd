@@ -103,7 +103,7 @@ struct TranscriptItemsView: View {
         case "Task", "Agent":
             AgentCard(id: id, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
         default:
-            GenericToolCard(id: id, name: name, inputJSON: inputJSON, result: result, timestamp: timestamp, terminalID: terminalID)
+            GenericToolCard(id: id, name: name, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
         }
     }
 }

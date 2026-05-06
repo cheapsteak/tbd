@@ -6,12 +6,14 @@ struct GenericToolCard: View {
     let id: String
     let name: String
     let inputJSON: String
+    let inputTruncatedTo: Int?
     let result: ToolResult?
     let timestamp: Date?
     let terminalID: UUID?
 
     @State private var expanded = false
     @State private var fullResultText: String? = nil
+    @State private var fullInputJSON: String? = nil
     @EnvironmentObject var appState: AppState
 
     private var displayName: String {
@@ -43,8 +45,9 @@ struct GenericToolCard: View {
             }
         } body: {
             VStack(alignment: .leading, spacing: 8) {
-                if !inputJSON.isEmpty && inputJSON != "{}" {
-                    Text(prettyJSON(inputJSON))
+                let displayedInput = fullInputJSON ?? inputJSON
+                if !displayedInput.isEmpty && displayedInput != "{}" {
+                    Text(prettyJSON(displayedInput))
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
@@ -52,6 +55,11 @@ struct GenericToolCard: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
+                    if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
+                        TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
+                            Task { await fetchFullInput() }
+                        }
+                    }
                 }
                 if let r = result {
                     Text(fullResultText ?? r.text)
@@ -96,6 +104,13 @@ struct GenericToolCard: View {
             await MainActor.run { fullResultText = result.text }
         } catch {
             // Keep showing truncated version on error.
+        }
+    }
+
+    private func fetchFullInput() async {
+        guard let terminalID else { return }
+        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input") {
+            await MainActor.run { fullInputJSON = r.text }
         }
     }
 }
