@@ -3,6 +3,7 @@ import os
 import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "terminalHandlers")
+private let perfTranscriptLog = Logger(subsystem: "com.tbd.daemon", category: "perf-transcript")
 
 // MARK: - Transcript parse cache
 
@@ -811,22 +812,41 @@ extension RPCRouter {
     }
 
     func handleTerminalTranscript(_ paramsData: Data) async throws -> RPCResponse {
+        perfTranscriptLog.debug("rpc.handle.start method=terminalTranscript")
+        let start = ContinuousClock.now
+        let response: RPCResponse
+        var responseBytes = 0
+        var itemsCount = 0
+        defer {
+            let elapsed = ContinuousClock.now - start
+            let ms = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
+            perfTranscriptLog.debug("rpc.handle.end method=terminalTranscript elapsed_ms=\(ms, privacy: .public) response_bytes=\(responseBytes, privacy: .public) items=\(itemsCount, privacy: .public)")
+        }
+
         let params = try decoder.decode(TerminalTranscriptParams.self, from: paramsData)
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
-            return RPCResponse(error: "Terminal not found: \(params.terminalID)")
+            response = RPCResponse(error: "Terminal not found: \(params.terminalID)")
+            return response
         }
 
         guard let sessionID = terminal.claudeSessionID else {
-            return try RPCResponse(result: TerminalTranscriptResult(messages: [], sessionID: nil))
+            let result = TerminalTranscriptResult(messages: [], sessionID: nil)
+            response = try RPCResponse(result: result)
+            responseBytes = response.result?.utf8.count ?? 0
+            return response
         }
 
         guard let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
-            return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+            response = RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
+            return response
         }
 
         guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
-            return try RPCResponse(result: TerminalTranscriptResult(messages: [], sessionID: sessionID))
+            let result = TerminalTranscriptResult(messages: [], sessionID: sessionID)
+            response = try RPCResponse(result: result)
+            responseBytes = response.result?.utf8.count ?? 0
+            return response
         }
 
         let filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
@@ -837,7 +857,11 @@ extension RPCRouter {
             messages = TranscriptParser.parse(filePath: filePath)
             await TranscriptParseCache.shared.put(filePath: filePath, result: messages)
         }
-        return try RPCResponse(result: TerminalTranscriptResult(messages: messages, sessionID: sessionID))
+        let result = TerminalTranscriptResult(messages: messages, sessionID: sessionID)
+        response = try RPCResponse(result: result)
+        responseBytes = response.result?.utf8.count ?? 0
+        itemsCount = messages.count
+        return response
     }
 
     func handleTerminalTranscriptItemFullBody(_ paramsData: Data) async throws -> RPCResponse {

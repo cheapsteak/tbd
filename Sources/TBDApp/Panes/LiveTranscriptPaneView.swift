@@ -21,12 +21,25 @@ struct LiveTranscriptPaneView: View {
     @State private var hasShownInitialMessages = false
     @State private var lastSessionID: String?
     @State private var retryToken = 0
-    // TODO: scroll-position detection is deferred; autoscrollEnabled is
-    // always true in v1. Wire to .scrollPosition (macOS 14+) when the
-    // "freeze autoscroll when user scrolls up" feature lands.
-    @State private var autoscrollEnabled = true
+
+    /// True when the visible viewport is within ~50pt of the bottom of
+    /// the transcript content. Drives the floating jump-to-bottom button:
+    /// shown only when the user has consciously scrolled up.
+    @State private var atBottom: Bool = true
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
+    nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
+
+    /// Tracks which terminal IDs have already emitted a `body.first` marker
+    /// for this process, so the per-(logger lifetime, terminalID) one-shot
+    /// log fires exactly once. Throwaway diagnostic state — removed when the
+    /// `perf-transcript` instrumentation is cleaned up.
+    nonisolated private static let bodyLogged = OSAllocatedUnfairLock<Set<UUID>>(initialState: [])
+
+    /// Last 4 characters of an identifier for compact log lines.
+    nonisolated private static func shortID(_ s: String) -> String {
+        return String(s.suffix(4))
+    }
 
     private var terminal: Terminal? {
         appState.terminals[worktreeID]?.first { $0.id == terminalID }
@@ -42,6 +55,12 @@ struct LiveTranscriptPaneView: View {
     }
 
     var body: some View {
+        let _ = Self.bodyLogged.withLock { logged in
+            if !logged.contains(terminalID) {
+                logged.insert(terminalID)
+                Self.perfLog.debug("body.first terminalID=\(Self.shortID(terminalID.uuidString), privacy: .public)")
+            }
+        }
         Group {
             if let err = loadError {
                 errorState(message: err)
@@ -54,7 +73,10 @@ struct LiveTranscriptPaneView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: TaskKey(terminalID: terminalID, retryToken: retryToken)) { await pollLoop() }
+        .task(id: TaskKey(terminalID: terminalID, retryToken: retryToken)) {
+            Self.perfLog.debug("task.start terminalID=\(Self.shortID(terminalID.uuidString), privacy: .public)")
+            await pollLoop()
+        }
     }
 
     // MARK: - States
@@ -103,15 +125,50 @@ struct LiveTranscriptPaneView: View {
             ScrollView {
                 TranscriptItemsView(items: messages, terminalID: terminalID)
             }
-            .onChange(of: messages.last?.id) { _, newID in
-                guard autoscrollEnabled, let id = newID else { return }
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo(id, anchor: .bottom)
-                }
+            .defaultScrollAnchor(.bottom)
+            .onScrollGeometryChange(for: AtBottomGeometry.self) { geometry in
+                AtBottomGeometry(
+                    contentBottom: geometry.contentSize.height,
+                    viewportBottom: geometry.contentOffset.y + geometry.containerSize.height,
+                    contentHeight: geometry.contentSize.height,
+                    offsetY: geometry.contentOffset.y,
+                    containerHeight: geometry.containerSize.height
+                )
+            } action: { _, new in
+                atBottom = new.contentBottom - new.viewportBottom < 50
+                Self.perfLog.debug("scroll.geometry contentH=\(Int(new.contentHeight), privacy: .public) offsetY=\(Int(new.offsetY), privacy: .public) containerH=\(Int(new.containerHeight), privacy: .public)")
             }
+            .overlay(alignment: .bottomTrailing) {
+                jumpToBottomButton(proxy: proxy)
+            }
+            .animation(.easeInOut(duration: 0.2), value: atBottom)
             .onAppear {
-                if let id = messages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+                let sidShort = Self.shortID(currentSessionID ?? "")
+                Self.perfLog.debug("view.appear sid=\(sidShort, privacy: .public) count=\(messages.count, privacy: .public)")
             }
+        }
+    }
+
+    @ViewBuilder
+    private func jumpToBottomButton(proxy: ScrollViewProxy) -> some View {
+        if !atBottom {
+            Button {
+                guard let lastID = messages.last?.id else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(lastID, anchor: .bottom)
+                }
+            } label: {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 28))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color.accentColor)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .shadow(radius: 4)
+            }
+            .buttonStyle(.plain)
+            .padding(16)
+            .transition(.scale(scale: 0.5).combined(with: .opacity))
+            .help("Scroll to bottom")
         }
     }
 
@@ -131,10 +188,14 @@ struct LiveTranscriptPaneView: View {
 
     private func pollOnce(failureCount: inout Int) async {
         guard let sid = currentSessionID else { return }
+        let sidShort = Self.shortID(sid)
+        Self.perfLog.debug("pollOnce.start sid=\(sidShort, privacy: .public)")
+        let pollStart = ContinuousClock.now
+        var changed = false
+        var finalCount = 0
 
         // Detect session rollover.
         if let last = lastSessionID, last != sid {
-            autoscrollEnabled = true
             hasShownInitialMessages = false
         }
         lastSessionID = sid
@@ -142,31 +203,69 @@ struct LiveTranscriptPaneView: View {
         do {
             let result = try await appState.daemonClient.terminalTranscript(terminalID: terminalID)
             failureCount = 0
+            finalCount = result.messages.count
             // Resolved sessionID may differ from terminal.claudeSessionID if a rollover
             // happened mid-flight; trust the daemon's resolution.
             let resolvedSID = result.sessionID ?? sid
-            await MainActor.run {
+            let didChange: Bool = await MainActor.run {
+                Self.perfLog.debug("pollOnce.mainActor.start sid=\(sidShort, privacy: .public)")
+                let mainActorStart = ContinuousClock.now
                 let prev = appState.sessionTranscripts[resolvedSID] ?? []
-                if !messagesEqual(prev, result.messages) {
+                let equalStart = ContinuousClock.now
+                let equal = messagesEqual(prev, result.messages)
+                let equalElapsed = ContinuousClock.now - equalStart
+                let equalMs = Int(equalElapsed.components.seconds * 1000 + equalElapsed.components.attoseconds / 1_000_000_000_000_000)
+                let swapStart = ContinuousClock.now
+                if !equal {
                     appState.sessionTranscripts[resolvedSID] = result.messages
                     appState.touchSessionTranscript(resolvedSID)
                 }
+                let swapElapsed = ContinuousClock.now - swapStart
+                let swapMs = Int(swapElapsed.components.seconds * 1000 + swapElapsed.components.attoseconds / 1_000_000_000_000_000)
                 if !result.messages.isEmpty {
                     hasShownInitialMessages = true
                 }
+                let mainActorElapsed = ContinuousClock.now - mainActorStart
+                let mainActorMs = Int(mainActorElapsed.components.seconds * 1000 + mainActorElapsed.components.attoseconds / 1_000_000_000_000_000)
+                Self.perfLog.debug("pollOnce.mainActor.end sid=\(sidShort, privacy: .public) elapsed_ms=\(mainActorMs, privacy: .public) equal_ms=\(equalMs, privacy: .public) swap_ms=\(swapMs, privacy: .public)")
+                return !equal
             }
+            changed = didChange
         } catch {
             failureCount += 1
             Self.log.debug("transcript poll failed: \(error.localizedDescription, privacy: .public)")
         }
+
+        let pollElapsed = ContinuousClock.now - pollStart
+        let pollMs = Int(pollElapsed.components.seconds * 1000 + pollElapsed.components.attoseconds / 1_000_000_000_000_000)
+        Self.perfLog.debug("pollOnce.end sid=\(sidShort, privacy: .public) elapsed_ms=\(pollMs, privacy: .public) changed=\(changed, privacy: .public) count=\(finalCount, privacy: .public)")
     }
 
     private func messagesEqual(_ a: [TranscriptItem], _ b: [TranscriptItem]) -> Bool {
-        return a == b
+        let start = ContinuousClock.now
+        let result = a == b
+        let elapsed = ContinuousClock.now - start
+        if max(a.count, b.count) > 100 {
+            let ms = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
+            Self.perfLog.debug("messagesEqual elapsed_ms=\(ms, privacy: .public) count_a=\(a.count, privacy: .public) count_b=\(b.count, privacy: .public) result=\(result, privacy: .public)")
+        }
+        return result
     }
 }
 
 private struct TaskKey: Equatable {
     let terminalID: UUID
     let retryToken: Int
+}
+
+/// Bundle of scroll-geometry numbers we want to log together in
+/// `onScrollGeometryChange`. The modifier requires a single Equatable
+/// transform, so we ferry the values through this struct rather than
+/// the previous `Bool` (atBottom-only) form.
+private struct AtBottomGeometry: Equatable {
+    let contentBottom: CGFloat
+    let viewportBottom: CGFloat
+    let contentHeight: CGFloat
+    let offsetY: CGFloat
+    let containerHeight: CGFloat
 }

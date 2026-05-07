@@ -301,6 +301,19 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
             // TerminalView.scrollWheel is not `open`, so we can't override it
             // in TBDTerminalView. Instead, a local event monitor intercepts
             // scroll events and forwards them to tmux as mouse button presses.
+            //
+            // Visibility filter: the `tv.window != nil` guard inside the
+            // closure rejects events when the terminal isn't currently part of
+            // the visible UI. This is load-bearing for the worktree keep-alive
+            // system (see WorktreePager + TerminalContainerView): inactive
+            // worktrees keep their terminal NSViews alive but detached from the
+            // window. Without the guard, every kept-alive terminal's monitor
+            // would still fire for every app-wide scroll-wheel event, and the
+            // `bounds.contains(point)` check below wouldn't filter them out
+            // (bounds-space math works fine on detached views) — events would
+            // be silently consumed and forwarded to hidden terminals' tmux
+            // sessions, scrolling them invisibly. tv.window == nil ⇒ this
+            // terminal isn't visible right now ⇒ no-op the monitor.
             let ref = WeakTerminalRef(terminalView)
             scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
                 let deltaY = event.deltaY
@@ -309,6 +322,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
 
                 let consumed = MainActor.assumeIsolated {
                     guard let tv = ref.view as? TBDTerminalView else { return false }
+                    guard tv.window != nil else { return false }
                     let point = tv.convert(location, from: nil)
                     guard tv.bounds.contains(point) else { return false }
                     guard tv.terminal.mouseMode != .off else { return false }
@@ -332,12 +346,21 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
 
             // Intercept clicks: claim first responder on any click (so Cmd+Arrow
             // routes to the focused terminal), and handle Cmd+Click for file paths.
+            //
+            // Visibility filter: each `assumeIsolated` block guards on
+            // `tv.window != nil` for the same reason as scrollMonitor above —
+            // the worktree keep-alive system retains terminal NSViews for
+            // inactive worktrees in a detached state, and we must skip event
+            // processing for those (otherwise clicks would claim first responder
+            // for a hidden terminal, or fire Cmd+Click handlers against
+            // invisible bounds).
             clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
                 let location = event.locationInWindow
 
                 // Claim first responder so key equivalents route to this terminal
                 MainActor.assumeIsolated {
                     guard let tv = ref.view else { return }
+                    guard tv.window != nil else { return }
                     let point = tv.convert(location, from: nil)
                     guard tv.bounds.contains(point) else { return }
                     tv.window?.makeFirstResponder(tv)
@@ -347,6 +370,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
 
                 let consumed = MainActor.assumeIsolated { () -> Bool in
                     guard let tv = ref.view as? TBDTerminalView else { return false }
+                    guard tv.window != nil else { return false }
                     let point = tv.convert(location, from: nil)
                     guard tv.bounds.contains(point) else { return false }
 

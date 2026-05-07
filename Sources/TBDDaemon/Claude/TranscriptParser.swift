@@ -1,4 +1,5 @@
 import Foundation
+import os
 import TBDShared
 
 /// Loads a Claude Code session JSONL into a structured `[TranscriptItem]`.
@@ -7,6 +8,7 @@ import TBDShared
 /// skipped rather than failing the whole session. JSONL writes from Claude
 /// Code may be partial during live polling; we tolerate that.
 enum TranscriptParser {
+    private static let perfLog = Logger(subsystem: "com.tbd.daemon", category: "perf-transcript")
     /// Shared ISO8601 formatter that accepts Claude Code's fractional-seconds
     /// timestamps (e.g. `2026-05-05T03:06:16.813Z`). Without
     /// `.withFractionalSeconds`, every such timestamp silently fails to parse.
@@ -21,7 +23,22 @@ enum TranscriptParser {
     /// Subagent (sidechain) JSONLs referenced by Task tool_results are recursively
     /// parsed and attached to the corresponding `.toolCall` items.
     static func parse(filePath: String) -> [TranscriptItem] {
-        return parse(filePath: filePath, visitedAgentIDs: [], skipSidechain: true)
+        let basename = (filePath as NSString).lastPathComponent
+        perfLog.debug("parse.start file=\(basename, privacy: .public)")
+        let start = ContinuousClock.now
+        var totalBytes = 0
+        var subagentCount = 0
+        let result = parse(
+            filePath: filePath,
+            visitedAgentIDs: [],
+            skipSidechain: true,
+            totalBytes: &totalBytes,
+            subagentCount: &subagentCount
+        )
+        let elapsed = ContinuousClock.now - start
+        let ms = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
+        perfLog.debug("parse.end file=\(basename, privacy: .public) elapsed_ms=\(ms, privacy: .public) items=\(result.count, privacy: .public) bytes=\(totalBytes, privacy: .public) subagents=\(subagentCount, privacy: .public)")
+        return result
     }
 
     /// Recursive worker. `visitedAgentIDs` prevents cycles between subagent files.
@@ -30,12 +47,15 @@ enum TranscriptParser {
     private static func parse(
         filePath: String,
         visitedAgentIDs: Set<String>,
-        skipSidechain: Bool
+        skipSidechain: Bool,
+        totalBytes: inout Int,
+        subagentCount: inout Int
     ) -> [TranscriptItem] {
         guard let data = FileManager.default.contents(atPath: filePath),
               let content = String(data: data, encoding: .utf8) else {
             return []
         }
+        totalBytes += data.count
 
         // First pass: collect raw line dicts; index tool_results and agent ids.
         var rawLines: [[String: Any]] = []
@@ -193,7 +213,9 @@ enum TranscriptParser {
                             subagent = resolveSubagent(
                                 agentID: agentID,
                                 subagentsDir: subagentsDir,
-                                visitedAgentIDs: visitedAgentIDs
+                                visitedAgentIDs: visitedAgentIDs,
+                                totalBytes: &totalBytes,
+                                subagentCount: &subagentCount
                             )
                         }
 
@@ -215,7 +237,9 @@ enum TranscriptParser {
     private static func resolveSubagent(
         agentID: String,
         subagentsDir: URL,
-        visitedAgentIDs: Set<String>
+        visitedAgentIDs: Set<String>,
+        totalBytes: inout Int,
+        subagentCount: inout Int
     ) -> Subagent? {
         if visitedAgentIDs.contains(agentID) {
             // Cycle detected — surface a single system reminder noting it.
@@ -231,9 +255,16 @@ enum TranscriptParser {
         let jsonlPath = subagentsDir.appendingPathComponent("agent-\(agentID).jsonl").path
         guard FileManager.default.fileExists(atPath: jsonlPath) else { return nil }
 
+        subagentCount += 1
         var nextVisited = visitedAgentIDs
         nextVisited.insert(agentID)
-        let items = parse(filePath: jsonlPath, visitedAgentIDs: nextVisited, skipSidechain: false)
+        let items = parse(
+            filePath: jsonlPath,
+            visitedAgentIDs: nextVisited,
+            skipSidechain: false,
+            totalBytes: &totalBytes,
+            subagentCount: &subagentCount
+        )
 
         let metaPath = subagentsDir.appendingPathComponent("agent-\(agentID).meta.json").path
         let agentType = readAgentType(from: metaPath)

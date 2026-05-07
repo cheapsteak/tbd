@@ -8,6 +8,7 @@ import TBDShared
 import os
 
 private let daemonClientLogger = Logger(subsystem: "com.tbd.app", category: "DaemonClient")
+private let perfTranscriptLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
 /// Errors from the DaemonClient.
 enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable {
@@ -864,22 +865,50 @@ actor DaemonClient {
 
     /// Load full chat messages for a session file.
     func sessionMessages(filePath: String) async throws -> [TranscriptItem] {
-        return try await callAsync(
+        perfTranscriptLog.debug("client.rpc.start method=sessionMessages")
+        let start = ContinuousClock.now
+        let request = try RPCRequest(
             method: RPCMethod.sessionMessages,
-            params: SessionMessagesParams(filePath: filePath),
-            resultType: [TranscriptItem].self
+            params: SessionMessagesParams(filePath: filePath)
         )
+        let response = try await sendRawAsync(request)
+        guard response.success else {
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+        }
+        let bytes = response.result?.utf8.count ?? 0
+        let decodeStart = ContinuousClock.now
+        let result = try response.decodeResult([TranscriptItem].self)
+        let decodeElapsed = ContinuousClock.now - decodeStart
+        let totalElapsed = ContinuousClock.now - start
+        let ms = Int(totalElapsed.components.seconds * 1000 + totalElapsed.components.attoseconds / 1_000_000_000_000_000)
+        let decodeMs = Int(decodeElapsed.components.seconds * 1000 + decodeElapsed.components.attoseconds / 1_000_000_000_000_000)
+        perfTranscriptLog.debug("client.rpc.end method=sessionMessages elapsed_ms=\(ms, privacy: .public) bytes=\(bytes, privacy: .public) decode_ms=\(decodeMs, privacy: .public) items=\(result.count, privacy: .public)")
+        return result
     }
 
     /// Load the full chat transcript for a terminal's current Claude session.
     /// Returns empty messages and nil sessionID if the terminal has no session yet;
     /// returns empty messages and a sessionID if the session JSONL doesn't exist yet.
     func terminalTranscript(terminalID: UUID) async throws -> TerminalTranscriptResult {
-        return try await callAsync(
+        perfTranscriptLog.debug("client.rpc.start method=terminalTranscript")
+        let start = ContinuousClock.now
+        let request = try RPCRequest(
             method: RPCMethod.terminalTranscript,
-            params: TerminalTranscriptParams(terminalID: terminalID),
-            resultType: TerminalTranscriptResult.self
+            params: TerminalTranscriptParams(terminalID: terminalID)
         )
+        let response = try await sendRawAsync(request)
+        guard response.success else {
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+        }
+        let bytes = response.result?.utf8.count ?? 0
+        let decodeStart = ContinuousClock.now
+        let result = try response.decodeResult(TerminalTranscriptResult.self)
+        let decodeElapsed = ContinuousClock.now - decodeStart
+        let totalElapsed = ContinuousClock.now - start
+        let ms = Int(totalElapsed.components.seconds * 1000 + totalElapsed.components.attoseconds / 1_000_000_000_000_000)
+        let decodeMs = Int(decodeElapsed.components.seconds * 1000 + decodeElapsed.components.attoseconds / 1_000_000_000_000_000)
+        perfTranscriptLog.debug("client.rpc.end method=terminalTranscript elapsed_ms=\(ms, privacy: .public) bytes=\(bytes, privacy: .public) decode_ms=\(decodeMs, privacy: .public) items=\(result.messages.count, privacy: .public)")
+        return result
     }
 
     /// Fetch the un-truncated body for a single transcript item (for
