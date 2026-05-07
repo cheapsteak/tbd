@@ -11,6 +11,11 @@ struct TBDCommands: Commands {
                     await appState.installCLITool()
                 }
             }
+            Button("Migrate Claude Hooks…") {
+                Task { @MainActor in
+                    await appState.migrateClaudeHooks()
+                }
+            }
         }
 
         // Worktree commands

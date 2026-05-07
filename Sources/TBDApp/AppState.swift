@@ -273,6 +273,7 @@ final class AppState: ObservableObject {
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient)
+    lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient)
     private var pollTimer: Timer?
     private var pollCycle = 0
     private var subscriptionTask: Task<Void, Never>?
@@ -533,12 +534,22 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 await self.cliInstallerCoordinator.checkOnLaunch()
             }
+            Task { [weak self] in
+                guard let self else { return }
+                await self.legacyHooksCoordinator.checkOnLaunch()
+            }
         }
     }
 
     /// Menu entry point — install or refresh the `tbd` CLI symlink.
     func installCLITool() async {
         await cliInstallerCoordinator.runFromMenu()
+    }
+
+    /// Menu entry point — review and (optionally) remove TBD's legacy
+    /// hook entries from the user's `~/.claude/settings.json`.
+    func migrateClaudeHooks() async {
+        await legacyHooksCoordinator.runFromMenu()
     }
 
     /// Launch the daemon process and connect.

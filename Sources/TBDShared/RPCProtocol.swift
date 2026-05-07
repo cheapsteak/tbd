@@ -142,6 +142,45 @@ public enum RPCMethod {
     public static let setMainAreaSize = "app.setMainAreaSize"
     public static let skillStatus = "skill.status"
     public static let skillInstall = "skill.install"
+    public static let daemonLegacyHooksStatus = "daemon.legacyHooksStatus"
+    public static let daemonRemoveLegacyGlobalHooks = "daemon.removeLegacyGlobalHooks"
+}
+
+// MARK: - Legacy Hook Detection / Removal
+
+/// One detected legacy entry — surfaced to the user so they know what TBD
+/// proposes to remove (or, for repo-level entries, what they can edit
+/// themselves).
+public struct LegacyHookEntry: Codable, Sendable, Equatable {
+    /// "Stop", "SessionStart", etc. — the matcher event name.
+    public let event: String
+    /// Captured `command` string from the matched entry (truncated upstream
+    /// if needed so the dialog stays readable).
+    public let command: String
+    public init(event: String, command: String) {
+        self.event = event
+        self.command = command
+    }
+}
+
+public struct LegacyHooksStatusResult: Codable, Sendable {
+    public let globalEntries: [LegacyHookEntry]
+    /// Repo-level entries keyed by repo settings.json path. Surfaced
+    /// informationally; TBD never auto-modifies repo files.
+    public let repoEntries: [String: [LegacyHookEntry]]
+    public init(globalEntries: [LegacyHookEntry], repoEntries: [String: [LegacyHookEntry]]) {
+        self.globalEntries = globalEntries
+        self.repoEntries = repoEntries
+    }
+}
+
+public struct RemoveLegacyGlobalHooksResult: Codable, Sendable {
+    public let removedCount: Int
+    public let backupPath: String?
+    public init(removedCount: Int, backupPath: String?) {
+        self.removedCount = removedCount
+        self.backupPath = backupPath
+    }
 }
 
 // MARK: - Main Area Size

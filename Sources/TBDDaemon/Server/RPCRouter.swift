@@ -204,6 +204,10 @@ public final class RPCRouter: Sendable {
                 return try await handleSkillStatus(request.paramsData)
             case RPCMethod.skillInstall:
                 return try await handleSkillInstall(request.paramsData)
+            case RPCMethod.daemonLegacyHooksStatus:
+                return try await handleDaemonLegacyHooksStatus()
+            case RPCMethod.daemonRemoveLegacyGlobalHooks:
+                return try await handleDaemonRemoveLegacyGlobalHooks()
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
