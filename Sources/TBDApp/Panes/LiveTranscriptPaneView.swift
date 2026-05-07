@@ -128,14 +128,11 @@ struct LiveTranscriptPaneView: View {
             .defaultScrollAnchor(.bottom)
             .onScrollGeometryChange(for: AtBottomGeometry.self) { geometry in
                 AtBottomGeometry(
-                    contentBottom: geometry.contentSize.height,
-                    viewportBottom: geometry.contentOffset.y + geometry.containerSize.height,
                     contentHeight: geometry.contentSize.height,
-                    offsetY: geometry.contentOffset.y,
-                    containerHeight: geometry.containerSize.height
+                    viewportBottom: geometry.contentOffset.y + geometry.containerSize.height
                 )
             } action: { _, new in
-                atBottom = new.contentBottom - new.viewportBottom < 50
+                atBottom = new.contentHeight - new.viewportBottom < 50
             }
             .overlay(alignment: .bottomTrailing) {
                 jumpToBottomButton(proxy: proxy)
@@ -257,14 +254,9 @@ private struct TaskKey: Equatable {
     let retryToken: Int
 }
 
-/// Bundle of scroll-geometry numbers we want to log together in
-/// `onScrollGeometryChange`. The modifier requires a single Equatable
-/// transform, so we ferry the values through this struct rather than
-/// the previous `Bool` (atBottom-only) form.
+/// Inputs to the at-bottom check, ferried through `onScrollGeometryChange`'s
+/// Equatable transform. `atBottom` is true when `contentHeight - viewportBottom < 50`.
 private struct AtBottomGeometry: Equatable {
-    let contentBottom: CGFloat
-    let viewportBottom: CGFloat
     let contentHeight: CGFloat
-    let offsetY: CGFloat
-    let containerHeight: CGFloat
+    let viewportBottom: CGFloat
 }
