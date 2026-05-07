@@ -76,6 +76,12 @@ public final class Daemon: Sendable {
                 .error("Failed to write fallback skill file: \(String(describing: error), privacy: .public)")
         }
 
+        // Refresh the TBD-owned Claude settings overlay so newly spawned
+        // Claude sessions register the SessionStart + Stop hooks. Idempotent;
+        // failures degrade gracefully to the legacy cwd-based transcript
+        // resolution (the bridge just won't fire).
+        ClaudeHookOverlay.writeOverlay()
+
         // 4a. Scrub inherited TBD_* env vars before any tmux server is spawned.
         // The daemon may have been launched from inside a TBD-spawned shell (e.g.
         // `scripts/restart.sh` run from a terminal pane), which exports per-worktree

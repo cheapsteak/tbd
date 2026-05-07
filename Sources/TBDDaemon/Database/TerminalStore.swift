@@ -61,7 +61,13 @@ public struct TerminalStore: Sendable {
     }
 
     /// Create a new terminal record.
+    ///
+    /// `id` is optional. Callers that need to know the terminal ID *before*
+    /// the tmux window is spawned (so it can be injected as `TBD_TERMINAL_ID`
+    /// in the spawned env, used by the SessionStart hook bridge) can pre-mint
+    /// a UUID and pass it here. Defaults to a fresh UUID otherwise.
     public func create(
+        id: UUID = UUID(),
         worktreeID: UUID,
         tmuxWindowID: String,
         tmuxPaneID: String,
@@ -70,6 +76,7 @@ public struct TerminalStore: Sendable {
         profileID: UUID? = nil
     ) async throws -> Terminal {
         let terminal = Terminal(
+            id: id,
             worktreeID: worktreeID,
             tmuxWindowID: tmuxWindowID,
             tmuxPaneID: tmuxPaneID,

@@ -89,9 +89,16 @@ extension RPCRouter {
         // Look up repo once for system prompt env vars and Claude session setup
         let repo = try await db.repos.get(id: worktree.repoID)
 
+        // Pre-mint the terminal ID so we can inject it into the spawned env
+        // as TBD_TERMINAL_ID. Claude's SessionStart hook (registered via the
+        // TBD overlay file) reads this env var to route session events back
+        // to the right terminal record.
+        let plannedTerminalID = UUID()
+
         // Build env vars available in all TBD terminals
         var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
         env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
+        env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
         // Codex branch: minimal launch with isolated CODEX_HOME. No session
         // tracking, no system prompt injection, no token resolution. Session
@@ -106,6 +113,7 @@ extension RPCRouter {
             let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
+            codexEnv["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
             codexEnv["CODEX_HOME"] = codexHome.path
 
             let window = try await tmux.createWindow(
@@ -119,6 +127,7 @@ extension RPCRouter {
             )
 
             let terminal = try await db.terminals.create(
+                id: plannedTerminalID,
                 worktreeID: params.worktreeID,
                 tmuxWindowID: window.windowID,
                 tmuxPaneID: window.paneID,
@@ -195,7 +204,8 @@ extension RPCRouter {
             profileBaseURL: resolvedProfile?.baseURL,
             profileModel: resolvedProfile?.model,
             cmd: params.cmd,
-            shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
+            settingsOverlayPath: isClaudeType ? ClaudeHookOverlay.overlayPath : nil
         )
 
         let window = try await tmux.createWindow(
@@ -210,6 +220,7 @@ extension RPCRouter {
         )
 
         let terminal = try await db.terminals.create(
+            id: plannedTerminalID,
             worktreeID: params.worktreeID,
             tmuxWindowID: window.windowID,
             tmuxPaneID: window.paneID,
@@ -500,8 +511,10 @@ extension RPCRouter {
         // produce "no conversation found" and chaotic behavior, so we instead
         // spawn a brand-new session and skip the recapture.
         let repo = try await db.repos.get(id: worktree.repoID)
+        let plannedTerminalID = UUID()
         var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
+        env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
         let blank = ClaudeSessionScanner.isSessionBlank(
             sessionID: sessionID,
@@ -525,7 +538,8 @@ extension RPCRouter {
                 profileBaseURL: resolved?.baseURL,
                 profileModel: resolved?.model,
                 cmd: nil,
-                shellFallback: ""
+                shellFallback: "",
+                settingsOverlayPath: ClaudeHookOverlay.overlayPath
             )
             storedSessionID = resumeID
             scheduleRecapture = true
@@ -544,7 +558,8 @@ extension RPCRouter {
                 profileBaseURL: resolved?.baseURL,
                 profileModel: resolved?.model,
                 cmd: nil,
-                shellFallback: ""
+                shellFallback: "",
+                settingsOverlayPath: ClaudeHookOverlay.overlayPath
             )
             storedSessionID = newSessionID
             scheduleRecapture = false
@@ -567,6 +582,7 @@ extension RPCRouter {
         )
 
         let newTerminal = try await db.terminals.create(
+            id: plannedTerminalID,
             worktreeID: worktree.id,
             tmuxWindowID: window.windowID,
             tmuxPaneID: window.paneID,

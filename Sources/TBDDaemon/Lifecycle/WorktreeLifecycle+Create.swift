@@ -245,6 +245,7 @@ extension WorktreeLifecycle {
         }
 
         // Create terminal 1: claude (or shell if skipClaude)
+        let plannedTerminalID1 = UUID()
         let claudeCommand: String
         let claudeSensitiveEnv: [String: String]
         let claudeSessionID: String?
@@ -269,22 +270,31 @@ extension WorktreeLifecycle {
                 profileBaseURL: resolvedProfile?.baseURL,
                 profileModel: resolvedProfile?.model,
                 cmd: nil,
-                shellFallback: defaultShell
+                shellFallback: defaultShell,
+                settingsOverlayPath: ClaudeHookOverlay.overlayPath
             )
             claudeCommand = spawn.command
             claudeSensitiveEnv = spawn.sensitiveEnv
             pinnedProfileID = resolvedProfile?.profileID
         }
+        // Inject TBD_TERMINAL_ID + TBD_WORKTREE_ID so the SessionStart hook
+        // bridge can route session events to the right terminal.
+        let claudeEnv: [String: String] = [
+            "TBD_WORKTREE_ID": worktreeID.uuidString,
+            "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
+        ]
         let window1 = try await tmux.createWindow(
             server: tmuxServer,
             session: "main",
             cwd: worktreePath,
             shellCommand: claudeCommand,
+            env: claudeEnv,
             sensitiveEnv: claudeSensitiveEnv,
             cols: resolvedCols,
             rows: resolvedRows
         )
         _ = try await db.terminals.create(
+            id: plannedTerminalID1,
             worktreeID: worktreeID,
             tmuxWindowID: window1.windowID,
             tmuxPaneID: window1.paneID,
@@ -318,6 +328,7 @@ extension WorktreeLifecycle {
         // Restore additional archived Claude sessions (beyond the first which was used above)
         if !skipClaude, let sessions = archivedClaudeSessions, sessions.count > 1 {
             for sessionID in sessions.dropFirst() {
+                let plannedID = UUID()
                 let spawn = ClaudeSpawnCommandBuilder.build(
                     resumeID: nil,
                     freshSessionID: sessionID,
@@ -328,18 +339,25 @@ extension WorktreeLifecycle {
                     profileBaseURL: resolvedProfile?.baseURL,
                     profileModel: resolvedProfile?.model,
                     cmd: nil,
-                    shellFallback: defaultShell
+                    shellFallback: defaultShell,
+                    settingsOverlayPath: ClaudeHookOverlay.overlayPath
                 )
+                let perTermEnv: [String: String] = [
+                    "TBD_WORKTREE_ID": worktreeID.uuidString,
+                    "TBD_TERMINAL_ID": plannedID.uuidString,
+                ]
                 let window = try await tmux.createWindow(
                     server: tmuxServer,
                     session: "main",
                     cwd: worktreePath,
                     shellCommand: spawn.command,
+                    env: perTermEnv,
                     sensitiveEnv: spawn.sensitiveEnv,
                     cols: resolvedCols,
                     rows: resolvedRows
                 )
                 _ = try await db.terminals.create(
+                    id: plannedID,
                     worktreeID: worktreeID,
                     tmuxWindowID: window.windowID,
                     tmuxPaneID: window.paneID,

@@ -40,13 +40,29 @@ enum ClaudeSpawnCommandBuilder {
         profileBaseURL: String? = nil,
         profileModel: String? = nil,
         cmd: String?,
-        shellFallback: String
+        shellFallback: String,
+        settingsOverlayPath: String? = nil
     ) -> Result {
+        // Optional --settings flag merged into the claude invocation.
+        // Claude's --settings flag MERGES with ~/.claude/settings.json
+        // (array settings concatenated + deduplicated). So we can ship
+        // a TBD-owned overlay carrying the SessionStart hook etc. without
+        // touching the user's settings.json. Only emitted when an overlay
+        // path was supplied AND it exists on disk — otherwise the spawn
+        // would fail with "settings file not found".
+        let settingsFlag: String
+        if let p = settingsOverlayPath,
+           FileManager.default.fileExists(atPath: p) {
+            settingsFlag = " --settings \(SystemPromptBuilder.shellEscape(p))"
+        } else {
+            settingsFlag = ""
+        }
+
         let base: String
         if let resumeID {
-            base = "claude --resume \(resumeID) --dangerously-skip-permissions"
+            base = "claude --resume \(resumeID) --dangerously-skip-permissions\(settingsFlag)"
         } else if let sessionID = freshSessionID {
-            var b = "claude --session-id \(sessionID) --dangerously-skip-permissions"
+            var b = "claude --session-id \(sessionID) --dangerously-skip-permissions\(settingsFlag)"
             if let prompt = appendSystemPrompt {
                 b += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
             }

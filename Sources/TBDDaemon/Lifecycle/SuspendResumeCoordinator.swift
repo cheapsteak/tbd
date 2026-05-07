@@ -387,12 +387,21 @@ public actor SuspendResumeCoordinator {
             profileBaseURL: resolvedProfile?.baseURL,
             profileModel: resolvedProfile?.model,
             cmd: nil,
-            shellFallback: defaultShell
+            shellFallback: defaultShell,
+            settingsOverlayPath: ClaudeHookOverlay.overlayPath
         )
+        // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID into the resumed pane so
+        // notifications and the SessionStart hook bridge attribute to the
+        // right terminal even after the post-resume session-id rollover.
+        let resumeEnv: [String: String] = [
+            "TBD_WORKTREE_ID": worktree.id.uuidString,
+            "TBD_TERMINAL_ID": terminal.id.uuidString,
+        ]
         do {
             let window = try await tmux.createWindow(
                 server: server, session: "main",
                 cwd: worktree.path, shellCommand: spawn.command,
+                env: resumeEnv,
                 sensitiveEnv: spawn.sensitiveEnv
             )
             try await db.terminals.updateTmuxIDs(
