@@ -37,25 +37,8 @@ struct TranscriptItemsView: View {
     /// removed when the `perf-transcript` instrumentation is cleaned up.
     nonisolated private static let bodyLogged = OSAllocatedUnfairLock<Set<UUID>>(initialState: [])
 
-    /// Tracks which row IDs have already emitted a `row.realize` marker in
-    /// this process — one log per row id per process lifetime. Throwaway
-    /// diagnostic state for the layout-race investigation.
-    nonisolated private static let realizeLogged = OSAllocatedUnfairLock<Set<String>>(initialState: [])
-
     nonisolated private static func shortID(_ id: UUID) -> String {
         return String(id.uuidString.suffix(4))
-    }
-
-    nonisolated private static func shortID(_ id: String) -> String {
-        return String(id.suffix(4))
-    }
-
-    nonisolated private static func logRowRealizeOnce(_ rowID: String) {
-        realizeLogged.withLock { logged in
-            guard !logged.contains(rowID) else { return }
-            logged.insert(rowID)
-            perfLog.debug("row.realize id=\(shortID(rowID), privacy: .public)")
-        }
     }
 
     var body: some View {
@@ -134,9 +117,6 @@ struct TranscriptItemsView: View {
                     }
                 }
             }
-        }
-        .onAppear {
-            Self.logRowRealizeOnce(item.id)
         }
     }
 

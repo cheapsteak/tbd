@@ -136,7 +136,6 @@ struct LiveTranscriptPaneView: View {
                 )
             } action: { _, new in
                 atBottom = new.contentBottom - new.viewportBottom < 50
-                Self.perfLog.debug("scroll.geometry contentH=\(Int(new.contentHeight), privacy: .public) offsetY=\(Int(new.offsetY), privacy: .public) containerH=\(Int(new.containerHeight), privacy: .public)")
             }
             .overlay(alignment: .bottomTrailing) {
                 jumpToBottomButton(proxy: proxy)
