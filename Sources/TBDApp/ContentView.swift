@@ -195,6 +195,11 @@ struct ContentView: View {
                     await appState.refreshTerminals(worktreeID: worktreeID)
                 }
             }
+
+            // Keep-alive: track most-recently-visited worktree for view-tree preservation.
+            if newSelection.count == 1, let id = newSelection.first {
+                appState.touchVisitedWorktree(id)
+            }
         }
         .alert(
             appState.alertIsError ? "Error" : "Success",
@@ -211,6 +216,11 @@ struct ContentView: View {
             conductorHotkeyMonitor.install { [weak appState] in
                 guard appState != nil else { return }
                 toggleConductor()
+            }
+            // Keep-alive: seed recentlyVisitedWorktreeIDs with the initially-restored
+            // selection so the ZStack renders the right SingleWorktreeView on first frame.
+            if appState.selectedWorktreeIDs.count == 1, let id = appState.selectedWorktreeIDs.first {
+                appState.touchVisitedWorktree(id)
             }
         }
     }

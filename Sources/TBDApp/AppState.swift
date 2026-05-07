@@ -198,6 +198,26 @@ final class AppState: ObservableObject {
     @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
     @Published var sessionTranscriptLoading: Set<String> = []
 
+    /// Worktree IDs whose view trees we keep alive past their selection,
+    /// most-recent-first. Cap: keepAliveLimit. Older worktrees get evicted
+    /// (their SingleWorktreeView unmounts) when the cap is exceeded.
+    @Published private(set) var recentlyVisitedWorktreeIDs: [UUID] = []
+
+    private let keepAliveLimit = 8
+
+    /// Move `id` to the front of recentlyVisitedWorktreeIDs, evicting the
+    /// oldest entries if we exceed keepAliveLimit. Idempotent — calling
+    /// repeatedly with the same id only updates ordering.
+    func touchVisitedWorktree(_ id: UUID) {
+        recentlyVisitedWorktreeIDs.removeAll { $0 == id }
+        recentlyVisitedWorktreeIDs.insert(id, at: 0)
+        if recentlyVisitedWorktreeIDs.count > keepAliveLimit {
+            recentlyVisitedWorktreeIDs.removeLast(
+                recentlyVisitedWorktreeIDs.count - keepAliveLimit
+            )
+        }
+    }
+
     /// Insertion/access order for `sessionTranscripts`. The most recently
     /// touched sessionID is at the END. Evict from the FRONT when the cap
     /// is exceeded.

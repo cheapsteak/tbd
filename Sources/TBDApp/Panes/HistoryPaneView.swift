@@ -276,6 +276,11 @@ struct SessionTranscriptView: View {
     let action: TranscriptAction
     @EnvironmentObject var appState: AppState
 
+    /// True when the visible viewport is within ~50pt of the bottom of
+    /// the transcript content. Drives the floating jump-to-bottom button:
+    /// shown only when the user has consciously scrolled up.
+    @State private var atBottom: Bool = true
+
     private var messages: [TranscriptItem] {
         appState.sessionTranscripts[sessionId] ?? []
     }
@@ -338,8 +343,40 @@ struct SessionTranscriptView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    TranscriptItemsView(items: messages, terminalID: nil)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        TranscriptItemsView(items: messages, terminalID: nil)
+                    }
+                    .defaultScrollAnchor(.bottom)
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        let viewportBottom = geometry.contentOffset.y + geometry.containerSize.height
+                        let contentBottom = geometry.contentSize.height
+                        return contentBottom - viewportBottom < 50
+                    } action: { _, newAtBottom in
+                        atBottom = newAtBottom
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if !atBottom {
+                            Button {
+                                guard let lastID = messages.last?.id else { return }
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    proxy.scrollTo(lastID, anchor: .bottom)
+                                }
+                            } label: {
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .font(.system(size: 28))
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, Color.accentColor)
+                                    .background(.ultraThinMaterial, in: Circle())
+                                    .shadow(radius: 4)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(16)
+                            .transition(.scale(scale: 0.5).combined(with: .opacity))
+                            .help("Scroll to bottom")
+                        }
+                    }
+                    .animation(.easeInOut(duration: 0.2), value: atBottom)
                 }
             }
         }

@@ -51,15 +51,25 @@ struct TerminalContainerView: View {
             !visible.contains(terminal.id)
         }
 
+        let activeWorktreeID: UUID? = appState.selectedWorktreeIDs.count == 1
+            ? appState.selectedWorktreeIDs.first
+            : nil
+
         let mainContent = Group {
-            if appState.selectedWorktreeIDs.count == 1,
-               let worktreeID = appState.selectedWorktreeIDs.first {
-                SingleWorktreeView(worktreeID: worktreeID)
-            } else if appState.selectedWorktreeIDs.count > 1 {
+            if appState.selectedWorktreeIDs.count > 1 {
+                // Multi-select bypasses keep-alive; existing behavior preserved.
                 MultiWorktreeView(worktreeIDs: appState.selectionOrder)
-            } else {
+            } else if appState.selectedWorktreeIDs.isEmpty {
                 Text("Select a worktree or click + to create one")
                     .foregroundStyle(.secondary)
+            } else {
+                // Single-select: NSTabViewController-backed pager keeps the recently-
+                // visited worktrees' views alive without resetting their @State or
+                // leaking AppKit events to inactive subtrees.
+                WorktreePager(
+                    worktreeIDs: appState.recentlyVisitedWorktreeIDs,
+                    activeID: activeWorktreeID
+                )
             }
         }
         .onPreferenceChange(MainAreaSizeKey.self) { newSize in
@@ -90,7 +100,7 @@ struct TerminalContainerView: View {
 // MARK: - SingleWorktreeView
 
 /// Shows the tab bar and split layout for a single selected worktree.
-private struct SingleWorktreeView: View {
+struct SingleWorktreeView: View {
     let worktreeID: UUID
     @EnvironmentObject var appState: AppState
 
