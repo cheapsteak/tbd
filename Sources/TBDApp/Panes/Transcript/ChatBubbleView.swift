@@ -60,7 +60,7 @@ struct ChatBubbleView: View {
     private var bubbleBody: some View {
         let segments = MarkdownSegments.split(text)
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
+            ForEach(segments) { seg in
                 switch seg {
                 case .prose(let p):
                     Markdown(p)

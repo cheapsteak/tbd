@@ -67,3 +67,17 @@ enum MarkdownSegments {
         return segments
     }
 }
+
+extension MarkdownSegments.Segment: Identifiable {
+    /// Content-derived id so SwiftUI's `ForEach` preserves identity for
+    /// unchanged segments across mid-stream re-splits (e.g. a fenced block
+    /// opening inside what was previously one prose segment).
+    var id: String {
+        switch self {
+        case .prose(let text):
+            return "p:\(text.hashValue)"
+        case .code(let language, let content):
+            return "c:\(language ?? ""):\(content.hashValue)"
+        }
+    }
+}
