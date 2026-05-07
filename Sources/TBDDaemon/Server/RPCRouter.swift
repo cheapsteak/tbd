@@ -106,6 +106,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalSetPin(request.paramsData)
             case RPCMethod.terminalSwapProfile:
                 return try await handleTerminalSwapProfile(request.paramsData)
+            case RPCMethod.terminalSessionEvent:
+                return try await handleTerminalSessionEvent(request.paramsData)
             case RPCMethod.notify:
                 return try await handleNotify(request.paramsData)
             case RPCMethod.daemonStatus:

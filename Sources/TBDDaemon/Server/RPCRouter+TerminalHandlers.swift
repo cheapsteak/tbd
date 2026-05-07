@@ -811,6 +811,57 @@ extension RPCRouter {
         return try RPCResponse(result: result)
     }
 
+    /// Bridge for the Claude SessionStart hook. The CLI relays the hook
+    /// payload (session_id, transcript_path, source) plus the spawn-time
+    /// `TBD_TERMINAL_ID` env to this method. We persist both fields and
+    /// broadcast a delta so the app's transcript pane re-targets the new
+    /// session file. Unknown terminal IDs are treated as a soft no-op (the
+    /// terminal may have been deleted between hook fire and arrival).
+    func handleTerminalSessionEvent(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSessionEventParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            // Soft success — caller is a fire-and-forget hook, returning an
+            // error would just spam stderr inside Claude.
+            logger.debug("sessionEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
+            return .ok()
+        }
+
+        // Sanitize: an empty transcriptPath shouldn't overwrite an existing
+        // good value with nil (treat as "not provided"). A non-absolute path
+        // is also rejected since that's never how Claude reports it.
+        let cleanedPath: String? = {
+            guard let p = params.transcriptPath, !p.isEmpty else { return nil }
+            guard p.hasPrefix("/") else {
+                logger.warning("sessionEvent: ignoring non-absolute transcriptPath \(p, privacy: .public)")
+                return nil
+            }
+            return p
+        }()
+
+        try await db.terminals.updateSession(
+            id: terminal.id,
+            sessionID: params.sessionID,
+            transcriptPath: cleanedPath
+        )
+
+        // Invalidate cached transcript parse for the OLD session file (if any)
+        // so a quick re-poll doesn't return stale entries.
+        // (TranscriptParseCache keys on filePath, so the new path naturally
+        // misses cache and re-parses — no explicit invalidation needed.)
+
+        let source = params.source ?? "unknown"
+        logger.info("sessionEvent: terminal \(terminal.id.uuidString, privacy: .public) -> session \(params.sessionID, privacy: .public) (source=\(source, privacy: .public))")
+
+        subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            sessionID: params.sessionID,
+            transcriptPath: cleanedPath
+        )))
+        return .ok()
+    }
+
     func handleTerminalTranscript(_ paramsData: Data) async throws -> RPCResponse {
         perfTranscriptLog.debug("rpc.handle.start method=terminalTranscript")
         let start = ContinuousClock.now
@@ -842,14 +893,25 @@ extension RPCRouter {
             return response
         }
 
-        guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
-            let result = TerminalTranscriptResult(messages: [], sessionID: sessionID)
-            response = try RPCResponse(result: result)
-            responseBytes = response.result?.utf8.count ?? 0
-            return response
+        // Prefer the absolute path captured by the SessionStart hook — it's
+        // immune to `/clear` and `/compact` rollovers that change the
+        // ~/.claude/projects/ subdir away from the cwd-derived guess. Fall
+        // back to the legacy projectDir+sessionID resolution for terminals
+        // that haven't received a hook event yet (older terminals, or
+        // sessions that were already running before the overlay hook was
+        // registered).
+        let filePath: String
+        if let storedPath = terminal.transcriptPath, !storedPath.isEmpty {
+            filePath = storedPath
+        } else {
+            guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
+                let result = TerminalTranscriptResult(messages: [], sessionID: sessionID)
+                response = try RPCResponse(result: result)
+                responseBytes = response.result?.utf8.count ?? 0
+                return response
+            }
+            filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
         }
-
-        let filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
         let messages: [TranscriptItem]
         if let cached = await TranscriptParseCache.shared.get(filePath: filePath) {
             messages = cached
@@ -871,13 +933,28 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
         guard let sessionID = terminal.claudeSessionID,
-              let worktree = try await db.worktrees.get(id: terminal.worktreeID),
-              let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
+              let worktree = try await db.worktrees.get(id: terminal.worktreeID) else {
             return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
         }
 
-        var paths = [projectDir.appendingPathComponent("\(sessionID).jsonl").path]
-        let subagentsDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
+        // Prefer hook-reported path; derive the subagents directory from
+        // either the stored path's parent or the legacy projectDir.
+        let primaryPath: String
+        let subagentsDir: URL
+        if let storedPath = terminal.transcriptPath, !storedPath.isEmpty {
+            primaryPath = storedPath
+            let parent = (storedPath as NSString).deletingLastPathComponent
+            subagentsDir = URL(fileURLWithPath: parent)
+                .appendingPathComponent(sessionID)
+                .appendingPathComponent("subagents")
+        } else {
+            guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
+                return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
+            }
+            primaryPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
+            subagentsDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
+        }
+        var paths = [primaryPath]
         if let subFiles = try? FileManager.default.contentsOfDirectory(at: subagentsDir, includingPropertiesForKeys: nil) {
             paths.append(contentsOf: subFiles
                 .filter { $0.pathExtension == "jsonl" }

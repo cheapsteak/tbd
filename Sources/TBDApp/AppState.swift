@@ -425,9 +425,23 @@ final class AppState: ObservableObject {
             applyModelProfileUsageDelta(usage)
         case .modelProfilesChanged:
             Task { [weak self] in await self?.loadModelProfiles() }
+        case .terminalSessionUpdated(let d):
+            applyTerminalSessionDelta(d)
         default:
             break
         }
+    }
+
+    /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)
+    /// directly to the in-memory Terminal so LiveTranscriptPaneView re-targets
+    /// without waiting for the next 2s `terminal.list` poll. Silently ignores
+    /// terminals we don't know about — the next refresh will reconcile.
+    private func applyTerminalSessionDelta(_ delta: TerminalSessionDelta) {
+        guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
+            return
+        }
+        terminals[delta.worktreeID]?[idx].claudeSessionID = delta.sessionID
+        terminals[delta.worktreeID]?[idx].transcriptPath = delta.transcriptPath
     }
 
     /// Update the in-place usage entry for a single profile. If no match,

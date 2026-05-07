@@ -133,6 +133,7 @@ public enum RPCMethod {
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let terminalSwapProfile = "terminal.swapProfile"
+    public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
@@ -762,5 +763,24 @@ public struct TerminalTranscriptItemFullBodyResult: Codable, Sendable {
     public let text: String
     public init(text: String) {
         self.text = text
+    }
+}
+
+// MARK: - Terminal Session Event (Claude SessionStart hook bridge)
+
+/// Payload reported by the SessionStart hook (relayed via `tbd session-event`).
+/// `source` is one of the values Claude Code emits: `startup`, `resume`,
+/// `clear`, `compact`. We pass it through opaquely so future Claude
+/// hook payload changes don't immediately break this bridge.
+public struct TerminalSessionEventParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let sessionID: String
+    public let transcriptPath: String?
+    public let source: String?
+    public init(terminalID: UUID, sessionID: String, transcriptPath: String?, source: String?) {
+        self.terminalID = terminalID
+        self.sessionID = sessionID
+        self.transcriptPath = transcriptPath
+        self.source = source
     }
 }

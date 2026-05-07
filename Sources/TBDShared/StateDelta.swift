@@ -19,6 +19,23 @@ public enum StateDelta: Codable, Sendable {
     case worktreeReordered(RepoIDDelta)
     case modelProfileUsageUpdated(ModelProfileUsage)
     case modelProfilesChanged
+    case terminalSessionUpdated(TerminalSessionDelta)
+}
+
+/// Delta payload for Claude session ID/transcript path rollover, fired when
+/// the SessionStart hook bridge reports a new session for an existing
+/// terminal (e.g., post-`/clear`, `/compact`, or initial startup).
+public struct TerminalSessionDelta: Codable, Sendable {
+    public let terminalID: UUID
+    public let worktreeID: UUID
+    public let sessionID: String
+    public let transcriptPath: String?
+    public init(terminalID: UUID, worktreeID: UUID, sessionID: String, transcriptPath: String?) {
+        self.terminalID = terminalID
+        self.worktreeID = worktreeID
+        self.sessionID = sessionID
+        self.transcriptPath = transcriptPath
+    }
 }
 
 /// Delta payload for worktree creation/revival.
