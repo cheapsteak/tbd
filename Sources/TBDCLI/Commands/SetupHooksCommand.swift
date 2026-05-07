@@ -43,6 +43,9 @@ struct SetupHooksCommand: AsyncParsableCommand {
     }
 
     /// Read existing settings, merge the Stop hook, and write back.
+    /// Wrapped in the SettingsJSONSafety helpers (pristine backup, roundtrip
+    /// validation, atomic write) so a malformed write can't corrupt the
+    /// user's settings.json mid-edit.
     private func installHooks(at path: String) throws {
         var settings: [String: Any] = [:]
 
@@ -95,8 +98,32 @@ struct SetupHooksCommand: AsyncParsableCommand {
         hooks["Stop"] = stopHooks
         settings["hooks"] = hooks
 
-        // Write back
+        // Pristine backup before TBD's first ever mutation. Idempotent — only
+        // creates the backup if it doesn't already exist.
+        try SettingsJSONSafety.ensureBackup(of: path)
+
+        // Serialize the proposed bytes once; the safety helper round-trips
+        // them and runs an invariant before atomically writing.
         let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: URL(fileURLWithPath: path))
+        try SettingsJSONSafety.atomicWriteValidated(
+            proposedBytes: data,
+            targetPath: path
+        ) { dict in
+            // Sanity-check: the result has a `hooks` dict, the Stop array
+            // contains our entry, and no stray null at top-level.
+            guard let parsedHooks = dict["hooks"] as? [String: Any] else {
+                throw SettingsJSONSafety.Error.invariantFailed("Missing hooks dict")
+            }
+            guard let parsedStop = parsedHooks["Stop"] as? [[String: Any]] else {
+                throw SettingsJSONSafety.Error.invariantFailed("Missing Stop hooks array")
+            }
+            let containsTBD = parsedStop.contains { matcher in
+                let inner = matcher["hooks"] as? [[String: Any]] ?? []
+                return inner.contains { ($0["command"] as? String)?.contains("tbd notify") == true }
+            }
+            guard containsTBD else {
+                throw SettingsJSONSafety.Error.invariantFailed("tbd notify entry missing after merge")
+            }
+        }
     }
 }
