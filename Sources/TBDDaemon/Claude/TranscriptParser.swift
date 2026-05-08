@@ -241,11 +241,15 @@ enum TranscriptParser {
     /// are ignored — we only care about the prompt-size signal.
     private static func extractUsage(from message: [String: Any]) -> TokenUsage? {
         guard let usage = message["usage"] as? [String: Any],
-              let input = usage["input_tokens"] as? Int,
-              let cacheCreation = usage["cache_creation_input_tokens"] as? Int,
-              let cacheRead = usage["cache_read_input_tokens"] as? Int else {
+              let input = usage["input_tokens"] as? Int else {
             return nil
         }
+        // Cache fields are optional in the Anthropic API: users without
+        // prompt caching enabled emit `usage` blocks that omit them
+        // entirely. Default to 0 so the badge still surfaces a token count
+        // for those sessions.
+        let cacheCreation = usage["cache_creation_input_tokens"] as? Int ?? 0
+        let cacheRead = usage["cache_read_input_tokens"] as? Int ?? 0
         return TokenUsage(
             inputTokens: input,
             cacheCreationTokens: cacheCreation,

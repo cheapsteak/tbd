@@ -443,6 +443,22 @@ struct TranscriptParserTests {
         #expect(items[0].usage == nil)
     }
 
+    @Test func usage_extracted_when_only_input_tokens_present() throws {
+        // Users without prompt caching emit `usage` blocks that omit the
+        // cache fields. Those sessions must still surface a token count.
+        let line = #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":42,"output_tokens":7}}}"#
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        let usage = items[0].usage
+        #expect(usage?.inputTokens == 42)
+        #expect(usage?.cacheCreationTokens == 0)
+        #expect(usage?.cacheReadTokens == 0)
+        #expect(usage?.contextTotal == 42)
+    }
+
     @Test func sidechain_lines_drop_at_top_level_regression_guard() throws {
         // Locks in the existing TranscriptParser behavior that top-level
         // sidechain lines are dropped — the latest-usage badge logic relies
