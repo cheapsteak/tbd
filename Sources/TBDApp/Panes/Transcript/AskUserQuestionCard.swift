@@ -95,8 +95,21 @@ struct AskUserQuestionCard: View {
                         match: match,
                         rawAnswer: answer,
                         options: q.options,
+                        pendingAnswer: result == nil,
                         timestamp: timestamp,
                         bubbleID: "\(self.id)#answer\(idx)"
+                    )
+                }
+                // If we got a result back but the parser produced nothing
+                // (e.g. Claude Code changed the canonical prefix), surface
+                // the raw text once so the user can still see what came back.
+                if result != nil, parsedAnswers.isEmpty {
+                    ChatBubbleView(
+                        item: .userPrompt(
+                            id: "\(self.id)#raw-result",
+                            text: resultText ?? "",
+                            timestamp: timestamp
+                        )
                     )
                 }
             } else {
@@ -287,6 +300,11 @@ private struct AnswerSlot: View {
     let match: AskUserQuestionParser.Match?
     let rawAnswer: String?
     let options: [AskUserQuestionCard.Option]
+    /// True while the tool result hasn't arrived yet. When false but
+    /// `match`/`rawAnswer` produce no bubble text, render nothing rather
+    /// than spinning forever — the parent card surfaces the raw result
+    /// text once at the bottom in that case.
+    let pendingAnswer: Bool
     let timestamp: Date?
     let bubbleID: String
 
@@ -300,8 +318,10 @@ private struct AnswerSlot: View {
             ChatBubbleView(
                 item: .userPrompt(id: bubbleID, text: text, timestamp: timestamp)
             )
-        } else {
+        } else if pendingAnswer {
             WaitingForResponseRow()
+        } else {
+            EmptyView()
         }
     }
 }
