@@ -2,10 +2,11 @@ import SwiftUI
 
 /// Diminutive subscript line shown beneath the latest top-level assistant
 /// item in the transcript viewer. Displays the total prompt size
-/// (input + cache_creation + cache_read tokens) of that turn's API call,
-/// formatted as `Nk tokens` with thresholds:
+/// (input + cache_creation + cache_read tokens) of that turn's API call
+/// as `Nk tokens` in muted gray, prefixed by a small colored dot whose
+/// color signals the band:
 ///
-/// - `<190k`  → muted (`.secondary`)
+/// - `<190k`  → `.secondary`
 /// - `>=190k` → yellow
 /// - `>=260k` → orange
 /// - `>=300k` → red
@@ -15,10 +16,14 @@ struct ContextUsageBadge: View {
     let total: Int
 
     var body: some View {
-        Text(Self.formatted(total))
-            .font(.caption2)
-            .fontWeight(.regular)
-            .foregroundStyle(Self.color(for: total))
+        HStack(spacing: 4) {
+            Image(systemName: "circle.fill")
+                .foregroundStyle(Self.color(for: total))
+            Text(Self.formatted(total))
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption2)
+        .fontWeight(.regular)
     }
 
     /// Whole-thousands abbreviation, e.g. 124_300 -> "124k tokens".
