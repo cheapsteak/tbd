@@ -62,9 +62,21 @@ struct TranscriptItemsView: View {
             // defaultScrollAnchor(.bottom) (applied by the parent pane). Lazy
             // realization for perf; the parent's anchor handles initial
             // bottom-positioning and follow-bottom-on-growth declaratively.
+            //
+            // Walk items in reverse to find the most recent one carrying a
+            // TokenUsage — that's where the ContextUsageBadge attaches. The
+            // top-level items array is sidechain-free by construction (the
+            // parser drops sidechain lines), so a simple reverse scan is
+            // correct without further filtering.
+            let latestUsageItemID = items.reversed().first { $0.usage != nil }?.id
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(items) { item in
                     rowFor(item)
+                    if item.id == latestUsageItemID, let usage = item.usage {
+                        ContextUsageBadge(total: usage.contextTotal)
+                            .padding(.leading, 12)
+                            .padding(.top, 2)
+                    }
                 }
             }
             .padding(.vertical, 8)
