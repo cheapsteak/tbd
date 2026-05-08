@@ -197,6 +197,7 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = nil
+            record.transcriptPath = nil
             record.suspendedAt = nil
             record.suspendedSnapshot = nil
             record.label = "shell"
