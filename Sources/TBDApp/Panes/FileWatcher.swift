@@ -77,7 +77,7 @@ final class FileWatcher: Sendable {
                 #endif
             }
 
-            if !box.startWatching(path: path) {
+            if !box.startWatching() {
                 continuation.finish()
             }
         }
@@ -123,12 +123,12 @@ private final class StreamState: @unchecked Sendable {
         self.continuation = continuation
     }
 
-    /// Open `path` and start a dispatch source for it. Returns `false` if
-    /// `open()` failed (caller should `continuation.finish()`).
-    func startWatching(path: String) -> Bool {
-        let fd = open(path, O_EVTONLY)
+    /// Open `self.path` and start a dispatch source for it. Returns `false`
+    /// if `open()` failed (caller should `continuation.finish()`).
+    func startWatching() -> Bool {
+        let fd = open(self.path, O_EVTONLY)
         guard fd >= 0 else {
-            logger.debug("FileWatcher: open(\(path, privacy: .public)) failed errno=\(errno)")
+            logger.debug("FileWatcher: open(\(self.path, privacy: .public)) failed errno=\(errno)")
             return false
         }
 
@@ -236,7 +236,7 @@ private final class StreamState: @unchecked Sendable {
         // Bail out fast if the stream is already gone.
         if inner.withLock({ $0.terminated }) { return }
 
-        if startWatching(path: path) {
+        if startWatching() {
             // Successful re-open — surface a single event so consumers
             // (e.g. file viewers) re-load the freshly-saved content.
             yieldIfActive()
