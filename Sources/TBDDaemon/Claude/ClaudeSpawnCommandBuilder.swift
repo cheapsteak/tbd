@@ -3,8 +3,11 @@ import TBDShared
 
 /// Builds the shell command string for spawning (or respawning) a claude terminal.
 ///
-/// Pure function — no DB, no Keychain, no tmux. Easy to unit-test. The caller is
-/// responsible for resolving the token secret (if any) before invoking.
+/// Pure function — no DB, no Keychain, no tmux. The only filesystem touch
+/// is via the injectable `fileExists` parameter, which defaults to
+/// `FileManager.default.fileExists(atPath:)`. Tests can pass a closure to
+/// keep the function fully hermetic. The caller is responsible for
+/// resolving the token secret (if any) before invoking.
 ///
 /// Behavior:
 /// - `resumeID` non-nil → `claude --resume <id> --dangerously-skip-permissions`
@@ -41,7 +44,8 @@ enum ClaudeSpawnCommandBuilder {
         profileModel: String? = nil,
         cmd: String?,
         shellFallback: String,
-        settingsOverlayPath: String? = nil
+        settingsOverlayPath: String? = nil,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Result {
         // Optional --settings flag merged into the claude invocation.
         // Claude's --settings flag MERGES with ~/.claude/settings.json
@@ -51,8 +55,7 @@ enum ClaudeSpawnCommandBuilder {
         // path was supplied AND it exists on disk — otherwise the spawn
         // would fail with "settings file not found".
         let settingsFlag: String
-        if let p = settingsOverlayPath,
-           FileManager.default.fileExists(atPath: p) {
+        if let p = settingsOverlayPath, fileExists(p) {
             settingsFlag = " --settings \(SystemPromptBuilder.shellEscape(p))"
         } else {
             settingsFlag = ""
