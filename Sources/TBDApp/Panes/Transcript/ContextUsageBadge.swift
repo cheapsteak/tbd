@@ -30,11 +30,11 @@ struct ContextUsageBadge: View {
     }
 
     /// Whole-thousands abbreviation, e.g. 124_300 -> "124k tokens".
-    static func formatted(_ total: Int) -> String {
+    nonisolated static func formatted(_ total: Int) -> String {
         "\(total / 1000)k tokens"
     }
 
-    static func color(for total: Int) -> Color {
+    nonisolated static func color(for total: Int) -> Color {
         switch total {
         case ..<190_000:  return .secondary
         case ..<260_000:  return .yellow
