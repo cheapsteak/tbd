@@ -105,6 +105,13 @@ final class LegacyHooksCoordinator {
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Not Now")
         alert.addButton(withTitle: "Show File…")
+        // HIG: destructive action shouldn't be the Return-key default.
+        // Move the keyEquivalent off "Remove" and onto "Not Now" so muscle-
+        // memory Return-presses don't trigger the destructive path. The
+        // pristine-backup mechanism makes accidental removal recoverable,
+        // but the friction is still worth adding.
+        alert.buttons[0].keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
         let response = alert.runModal()
         switch response {
         case .alertFirstButtonReturn:
