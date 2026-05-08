@@ -67,6 +67,39 @@ struct GitManagerTests {
         cleanup()
     }
 
+    /// Regression test for a race in `GitManager.run()` where the readability handler
+    /// did `availableData` and `accumulator.append` in two non-atomic steps,
+    /// allowing `terminationHandler` to snapshot between them and drop the chunk.
+    /// Manifested as fast commands like `git rev-parse HEAD` returning "" with exit 0.
+    /// Without the fix, this test reliably catches the race within ~200 iterations.
+    @Test func concurrentHeadSHADoesNotRace() async throws {
+        let repoPath = repoDir.path
+        let expected = try await git.headSHA(repoPath: repoPath)
+        #expect(expected.count == 40)
+        #expect(!expected.isEmpty)
+
+        let iterations = 200
+        let results = await withTaskGroup(of: String.self) { group -> [String] in
+            for _ in 0..<iterations {
+                group.addTask {
+                    (try? await self.git.headSHA(repoPath: repoPath)) ?? ""
+                }
+            }
+            var collected: [String] = []
+            for await sha in group {
+                collected.append(sha)
+            }
+            return collected
+        }
+
+        #expect(results.count == iterations)
+        for sha in results {
+            #expect(sha.count == 40, "Expected 40-char SHA, got \(sha.count) chars: '\(sha)'")
+            #expect(sha == expected, "Expected '\(expected)', got '\(sha)'")
+        }
+        cleanup()
+    }
+
     // MARK: - Helpers
 
     func cleanup() {

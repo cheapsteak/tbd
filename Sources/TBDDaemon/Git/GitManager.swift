@@ -236,35 +236,26 @@ public struct GitManager: Sendable {
             let stdoutAccumulator = PipeDataAccumulator()
             let stderrAccumulator = PipeDataAccumulator()
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-                let chunk = handle.availableData
-                if chunk.isEmpty {
+                if !stdoutAccumulator.readAvailable(from: handle) {
                     handle.readabilityHandler = nil
-                } else {
-                    stdoutAccumulator.append(chunk)
                 }
             }
             stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-                let chunk = handle.availableData
-                if chunk.isEmpty {
+                if !stderrAccumulator.readAvailable(from: handle) {
                     handle.readabilityHandler = nil
-                } else {
-                    stderrAccumulator.append(chunk)
                 }
             }
 
             process.terminationHandler = { _ in
-                // Detach handlers and drain anything still buffered.
+                // Detach handlers; `finish` blocks on the same lock the readability
+                // handler holds, so any in-flight read+append completes before we snapshot.
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
-                if let tail = try? stdoutPipe.fileHandleForReading.readToEnd(), !tail.isEmpty {
-                    stdoutAccumulator.append(tail)
-                }
-                if let tail = try? stderrPipe.fileHandleForReading.readToEnd(), !tail.isEmpty {
-                    stderrAccumulator.append(tail)
-                }
+                let stdoutData = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                let stderrData = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
 
-                let stdout = String(data: stdoutAccumulator.snapshot(), encoding: .utf8) ?? ""
-                let stderr = String(data: stderrAccumulator.snapshot(), encoding: .utf8) ?? ""
+                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
 
                 if process.terminationStatus != 0 {
                     continuation.resume(throwing: GitError(
@@ -330,21 +321,38 @@ public struct GitManager: Sendable {
     }
 }
 
-/// Thread-safe accumulator for incremental pipe reads. The readability handler
-/// fires on a background dispatch queue, so concurrent appends need a lock.
+/// Thread-safe accumulator for incremental pipe reads.
+///
+/// Invariant: `availableData`/`readToEnd` and the corresponding append happen
+/// under the same lock as `finish`. This prevents `terminationHandler` from
+/// snapshotting between a readability handler's read and its append, which
+/// would silently drop the in-flight chunk.
 private final class PipeDataAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
 
-    func append(_ chunk: Data) {
-        lock.lock()
-        data.append(chunk)
-        lock.unlock()
-    }
-
-    func snapshot() -> Data {
+    /// Reads any available data from `handle` and appends it atomically.
+    /// Returns `false` on EOF (empty read), `true` otherwise.
+    func readAvailable(from handle: FileHandle) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        let chunk = handle.availableData
+        if chunk.isEmpty {
+            return false
+        }
+        data.append(chunk)
+        return true
+    }
+
+    /// Drains any remaining buffered data from `handle` and returns the full
+    /// accumulated buffer. Acquiring the lock blocks until any in-flight
+    /// `readAvailable` call has completed its append.
+    func finish(handle: FileHandle) -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        if let tail = try? handle.readToEnd(), !tail.isEmpty {
+            data.append(tail)
+        }
         return data
     }
 }
