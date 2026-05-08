@@ -312,15 +312,22 @@ private struct FilePreviewView: View {
     let filePath: String
     let showSourceCode: Bool
 
+    @StateObject private var watcher = FileWatcher()
+
     var body: some View {
-        if !showSourceCode && isRenderableFile(filePath) {
-            RenderedContentView(filePath: filePath)
-        } else if isImageFile(filePath) {
-            ImagePreviewView(filePath: filePath)
-        } else if isTextFile(filePath) {
-            HighlightedCodeView(filePath: filePath)
-        } else {
-            BinaryFallbackView(filePath: filePath)
+        Group {
+            if !showSourceCode && isRenderableFile(filePath) {
+                RenderedContentView(filePath: filePath, revision: watcher.revision)
+            } else if isImageFile(filePath) {
+                ImagePreviewView(filePath: filePath, revision: watcher.revision)
+            } else if isTextFile(filePath) {
+                HighlightedCodeView(filePath: filePath, revision: watcher.revision)
+            } else {
+                BinaryFallbackView(filePath: filePath)
+            }
+        }
+        .task(id: filePath) {
+            watcher.observe(filePath)
         }
     }
 }
@@ -329,6 +336,7 @@ private struct FilePreviewView: View {
 
 private struct RenderedContentView: View {
     let filePath: String
+    let revision: Int
     @State private var content: String?
     @State private var loadError: String?
 
@@ -357,7 +365,7 @@ private struct RenderedContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: filePath) {
+        .task(id: "\(filePath)#\(revision)") {
             await loadContent()
         }
     }
@@ -383,6 +391,7 @@ private struct RenderedContentView: View {
 
 private struct ImagePreviewView: View {
     let filePath: String
+    let revision: Int
     @State private var image: NSImage?
 
     var body: some View {
@@ -405,7 +414,7 @@ private struct ImagePreviewView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task(id: filePath) {
+        .task(id: "\(filePath)#\(revision)") {
             image = NSImage(contentsOfFile: filePath)
         }
     }
@@ -441,6 +450,7 @@ private struct BinaryFallbackView: View {
 
 private struct HighlightedCodeView: View {
     let filePath: String
+    let revision: Int
     @State private var attributedContent: NSAttributedString?
     @State private var loadError: String?
 
@@ -462,7 +472,7 @@ private struct HighlightedCodeView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: filePath) {
+        .task(id: "\(filePath)#\(revision)") {
             await loadAndHighlight()
         }
     }
