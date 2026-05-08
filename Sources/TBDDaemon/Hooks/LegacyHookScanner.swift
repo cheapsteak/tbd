@@ -94,7 +94,13 @@ public enum LegacyHookScanner {
                 hooks[event] = newMatchers
             }
         }
-        settings["hooks"] = hooks
+        // If we stripped every event, drop the empty `hooks: {}` rather
+        // than leaving a vestigial section in the user's settings.json.
+        if hooks.isEmpty {
+            settings.removeValue(forKey: "hooks")
+        } else {
+            settings["hooks"] = hooks
+        }
         return removed
     }
 
