@@ -47,7 +47,7 @@ struct TerminalSessionEventHandlerTests {
         return (terminal, wt)
     }
 
-    @Test("updates sessionID + transcriptPath and broadcasts delta")
+    @Test("updates sessionID + transcriptPath in DB on a fresh SessionStart")
     func updatesSessionAndBroadcasts() async throws {
         let (terminal, _) = try await makeTerminal(initialSession: "old-id")
         let request = try RPCRequest(
