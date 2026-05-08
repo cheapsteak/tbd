@@ -16,7 +16,7 @@ Background and the underlying mechanism are documented in `docs/transcript-conte
   - `>= 260_000` → orange
   - `>= 300_000` → red
 - **Placement:** A single tiny line below the bubble or card of the most recent non-sidechain item that carries usage data. No badges on older items; no per-turn history; no sparkline; no status-bar version.
-- **Sidechain handling:** Subagent / sidechain assistant lines (top-level `isSidechain: true`) are skipped when picking "latest." They run in a separate context window, so their usage values are not meaningful to the parent session's display.
+- **Sidechain handling:** Subagent / sidechain assistant lines (top-level `isSidechain: true`) are skipped when picking "latest." They run in a separate context window, so their usage values are not meaningful to the parent session's display. The parser already drops top-level sidechain lines (`TranscriptParser.parse` line ~126, `if skipSidechain, json["isSidechain"] as? Bool == true { continue }`), so the top-level items array is sidechain-free by construction. Subagent-nested items are reached via recursive `TranscriptItemsView` at `depth > 0` inside `SubagentDisclosure`; we suppress the badge there by gating render on `depth == 0`.
 - **Scope:** Both `LiveTranscriptPaneView` (live polled session) and `HistoryPaneView` (static historical view). The single shared rendering path in `TranscriptItemsView` makes this one change.
 - **Latest-item rule (A1):** If the most recent assistant turn is tool-only (no text content), the badge attaches to the tool card it produced, not to the previous text bubble. The placement always reflects the most recent API call.
 
@@ -39,20 +39,20 @@ public struct TokenUsage: Codable, Sendable, Equatable {
 
 Extend `TranscriptItem`:
 
-- `.assistantText` and `.toolCall` gain two new fields:
+- `.assistantText` and `.toolCall` gain one new field:
   - `usage: TokenUsage?` (nil for items not derived from an assistant API call, or assistant lines that lack a `usage` block defensively)
-  - `isSidechain: Bool` (defaults to `false`)
-- These are **optional/defaulted** so existing serialized `TranscriptItem` values still decode — same compatibility rule the project applies to DB migrations (per `CLAUDE.md` Database section), applied here to the in-memory enum.
+- This is **optional** so existing serialized `TranscriptItem` values still decode — same compatibility rule the project applies to DB migrations (per `CLAUDE.md` Database section), applied here to the in-memory enum.
+
+No `isSidechain` field is needed: the parser drops top-level sidechain lines, and subagent-nested items are filtered out at render time via the `depth == 0` gate.
 
 ### Parser (`Sources/TBDDaemon/Claude/TranscriptParser.swift`)
 
 When processing a JSONL line where `type == "assistant"`:
 
 1. Decode `message.usage` into a `TokenUsage`. Only the three fields we care about are mapped; the rest of the `usage` blob is ignored. Missing or malformed → `nil`.
-2. Read the top-level `isSidechain` boolean (defaults to `false` if absent).
-3. Stamp both onto every `.assistantText` and `.toolCall` item produced from that line.
+2. Stamp the `usage` value onto every `.assistantText` and `.toolCall` item produced from that line.
 
-The duplication is intentional and cheap: a single assistant API call can produce one text item plus several tool_use items, and stamping the same `TokenUsage` on each one keeps the model uniform without introducing a separate "metadata index." Total memory cost is bounded by transcript length × ~32 bytes per stamped item.
+The duplication is intentional and cheap: a single assistant API call can produce one text item plus several tool_use items, and stamping the same `TokenUsage` on each one keeps the model uniform without introducing a separate "metadata index." Total memory cost is bounded by transcript length × ~24 bytes per stamped item.
 
 No changes to `TerminalTranscriptResult` or any RPC shape — usage rides with the existing items array.
 
@@ -82,7 +82,8 @@ struct ContextUsageBadge: View {
 
 `TranscriptItemsView` changes:
 
-- At the top of `body`, compute `let latestUsageItemID: String? = items.reversed().first { !$0.isSidechain && $0.usage != nil }?.id`. This walk is over the data array, not the materialized views, so it is unaffected by `LazyVStack`. The walk is O(n) per body evaluation, which is fine for a few hundred items at the 1.5s polling cadence.
+- The badge is only rendered when `depth == 0` (top-level transcript). Subagent-nested rendering at `depth > 0` skips the latest-usage walk entirely, so subagent context never shows a badge.
+- At the top of the `depth == 0` branch, compute `let latestUsageItemID: String? = items.reversed().first { $0.usage != nil }?.id`. This walk is over the data array, not the materialized views, so it is unaffected by `LazyVStack`. The walk is O(n) per body evaluation, which is fine for a few hundred items at the 1.5s polling cadence.
 - In the per-item `ForEach`, after the existing item view (`ChatBubbleView`, `BashCard`, `ReadCard`, `EditCard`, `WriteCard`, `GrepCard`, `GlobCard`, `GenericToolCard`, `AgentCard`), conditionally render the badge:
   ```swift
   if item.id == latestUsageItemID, let usage = item.usage {
@@ -111,7 +112,7 @@ The badge changes the latest item's height. With the existing scroll-to-bottom b
 
 - Assistant line with a `usage` block produces items whose `usage` is populated with the correct field values.
 - Assistant line with no `usage` (defensive) produces items with `usage == nil`.
-- Assistant line with `isSidechain: true` produces items with `isSidechain == true`; default lines have `isSidechain == false`.
+- A top-level assistant line with `isSidechain: true` produces no items at all (existing parser drop behavior — covered by an explicit test to lock it in as a regression guard for the badge logic).
 
 These cover each branch of the parser's gating logic per the `CLAUDE.md` rule on testing branching conditionals.
 
