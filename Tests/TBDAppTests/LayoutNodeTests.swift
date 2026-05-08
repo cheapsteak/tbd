@@ -249,4 +249,153 @@ struct LayoutNodeTests {
         let decoded = try JSONDecoder().decode(LayoutNode.self, from: data)
         #expect(decoded == node)
     }
+
+    // MARK: - firstPaneID
+
+    @Test func firstPaneID_returnsRootIDWhenRootMatches() {
+        let id = UUID()
+        let node = LayoutNode.pane(.codeViewer(id: id, path: "/a"))
+
+        let result = node.firstPaneID(where: {
+            if case .codeViewer = $0 { return true } else { return false }
+        })
+
+        #expect(result == id)
+    }
+
+    @Test func firstPaneID_returnsNilWhenNoneMatch() {
+        let node = LayoutNode.pane(.terminal(terminalID: UUID()))
+
+        let result = node.firstPaneID(where: {
+            if case .codeViewer = $0 { return true } else { return false }
+        })
+
+        #expect(result == nil)
+    }
+
+    @Test func firstPaneID_walksLeftThenRight() {
+        let leftID = UUID()
+        let rightID = UUID()
+        let node = LayoutNode.split(
+            direction: .horizontal,
+            children: [
+                .pane(.codeViewer(id: leftID, path: "/left")),
+                .pane(.codeViewer(id: rightID, path: "/right")),
+            ],
+            ratios: [0.5, 0.5]
+        )
+
+        let result = node.firstPaneID(where: {
+            if case .codeViewer = $0 { return true } else { return false }
+        })
+
+        #expect(result == leftID)
+    }
+
+    @Test func firstPaneID_findsNestedMatch() {
+        let terminalID = UUID()
+        let viewerID = UUID()
+        let node = LayoutNode.split(
+            direction: .horizontal,
+            children: [
+                .pane(.terminal(terminalID: terminalID)),
+                .split(
+                    direction: .vertical,
+                    children: [
+                        .pane(.terminal(terminalID: UUID())),
+                        .pane(.codeViewer(id: viewerID, path: "/nested")),
+                    ],
+                    ratios: [0.5, 0.5]
+                ),
+            ],
+            ratios: [0.6, 0.4]
+        )
+
+        let result = node.firstPaneID(where: {
+            if case .codeViewer = $0 { return true } else { return false }
+        })
+
+        #expect(result == viewerID)
+    }
+
+    // MARK: - replacingContent
+
+    @Test func replacingContent_returnsNilWhenIDMissing() {
+        let node = LayoutNode.pane(.terminal(terminalID: UUID()))
+
+        let result = node.replacingContent(
+            at: UUID(),
+            with: .codeViewer(id: UUID(), path: "/x")
+        )
+
+        #expect(result == nil)
+    }
+
+    @Test func replacingContent_replacesAtRoot() {
+        let id = UUID()
+        let node = LayoutNode.pane(.codeViewer(id: id, path: "/old"))
+        let newContent = PaneContent.codeViewer(id: id, path: "/new")
+
+        let result = node.replacingContent(at: id, with: newContent)
+
+        #expect(result == .pane(newContent))
+    }
+
+    @Test func replacingContent_replacesInsideSplitPreservingSiblingsAndRatios() {
+        let terminalID = UUID()
+        let viewerID = UUID()
+        let node = LayoutNode.split(
+            direction: .horizontal,
+            children: [
+                .pane(.terminal(terminalID: terminalID)),
+                .pane(.codeViewer(id: viewerID, path: "/old")),
+            ],
+            ratios: [0.7, 0.3]
+        )
+        let newContent = PaneContent.codeViewer(id: viewerID, path: "/new")
+
+        let result = node.replacingContent(at: viewerID, with: newContent)
+
+        #expect(result == .split(
+            direction: .horizontal,
+            children: [
+                .pane(.terminal(terminalID: terminalID)),
+                .pane(newContent),
+            ],
+            ratios: [0.7, 0.3]
+        ))
+    }
+
+    @Test func replacingContent_replacesInNestedSplit() {
+        let terminalID = UUID()
+        let viewerID = UUID()
+        let node = LayoutNode.split(
+            direction: .horizontal,
+            children: [
+                .pane(.terminal(terminalID: terminalID)),
+                .split(
+                    direction: .vertical,
+                    children: [
+                        .pane(.terminal(terminalID: UUID())),
+                        .pane(.codeViewer(id: viewerID, path: "/old")),
+                    ],
+                    ratios: [0.4, 0.6]
+                ),
+            ],
+            ratios: [0.5, 0.5]
+        )
+        let newContent = PaneContent.codeViewer(id: viewerID, path: "/new")
+
+        let result = node.replacingContent(at: viewerID, with: newContent)
+
+        guard case .split(_, let topChildren, let topRatios) = result,
+              case .split(_, let nestedChildren, let nestedRatios) = topChildren[1]
+        else {
+            Issue.record("Expected nested split structure")
+            return
+        }
+        #expect(topRatios == [0.5, 0.5])
+        #expect(nestedRatios == [0.4, 0.6])
+        #expect(nestedChildren[1] == .pane(newContent))
+    }
 }
