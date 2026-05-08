@@ -40,6 +40,13 @@ final class TmuxBridge: @unchecked Sendable {
     /// Tracks active grouped sessions: maps panel UUID -> grouped session name
     private var activeSessions: [UUID: String] = [:]
 
+    /// Serial background queue for fire-and-forget tmux teardown. SwiftUI's
+    /// `dismantleNSView` runs on the main thread mid-layout, and a synchronous
+    /// `Process.waitUntilExit` there pumps the runloop while a layout pass is
+    /// in flight — that re-enters AppKit and crashes via a null function
+    /// pointer in the layout observer. Off-main keeps the runloop quiet.
+    private let cleanupQueue = DispatchQueue(label: "com.tbd.app.tmux-cleanup", qos: .utility)
+
     /// Prepare a tmux grouped session for a specific panel.
     /// Creates a grouped session linked to "main", selects the right window,
     /// and returns the tmux arguments needed for SwiftTerm to attach.
@@ -88,6 +95,10 @@ final class TmuxBridge: @unchecked Sendable {
     }
 
     /// Clean up a grouped session when a panel is hidden.
+    ///
+    /// Fire-and-forget: the kill-session call runs on a background queue so
+    /// callers can return immediately. Safe to call from the main thread
+    /// during SwiftUI dismantle.
     func cleanupSession(panelID: UUID, server: String) {
         lock.lock()
         guard let sessionName = activeSessions.removeValue(forKey: panelID) else {
@@ -96,23 +107,25 @@ final class TmuxBridge: @unchecked Sendable {
         }
         lock.unlock()
 
-        let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
-        debugLog("CLEANUP: panelID=\(panelID.uuidString.prefix(8)) session=\(sessionName)")
+        cleanupQueue.async { [self] in
+            let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
+            debugLog("CLEANUP: panelID=\(panelID.uuidString.prefix(8)) session=\(sessionName)")
+        }
     }
 
     /// Clean up all grouped sessions for a server.
     func cleanupAllSessions(server: String) {
         lock.lock()
         let sessions = activeSessions
+        activeSessions.removeAll()
         lock.unlock()
 
-        for (panelID, sessionName) in sessions {
-            let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
-            lock.lock()
-            activeSessions.removeValue(forKey: panelID)
-            lock.unlock()
+        cleanupQueue.async { [self] in
+            for (_, sessionName) in sessions {
+                let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
+            }
+            debugLog("CLEANUP ALL: server=\(server)")
         }
-        debugLog("CLEANUP ALL: server=\(server)")
     }
 
     // MARK: - Helpers
