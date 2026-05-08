@@ -35,10 +35,26 @@ struct PanePlaceholder: View {
             paneBody
         }
         .onPreferenceChange(HasRenderableContentKey.self) { newValue in
-            if newValue && !hasRenderableContent {
-                showSourceCode = false
+            // Defer @State writes to the next runloop tick.
+            //
+            // SwiftUI propagates preference values during its layout / render
+            // pass — and on pane teardown the preference resets to its
+            // default, which fires this handler *while* the host view is
+            // mid-layout. Mutating @State synchronously here re-invalidates
+            // the view inside the same pass, producing
+            // "NSHostingView is being laid out reentrantly while rendering
+            // its SwiftUI content" and (with our FilePreviewView changes
+            // adding @StateObject + .task teardown work in the same phase)
+            // a SIGTRAP in GraphHost.updatePreferences.
+            //
+            // Hopping to the next main-actor turn lets the current layout
+            // pass finish, then schedules a normal subsequent render.
+            Task { @MainActor in
+                if newValue && !hasRenderableContent {
+                    showSourceCode = false
+                }
+                hasRenderableContent = newValue
             }
-            hasRenderableContent = newValue
         }
     }
 
