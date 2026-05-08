@@ -100,6 +100,38 @@ struct GitManagerTests {
         cleanup()
     }
 
+    /// Sibling regression test for the same `GitManager.run()` pipe-drain race,
+    /// exercised through `detectDefaultBranch`. An empty branch name flows into
+    /// `git worktree add ... -b <branch> ''` and produces the
+    /// `fatal: not a valid object name: ''` failure observed in `worktreeRemove`.
+    @Test func concurrentDetectDefaultBranchDoesNotRace() async throws {
+        let repoPath = repoDir.path
+        let expected = try await git.detectDefaultBranch(repoPath: repoPath)
+        #expect(!expected.isEmpty)
+        #expect(["main", "master"].contains(expected))
+
+        let iterations = 200
+        let results = await withTaskGroup(of: String.self) { group -> [String] in
+            for _ in 0..<iterations {
+                group.addTask {
+                    (try? await self.git.detectDefaultBranch(repoPath: repoPath)) ?? ""
+                }
+            }
+            var collected: [String] = []
+            for await branch in group {
+                collected.append(branch)
+            }
+            return collected
+        }
+
+        #expect(results.count == iterations)
+        for branch in results {
+            #expect(!branch.isEmpty, "Expected non-empty branch name, got empty string")
+            #expect(branch == expected, "Expected '\(expected)', got '\(branch)'")
+        }
+        cleanup()
+    }
+
     // MARK: - Helpers
 
     func cleanup() {

@@ -38,13 +38,24 @@ public struct GitManager: Sendable {
             let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
             // refs/remotes/origin/main -> main
             if let lastSlash = trimmed.lastIndex(of: "/") {
-                return String(trimmed[trimmed.index(after: lastSlash)...])
+                let branch = String(trimmed[trimmed.index(after: lastSlash)...])
+                if !branch.isEmpty {
+                    return branch
+                }
             }
         }
 
         // Fall back to local HEAD branch
         let result = try await run(arguments: ["symbolic-ref", "--short", "HEAD"], at: repoPath)
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            throw GitError(
+                command: "git symbolic-ref --short HEAD",
+                exitCode: 0,
+                stderr: "git symbolic-ref --short HEAD succeeded but returned empty output (likely a pipe-drain race upstream)"
+            )
+        }
+        return trimmed
     }
 
     /// Returns the URL of the `origin` remote, or `nil` if none is configured.
@@ -69,7 +80,15 @@ public struct GitManager: Sendable {
     /// Returns the HEAD SHA for a branch or ref.
     public func headSHA(repoPath: String, ref: String = "HEAD") async throws -> String {
         let output = try await run(arguments: ["rev-parse", ref], at: repoPath)
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            throw GitError(
+                command: "git rev-parse \(ref)",
+                exitCode: 0,
+                stderr: "git rev-parse \(ref) succeeded but returned empty output (likely a pipe-drain race upstream)"
+            )
+        }
+        return trimmed
     }
 
     /// Returns `true` if there are uncommitted changes (staged or unstaged).
@@ -114,7 +133,15 @@ public struct GitManager: Sendable {
     /// Returns the HEAD SHA of a worktree directory.
     public func headSHA(worktreePath: String) async throws -> String {
         let output = try await run(arguments: ["rev-parse", "HEAD"], at: worktreePath)
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            throw GitError(
+                command: "git rev-parse HEAD",
+                exitCode: 0,
+                stderr: "git rev-parse HEAD succeeded but returned empty output (likely a pipe-drain race upstream)"
+            )
+        }
+        return trimmed
     }
 
     /// Returns true if the given branch / ref name resolves in the repo.
