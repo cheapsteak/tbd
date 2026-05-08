@@ -68,7 +68,13 @@ struct TranscriptItemsView: View {
             // top-level items array is sidechain-free by construction (the
             // parser drops sidechain lines), so a simple reverse scan is
             // correct without further filtering.
-            let latestUsageItemID = items.reversed().first { $0.usage != nil }?.id
+            // Skip hidden tool calls (TodoWrite/TaskUpdate/etc) — those render
+            // as EmptyView, so attaching the badge there would leave it
+            // floating below nothing. The badge follows the latest *visible*
+            // assistant item instead.
+            let latestUsageItemID = items.reversed().first {
+                $0.usage != nil && !isHiddenInTranscript($0)
+            }?.id
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(items) { item in
                     rowFor(item)
