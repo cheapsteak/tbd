@@ -241,8 +241,7 @@ struct PanePlaceholder: View {
                     worktreePath: worktree.path,
                     remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
                     onFilePathClicked: { path in
-                        let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                        layout = layout.splitPane(id: terminalID, direction: .horizontal, newContent: newContent)
+                        layout = routeFileClick(into: layout, terminalID: terminalID, path: path)
                     },
                     onTerminalNotification: { title, body in
                         debugLog("OSC 777: \(title) — \(body)")
