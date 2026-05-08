@@ -13,6 +13,7 @@ struct WriteCard: View {
     @State private var containerExpanded = false
     @State private var fullInputJSON: String? = nil
     @EnvironmentObject var appState: AppState
+    @Environment(\.openFilePreview) private var openFilePreview
 
     private struct Input: Decodable { let file_path: String; let content: String }
 
@@ -74,9 +75,18 @@ struct WriteCard: View {
                         .help(containerExpanded ? "Collapse container" : "Expand container")
                     }
                 }
-                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
-                    TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
-                        Task { await fetchFullInput() }
+                let showTruncation = inputTruncatedTo != nil && fullInputJSON == nil && terminalID != nil
+                let showPreview = parsedInput?.file_path != nil && openFilePreview != nil
+                if showPreview || showTruncation {
+                    HStack(spacing: 12) {
+                        if showPreview, let path = parsedInput?.file_path, let open = openFilePreview {
+                            PreviewFileButton(path: path) { open(path) }
+                        }
+                        if showTruncation, let cap = inputTruncatedTo {
+                            TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
+                                Task { await fetchFullInput() }
+                            }
+                        }
                     }
                 }
             }
