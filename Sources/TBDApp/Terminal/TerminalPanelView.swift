@@ -374,18 +374,28 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
                     let point = tv.convert(location, from: nil)
                     guard tv.bounds.contains(point) else { return false }
 
+                    // OSC 8 hyperlinks are handled by SwiftTerm's mouseUp path
+                    // (requestOpenLink). If we also fired here on mouseDown,
+                    // a single cmd+click would route through both paths and
+                    // open two viewer panes.
+                    if tv.hasOSC8Payload(atWindowLocation: location) {
+                        logger.debug("file-click: skipping mouseDown handling — OSC 8 payload present, deferring to requestOpenLink")
+                        return false
+                    }
+
                     if let filePath = tv.extractFilePath(atWindowLocation: location) {
+                        logger.debug("file-click[mouseDown/path]: \(filePath, privacy: .public)")
                         tv.onFilePathClicked?(filePath)
                         return true
                     }
-                    // Fall back to hyperlink detection (OSC 8 or pattern matching)
+                    // Fall back to hyperlink detection (PR pattern; OSC 8 was
+                    // already short-circuited above).
                     if let urlString = tv.extractHyperlinkURL(atWindowLocation: location) {
-                        // Try to resolve as a file path first (OSC 8 payload may be relative or file:// URL)
                         if let resolved = tv.resolveAsFilePath(urlString) {
+                            logger.debug("file-click[mouseDown/hyperlink-as-file]: \(resolved, privacy: .public)")
                             tv.onFilePathClicked?(resolved)
                             return true
                         }
-                        // Only open as external URL if it has a real scheme
                         if urlString.contains("://"), let url = URL(string: urlString) {
                             NSWorkspace.shared.open(url)
                             return true
@@ -473,6 +483,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
                 // Try to resolve as a file path (absolute, file://, or relative to worktree)
                 if let tv = source as? TBDTerminalView,
                    let resolved = tv.resolveAsFilePath(link) {
+                    logger.debug("file-click[requestOpenLink/file]: \(resolved, privacy: .public) raw=\(link, privacy: .public)")
                     tv.onFilePathClicked?(resolved)
                     return
                 }

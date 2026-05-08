@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.tbd.app", category: "ViewerRouting")
 
 /// Decides where a terminal-link click should land.
 ///
@@ -20,9 +23,11 @@ func routeFileClick(into layout: LayoutNode, terminalID: UUID, path: String) -> 
            with: .codeViewer(id: viewerID, path: path)
        )
     {
+        logger.debug("routeFileClick[swap]: viewerID=\(viewerID, privacy: .public) path=\(path, privacy: .public)")
         return updated
     }
 
+    logger.debug("routeFileClick[split]: terminalID=\(terminalID, privacy: .public) path=\(path, privacy: .public)")
     return layout.splitPane(
         id: terminalID,
         direction: .horizontal,
