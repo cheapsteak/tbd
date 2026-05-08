@@ -112,7 +112,7 @@ struct ChatBubbleView: View {
 /// from the prior `AttributedString(markdown:)` rendering. Block
 /// elements (tables, lists, blockquotes, headings) light up as a
 /// byproduct.
-private extension MarkdownUI.Theme {
+extension MarkdownUI.Theme {
     @MainActor static let chatBubble = MarkdownUI.Theme.basic
         .text {
             ForegroundColor(.primary)
@@ -217,7 +217,7 @@ private extension MarkdownUI.Theme {
         }
 }
 
-private extension Color {
+extension Color {
     /// Inline code foreground — desaturated cool/blue. Matches the
     /// Claude Code terminal style: rgb(172,179,209) on dark, mirrored
     /// to a dark slate blue on light. Distinguishes inline code from
