@@ -53,9 +53,10 @@ struct HooksStatusCommand: AsyncParsableCommand {
             print("  (not yet written — start the daemon to generate it)")
         }
 
-        // 2. Legacy block — query the daemon. If the daemon isn't running we
-        //    fall back to a local-only scan so the command still gives useful
-        //    information.
+        // 2. Legacy block — query the daemon. The scanner lives in TBDDaemon
+        //    and isn't reachable from this module, so when the daemon is down
+        //    we just print a hint to start it rather than re-implementing the
+        //    scan locally.
         print("")
         print("Legacy entries in user settings.json files:")
         let client = SocketClient()
