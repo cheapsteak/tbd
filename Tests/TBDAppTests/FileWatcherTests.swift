@@ -4,7 +4,7 @@ import Testing
 
 @testable import TBDApp
 
-@Suite("FileWatcher")
+@Suite("FileWatcher", .serialized)
 struct FileWatcherTests {
 
     /// Construct many watchers without ever calling `changes(for:)`.
