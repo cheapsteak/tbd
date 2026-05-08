@@ -17,7 +17,7 @@ struct ChatBubbleView: View {
     private var text: String {
         switch item {
         case .userPrompt(_, let t, _): return t
-        case .assistantText(_, let t, _): return t
+        case .assistantText(_, let t, _, _): return t
         default: return ""
         }
     }

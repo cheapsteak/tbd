@@ -15,7 +15,7 @@ func isHiddenInTranscript(_ item: TranscriptItem) -> Bool {
     switch item {
     case .thinking:
         return true
-    case .toolCall(_, let name, _, _, _, _, _):
+    case .toolCall(_, let name, _, _, _, _, _, _):
         return hiddenToolNames.contains(name)
     default:
         return false
@@ -62,9 +62,30 @@ struct TranscriptItemsView: View {
             // defaultScrollAnchor(.bottom) (applied by the parent pane). Lazy
             // realization for perf; the parent's anchor handles initial
             // bottom-positioning and follow-bottom-on-growth declaratively.
+            //
+            // Walk items in reverse to find the most recent one carrying a
+            // TokenUsage — that's where the ContextUsageBadge attaches. The
+            // top-level items array is sidechain-free by construction (the
+            // parser drops sidechain lines), so a simple reverse scan is
+            // correct without further filtering.
+            // Skip hidden tool calls (TodoWrite/TaskUpdate/etc) — those render
+            // as EmptyView, so attaching the badge there would leave it
+            // floating below nothing. The badge follows the latest *visible*
+            // assistant item instead. Trade-off: when the most recent turn is
+            // entirely hidden tools, the badge shows the prior visible turn's
+            // token count, which lags reality by one turn until the next
+            // visible item lands.
+            let latestUsageItemID = items.reversed().first {
+                $0.usage != nil && !isHiddenInTranscript($0)
+            }?.id
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(items) { item in
                     rowFor(item)
+                    if item.id == latestUsageItemID, let usage = item.usage {
+                        ContextUsageBadge(total: usage.contextTotal)
+                            .padding(.leading, 12)
+                            .padding(.top, 2)
+                    }
                 }
             }
             .padding(.vertical, 8)
@@ -104,7 +125,7 @@ struct TranscriptItemsView: View {
                 // case stays in the wire format for Codable safety, but no parser
                 // path emits it today.
                 EmptyView()
-            case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let subagent, let ts):
+            case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let subagent, let ts, _):
                 if hiddenToolNames.contains(name) {
                     EmptyView()
                 } else {

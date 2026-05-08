@@ -28,7 +28,7 @@ struct TranscriptParserTests {
     @Test func parses_assistant_text() throws {
         let items = TranscriptParser.parse(filePath: fixturePath)
         let assistantTexts = items.compactMap { item -> String? in
-            if case .assistantText(_, let t, _) = item { return t }
+            if case .assistantText(_, let t, _, _) = item { return t }
             return nil
         }
         #expect(!assistantTexts.isEmpty)
@@ -58,7 +58,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: tmp)
         #expect(items.count == 1, "tool_result should fold into the tool_use, not be its own item")
-        if case .toolCall(_, _, _, _, let r, _, _) = items[0] {
+        if case .toolCall(_, _, _, _, let r, _, _, _) = items[0] {
             #expect(r?.text == "file contents")
             #expect(r?.isError == false)
         } else {
@@ -73,7 +73,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: tmp)
         #expect(items.count == 1)
-        if case .toolCall(_, _, _, _, let r, _, _) = items[0] {
+        if case .toolCall(_, _, _, _, let r, _, _, _) = items[0] {
             #expect(r == nil, "in-flight tool call should have nil result")
         } else {
             Issue.record("expected .toolCall")
@@ -120,7 +120,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: parentPath)
         #expect(items.count == 1)
-        guard case .toolCall(_, let name, _, _, _, let subagent, _) = items[0] else {
+        guard case .toolCall(_, let name, _, _, _, let subagent, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(name == "Task")
@@ -150,7 +150,7 @@ struct TranscriptParserTests {
             .write(toFile: subDir.appendingPathComponent("agent-AM.meta.json").path, atomically: true, encoding: .utf8)
 
         let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, _, let subagent, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, _, let subagent, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(subagent?.agentType == "feature-dev:code-reviewer")
@@ -170,7 +170,7 @@ struct TranscriptParserTests {
         try parent.write(toFile: parentPath, atomically: true, encoding: .utf8)
 
         let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, _, let subagent, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, _, let subagent, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(subagent == nil, "missing subagent file → nil subagent, parent still renders")
@@ -204,9 +204,9 @@ struct TranscriptParserTests {
         ].joined(separator: "\n").write(toFile: subDir.appendingPathComponent("agent-AINNER.jsonl").path, atomically: true, encoding: .utf8)
 
         let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, _, let outer, _) = items[0],
+        guard case .toolCall(_, _, _, _, _, let outer, _, _) = items[0],
               let outerItems = outer?.items, outerItems.count >= 2,
-              case .toolCall(_, _, _, _, _, let inner, _) = outerItems[1] else {
+              case .toolCall(_, _, _, _, _, let inner, _, _) = outerItems[1] else {
             Issue.record("recursive structure mismatched"); return
         }
         #expect(inner?.agentID == "AINNER")
@@ -223,7 +223,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, _, let r, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, let r, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(r?.text.count == 2000)
@@ -241,7 +241,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, _, let r, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, let r, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(r?.text.split(separator: "\n").count == 20)
@@ -257,7 +257,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, _, let r, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, let r, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(r?.text == "short")
@@ -349,7 +349,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _) = items[0] else {
+        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(inputTruncatedTo != nil, "large input field should set inputTruncatedTo")
@@ -366,7 +366,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, let inputTruncatedTo, _, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, let inputTruncatedTo, _, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(inputTruncatedTo == nil, "small inputs should not set inputTruncatedTo")
@@ -379,7 +379,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _) = items[0] else {
+        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(inputTruncatedTo != nil, "nested oversized string should trigger truncation")
@@ -402,6 +402,81 @@ struct TranscriptParserTests {
         let data = hit.data(using: .utf8) ?? Data()
         let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         #expect(parsed != nil, "result should be valid JSON")
+    }
+
+    @Test func extracts_usage_from_assistant_line() throws {
+        let line = """
+        {"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":5,"cache_creation_input_tokens":1000,"cache_read_input_tokens":40000,"output_tokens":7}}}
+        """
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        let usage = items[0].usage
+        #expect(usage?.inputTokens == 5)
+        #expect(usage?.cacheCreationTokens == 1000)
+        #expect(usage?.cacheReadTokens == 40000)
+        #expect(usage?.contextTotal == 41005)
+    }
+
+    @Test func usage_stamped_on_every_item_from_same_assistant_line() throws {
+        let line = """
+        {"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"calling a tool"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/x"}}],"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":4}}}
+        """
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 2)
+        #expect(items[0].usage?.contextTotal == 6)
+        #expect(items[1].usage?.contextTotal == 6)
+    }
+
+    @Test func usage_nil_when_absent() throws {
+        let line = #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        #expect(items[0].usage == nil)
+    }
+
+    @Test func usage_extracted_when_only_input_tokens_present() throws {
+        // Users without prompt caching emit `usage` blocks that omit the
+        // cache fields. Those sessions must still surface a token count.
+        let line = #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":42,"output_tokens":7}}}"#
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        let usage = items[0].usage
+        #expect(usage?.inputTokens == 42)
+        #expect(usage?.cacheCreationTokens == 0)
+        #expect(usage?.cacheReadTokens == 0)
+        #expect(usage?.contextTotal == 42)
+    }
+
+    @Test func sidechain_lines_drop_at_top_level_regression_guard() throws {
+        // Locks in the existing TranscriptParser behavior that top-level
+        // sidechain lines are dropped — the latest-usage badge logic relies
+        // on the top-level items array being sidechain-free by construction.
+        let lines = [
+            #"{"type":"assistant","uuid":"a1","isSidechain":true,"timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"sidechain"}],"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}"#,
+            #"{"type":"assistant","uuid":"a2","timestamp":"2026-05-05T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"main"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}"#,
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1, "sidechain line must not produce a top-level item")
+        if case .assistantText(_, let text, _, _) = items[0] {
+            #expect(text == "main")
+        } else {
+            Issue.record("expected only the main assistant text item")
+        }
     }
 
     // MARK: - helpers
