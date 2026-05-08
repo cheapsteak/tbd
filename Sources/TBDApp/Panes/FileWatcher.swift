@@ -157,12 +157,11 @@ private final class StreamState: @unchecked Sendable {
             close(fd)
         }
 
-        // Install the new source under the lock, cancelling any previous
-        // source in case startWatching is called from a reopen path.
+        // Install the new source under the lock, returning either the
+        // previous epoch's source (so we can cancel it below) or — if
+        // terminate() already ran — the freshly-built `src` itself, so
+        // the same teardown step closes its FD.
         let previousSource: DispatchSourceFileSystemObject? = inner.withLock { i -> DispatchSourceFileSystemObject? in
-            // Don't install if we've already terminated — race with
-            // onTermination firing while we were mid-open. Cancel the
-            // freshly-built source ourselves so its FD doesn't leak.
             if i.terminated {
                 return src
             }
@@ -171,14 +170,17 @@ private final class StreamState: @unchecked Sendable {
             return prev
         }
 
-        if inner.withLock({ $0.terminated }) {
-            // We raced with terminate(); the source we just stashed-then-
-            // returned is the one we need to cancel ourselves. (See above.)
-            previousSource?.cancel()
-            return true
-        }
-
-        // Cancel the previous epoch (if any) and start the new one.
+        // Always cancel any previous epoch's source AND resume `src`. The
+        // resume is the load-bearing detail: per GCD docs, "if a source
+        // was suspended at the time `dispatch_source_cancel()` was called,
+        // the cancellation handler will be submitted after the source is
+        // resumed." Without resume() on every path, a path where another
+        // thread cancels `src` while it's still suspended (race with
+        // terminate(), or the `terminated`-at-install case above) would
+        // never run the cancel handler — leaking the FD.
+        //
+        // Resuming an already-cancelled source is harmless: GCD dispatches
+        // the cancel handler and delivers no events.
         previousSource?.cancel()
         src.resume()
         return true
