@@ -504,10 +504,13 @@ enum AskUserQuestionParser {
             return i
         }
         // 2. Letter-shorthand: short answer (≤4 chars) and a label starts with
-        //    "<answer>. " or "<answer>:".
+        //    "<answer>. " or "<answer>:". Case-insensitive so a lowercase
+        //    "c" still matches "C. Loop until satisfied or budget".
         if trimmed.count <= 4 {
+            let lowered = trimmed.lowercased()
             if let i = options.firstIndex(where: { opt in
-                opt.label.hasPrefix("\(trimmed). ") || opt.label.hasPrefix("\(trimmed):")
+                let lowerLabel = opt.label.lowercased()
+                return lowerLabel.hasPrefix("\(lowered). ") || lowerLabel.hasPrefix("\(lowered):")
             }) {
                 return i
             }

@@ -46,6 +46,12 @@ struct AskUserQuestionMatchTests {
         #expect(m.freeformAnswer == nil)
     }
 
+    @Test func letter_shorthand_matches_case_insensitive() {
+        let m = AskUserQuestionParser.match(answer: "c", options: options, multiSelect: false)
+        #expect(m.selectedIndices == [2])
+        #expect(m.freeformAnswer == nil)
+    }
+
     @Test func full_label_matches() {
         let answer = "C. Loop until satisfied or budget"
         let m = AskUserQuestionParser.match(answer: answer, options: options, multiSelect: false)
