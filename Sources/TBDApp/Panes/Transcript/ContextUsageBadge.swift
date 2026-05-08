@@ -17,6 +17,7 @@ struct ContextUsageBadge: View {
     var body: some View {
         Text(Self.formatted(total))
             .font(.caption2)
+            .fontWeight(.regular)
             .foregroundStyle(Self.color(for: total))
     }
 
