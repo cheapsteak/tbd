@@ -16,9 +16,10 @@ struct ContextUsageBadge: View {
     let total: Int
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             Image(systemName: "circle.fill")
                 .imageScale(.small)
+                .frame(width: 14)
                 .foregroundStyle(Self.color(for: total))
             Text(Self.formatted(total))
                 .foregroundStyle(.secondary)
