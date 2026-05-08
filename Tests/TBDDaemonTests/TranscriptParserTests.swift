@@ -404,6 +404,65 @@ struct TranscriptParserTests {
         #expect(parsed != nil, "result should be valid JSON")
     }
 
+    @Test func extracts_usage_from_assistant_line() throws {
+        let line = """
+        {"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":5,"cache_creation_input_tokens":1000,"cache_read_input_tokens":40000,"output_tokens":7}}}
+        """
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        let usage = items[0].usage
+        #expect(usage?.inputTokens == 5)
+        #expect(usage?.cacheCreationTokens == 1000)
+        #expect(usage?.cacheReadTokens == 40000)
+        #expect(usage?.contextTotal == 41005)
+    }
+
+    @Test func usage_stamped_on_every_item_from_same_assistant_line() throws {
+        let line = """
+        {"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"calling a tool"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/x"}}],"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":4}}}
+        """
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 2)
+        #expect(items[0].usage?.contextTotal == 6)
+        #expect(items[1].usage?.contextTotal == 6)
+    }
+
+    @Test func usage_nil_when_absent() throws {
+        let line = #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"#
+        let tmp = try writeTempJSONL(line)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1)
+        #expect(items[0].usage == nil)
+    }
+
+    @Test func sidechain_lines_drop_at_top_level_regression_guard() throws {
+        // Locks in the existing TranscriptParser behavior that top-level
+        // sidechain lines are dropped — the latest-usage badge logic relies
+        // on the top-level items array being sidechain-free by construction.
+        let lines = [
+            #"{"type":"assistant","uuid":"a1","isSidechain":true,"timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"sidechain"}],"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}"#,
+            #"{"type":"assistant","uuid":"a2","timestamp":"2026-05-05T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"main"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}"#,
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 1, "sidechain line must not produce a top-level item")
+        if case .assistantText(_, let text, _, _) = items[0] {
+            #expect(text == "main")
+        } else {
+            Issue.record("expected only the main assistant text item")
+        }
+    }
+
     // MARK: - helpers
 
     private func writeTempJSONL(_ contents: String) throws -> String {

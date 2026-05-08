@@ -169,11 +169,12 @@ enum TranscriptParser {
 
             if typeStr == "assistant" {
                 guard let message = json["message"] as? [String: Any] else { continue }
+                let usage = extractUsage(from: message)
 
                 // String-content fallback (matches existing scanner behavior).
                 if let s = message["content"] as? String {
                     if !s.isEmpty {
-                        items.append(.assistantText(id: "\(lineUUID)#0", text: s, timestamp: timestamp))
+                        items.append(.assistantText(id: "\(lineUUID)#0", text: s, timestamp: timestamp, usage: usage))
                     }
                     continue
                 }
@@ -189,7 +190,7 @@ enum TranscriptParser {
                     case "text":
                         let text = (block["text"] as? String) ?? ""
                         if !text.isEmpty {
-                            items.append(.assistantText(id: blockID, text: text, timestamp: timestamp))
+                            items.append(.assistantText(id: blockID, text: text, timestamp: timestamp, usage: usage))
                         }
                     case "tool_use":
                         let toolID = (block["id"] as? String) ?? blockID
@@ -222,7 +223,8 @@ enum TranscriptParser {
                         items.append(.toolCall(
                             id: toolID, name: name, inputJSON: inputJSON,
                             inputTruncatedTo: inputTruncatedTo,
-                            result: result, subagent: subagent, timestamp: timestamp
+                            result: result, subagent: subagent, timestamp: timestamp,
+                            usage: usage
                         ))
                     default:
                         continue
@@ -232,6 +234,23 @@ enum TranscriptParser {
         }
 
         return items
+    }
+
+    /// Extract a `TokenUsage` from `message.usage` if all three input-token
+    /// fields are present. Output tokens, cache breakdowns, and other fields
+    /// are ignored — we only care about the prompt-size signal.
+    private static func extractUsage(from message: [String: Any]) -> TokenUsage? {
+        guard let usage = message["usage"] as? [String: Any],
+              let input = usage["input_tokens"] as? Int,
+              let cacheCreation = usage["cache_creation_input_tokens"] as? Int,
+              let cacheRead = usage["cache_read_input_tokens"] as? Int else {
+            return nil
+        }
+        return TokenUsage(
+            inputTokens: input,
+            cacheCreationTokens: cacheCreation,
+            cacheReadTokens: cacheRead
+        )
     }
 
     private static func resolveSubagent(
