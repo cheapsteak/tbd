@@ -442,7 +442,13 @@ final class AppState: ObservableObject {
             return
         }
         terminals[delta.worktreeID]?[idx].claudeSessionID = delta.sessionID
-        terminals[delta.worktreeID]?[idx].transcriptPath = delta.transcriptPath
+        // Mirror TerminalStore.updateSession's preserve-on-nil: a delta with
+        // nil transcriptPath means the SessionStart payload didn't carry a
+        // path even though sessionID rolled. Keep the previous value so the
+        // in-memory model doesn't drift from the DB.
+        if let tp = delta.transcriptPath {
+            terminals[delta.worktreeID]?[idx].transcriptPath = tp
+        }
     }
 
     /// Update the in-place usage entry for a single profile. If no match,
