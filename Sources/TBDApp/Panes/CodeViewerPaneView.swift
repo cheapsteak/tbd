@@ -313,25 +313,41 @@ private func isTextFile(_ path: String) -> Bool {
 
 /// Routes to the appropriate preview based on file type:
 /// images → native NSImage, text → syntax-highlighted code, binary → "Open in Finder" fallback.
+///
+/// File-watching plumbing intentionally avoids `@StateObject` /
+/// `ObservableObject` / `@Published` — see the doc-comment on
+/// `FileWatcher` for the SIGTRAP that taught us why. The watcher lives in
+/// `@State` (which stores reference types stably across re-renders) and
+/// pokes the view via a callback that bumps `revision`, an Int observed
+/// by SwiftUI as ordinary `@State`.
 private struct FilePreviewView: View {
     let filePath: String
     let showSourceCode: Bool
 
-    @StateObject private var watcher = FileWatcher()
+    @State private var watcher = FileWatcher()
+    @State private var revision: Int = 0
 
     var body: some View {
         Group {
             if !showSourceCode && isRenderableFile(filePath) {
-                RenderedContentView(filePath: filePath, revision: watcher.revision)
+                RenderedContentView(filePath: filePath, revision: revision)
             } else if isImageFile(filePath) {
-                ImagePreviewView(filePath: filePath, revision: watcher.revision)
+                ImagePreviewView(filePath: filePath, revision: revision)
             } else if isTextFile(filePath) {
-                HighlightedCodeView(filePath: filePath, revision: watcher.revision)
+                HighlightedCodeView(filePath: filePath, revision: revision)
             } else {
                 BinaryFallbackView(filePath: filePath)
             }
         }
         .task(id: filePath) {
+            // Wire the callback fresh each time filePath changes. The
+            // callback bumps revision on the main actor; SwiftUI re-renders
+            // the leaf view, whose .task(id: "<path>#<rev>") reloads.
+            watcher.onChange = {
+                Task { @MainActor in
+                    revision &+= 1
+                }
+            }
             watcher.observe(filePath)
         }
     }

@@ -55,11 +55,16 @@ struct FileWatcherTests {
 
     @MainActor
     @Test func observeIsIdempotentOnSamePath() {
+        // FileWatcher no longer exposes `revision` directly (see doc
+        // comment on FileWatcher for why). The observable signal we have
+        // here is "did onChange fire?", which it should NOT for a no-op
+        // re-observe of the same (non-existent) path.
+        var fireCount = 0
         let w = FileWatcher()
+        w.onChange = { fireCount += 1 }
         w.observe("/some/path")
-        let r1 = w.revision
         w.observe("/some/path") // same path — should be a no-op
-        #expect(w.revision == r1)
+        #expect(fireCount == 0)
     }
 
     @MainActor
