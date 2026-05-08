@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TBDShared
 
@@ -282,8 +283,36 @@ private struct TabBarItem: View {
         entry.profile.name
     }
 
+    /// Absolute path on disk for tab content that has a backing file
+    /// (codeViewer points at the file directly; liveTranscript points at
+    /// the resolved Claude session JSONL via the underlying terminal).
+    private var copyablePath: String? {
+        switch tab.content {
+        case .codeViewer(_, let path):
+            return path.isEmpty ? nil : path
+        case .liveTranscript(_, let terminalID):
+            let allTerminals = appState.terminals.values.flatMap { $0 }
+            return allTerminals.first { $0.id == terminalID }?.transcriptPath
+        default:
+            return nil
+        }
+    }
+
+    private var copyPathLabel: String {
+        if case .liveTranscript = tab.content { return "Copy Conversation Path" }
+        return "Copy Path"
+    }
+
     @ViewBuilder
     private var contextMenuContent: some View {
+        if let path = copyablePath {
+            Button(copyPathLabel) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(path, forType: .string)
+            }
+            Divider()
+        }
+
         if isClaudeTerminal {
             Button(formatProfileHeader(terminal?.profileID)) {}
                 .disabled(true)
