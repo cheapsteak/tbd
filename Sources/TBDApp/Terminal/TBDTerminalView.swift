@@ -215,12 +215,16 @@ class TBDTerminalView: TerminalView {
     /// payload. SwiftTerm's `mouseUp` will dispatch these via
     /// `requestOpenLink`, so our local mouseDown monitor must not also handle
     /// them — otherwise a single cmd+click opens two viewer panes.
+    ///
+    /// `CharData.getPayload()` is `Any?` — SwiftTerm also uses it for sixel
+    /// and iTerm2 inline image data. Cast to `String` so non-OSC-8 payloads
+    /// (graphics) don't short-circuit our path-detection path.
     func hasOSC8Payload(atWindowLocation windowPoint: CGPoint) -> Bool {
         guard let pos = gridPosition(atWindowLocation: windowPoint) else { return false }
         let terminal = getTerminal()
         guard let line = terminal.getLine(row: pos.row) else { return false }
         guard pos.col < line.count else { return false }
-        return line[pos.col].getPayload() != nil
+        return line[pos.col].getPayload() as? String != nil
     }
 
     /// Extracts a file path from the terminal buffer at the given window-coordinate point.
@@ -319,25 +323,16 @@ class TBDTerminalView: TerminalView {
     }
 
     /// Extracts a clickable URL from the terminal buffer at the given window-coordinate point.
-    /// Checks for OSC 8 hyperlink payloads first, then falls back to pattern matching
-    /// for common link patterns like "PR #123".
+    /// OSC 8 hyperlinks are dispatched by SwiftTerm's `mouseUp` /
+    /// `requestOpenLink` path (see `hasOSC8Payload`); this function handles
+    /// the residual non-OSC-8 patterns we recognize, currently just
+    /// `PR #123`.
     func extractHyperlinkURL(atWindowLocation windowPoint: CGPoint) -> String? {
         guard let pos = gridPosition(atWindowLocation: windowPoint) else { return nil }
-        let col = pos.col
         let row = pos.row
         let terminal = getTerminal()
 
         guard let line = terminal.getLine(row: row) else { return nil }
-        guard col < line.count else { return nil }
-
-        // Check for OSC 8 payload first
-        if let payload = line[col].getPayload() as? String {
-            let parts = payload.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
-            if parts.count > 1 {
-                let url = String(parts[1])
-                if !url.isEmpty { return url }
-            }
-        }
 
         // Build visible text from line (translateToString may return empty for status bar lines)
         var visibleText = ""
