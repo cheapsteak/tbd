@@ -39,15 +39,8 @@ struct SessionEventCommand: AsyncParsableCommand {
 
         // 2. Read stdin (Claude pipes the hook payload here). Bound the
         //    read at 1 MiB to avoid a runaway hook flooding the CLI process.
-        let stdin = FileHandle.standardInput
-        let maxBytes = 1 << 20
-        var data = Data()
-        while data.count < maxBytes {
-            let chunk = stdin.availableData
-            if chunk.isEmpty { break }
-            data.append(chunk)
-        }
-        guard !data.isEmpty,
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        guard !data.isEmpty, data.count <= 1 << 20,
               let payload = try? JSONDecoder().decode(HookPayload.self, from: data),
               let sessionID = payload.session_id, !sessionID.isEmpty else {
             return
