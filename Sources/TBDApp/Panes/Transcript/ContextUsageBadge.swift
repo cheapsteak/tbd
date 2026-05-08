@@ -18,12 +18,14 @@ struct ContextUsageBadge: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: "circle.fill")
+                .imageScale(.small)
                 .foregroundStyle(Self.color(for: total))
             Text(Self.formatted(total))
                 .foregroundStyle(.secondary)
         }
-        .font(.caption2)
+        .font(.system(size: 9))
         .fontWeight(.regular)
+        .opacity(0.7)
     }
 
     /// Whole-thousands abbreviation, e.g. 124_300 -> "124k tokens".
