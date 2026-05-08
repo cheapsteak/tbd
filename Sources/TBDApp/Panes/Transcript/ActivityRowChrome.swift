@@ -86,3 +86,23 @@ struct TruncationFooter: View {
         .padding(.top, 4)
     }
 }
+
+/// Button that opens a file path in a new code-viewer split pane.
+struct PreviewFileButton: View {
+    let path: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: "doc.text.magnifyingglass")
+                Text("Preview file").foregroundStyle(.tint)
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 4)
+        .help("Open \(path) in viewer")
+    }
+}

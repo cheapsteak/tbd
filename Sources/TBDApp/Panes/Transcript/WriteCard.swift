@@ -13,6 +13,7 @@ struct WriteCard: View {
     @State private var containerExpanded = false
     @State private var fullInputJSON: String? = nil
     @EnvironmentObject var appState: AppState
+    @Environment(\.openFilePreview) private var openFilePreview
 
     private struct Input: Decodable { let file_path: String; let content: String }
 
@@ -21,6 +22,11 @@ struct WriteCard: View {
     private func decodeInput() -> Input? {
         guard let data = (fullInputJSON ?? inputJSON).data(using: .utf8) else { return nil }
         return try? Self.decoder.decode(Input.self, from: data)
+    }
+
+    private var resolvedFilePath: String? {
+        if let p = decodeInput()?.file_path { return p }
+        return ToolInputFilePath.extract(from: fullInputJSON ?? inputJSON)
     }
 
     private func lineCount(for parsed: Input?) -> Int {
@@ -74,9 +80,19 @@ struct WriteCard: View {
                         .help(containerExpanded ? "Collapse container" : "Expand container")
                     }
                 }
-                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
-                    TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
-                        Task { await fetchFullInput() }
+                let showTruncation = inputTruncatedTo != nil && fullInputJSON == nil && terminalID != nil
+                let previewPath = resolvedFilePath
+                let showPreview = previewPath != nil && openFilePreview != nil
+                if showPreview || showTruncation {
+                    HStack(spacing: 12) {
+                        if showPreview, let path = previewPath, let open = openFilePreview {
+                            PreviewFileButton(path: path) { open(path) }
+                        }
+                        if showTruncation, let cap = inputTruncatedTo {
+                            TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
+                                Task { await fetchFullInput() }
+                            }
+                        }
                     }
                 }
             }

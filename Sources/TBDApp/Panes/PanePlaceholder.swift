@@ -217,6 +217,10 @@ struct PanePlaceholder: View {
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):
             LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
+                .environment(\.openFilePreview, { path in
+                    let newContent = PaneContent.codeViewer(id: UUID(), path: path)
+                    layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                })
         }
     }
 

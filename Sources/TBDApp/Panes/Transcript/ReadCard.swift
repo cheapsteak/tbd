@@ -13,6 +13,7 @@ struct ReadCard: View {
     @State private var expanded = false
     @State private var fullResultText: String? = nil
     @EnvironmentObject var appState: AppState
+    @Environment(\.openFilePreview) private var openFilePreview
 
     private struct Input: Decodable {
         let file_path: String
@@ -62,9 +63,18 @@ struct ReadCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                if let cap = r.truncatedTo, fullResultText == nil, terminalID != nil {
-                    TruncationFooter(truncatedTo: cap, currentLength: r.text.count) {
-                        Task { await fetchFull() }
+                let showTruncation = r.truncatedTo != nil && fullResultText == nil && terminalID != nil
+                let showPreview = parsedInput?.file_path != nil && openFilePreview != nil
+                if showPreview || showTruncation {
+                    HStack(spacing: 12) {
+                        if showPreview, let path = parsedInput?.file_path, let open = openFilePreview {
+                            PreviewFileButton(path: path) { open(path) }
+                        }
+                        if showTruncation, let cap = r.truncatedTo {
+                            TruncationFooter(truncatedTo: cap, currentLength: r.text.count) {
+                                Task { await fetchFull() }
+                            }
+                        }
                     }
                 }
             } else {

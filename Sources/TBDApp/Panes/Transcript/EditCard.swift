@@ -15,6 +15,7 @@ struct EditCard: View {
     @State private var expanded = true
     @State private var fullInputJSON: String? = nil
     @EnvironmentObject var appState: AppState
+    @Environment(\.openFilePreview) private var openFilePreview
 
     private struct EditHunk: Decodable, Equatable {
         let old_string: String
@@ -35,6 +36,11 @@ struct EditCard: View {
     private func decodeInput() -> EditInput? {
         guard let data = (fullInputJSON ?? inputJSON).data(using: .utf8) else { return nil }
         return try? Self.decoder.decode(EditInput.self, from: data)
+    }
+
+    private var resolvedFilePath: String? {
+        if let p = decodeInput()?.file_path { return p }
+        return ToolInputFilePath.extract(from: fullInputJSON ?? inputJSON)
     }
 
     var body: some View {
@@ -96,9 +102,19 @@ struct EditCard: View {
                         if idx < hunks.count - 1 { Divider() }
                     }
                 }
-                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
-                    TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
-                        Task { await fetchFullInput() }
+                let showTruncation = inputTruncatedTo != nil && fullInputJSON == nil && terminalID != nil
+                let previewPath = resolvedFilePath
+                let showPreview = previewPath != nil && openFilePreview != nil
+                if showPreview || showTruncation {
+                    HStack(spacing: 12) {
+                        if showPreview, let path = previewPath, let open = openFilePreview {
+                            PreviewFileButton(path: path) { open(path) }
+                        }
+                        if showTruncation, let cap = inputTruncatedTo {
+                            TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
+                                Task { await fetchFullInput() }
+                            }
+                        }
                     }
                 }
             }
