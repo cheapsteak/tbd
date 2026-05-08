@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Testing
 
 @testable import TBDApp
@@ -59,12 +60,16 @@ struct FileWatcherTests {
         // comment on FileWatcher for why). The observable signal we have
         // here is "did onChange fire?", which it should NOT for a no-op
         // re-observe of the same (non-existent) path.
-        var fireCount = 0
+        //
+        // `onChange` is `@Sendable`, so the counter has to be safe to
+        // mutate from any isolation. A lock-backed counter keeps the
+        // assertion semantics while satisfying Swift 6 strict concurrency.
+        let fireCount = OSAllocatedUnfairLock<Int>(initialState: 0)
         let w = FileWatcher()
-        w.onChange = { fireCount += 1 }
+        w.onChange = { fireCount.withLock { $0 += 1 } }
         w.observe("/some/path")
         w.observe("/some/path") // same path — should be a no-op
-        #expect(fireCount == 0)
+        #expect(fireCount.withLock { $0 } == 0)
     }
 
     @MainActor
