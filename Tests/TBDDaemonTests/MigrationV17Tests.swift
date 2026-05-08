@@ -52,7 +52,12 @@ import GRDB
         #expect(fetched?.transcriptPath == "/Users/me/.claude/projects/-x/new.jsonl")
     }
 
-    @Test func updateSessionWithNilTranscriptPathClearsIt() async throws {
+    @Test func updateSessionWithNilTranscriptPathPreservesPrior() async throws {
+        // updateSession leaves transcriptPath untouched when called with nil
+        // so a SessionStart payload that omits/rejects `transcript_path`
+        // doesn't blow away a previously-captured good path. See
+        // TerminalSessionEventHandlerTests.nilPathPreservesExisting for the
+        // end-to-end RPC coverage; this guards the store-layer behavior.
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
             path: "/tmp/v17c-repo", displayName: "V17c", defaultBranch: "main"
@@ -77,6 +82,6 @@ import GRDB
         )
         let fetched = try await db.terminals.get(id: terminal.id)
         #expect(fetched?.claudeSessionID == "s2")
-        #expect(fetched?.transcriptPath == nil)
+        #expect(fetched?.transcriptPath == "/tmp/path1.jsonl")
     }
 }
