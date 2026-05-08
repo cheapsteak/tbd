@@ -39,6 +39,10 @@ final class LegacyHooksCoordinator {
     /// same app session, even if a daemon reconnect happens.
     func checkOnLaunch() async {
         guard !hasCheckedThisSession else { return }
+        // Latch immediately so a second concurrent caller can't slip past
+        // the guard during the daemonClient await below. Mirrors CLI
+        // installer's pattern: only the first invocation per session runs.
+        hasCheckedThisSession = true
         let status: LegacyHooksStatusResult
         do {
             status = try await daemonClient.legacyHooksStatus()
@@ -46,7 +50,6 @@ final class LegacyHooksCoordinator {
             logger.warning("daemon.legacyHooksStatus failed: \(error.localizedDescription, privacy: .public)")
             return
         }
-        hasCheckedThisSession = true
 
         if status.globalEntries.isEmpty {
             // Re-arm dismissal so a later reinstall surfaces the prompt
