@@ -15,7 +15,7 @@ struct StatusBarView: View {
     private var footerLabel: (text: String, tooltip: String?) {
         let version = "v\(TBDConstants.version)"
         guard let execPath = Bundle.main.executablePath,
-              let buildRange = execPath.range(of: "/.build/") else {
+              let buildRange = execPath.range(of: "/.build/", options: .backwards) else {
             return (version, nil)
         }
         let worktreePath = String(execPath[..<buildRange.lowerBound])
