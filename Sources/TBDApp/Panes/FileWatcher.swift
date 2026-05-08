@@ -108,40 +108,70 @@ final class FileWatcher: @unchecked Sendable {
     }
 
     func observe(_ path: String) {
-        state.withLock { s in
-            guard path != s.watchedPath else { return }
-            stopLocked(&s)
-            startWatchingLocked(&s, path: path)
+        // Stage 1 (under lock, fast): record the new desired path and tear down
+        // any existing source. Setting `watchedPath = path` *before* the slow
+        // `open()`/source setup is what lets stage 3 detect concurrent
+        // `stop()` or `observe(otherPath)` races — those callers will overwrite
+        // `watchedPath` and our staged source will be discarded.
+        let proceed: Bool = state.withLock { s in
+            if s.watchedPath == path { return false }
+            s.source?.cancel()
+            s.source = nil
+            s.debounceTask?.cancel(); s.debounceTask = nil
+            s.reopenTask?.cancel(); s.reopenTask = nil
+            s.watchedPath = path     // optimistic intent
+            return true
+        }
+        guard proceed else { return }
+
+        // Stage 2 (outside lock, potentially slow): `open()` and dispatch
+        // source configuration. On NFS / encrypted volumes `open()` can stall
+        // for meaningful time; doing it under the lock would serialize every
+        // other `observe`/`stop` call until it returns. We can safely run this
+        // unguarded because nothing else touches the local `src` we build.
+        guard let src = makeSource(path: path) else {
+            // Open failed. `watchedPath` stays set so a later observe(samePath)
+            // is still a no-op; the leaf views' one-shot loaders surface the
+            // read error.
+            logger.debug("FileWatcher: open(\(path, privacy: .public)) failed errno=\(errno)")
+            return
+        }
+
+        // Stage 3 (under lock, fast): atomically install or abandon. If
+        // `watchedPath` is no longer `path`, a concurrent `stop()` or
+        // `observe(otherPath)` won the race — discard our source.
+        let installed: Bool = state.withLock { s in
+            guard s.watchedPath == path else { return false }
+            s.source = src
+            return true
+        }
+
+        if installed {
+            src.resume()
+        } else {
+            src.cancel()    // cancel handler closes fd
         }
     }
 
     func stop() {
         state.withLock { s in
-            stopLocked(&s)
+            s.debounceTask?.cancel(); s.debounceTask = nil
+            s.reopenTask?.cancel(); s.reopenTask = nil
+            s.source?.cancel()           // triggers cancel handler → close(fd)
+            s.source = nil
+            s.watchedPath = nil
         }
     }
 
-    // MARK: - Private (caller holds the lock)
+    // MARK: - Private
 
-    private func stopLocked(_ s: inout State) {
-        s.debounceTask?.cancel(); s.debounceTask = nil
-        s.reopenTask?.cancel(); s.reopenTask = nil
-        s.source?.cancel()           // triggers cancel handler → close(fd)
-        s.source = nil
-        s.watchedPath = nil
-    }
-
-    private func startWatchingLocked(_ s: inout State, path: String) {
+    /// Builds a configured (but not yet resumed) dispatch source for `path`.
+    /// Runs entirely outside the watcher's lock — the only mutation it makes
+    /// is to the local `src` it returns. Callers install or cancel the source
+    /// after re-acquiring the lock.
+    private func makeSource(path: String) -> DispatchSourceFileSystemObject? {
         let fd = open(path, O_EVTONLY)
-        guard fd >= 0 else {
-            // File doesn't exist (or we can't open it). Remember the intent
-            // anyway so a later observe(samePath) is still a no-op; the
-            // existing one-shot loaders in the leaf views will surface the
-            // read error.
-            s.watchedPath = path
-            logger.debug("FileWatcher: open(\(path, privacy: .public)) failed errno=\(errno)")
-            return
-        }
+        guard fd >= 0 else { return nil }
 
         let queue = DispatchQueue.global(qos: .utility)
         let src = DispatchSource.makeFileSystemObjectSource(
@@ -151,21 +181,17 @@ final class FileWatcher: @unchecked Sendable {
         )
 
         src.setEventHandler { [weak self] in
-            // Capture the mask while we're on the dispatch queue; hop into
-            // the watcher (under its lock) on whichever queue we're on.
             let mask = src.data
             self?.handleEvent(mask: mask, path: path)
         }
 
         src.setCancelHandler {
             // FD closed exactly once, here, regardless of who triggered
-            // cancellation (stop / deinit / re-open).
+            // cancellation (stop / deinit / re-open / abandoned-stage-3).
             close(fd)
         }
 
-        s.source = src
-        s.watchedPath = path
-        src.resume()
+        return src
     }
 
     private func handleEvent(mask: DispatchSource.FileSystemEvent, path: String) {
@@ -185,21 +211,47 @@ final class FileWatcher: @unchecked Sendable {
         let newTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(50))
             guard !Task.isCancelled, let self else { return }
-            let cb: (@Sendable () -> Void)? = self.state.withLock { s in
-                guard s.watchedPath == path else { return nil }
-                self.stopLocked(&s)
-                self.startWatchingLocked(&s, path: path)
-                return s.onChange
+
+            // Stage 1: tear down the dead source under the lock; bail if a
+            // concurrent stop/observe has moved on from this path.
+            let stillDesired: Bool = self.state.withLock { s in
+                guard s.watchedPath == path else { return false }
+                s.source?.cancel()
+                s.source = nil
+                return true
             }
-            if let cb {
-                await MainActor.run { cb() }
+            guard stillDesired else { return }
+
+            // Stage 2: open + configure outside the lock (same NFS / slow-FS
+            // reasoning as `observe`).
+            guard let src = self.makeSource(path: path) else {
+                // File is genuinely gone now. Leave `watchedPath = path` so a
+                // future `observe(samePath)` is still a no-op; the leaf views
+                // will surface the read error on their own.
+                return
+            }
+
+            // Stage 3: atomically install or abandon, then notify the view.
+            let installed: Bool
+            let cb: (@Sendable () -> Void)?
+            (installed, cb) = self.state.withLock { s in
+                guard s.watchedPath == path else { return (false, nil) }
+                s.source = src
+                return (true, s.onChange)
+            }
+
+            if installed {
+                src.resume()
+                if let cb { await MainActor.run { cb() } }
+            } else {
+                src.cancel()
             }
         }
         state.withLock { s in
-            // If we're racing with a `stop()` that already happened, the
-            // path won't match in the body above — the task will be a
-            // benign no-op. We still record it so that a subsequent
-            // `stop()`/deinit cancels it promptly.
+            // If we're racing with a `stop()` that already happened, the path
+            // won't match in the body above — the task will bail at stage 1.
+            // We still record it so a subsequent `stop()`/deinit cancels it
+            // promptly.
             guard s.watchedPath == path else {
                 newTask.cancel()
                 return
