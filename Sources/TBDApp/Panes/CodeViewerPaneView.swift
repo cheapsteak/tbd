@@ -258,6 +258,11 @@ struct CodeViewerPaneView: View {
                 selectedFiles = [path]
             }
         }
+        .onChange(of: path) { _, newPath in
+            if !newPath.isEmpty && FileManager.default.fileExists(atPath: newPath) {
+                selectedFiles = [newPath]
+            }
+        }
     }
 
     private var emptyState: some View {
