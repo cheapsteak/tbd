@@ -103,6 +103,36 @@ struct TerminalSessionEventHandlerTests {
         #expect(updated?.transcriptPath == nil)
     }
 
+    @Test("nil/rejected transcriptPath preserves a previously-stored path")
+    func nilPathPreservesExisting() async throws {
+        let (terminal, _) = try await makeTerminal()
+        // First event sets a valid path.
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "s1",
+                transcriptPath: "/abs/s1.jsonl",
+                source: "startup"
+            )
+        ))
+        // Second event has a rejected (non-absolute) path. sessionID
+        // updates; transcriptPath stays at the previously-stored value
+        // rather than getting zeroed back to nil.
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "s2",
+                transcriptPath: "relative/path.jsonl",
+                source: "clear"
+            )
+        ))
+        let updated = try await db.terminals.get(id: terminal.id)
+        #expect(updated?.claudeSessionID == "s2")
+        #expect(updated?.transcriptPath == "/abs/s1.jsonl")
+    }
+
     @Test("unknown terminalID is a soft no-op (success, no error)")
     func unknownTerminalSoftSuccess() async throws {
         let request = try RPCRequest(

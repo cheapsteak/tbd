@@ -184,7 +184,14 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = sessionID
-            record.transcriptPath = transcriptPath
+            // Only overwrite when the caller supplied a path. A SessionStart
+            // payload that omits `transcript_path` (theoretical — Claude
+            // currently always sends it) shouldn't clobber a previously
+            // captured path; the existing value still points at the right
+            // file as long as sessionID matches.
+            if let transcriptPath = transcriptPath {
+                record.transcriptPath = transcriptPath
+            }
             try record.update(db)
         }
     }
