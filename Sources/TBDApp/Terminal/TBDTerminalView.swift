@@ -211,6 +211,18 @@ class TBDTerminalView: TerminalView {
         term.sendEvent(buttonFlags: releaseFlags, x: col, y: row)
     }
 
+    /// True if the cell at the given window point carries an OSC 8 hyperlink
+    /// payload. SwiftTerm's `mouseUp` will dispatch these via
+    /// `requestOpenLink`, so our local mouseDown monitor must not also handle
+    /// them — otherwise a single cmd+click opens two viewer panes.
+    func hasOSC8Payload(atWindowLocation windowPoint: CGPoint) -> Bool {
+        guard let pos = gridPosition(atWindowLocation: windowPoint) else { return false }
+        let terminal = getTerminal()
+        guard let line = terminal.getLine(row: pos.row) else { return false }
+        guard pos.col < line.count else { return false }
+        return line[pos.col].getPayload() != nil
+    }
+
     /// Extracts a file path from the terminal buffer at the given window-coordinate point.
     func extractFilePath(atWindowLocation windowPoint: CGPoint) -> String? {
         guard let pos = gridPosition(atWindowLocation: windowPoint) else { return nil }
