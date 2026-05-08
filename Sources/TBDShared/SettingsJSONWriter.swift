@@ -53,6 +53,7 @@ public enum SettingsJSONSafety {
     public static func atomicWriteValidated(
         proposedBytes: Data,
         targetPath: String,
+        fileManager: FileManager = .default,
         invariant: ([String: Any]) throws -> Void
     ) throws {
         let parsed: Any
@@ -74,8 +75,8 @@ public enum SettingsJSONSafety {
         do {
             // Ensure parent directory exists.
             let parent = (targetPath as NSString).deletingLastPathComponent
-            if !FileManager.default.fileExists(atPath: parent) {
-                try FileManager.default.createDirectory(
+            if !fileManager.fileExists(atPath: parent) {
+                try fileManager.createDirectory(
                     atPath: parent,
                     withIntermediateDirectories: true
                 )
