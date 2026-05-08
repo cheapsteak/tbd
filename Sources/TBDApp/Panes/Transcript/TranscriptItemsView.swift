@@ -15,7 +15,7 @@ func isHiddenInTranscript(_ item: TranscriptItem) -> Bool {
     switch item {
     case .thinking:
         return true
-    case .toolCall(_, let name, _, _, _, _, _):
+    case .toolCall(_, let name, _, _, _, _, _, _):
         return hiddenToolNames.contains(name)
     default:
         return false
@@ -104,7 +104,7 @@ struct TranscriptItemsView: View {
                 // case stays in the wire format for Codable safety, but no parser
                 // path emits it today.
                 EmptyView()
-            case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let subagent, let ts):
+            case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let subagent, let ts, _):
                 if hiddenToolNames.contains(name) {
                     EmptyView()
                 } else {

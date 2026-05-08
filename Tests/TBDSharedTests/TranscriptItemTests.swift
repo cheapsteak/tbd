@@ -19,7 +19,7 @@ struct TranscriptItemTests {
         let original: TranscriptItem = .assistantText(id: "a1", text: "ok", timestamp: nil)
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
-        guard case .assistantText(let id, let text, _) = decoded else {
+        guard case .assistantText(let id, let text, _, _) = decoded else {
             Issue.record("expected .assistantText"); return
         }
         #expect(id == "a1")
@@ -35,7 +35,7 @@ struct TranscriptItemTests {
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
-        guard case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let r, let sub, _) = decoded else {
+        guard case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let r, let sub, _, _) = decoded else {
             Issue.record("expected .toolCall"); return
         }
         #expect(id == "toolu_1")
@@ -62,7 +62,7 @@ struct TranscriptItemTests {
         )
         let data = try JSONEncoder().encode(outer)
         let decoded = try JSONDecoder().decode(TranscriptItem.self, from: data)
-        guard case .toolCall(_, _, _, let outerTruncated, _, let s, _) = decoded else {
+        guard case .toolCall(_, _, _, let outerTruncated, _, let s, _, _) = decoded else {
             Issue.record("expected .toolCall"); return
         }
         #expect(outerTruncated == 50_000)

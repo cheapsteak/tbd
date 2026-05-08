@@ -28,7 +28,7 @@ struct TranscriptParserTests {
     @Test func parses_assistant_text() throws {
         let items = TranscriptParser.parse(filePath: fixturePath)
         let assistantTexts = items.compactMap { item -> String? in
-            if case .assistantText(_, let t, _) = item { return t }
+            if case .assistantText(_, let t, _, _) = item { return t }
             return nil
         }
         #expect(!assistantTexts.isEmpty)
@@ -58,7 +58,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: tmp)
         #expect(items.count == 1, "tool_result should fold into the tool_use, not be its own item")
-        if case .toolCall(_, _, _, _, let r, _, _) = items[0] {
+        if case .toolCall(_, _, _, _, let r, _, _, _) = items[0] {
             #expect(r?.text == "file contents")
             #expect(r?.isError == false)
         } else {
@@ -73,7 +73,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: tmp)
         #expect(items.count == 1)
-        if case .toolCall(_, _, _, _, let r, _, _) = items[0] {
+        if case .toolCall(_, _, _, _, let r, _, _, _) = items[0] {
             #expect(r == nil, "in-flight tool call should have nil result")
         } else {
             Issue.record("expected .toolCall")
@@ -120,7 +120,7 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: parentPath)
         #expect(items.count == 1)
-        guard case .toolCall(_, let name, _, _, _, let subagent, _) = items[0] else {
+        guard case .toolCall(_, let name, _, _, _, let subagent, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(name == "Task")
@@ -150,7 +150,7 @@ struct TranscriptParserTests {
             .write(toFile: subDir.appendingPathComponent("agent-AM.meta.json").path, atomically: true, encoding: .utf8)
 
         let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, _, let subagent, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, _, let subagent, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(subagent?.agentType == "feature-dev:code-reviewer")
@@ -170,7 +170,7 @@ struct TranscriptParserTests {
         try parent.write(toFile: parentPath, atomically: true, encoding: .utf8)
 
         let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, _, let subagent, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, _, let subagent, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(subagent == nil, "missing subagent file → nil subagent, parent still renders")
@@ -204,9 +204,9 @@ struct TranscriptParserTests {
         ].joined(separator: "\n").write(toFile: subDir.appendingPathComponent("agent-AINNER.jsonl").path, atomically: true, encoding: .utf8)
 
         let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, _, let outer, _) = items[0],
+        guard case .toolCall(_, _, _, _, _, let outer, _, _) = items[0],
               let outerItems = outer?.items, outerItems.count >= 2,
-              case .toolCall(_, _, _, _, _, let inner, _) = outerItems[1] else {
+              case .toolCall(_, _, _, _, _, let inner, _, _) = outerItems[1] else {
             Issue.record("recursive structure mismatched"); return
         }
         #expect(inner?.agentID == "AINNER")
@@ -223,7 +223,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, _, let r, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, let r, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(r?.text.count == 2000)
@@ -241,7 +241,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, _, let r, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, let r, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(r?.text.split(separator: "\n").count == 20)
@@ -257,7 +257,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, _, let r, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, _, let r, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(r?.text == "short")
@@ -349,7 +349,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _) = items[0] else {
+        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(inputTruncatedTo != nil, "large input field should set inputTruncatedTo")
@@ -366,7 +366,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, _, let inputTruncatedTo, _, _, _) = items[0] else {
+        guard case .toolCall(_, _, _, let inputTruncatedTo, _, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(inputTruncatedTo == nil, "small inputs should not set inputTruncatedTo")
@@ -379,7 +379,7 @@ struct TranscriptParserTests {
         defer { try? FileManager.default.removeItem(atPath: tmp) }
 
         let items = TranscriptParser.parse(filePath: tmp)
-        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _) = items[0] else {
+        guard case .toolCall(_, _, let inputJSON, let inputTruncatedTo, _, _, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(inputTruncatedTo != nil, "nested oversized string should trigger truncation")

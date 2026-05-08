@@ -457,12 +457,34 @@ public struct Subagent: Codable, Sendable, Equatable {
     }
 }
 
+/// Token-count snapshot from a single Claude API response, captured per
+/// assistant JSONL line. The three fields together represent the size of
+/// the prompt sent on that request — see docs/transcript-context-usage.md
+/// for the meaning of each.
+public struct TokenUsage: Codable, Sendable, Equatable {
+    public let inputTokens: Int
+    public let cacheCreationTokens: Int
+    public let cacheReadTokens: Int
+
+    public init(inputTokens: Int, cacheCreationTokens: Int, cacheReadTokens: Int) {
+        self.inputTokens = inputTokens
+        self.cacheCreationTokens = cacheCreationTokens
+        self.cacheReadTokens = cacheReadTokens
+    }
+
+    /// Total prompt size for this request — what `/context` reports.
+    public var contextTotal: Int {
+        inputTokens + cacheCreationTokens + cacheReadTokens
+    }
+}
+
 public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable {
     case userPrompt(id: String, text: String, timestamp: Date?)
-    case assistantText(id: String, text: String, timestamp: Date?)
+    case assistantText(id: String, text: String, timestamp: Date?, usage: TokenUsage? = nil)
     case toolCall(id: String, name: String, inputJSON: String,
                   inputTruncatedTo: Int?,
-                  result: ToolResult?, subagent: Subagent?, timestamp: Date?)
+                  result: ToolResult?, subagent: Subagent?, timestamp: Date?,
+                  usage: TokenUsage? = nil)
     case thinking(id: String, text: String, timestamp: Date?)
     case systemReminder(id: String, kind: SystemKind, text: String, timestamp: Date?)
     case slashCommand(id: String, name: String, args: String?, timestamp: Date?)
@@ -470,8 +492,8 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable 
     public var id: String {
         switch self {
         case .userPrompt(let id, _, _): return id
-        case .assistantText(let id, _, _): return id
-        case .toolCall(let id, _, _, _, _, _, _): return id
+        case .assistantText(let id, _, _, _): return id
+        case .toolCall(let id, _, _, _, _, _, _, _): return id
         case .thinking(let id, _, _): return id
         case .systemReminder(let id, _, _, _): return id
         case .slashCommand(let id, _, _, _): return id
@@ -481,12 +503,23 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable 
     public var timestamp: Date? {
         switch self {
         case .userPrompt(_, _, let t),
-             .assistantText(_, _, let t),
-             .toolCall(_, _, _, _, _, _, let t),
+             .assistantText(_, _, let t, _),
+             .toolCall(_, _, _, _, _, _, let t, _),
              .thinking(_, _, let t),
              .systemReminder(_, _, _, let t),
              .slashCommand(_, _, _, let t):
             return t
+        }
+    }
+
+    /// The `TokenUsage` stamped on items derived from an assistant API call,
+    /// `nil` for all other item kinds. Used by `TranscriptItemsView` to find
+    /// the latest item whose context size is worth surfacing in the UI.
+    public var usage: TokenUsage? {
+        switch self {
+        case .assistantText(_, _, _, let u): return u
+        case .toolCall(_, _, _, _, _, _, _, let u): return u
+        default: return nil
         }
     }
 }
