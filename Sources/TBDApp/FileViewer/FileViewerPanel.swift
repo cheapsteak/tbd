@@ -2,6 +2,15 @@ import AppKit
 import SwiftUI
 import TBDShared
 
+private func copyPathToPasteboard(_ path: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(path, forType: .string)
+}
+
+private func absolutePath(worktreePath: String, relativePath: String) -> String {
+    URL(fileURLWithPath: worktreePath).appendingPathComponent(relativePath).path
+}
+
 // MARK: - Data Model
 
 struct GitFileStatus: Identifiable {
@@ -328,6 +337,11 @@ private struct GitFileRow: View {
             onFileClick(file.path, cmdClick)
         }
         .onHover { isHovered = $0 }
+        .contextMenu {
+            Button("Copy Path") {
+                copyPathToPasteboard(absolutePath(worktreePath: worktreePath, relativePath: file.path))
+            }
+        }
     }
 }
 
@@ -407,5 +421,10 @@ private struct BranchFileRow: View {
             onFileClick(file.path, cmdClick)
         }
         .onHover { isHovered = $0 }
+        .contextMenu {
+            Button("Copy Path") {
+                copyPathToPasteboard(absolutePath(worktreePath: worktreePath, relativePath: file.path))
+            }
+        }
     }
 }

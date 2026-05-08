@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TBDShared
 
@@ -94,6 +95,12 @@ struct HistoryPaneView: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         Task { await appState.selectSession(summary, worktreeID: worktreeID) }
+                    }
+                    .contextMenu {
+                        Button("Copy Conversation Path") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(summary.filePath, forType: .string)
+                        }
                     }
                     .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                     .listRowBackground(
@@ -326,6 +333,12 @@ struct SessionTranscriptView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+            .contextMenu {
+                Button("Copy Conversation Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(summary.filePath, forType: .string)
+                }
+            }
 
             Divider()
 
