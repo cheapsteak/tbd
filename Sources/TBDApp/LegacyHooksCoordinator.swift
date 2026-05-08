@@ -92,6 +92,21 @@ final class LegacyHooksCoordinator {
             )
             return
         }
+        // Repo-only case: presentDialog renders Remove/Not Now/Show File…
+        // but Remove only acts on global entries. Show an info alert that
+        // names the affected repo files instead, so the menu path doesn't
+        // dangle a button that does nothing.
+        if status.globalEntries.isEmpty {
+            let body = "TBD doesn't auto-modify repo settings (often git-tracked). "
+                + "Edit these manually:\n\n"
+                + status.repoEntries.keys.sorted().map { "• \($0)" }.joined(separator: "\n")
+            presentAlert(
+                style: .informational,
+                title: "Repo-level legacy hooks need manual cleanup",
+                body: body
+            )
+            return
+        }
         await presentDialog(status: status, recordDismissalOnDecline: false)
     }
 
