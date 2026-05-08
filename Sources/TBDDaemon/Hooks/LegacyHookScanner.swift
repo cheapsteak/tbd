@@ -65,7 +65,7 @@ public enum LegacyHookScanner {
         guard var hooks = settings["hooks"] as? [String: Any] else { return 0 }
         var removed = 0
         for (event, raw) in hooks {
-            guard var matchers = raw as? [[String: Any]] else { continue }
+            guard let matchers = raw as? [[String: Any]] else { continue }
             var newMatchers: [[String: Any]] = []
             for matcher in matchers {
                 if let inner = matcher["hooks"] as? [[String: Any]] {
@@ -88,11 +88,10 @@ public enum LegacyHookScanner {
                     newMatchers.append(matcher)
                 }
             }
-            matchers = newMatchers
-            if matchers.isEmpty {
+            if newMatchers.isEmpty {
                 hooks.removeValue(forKey: event)
             } else {
-                hooks[event] = matchers
+                hooks[event] = newMatchers
             }
         }
         settings["hooks"] = hooks
