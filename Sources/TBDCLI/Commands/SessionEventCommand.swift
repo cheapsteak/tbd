@@ -15,7 +15,8 @@ import TBDShared
 struct SessionEventCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "session-event",
-        abstract: "Internal: bridge Claude Code's SessionStart hook into TBD"
+        abstract: "Internal: bridge Claude Code's SessionStart hook into TBD",
+        shouldDisplay: false
     )
 
     /// JSON payload Claude Code emits to stdin for SessionStart hooks.
@@ -37,8 +38,11 @@ struct SessionEventCommand: AsyncParsableCommand {
             return
         }
 
-        // 2. Read stdin (Claude pipes the hook payload here). Bound the
-        //    read at 1 MiB to avoid a runaway hook flooding the CLI process.
+        // 2. Read stdin (Claude pipes the hook payload here). The 1 MiB
+        //    cap below limits *processing*, not the read itself —
+        //    readDataToEndOfFile() allocates the full buffer first. In
+        //    practice Claude controls the payload, so this is fine; the
+        //    cap exists as a defensive guard against a runaway producer.
         let data = FileHandle.standardInput.readDataToEndOfFile()
         guard !data.isEmpty, data.count <= 1 << 20,
               let payload = try? JSONDecoder().decode(HookPayload.self, from: data),
