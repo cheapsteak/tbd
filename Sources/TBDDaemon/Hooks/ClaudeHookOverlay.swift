@@ -35,31 +35,58 @@ public enum ClaudeHookOverlay {
     /// The shell command for the SessionStart hook. Reads stdin (Claude's
     /// hook payload) into `tbd session-event`, which RPCs the daemon. The
     /// command tolerates `tbd` not being on PATH — silent failure is fine.
-    static let sessionStartCommand =
-        #"tbd session-event 2>/dev/null || true"#
+    ///
+    /// Pass an absolute path to TBDCLI to bypass PATH entirely (avoids the
+    /// stale-symlink-on-PATH bug where `tbd` resolves to a different
+    /// worktree's older binary that doesn't know `session-event`). When
+    /// `cliPath` is nil/empty, fall back to bare `tbd` for backward compat.
+    static func sessionStartCommand(cliPath: String?) -> String {
+        let bin = shellQuote(cliPath) ?? "tbd"
+        return "\(bin) session-event 2>/dev/null || true"
+    }
 
     /// The shell command for the Stop hook. Mirrors the legacy
     /// `setup-hooks --global` command so TBD can replace it without
     /// regressing notification behavior.
-    static let stopCommand =
-        #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
+    ///
+    /// Same rationale as `sessionStartCommand` for `cliPath`: bake an
+    /// absolute path so we don't share the broken `tbd` PATH symlink.
+    static func stopCommand(cliPath: String?) -> String {
+        let bin = shellQuote(cliPath) ?? "tbd"
+        return #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); "# +
+            #"\#(bin) notify --type response_complete --message "$MSG" 2>/dev/null || true"#
+    }
+
+    /// Single-quote-wrap a path for safe shell embedding. Returns nil when
+    /// the input is nil/empty so callers can fall back to bare `tbd`.
+    /// Embedded single quotes are escaped via the standard `'\''` trick.
+    static func shellQuote(_ path: String?) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+        let escaped = path.replacingOccurrences(of: "'", with: #"'\''"#)
+        return "'\(escaped)'"
+    }
 
     /// Build the JSON-encoded overlay body.
-    public static func generateBody() throws -> Data {
+    ///
+    /// `cliPath` should be the absolute path to the daemon's sibling TBDCLI
+    /// binary (see `CLIInstaller.cliPath(forDaemonExecutable:)`). When nil,
+    /// falls back to bare `tbd` (PATH lookup) — accepting the stale-symlink
+    /// risk so notifications still have a chance to fire.
+    public static func generateBody(cliPath: String? = nil) throws -> Data {
         let body: [String: Any] = [
             "hooks": [
                 "SessionStart": [
                     [
                         "matcher": "*",
                         "hooks": [
-                            ["type": "command", "command": sessionStartCommand]
+                            ["type": "command", "command": sessionStartCommand(cliPath: cliPath)]
                         ]
                     ]
                 ],
                 "Stop": [
                     [
                         "hooks": [
-                            ["type": "command", "command": stopCommand]
+                            ["type": "command", "command": stopCommand(cliPath: cliPath)]
                         ]
                     ]
                 ]
@@ -74,17 +101,24 @@ public enum ClaudeHookOverlay {
     /// Write the overlay to `overlayPath`, creating the parent directory if
     /// needed. Atomic so a crash mid-write can't leave a half-written file
     /// that breaks the next Claude spawn. Returns true on success.
+    ///
+    /// `cliPath` is the absolute path to TBDCLI. When nil/empty, the overlay
+    /// falls back to bare `tbd` and a warning is logged — the caller's
+    /// responsibility to pass a real path on every healthy startup.
     @discardableResult
-    public static func writeOverlay() -> Bool {
+    public static func writeOverlay(cliPath: String? = nil) -> Bool {
+        if cliPath == nil || cliPath?.isEmpty == true {
+            logger.warning("Writing Claude overlay without absolute CLI path; falling back to bare `tbd` on PATH (may resolve to a stale symlink).")
+        }
         do {
-            let data = try generateBody()
+            let data = try generateBody(cliPath: cliPath)
             let parent = (overlayPath as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(
                 atPath: parent,
                 withIntermediateDirectories: true
             )
             try data.write(to: URL(fileURLWithPath: overlayPath), options: .atomic)
-            logger.info("Wrote Claude overlay at \(overlayPath, privacy: .public)")
+            logger.info("Wrote Claude overlay at \(overlayPath, privacy: .public) (cli=\(cliPath ?? "<bare tbd>", privacy: .public))")
             return true
         } catch {
             logger.error("Failed to write Claude overlay: \(error.localizedDescription, privacy: .public)")
