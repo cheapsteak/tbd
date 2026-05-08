@@ -38,6 +38,11 @@ struct EditCard: View {
         return try? Self.decoder.decode(EditInput.self, from: data)
     }
 
+    private var resolvedFilePath: String? {
+        if let p = decodeInput()?.file_path { return p }
+        return ToolInputFilePath.extract(from: fullInputJSON ?? inputJSON)
+    }
+
     var body: some View {
         let parsedInput = decodeInput()
         let language: String? = {
@@ -98,10 +103,11 @@ struct EditCard: View {
                     }
                 }
                 let showTruncation = inputTruncatedTo != nil && fullInputJSON == nil && terminalID != nil
-                let showPreview = parsedInput?.file_path != nil && openFilePreview != nil
+                let previewPath = resolvedFilePath
+                let showPreview = previewPath != nil && openFilePreview != nil
                 if showPreview || showTruncation {
                     HStack(spacing: 12) {
-                        if showPreview, let path = parsedInput?.file_path, let open = openFilePreview {
+                        if showPreview, let path = previewPath, let open = openFilePreview {
                             PreviewFileButton(path: path) { open(path) }
                         }
                         if showTruncation, let cap = inputTruncatedTo {

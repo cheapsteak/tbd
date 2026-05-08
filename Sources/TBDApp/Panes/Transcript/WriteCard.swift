@@ -24,6 +24,11 @@ struct WriteCard: View {
         return try? Self.decoder.decode(Input.self, from: data)
     }
 
+    private var resolvedFilePath: String? {
+        if let p = decodeInput()?.file_path { return p }
+        return ToolInputFilePath.extract(from: fullInputJSON ?? inputJSON)
+    }
+
     private func lineCount(for parsed: Input?) -> Int {
         guard let content = parsed?.content, !content.isEmpty else { return 0 }
         return content.split(separator: "\n", omittingEmptySubsequences: false).count
@@ -76,10 +81,11 @@ struct WriteCard: View {
                     }
                 }
                 let showTruncation = inputTruncatedTo != nil && fullInputJSON == nil && terminalID != nil
-                let showPreview = parsedInput?.file_path != nil && openFilePreview != nil
+                let previewPath = resolvedFilePath
+                let showPreview = previewPath != nil && openFilePreview != nil
                 if showPreview || showTruncation {
                     HStack(spacing: 12) {
-                        if showPreview, let path = parsedInput?.file_path, let open = openFilePreview {
+                        if showPreview, let path = previewPath, let open = openFilePreview {
                             PreviewFileButton(path: path) { open(path) }
                         }
                         if showTruncation, let cap = inputTruncatedTo {
