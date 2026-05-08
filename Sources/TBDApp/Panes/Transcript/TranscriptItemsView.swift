@@ -71,7 +71,10 @@ struct TranscriptItemsView: View {
             // Skip hidden tool calls (TodoWrite/TaskUpdate/etc) — those render
             // as EmptyView, so attaching the badge there would leave it
             // floating below nothing. The badge follows the latest *visible*
-            // assistant item instead.
+            // assistant item instead. Trade-off: when the most recent turn is
+            // entirely hidden tools, the badge shows the prior visible turn's
+            // token count, which lags reality by one turn until the next
+            // visible item lands.
             let latestUsageItemID = items.reversed().first {
                 $0.usage != nil && !isHiddenInTranscript($0)
             }?.id
