@@ -316,16 +316,17 @@ private func isTextFile(_ path: String) -> Bool {
 ///
 /// File-watching plumbing intentionally avoids `@StateObject` /
 /// `ObservableObject` / `@Published` — see the doc-comment on
-/// `FileWatcher` for the SIGTRAP that taught us why. The watcher lives in
-/// `@State` (which stores reference types stably across re-renders) and
-/// pokes the view via a callback that bumps `revision`, an Int observed
-/// by SwiftUI as ordinary `@State`.
+/// `FileWatcher` for the SIGTRAP that taught us why. The watcher exposes
+/// changes as an `AsyncStream<Void>` consumed inside `.task(id: filePath)`;
+/// when the task is cancelled (path change, view teardown) the stream's
+/// `onTermination` cancels the dispatch source, closing the FD via its
+/// cancel handler. SwiftUI just observes the `revision` Int.
 private struct FilePreviewView: View {
     let filePath: String
     let showSourceCode: Bool
 
-    @State private var watcher = FileWatcher()
     @State private var revision: Int = 0
+    private let watcher = FileWatcher()
 
     var body: some View {
         Group {
@@ -340,15 +341,16 @@ private struct FilePreviewView: View {
             }
         }
         .task(id: filePath) {
-            // Wire the callback fresh each time filePath changes. The
-            // callback bumps revision on the main actor; SwiftUI re-renders
-            // the leaf view, whose .task(id: "<path>#<rev>") reloads.
-            watcher.onChange = {
-                Task { @MainActor in
-                    revision &+= 1
-                }
+            // Each filePath change starts a fresh stream. Iterating it
+            // inside `.task` ties FD lifetime to this view: when the task
+            // is cancelled (path change, view teardown), the stream's
+            // iterator is dropped, `onTermination` fires, and the dispatch
+            // source is cancelled — which closes the FD via its cancel
+            // handler. SwiftUI re-renders the leaf view on each yield, and
+            // its `.task(id: "<path>#<rev>")` reloads the file contents.
+            for await _ in watcher.changes(for: filePath) {
+                revision &+= 1
             }
-            watcher.observe(filePath)
         }
     }
 }

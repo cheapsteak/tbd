@@ -7,35 +7,34 @@ import Testing
 @Suite("FileWatcher")
 struct FileWatcherTests {
 
-    /// Creates and immediately releases many FileWatchers. If any of them
-    /// kept an internal retain cycle (e.g. handler closure capturing self
-    /// strongly, Task holding self), liveCount would not return to its
-    /// starting value.
+    /// Construct many watchers without ever calling `changes(for:)`.
+    /// `FileWatcher` itself is now a stateless factory, so this should be
+    /// trivially balanced — no FDs opened, no streams alive.
     @MainActor
-    @Test func liveCountReturnsToZeroAfterRelease() async {
-        let baseline = FileWatcher.liveCount
-
+    @Test func factoryConstructionIsStateless() async {
+        let baseline = FileWatcher.liveStreamCount
         do {
             var watchers: [FileWatcher] = []
             for _ in 0..<50 {
                 watchers.append(FileWatcher())
             }
-            #expect(FileWatcher.liveCount == baseline + 50)
+            // Constructing a FileWatcher must not start any stream.
+            #expect(FileWatcher.liveStreamCount == baseline)
             watchers.removeAll()
         }
-
-        // Allow any deferred deallocations to settle on the main actor.
         await Task.yield()
-        #expect(FileWatcher.liveCount == baseline)
+        #expect(FileWatcher.liveStreamCount == baseline)
     }
 
+    /// Start a stream against a real temp file, drop the iterator, and
+    /// confirm the stream's `onTermination` ran (live count returns to
+    /// baseline). This covers the core invariant: any path that drops the
+    /// iterator must drive cleanup, including the dispatch source's cancel
+    /// handler closing the FD.
     @MainActor
-    @Test func liveCountReturnsToZeroAfterObserveOnTempFile() async {
-        let baseline = FileWatcher.liveCount
+    @Test func liveStreamCountReturnsToBaselineAfterIteratorDrops() async {
+        let baseline = FileWatcher.liveStreamCount
 
-        // Create a real temp file so observe() actually opens an FD and
-        // creates a dispatch source — we want to confirm the source's
-        // strong refs to closures don't keep self alive.
         let tmpURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("filewatcher-test-\(UUID().uuidString).txt")
         FileManager.default.createFile(atPath: tmpURL.path, contents: Data("hi".utf8))
@@ -43,40 +42,73 @@ struct FileWatcherTests {
 
         do {
             let w = FileWatcher()
-            w.observe(tmpURL.path)
-            #expect(FileWatcher.liveCount == baseline + 1)
-            // w goes out of scope here
-            _ = w
+            var iterator = w.changes(for: tmpURL.path).makeAsyncIterator()
+            #expect(FileWatcher.liveStreamCount == baseline + 1)
+            // Dropping `iterator` here triggers continuation.onTermination
+            // (no consumer left to receive yields).
+            _ = iterator
         }
 
-        // Give GCD a moment to run the cancel handler / release closures.
-        try? await Task.sleep(for: .milliseconds(50))
-        #expect(FileWatcher.liveCount == baseline)
+        // Give GCD a moment to run the cancel handler and the
+        // onTermination callback.
+        for _ in 0..<10 {
+            if FileWatcher.liveStreamCount == baseline { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(FileWatcher.liveStreamCount == baseline)
     }
 
+    /// Cancelling the consuming `Task` (the SwiftUI `.task` analogue) must
+    /// also drive the stream's onTermination — that's the most common
+    /// real-world cleanup path.
     @MainActor
-    @Test func observeIsIdempotentOnSamePath() {
-        // FileWatcher no longer exposes `revision` directly (see doc
-        // comment on FileWatcher for why). The observable signal we have
-        // here is "did onChange fire?", which it should NOT for a no-op
-        // re-observe of the same (non-existent) path.
-        //
-        // `onChange` is `@Sendable`, so the counter has to be safe to
-        // mutate from any isolation. A lock-backed counter keeps the
-        // assertion semantics while satisfying Swift 6 strict concurrency.
-        let fireCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+    @Test func cancellingConsumingTaskTerminatesStream() async {
+        let baseline = FileWatcher.liveStreamCount
+
+        let tmpURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("filewatcher-test-\(UUID().uuidString).txt")
+        FileManager.default.createFile(atPath: tmpURL.path, contents: Data("hi".utf8))
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+
         let w = FileWatcher()
-        w.onChange = { fireCount.withLock { $0 += 1 } }
-        w.observe("/some/path")
-        w.observe("/some/path") // same path — should be a no-op
-        #expect(fireCount.withLock { $0 } == 0)
+        let path = tmpURL.path
+        let task = Task {
+            for await _ in w.changes(for: path) {
+                // Nothing to do — we just need a live consumer.
+            }
+        }
+        // Yield to let the Task actually start iterating.
+        await Task.yield()
+        #expect(FileWatcher.liveStreamCount >= baseline + 1)
+
+        task.cancel()
+        _ = await task.value
+
+        for _ in 0..<10 {
+            if FileWatcher.liveStreamCount == baseline { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(FileWatcher.liveStreamCount == baseline)
     }
 
+    /// Opening a non-existent path must finish the stream cleanly — no
+    /// hang, no leak. The for-await loop should exit immediately.
     @MainActor
-    @Test func stopIsIdempotent() {
+    @Test func nonExistentPathFinishesStreamImmediately() async {
+        let baseline = FileWatcher.liveStreamCount
         let w = FileWatcher()
-        w.observe("/some/path")
-        w.stop()
-        w.stop() // should not crash
+        let bogus = "/definitely/does/not/exist/\(UUID().uuidString)"
+
+        var receivedAny = false
+        for await _ in w.changes(for: bogus) {
+            receivedAny = true
+        }
+        #expect(receivedAny == false)
+
+        for _ in 0..<10 {
+            if FileWatcher.liveStreamCount == baseline { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(FileWatcher.liveStreamCount == baseline)
     }
 }
