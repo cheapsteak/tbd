@@ -273,6 +273,7 @@ final class AppState: ObservableObject {
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient)
+    lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient)
     private var pollTimer: Timer?
     private var pollCycle = 0
     private var subscriptionTask: Task<Void, Never>?
@@ -425,8 +426,28 @@ final class AppState: ObservableObject {
             applyModelProfileUsageDelta(usage)
         case .modelProfilesChanged:
             Task { [weak self] in await self?.loadModelProfiles() }
+        case .terminalSessionUpdated(let d):
+            applyTerminalSessionDelta(d)
         default:
             break
+        }
+    }
+
+    /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)
+    /// directly to the in-memory Terminal so LiveTranscriptPaneView re-targets
+    /// without waiting for the next 2s `terminal.list` poll. Silently ignores
+    /// terminals we don't know about — the next refresh will reconcile.
+    private func applyTerminalSessionDelta(_ delta: TerminalSessionDelta) {
+        guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
+            return
+        }
+        terminals[delta.worktreeID]?[idx].claudeSessionID = delta.sessionID
+        // Mirror TerminalStore.updateSession's preserve-on-nil: a delta with
+        // nil transcriptPath means the SessionStart payload didn't carry a
+        // path even though sessionID rolled. Keep the previous value so the
+        // in-memory model doesn't drift from the DB.
+        if let tp = delta.transcriptPath {
+            terminals[delta.worktreeID]?[idx].transcriptPath = tp
         }
     }
 
@@ -519,12 +540,22 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 await self.cliInstallerCoordinator.checkOnLaunch()
             }
+            Task { [weak self] in
+                guard let self else { return }
+                await self.legacyHooksCoordinator.checkOnLaunch()
+            }
         }
     }
 
     /// Menu entry point — install or refresh the `tbd` CLI symlink.
     func installCLITool() async {
         await cliInstallerCoordinator.runFromMenu()
+    }
+
+    /// Menu entry point — review and (optionally) remove TBD's legacy
+    /// hook entries from the user's `~/.claude/settings.json`.
+    func migrateClaudeHooks() async {
+        await legacyHooksCoordinator.runFromMenu()
     }
 
     /// Launch the daemon process and connect.

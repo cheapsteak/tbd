@@ -239,6 +239,10 @@ extension WorktreeLifecycle {
         // with — which would misattribute notifications to a different
         // worktree. Applies to all branches below (claude, codex, shell/cmd).
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
+        // Persist the terminal ID into the spawned env so the SessionStart
+        // hook bridge can route session events for `/clear`/`/compact`
+        // rollovers without depending on cwd-based heuristics.
+        env["TBD_TERMINAL_ID"] = terminal.id.uuidString
 
         if let sessionID = terminal.claudeSessionID {
             // Claude terminal — resume existing session with persisted profile
@@ -256,7 +260,8 @@ extension WorktreeLifecycle {
                 profileBaseURL: resolvedProfile?.baseURL,
                 profileModel: resolvedProfile?.model,
                 cmd: nil,
-                shellFallback: defaultShell
+                shellFallback: defaultShell,
+                settingsOverlayPath: ClaudeHookOverlay.overlayPath
             )
         } else if terminal.label == "Codex" {
             // Codex terminal — detected by label "Codex" (set during terminal creation).

@@ -146,12 +146,19 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var suspendedAt: Date?
     public var suspendedSnapshot: String?
     public var profileID: UUID?
+    /// Absolute path to the JSONL file Claude is writing for the current
+    /// session, captured via the SessionStart hook. Persisted so the
+    /// transcript handler can re-target accurately across `/clear` and
+    /// `/compact` rollovers (where Claude may pick a different
+    /// `~/.claude/projects/` subdirectory than cwd would suggest).
+    public var transcriptPath: String?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
                 pinnedAt: Date? = nil, claudeSessionID: String? = nil,
                 suspendedAt: Date? = nil, suspendedSnapshot: String? = nil,
-                profileID: UUID? = nil) {
+                profileID: UUID? = nil,
+                transcriptPath: String? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -163,6 +170,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.suspendedAt = suspendedAt
         self.suspendedSnapshot = suspendedSnapshot
         self.profileID = profileID
+        self.transcriptPath = transcriptPath
     }
 
     public init(from decoder: Decoder) throws {
@@ -178,6 +186,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         suspendedAt = try c.decodeIfPresent(Date.self, forKey: .suspendedAt)
         suspendedSnapshot = try c.decodeIfPresent(String.self, forKey: .suspendedSnapshot)
         profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
+        transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
     }
 }
 

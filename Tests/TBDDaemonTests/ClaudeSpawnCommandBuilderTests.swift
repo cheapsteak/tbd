@@ -217,4 +217,108 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == nil)
         #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == nil)
     }
+
+    // MARK: - settingsOverlayPath branch
+
+    @Test("settings overlay path absent → no --settings flag in command")
+    func settingsOverlayNotPassed() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            settingsOverlayPath: nil
+        )
+        #expect(!r.command.contains("--settings"))
+    }
+
+    @Test("settings overlay path supplied but file missing → no --settings flag")
+    func settingsOverlayMissingFile() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            settingsOverlayPath: "/tmp/this-path-cannot-possibly-exist-\(UUID().uuidString)/overlay.json"
+        )
+        #expect(!r.command.contains("--settings"))
+    }
+
+    @Test("settings overlay path with existing file → --settings flag emitted")
+    func settingsOverlayWithExistingFile() throws {
+        let tmpFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString).json")
+        try "{}".data(using: .utf8)!.write(to: tmpFile)
+        defer { try? FileManager.default.removeItem(at: tmpFile) }
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            settingsOverlayPath: tmpFile.path
+        )
+        #expect(r.command.contains("--settings"))
+        #expect(r.command.contains(tmpFile.path))
+    }
+
+    @Test("--settings flag also applied to fresh-session spawns")
+    func settingsOverlayOnFreshSession() throws {
+        let tmpFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-overlay-fresh-\(UUID().uuidString).json")
+        try "{}".data(using: .utf8)!.write(to: tmpFile)
+        defer { try? FileManager.default.removeItem(at: tmpFile) }
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            settingsOverlayPath: tmpFile.path
+        )
+        #expect(r.command.contains("--session-id sid"))
+        #expect(r.command.contains("--settings"))
+    }
+
+    @Test("--settings is NOT emitted in cmd or shell-fallback branches")
+    func settingsOverlayIgnoredForCmdBranch() throws {
+        let tmpFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-overlay-cmd-\(UUID().uuidString).json")
+        try "{}".data(using: .utf8)!.write(to: tmpFile)
+        defer { try? FileManager.default.removeItem(at: tmpFile) }
+        // cmd path returns the verbatim cmd, no --settings injection
+        let r1 = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: "codex --full-auto",
+            shellFallback: "/bin/zsh",
+            settingsOverlayPath: tmpFile.path
+        )
+        #expect(r1.command == "codex --full-auto")
+        // shell fallback path likewise verbatim
+        let r2 = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            settingsOverlayPath: tmpFile.path
+        )
+        #expect(r2.command == "/bin/zsh")
+    }
 }

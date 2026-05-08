@@ -928,4 +928,25 @@ actor DaemonClient {
             params: AppSetForegroundStateParams(isForeground: isForeground)
         )
     }
+
+    /// Read-only scan of the user's settings.json files for legacy TBD hook
+    /// entries (the ones now superseded by the spawn-time --settings overlay).
+    func legacyHooksStatus() async throws -> LegacyHooksStatusResult {
+        return try await callNoParamsAsync(
+            method: RPCMethod.daemonLegacyHooksStatus,
+            resultType: LegacyHooksStatusResult.self
+        )
+    }
+
+    /// Remove TBD's legacy entries from ~/.claude/settings.json. The daemon
+    /// runs the write through SettingsJSONSafety (pristine backup, atomic,
+    /// roundtrip-validated). Repo-level files are NEVER auto-modified.
+    func removeLegacyGlobalHooks() async throws -> RemoveLegacyGlobalHooksResult {
+        let request = RPCRequest(method: RPCMethod.daemonRemoveLegacyGlobalHooks)
+        let response = try await sendRawAsync(request)
+        guard response.success else {
+            throw DaemonClientError.rpcError(response.error ?? "Unknown error")
+        }
+        return try response.decodeResult(RemoveLegacyGlobalHooksResult.self)
+    }
 }

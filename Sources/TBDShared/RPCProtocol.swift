@@ -133,6 +133,7 @@ public enum RPCMethod {
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let terminalSwapProfile = "terminal.swapProfile"
+    public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
@@ -141,6 +142,45 @@ public enum RPCMethod {
     public static let setMainAreaSize = "app.setMainAreaSize"
     public static let skillStatus = "skill.status"
     public static let skillInstall = "skill.install"
+    public static let daemonLegacyHooksStatus = "daemon.legacyHooksStatus"
+    public static let daemonRemoveLegacyGlobalHooks = "daemon.removeLegacyGlobalHooks"
+}
+
+// MARK: - Legacy Hook Detection / Removal
+
+/// One detected legacy entry — surfaced to the user so they know what TBD
+/// proposes to remove (or, for repo-level entries, what they can edit
+/// themselves).
+public struct LegacyHookEntry: Codable, Sendable, Equatable {
+    /// "Stop", "SessionStart", etc. — the matcher event name.
+    public let event: String
+    /// Captured `command` string from the matched entry (truncated upstream
+    /// if needed so the dialog stays readable).
+    public let command: String
+    public init(event: String, command: String) {
+        self.event = event
+        self.command = command
+    }
+}
+
+public struct LegacyHooksStatusResult: Codable, Sendable {
+    public let globalEntries: [LegacyHookEntry]
+    /// Repo-level entries keyed by repo settings.json path. Surfaced
+    /// informationally; TBD never auto-modifies repo files.
+    public let repoEntries: [String: [LegacyHookEntry]]
+    public init(globalEntries: [LegacyHookEntry], repoEntries: [String: [LegacyHookEntry]]) {
+        self.globalEntries = globalEntries
+        self.repoEntries = repoEntries
+    }
+}
+
+public struct RemoveLegacyGlobalHooksResult: Codable, Sendable {
+    public let removedCount: Int
+    public let backupPath: String?
+    public init(removedCount: Int, backupPath: String?) {
+        self.removedCount = removedCount
+        self.backupPath = backupPath
+    }
 }
 
 // MARK: - Main Area Size
@@ -762,5 +802,24 @@ public struct TerminalTranscriptItemFullBodyResult: Codable, Sendable {
     public let text: String
     public init(text: String) {
         self.text = text
+    }
+}
+
+// MARK: - Terminal Session Event (Claude SessionStart hook bridge)
+
+/// Payload reported by the SessionStart hook (relayed via `tbd session-event`).
+/// `source` is one of the values Claude Code emits: `startup`, `resume`,
+/// `clear`, `compact`. We pass it through opaquely so future Claude
+/// hook payload changes don't immediately break this bridge.
+public struct TerminalSessionEventParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let sessionID: String
+    public let transcriptPath: String?
+    public let source: String?
+    public init(terminalID: UUID, sessionID: String, transcriptPath: String?, source: String?) {
+        self.terminalID = terminalID
+        self.sessionID = sessionID
+        self.transcriptPath = transcriptPath
+        self.source = source
     }
 }

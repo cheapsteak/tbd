@@ -337,6 +337,17 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        // Persist the absolute JSONL path Claude reports via the SessionStart
+        // hook. Lets the transcript handler stay accurate across `/clear` and
+        // `/compact` rollovers where the session ID changes mid-stream and the
+        // jsonl can land in a different `~/.claude/projects/` directory than
+        // the worktree's cwd would suggest.
+        migrator.registerMigration("v17_terminal_transcript_path") { db in
+            try db.alter(table: "terminal") { t in
+                t.add(column: "transcriptPath", .text)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

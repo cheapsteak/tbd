@@ -17,6 +17,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var suspendedAt: Date?
     var suspendedSnapshot: String?
     var profile_id: String?
+    var transcriptPath: String?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -30,6 +31,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.suspendedAt = terminal.suspendedAt
         self.suspendedSnapshot = terminal.suspendedSnapshot
         self.profile_id = terminal.profileID?.uuidString
+        self.transcriptPath = terminal.transcriptPath
     }
 
     func toModel() -> Terminal {
@@ -44,7 +46,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             claudeSessionID: claudeSessionID,
             suspendedAt: suspendedAt,
             suspendedSnapshot: suspendedSnapshot,
-            profileID: profile_id.flatMap(UUID.init(uuidString:))
+            profileID: profile_id.flatMap(UUID.init(uuidString:)),
+            transcriptPath: transcriptPath
         )
     }
 }
@@ -58,7 +61,13 @@ public struct TerminalStore: Sendable {
     }
 
     /// Create a new terminal record.
+    ///
+    /// `id` is optional. Callers that need to know the terminal ID *before*
+    /// the tmux window is spawned (so it can be injected as `TBD_TERMINAL_ID`
+    /// in the spawned env, used by the SessionStart hook bridge) can pre-mint
+    /// a UUID and pass it here. Defaults to a fresh UUID otherwise.
     public func create(
+        id: UUID = UUID(),
         worktreeID: UUID,
         tmuxWindowID: String,
         tmuxPaneID: String,
@@ -67,6 +76,7 @@ public struct TerminalStore: Sendable {
         profileID: UUID? = nil
     ) async throws -> Terminal {
         let terminal = Terminal(
+            id: id,
             worktreeID: worktreeID,
             tmuxWindowID: tmuxWindowID,
             tmuxPaneID: tmuxPaneID,
@@ -163,6 +173,29 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Update the Claude session ID and the absolute JSONL transcript path for
+    /// a terminal in one write. Used by the SessionStart hook bridge so the
+    /// transcript handler can target the exact file Claude is writing without
+    /// re-deriving the project directory from cwd (which is fragile across
+    /// `/clear` and `/compact` rollovers).
+    public func updateSession(id: UUID, sessionID: String, transcriptPath: String?) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.claudeSessionID = sessionID
+            // Only overwrite when the caller supplied a path. A SessionStart
+            // payload that omits `transcript_path` (theoretical — Claude
+            // currently always sends it) shouldn't clobber a previously
+            // captured path; the existing value still points at the right
+            // file as long as sessionID matches.
+            if let transcriptPath = transcriptPath {
+                record.transcriptPath = transcriptPath
+            }
+            try record.update(db)
+        }
+    }
+
     /// Clear Claude-specific metadata after window recreation.
     /// The recreated window runs a plain shell, not Claude.
     public func clearRecreated(id: UUID) async throws {
@@ -171,6 +204,7 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = nil
+            record.transcriptPath = nil
             record.suspendedAt = nil
             record.suspendedSnapshot = nil
             record.label = "shell"
