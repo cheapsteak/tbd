@@ -49,23 +49,23 @@ struct AskUserQuestionCard: View {
         return result?.text
     }
 
-    /// Build the chat-bubble text for one answered question. Returns nil
-    /// when there's no answer yet.
-    /// - Single-select match → the matched option's full label.
-    /// - Multi-select match → matched labels joined with newlines.
-    /// - Free-form (no match) → raw answer string.
-    private func bubbleText(for question: Question, answer: String?) -> String? {
-        guard let raw = answer, !raw.isEmpty else { return nil }
-        let match = AskUserQuestionParser.match(
-            answer: raw,
-            options: question.options,
-            multiSelect: question.multiSelect ?? false
-        )
+    /// Derive the chat-bubble text for one answered question from a
+    /// pre-computed match. Returns nil when there's no answer yet (or
+    /// nothing parsed for this question).
+    /// - Selected options → ordered labels joined with newlines.
+    /// - Free-form (no match) → match.freeformAnswer ?? raw answer.
+    static func bubbleText(
+        from match: AskUserQuestionParser.Match?,
+        options: [Option],
+        rawAnswer: String?
+    ) -> String? {
+        guard let match else { return nil }
+        guard let raw = rawAnswer, !raw.isEmpty else { return nil }
         if !match.selectedIndices.isEmpty {
             let ordered = match.selectedIndices.sorted()
             let labels = ordered.compactMap { idx -> String? in
-                guard idx < question.options.count else { return nil }
-                return question.options[idx].label
+                guard idx < options.count else { return nil }
+                return options[idx].label
             }
             return labels.joined(separator: "\n")
         }
@@ -92,7 +92,9 @@ struct AskUserQuestionCard: View {
                         selectedIndices: match?.selectedIndices ?? []
                     )
                     AnswerSlot(
-                        bubbleText: bubbleText(for: q, answer: answer),
+                        match: match,
+                        rawAnswer: answer,
+                        options: q.options,
                         timestamp: timestamp,
                         bubbleID: "\(self.id)#answer\(idx)"
                     )
@@ -282,12 +284,19 @@ private struct QuestionBubble: View {
 // MARK: - Answer slot — either a static user bubble or a "waiting" placeholder
 
 private struct AnswerSlot: View {
-    let bubbleText: String?
+    let match: AskUserQuestionParser.Match?
+    let rawAnswer: String?
+    let options: [AskUserQuestionCard.Option]
     let timestamp: Date?
     let bubbleID: String
 
     var body: some View {
-        if let text = bubbleText {
+        let text = AskUserQuestionCard.bubbleText(
+            from: match,
+            options: options,
+            rawAnswer: rawAnswer
+        )
+        if let text {
             ChatBubbleView(
                 item: .userPrompt(id: bubbleID, text: text, timestamp: timestamp)
             )
