@@ -69,11 +69,11 @@ enum DiffSyntaxHighlighter {
     /// current callers are SwiftUI view bodies.
     @MainActor
     static func highlightLines(_ code: String, language: String?) -> [NSAttributedString] {
-        let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let plainFont = monoFont(bold: false, italic: false)
         let plainLines: () -> [NSAttributedString] = {
             code.split(separator: "\n", omittingEmptySubsequences: false).map { line in
                 NSAttributedString(string: String(line), attributes: [
-                    .font: monoFont,
+                    .font: plainFont,
                     .foregroundColor: NSColor.labelColor,
                 ])
             }
@@ -99,7 +99,17 @@ enum DiffSyntaxHighlighter {
 
         let mutable = NSMutableAttributedString(attributedString: highlighted)
         let fullRange = NSRange(location: 0, length: mutable.length)
-        mutable.addAttribute(.font, value: monoFont, range: fullRange)
+        // Replace Highlightr's proportional theme font with a monospaced one
+        // (so columns line up) while preserving the bold/italic traits the
+        // theme attaches to headings, **bold**, *italic*, etc.
+        mutable.enumerateAttribute(.font, in: fullRange) { value, attrRange, _ in
+            let traits = (value as? NSFont)?.fontDescriptor.symbolicTraits ?? []
+            mutable.addAttribute(
+                .font,
+                value: monoFont(bold: traits.contains(.bold), italic: traits.contains(.italic)),
+                range: attrRange
+            )
+        }
         mutable.enumerateAttribute(.foregroundColor, in: fullRange) { value, attrRange, _ in
             if let color = value as? NSColor, colorIsHardToRead(color, onDarkBackground: isDark) {
                 mutable.addAttribute(.foregroundColor, value: NSColor.labelColor, range: attrRange)
@@ -130,6 +140,19 @@ enum DiffSyntaxHighlighter {
             resultCache.removeValue(forKey: evict)
         }
         return result
+    }
+
+    /// Monospaced system font with optional bold/italic traits. Used to keep
+    /// diff columns aligned while preserving the typographic emphasis
+    /// Highlightr's themes attach to certain tokens (markdown headings,
+    /// `**bold**`, `*italic*`, etc.).
+    private static func monoFont(bold: Bool, italic: Bool) -> NSFont {
+        let base = NSFont.monospacedSystemFont(ofSize: 12, weight: bold ? .bold : .regular)
+        guard italic else { return base }
+        var traits = base.fontDescriptor.symbolicTraits
+        traits.insert(.italic)
+        let descriptor = base.fontDescriptor.withSymbolicTraits(traits)
+        return NSFont(descriptor: descriptor, size: 12) ?? base
     }
 
     /// Symmetric WCAG luminance clamp. In light mode, replace overly-pale
