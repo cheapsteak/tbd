@@ -12,6 +12,19 @@ struct StatusBarView: View {
         return (worktree.path, worktree.repoID)
     }
 
+    private var footerLabel: (text: String, tooltip: String?) {
+        let version = "v\(TBDConstants.version)"
+        guard let execPath = Bundle.main.executablePath,
+              let buildRange = execPath.range(of: "/.build/", options: .backwards) else {
+            return (version, nil)
+        }
+        let worktreePath = String(execPath[..<buildRange.lowerBound])
+        guard let worktree = appState.worktrees.values.flatMap({ $0 }).first(where: { $0.path == worktreePath }) else {
+            return (version, nil)
+        }
+        return (worktree.displayName, version)
+    }
+
     var body: some View {
         HStack {
             Circle()
@@ -22,8 +35,15 @@ struct StatusBarView: View {
             if let info = selectedWorktreeInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)
             }
-            Text("v\(TBDConstants.version)")
-                .foregroundStyle(.secondary)
+            let footer = footerLabel
+            if let tooltip = footer.tooltip {
+                Text(footer.text)
+                    .foregroundStyle(.secondary)
+                    .help(tooltip)
+            } else {
+                Text(footer.text)
+                    .foregroundStyle(.secondary)
+            }
         }
         .font(.caption)
         .padding(.horizontal)
