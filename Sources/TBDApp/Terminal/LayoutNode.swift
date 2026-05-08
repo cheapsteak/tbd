@@ -105,6 +105,50 @@ indirect enum LayoutNode: Equatable, Sendable {
     }
 }
 
+// MARK: - Pane lookup / replacement helpers
+
+extension LayoutNode {
+    /// Returns the id of the first pane (in pre-order, left-to-right traversal)
+    /// whose content matches the predicate, or nil if none match.
+    func firstPaneID(where predicate: (PaneContent) -> Bool) -> UUID? {
+        switch self {
+        case .pane(let content):
+            return predicate(content) ? content.paneID : nil
+        case .split(_, let children, _):
+            for child in children {
+                if let found = child.firstPaneID(where: predicate) {
+                    return found
+                }
+            }
+            return nil
+        }
+    }
+
+    /// Returns a copy of the tree with the pane identified by `paneID` replaced
+    /// by `newContent`. Sibling panes and split ratios are preserved exactly.
+    /// Returns nil if no pane has that id.
+    func replacingContent(at paneID: UUID, with newContent: PaneContent) -> LayoutNode? {
+        switch self {
+        case .pane(let content):
+            return content.paneID == paneID ? .pane(newContent) : nil
+
+        case .split(let direction, let children, let ratios):
+            var newChildren = children
+            var replaced = false
+            for (index, child) in children.enumerated() {
+                if let updated = child.replacingContent(at: paneID, with: newContent) {
+                    newChildren[index] = updated
+                    replaced = true
+                    break
+                }
+            }
+            return replaced
+                ? .split(direction: direction, children: newChildren, ratios: ratios)
+                : nil
+        }
+    }
+}
+
 // MARK: - Codable (manual conformance for indirect enum)
 
 extension LayoutNode: Codable {
