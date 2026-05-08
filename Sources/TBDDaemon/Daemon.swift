@@ -40,30 +40,6 @@ public final class Daemon: Sendable {
         unsetenv("TBD_PROMPT_RENAME")
     }
 
-    /// Resolve the absolute path to the TBDCLI binary that sits alongside
-    /// this daemon executable. Returns nil when the executable path can't
-    /// be determined — callers should fall back to bare `tbd` on PATH.
-    ///
-    /// Why we bother: the user's `~/.local/bin/tbd` symlink can be stale
-    /// (pointing at a different worktree's older build), so PATH lookup is
-    /// unreliable for hook commands. The daemon's own sibling binary is
-    /// guaranteed to be the version that wrote the overlay.
-    static func resolveSiblingCLIPath() -> String? {
-        // `Bundle.main.executableURL` is the most reliable source — it
-        // resolves through symlinks and any wrapping bundle. Fall back to
-        // argv[0] only if the bundle API somehow returns nil (shouldn't
-        // happen for SPM executables, but cheap insurance).
-        let daemonPath: String
-        if let url = Bundle.main.executableURL {
-            daemonPath = url.path
-        } else if let arg0 = CommandLine.arguments.first, !arg0.isEmpty {
-            daemonPath = arg0
-        } else {
-            return nil
-        }
-        return CLIInstaller.cliPath(forDaemonExecutable: daemonPath)
-    }
-
     /// Start the daemon: create config directory, clean up stale state,
     /// initialize database and all managers, start servers, reconcile worktrees.
     public func start() async throws {
@@ -104,13 +80,7 @@ public final class Daemon: Sendable {
         // Claude sessions register the SessionStart + Stop hooks. Idempotent;
         // failures degrade gracefully to the legacy cwd-based transcript
         // resolution (the bridge just won't fire).
-        //
-        // Bake the absolute path to the daemon's sibling TBDCLI binary into
-        // the hook commands. Otherwise the hooks rely on `tbd` being on PATH,
-        // which on this machine often resolves to a stale symlink pointing at
-        // the main-project build (predates `session-event`) and silently
-        // exits non-zero.
-        ClaudeHookOverlay.writeOverlay(cliPath: Daemon.resolveSiblingCLIPath())
+        ClaudeHookOverlay.writeOverlay()
 
         // 4a. Scrub inherited TBD_* env vars before any tmux server is spawned.
         // The daemon may have been launched from inside a TBD-spawned shell (e.g.
