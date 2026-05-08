@@ -50,6 +50,12 @@ public enum SettingsJSONSafety {
     /// over the parsed dictionary. The invariant closure should throw on
     /// any structural mismatch; that throw is mapped into
     /// `Error.invariantFailed` and the on-disk file is NOT modified.
+    ///
+    /// `fileManager` is used only for parent-directory existence checks and
+    /// `createDirectory`; the final write goes through `Data.write(to:)`,
+    /// which always hits real I/O. Tests can pass an in-memory file manager
+    /// to mock the directory probe but should still expect real bytes on
+    /// disk afterwards.
     public static func atomicWriteValidated(
         proposedBytes: Data,
         targetPath: String,
