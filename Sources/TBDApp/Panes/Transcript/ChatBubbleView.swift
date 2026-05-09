@@ -283,6 +283,10 @@ struct ChatBubbleView_Previews: PreviewProvider {
             .padding()
         }
         .frame(width: 560, height: 720)
+        // Match ChatBubbleParityPreviews: previews have no enclosing
+        // TranscriptItemsView to flip the env on hover, so force-enable
+        // text selection for review ergonomics.
+        .environment(\.transcriptTextSelection, true)
     }
 }
 
