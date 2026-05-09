@@ -79,11 +79,6 @@ struct WorktreeRowView: View {
 
     @ViewBuilder
     private func rowIcons() -> some View {
-        if isMain {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
         if hasSuspendedTerminal {
             Image(systemName: "pause.circle.fill")
                 .font(.caption2)
@@ -130,6 +125,7 @@ struct WorktreeRowView: View {
             ) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(worktree.displayName)
+                        .font(.system(size: 13))
                         .fontWeight(hasBoldNotification ? .bold : .regular)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -156,6 +152,7 @@ struct WorktreeRowView: View {
                 appState.selectedWorktreeIDs = [worktree.id]
             }
         }
+        .frame(height: 28)
         .help(isEditing ? "" : worktree.displayName)
         .background(
             RoundedRectangle(cornerRadius: 4)

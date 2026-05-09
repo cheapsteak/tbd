@@ -34,6 +34,11 @@ struct RepoSectionView: View {
     @State private var isSectionHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
 
+    private static func startsWithEmoji(_ name: String) -> Bool {
+        guard let first = name.first else { return false }
+        return first.unicodeScalars.contains { $0.properties.isEmoji && $0.value > 0x7F }
+    }
+
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
             hoverDebounceTask?.cancel()
@@ -63,6 +68,16 @@ struct RepoSectionView: View {
 
     var body: some View {
         HStack(spacing: 4) {
+            if !Self.startsWithEmoji(repo.displayName) {
+                Image(systemName: "folder")
+                    .font(.system(size: 11))
+                    .foregroundStyle(
+                        repo.status == .missing
+                            ? AnyShapeStyle(Color.secondary.opacity(0.5))
+                            : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+                    )
+                    .frame(width: 18, height: 18)
+            }
             RenameableLabel(
                 text: repo.displayName,
                 isEditing: $isEditing,
@@ -73,7 +88,9 @@ struct RepoSectionView: View {
                 }
             ) {
                 Text(repo.displayName)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .foregroundStyle(
                         repo.status == .missing
                             ? AnyShapeStyle(Color.secondary.opacity(0.5))
@@ -109,6 +126,7 @@ struct RepoSectionView: View {
             }
             .frame(width: 20, height: 20)
         }
+        .frame(height: 22, alignment: .bottom)
         .contentShape(Rectangle())
         .onTapGesture {
             appState.selectRepo(id: repo.id)
@@ -123,6 +141,8 @@ struct RepoSectionView: View {
             }
         }
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
         .tag(repo.id)
 
         if isExpanded {
@@ -147,13 +167,17 @@ struct RepoSectionView: View {
                     .frame(width: 20, height: 20)
                 }
                 .onHover { onSectionHoverChange($0) }
-                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
                 .tag(main.id)
             }
             ForEach(worktrees) { worktree in
                 WorktreeRowView(worktree: worktree)
                     .onHover { onSectionHoverChange($0) }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
                     .tag(worktree.id)
             }
             .onMove { source, destination in
