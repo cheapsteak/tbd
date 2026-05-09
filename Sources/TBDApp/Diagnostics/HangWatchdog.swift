@@ -251,9 +251,11 @@ final class HangWatchdog: @unchecked Sendable {
         guard then != 0, now >= then else { return 0 }
         let delta = now - then
         let info = Self.timebase
-        // (delta * numer) / denom, computed in 128-bit-ish space by hand to
-        // avoid overflow on long deltas. UInt64 * UInt32 fits in UInt128 in
-        // practice; for our threshold range we're nowhere near overflow.
+        // (delta * numer) / denom in plain UInt64. Overflow is impractical
+        // here because numer is tiny (1 on Intel, 125 on Apple Silicon) and
+        // delta is at most uptime-since-last-tick — bounded by the timer
+        // interval in steady state. Wraparound would require deltas
+        // measured in years.
         return delta * UInt64(info.numer) / UInt64(info.denom)
     }
 
