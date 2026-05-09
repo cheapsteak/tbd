@@ -132,7 +132,7 @@ struct RepoSectionView: View {
             if let main = mainWorktree {
                 HStack(spacing: 0) {
                     WorktreeRowView(worktree: main, isMain: true)
-                    Spacer()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Group {
                         if isSectionHovered {
                             Button(action: createWorktree) {
