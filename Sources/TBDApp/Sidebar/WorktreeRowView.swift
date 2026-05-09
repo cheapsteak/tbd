@@ -79,11 +79,6 @@ struct WorktreeRowView: View {
 
     @ViewBuilder
     private func rowIcons() -> some View {
-        if isMain {
-            Image(systemName: "arrow.triangle.branch")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
         if hasSuspendedTerminal {
             Image(systemName: "pause.circle.fill")
                 .font(.caption2)

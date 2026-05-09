@@ -63,6 +63,13 @@ struct RepoSectionView: View {
 
     var body: some View {
         HStack(spacing: 4) {
+            Image(systemName: "folder")
+                .font(.system(size: 11))
+                .foregroundStyle(
+                    repo.status == .missing
+                        ? AnyShapeStyle(Color.secondary.opacity(0.5))
+                        : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+                )
             RenameableLabel(
                 text: repo.displayName,
                 isEditing: $isEditing,
@@ -109,6 +116,7 @@ struct RepoSectionView: View {
             }
             .frame(width: 20, height: 20)
         }
+        .padding(.leading, -6)
         .contentShape(Rectangle())
         .onTapGesture {
             appState.selectRepo(id: repo.id)
