@@ -180,6 +180,7 @@ struct ContentView: View {
 
             StatusBarView()
         }
+        .frame(minWidth: 800, minHeight: 500)
         .onChange(of: appState.selectedWorktreeIDs) { oldSelection, newSelection in
             markSelectedWorktreesAsRead(newSelection)
             let newlySelected = newSelection.subtracting(oldSelection)
