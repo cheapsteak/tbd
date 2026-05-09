@@ -30,6 +30,7 @@ struct AppKitSplitView<Sidebar: View, Detail: View>: NSViewControllerRepresentab
 
     func makeNSViewController(context: Context) -> NSSplitViewController {
         let splitVC = NSSplitViewController()
+        splitVC.splitView.autosaveName = "main.sidebar"
 
         let sidebarHost = NSHostingController(
             rootView: AnyView(sidebar().environmentObject(appState))
