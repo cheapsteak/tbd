@@ -41,7 +41,7 @@ jobs:
           # restored. restore-keys falls back to the most recent matching
           # cache; llbuild's incremental build then only recompiles what
           # actually differs.
-          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
 
