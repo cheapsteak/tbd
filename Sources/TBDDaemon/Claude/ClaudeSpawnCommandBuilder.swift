@@ -45,6 +45,7 @@ enum ClaudeSpawnCommandBuilder {
         cmd: String?,
         shellFallback: String,
         settingsOverlayPath: String? = nil,
+        pluginDirPath: String? = nil,
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Result {
         // Optional --settings flag merged into the claude invocation.
@@ -61,11 +62,18 @@ enum ClaudeSpawnCommandBuilder {
             settingsFlag = ""
         }
 
+        let pluginFlag: String
+        if let p = pluginDirPath, fileExists(p) {
+            pluginFlag = " --plugin-dir \(SystemPromptBuilder.shellEscape(p))"
+        } else {
+            pluginFlag = ""
+        }
+
         let base: String
         if let resumeID {
-            base = "claude --resume \(resumeID) --dangerously-skip-permissions\(settingsFlag)"
+            base = "claude --resume \(resumeID) --dangerously-skip-permissions\(settingsFlag)\(pluginFlag)"
         } else if let sessionID = freshSessionID {
-            var b = "claude --session-id \(sessionID) --dangerously-skip-permissions\(settingsFlag)"
+            var b = "claude --session-id \(sessionID) --dangerously-skip-permissions\(settingsFlag)\(pluginFlag)"
             if let prompt = appendSystemPrompt {
                 b += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
             }
