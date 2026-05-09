@@ -33,12 +33,3 @@ import Foundation
     #expect(body.contains("--help"))
 }
 
-@Test func bodyHashIsStableAcrossCalls() {
-    #expect(TBDSkillContent.bodyHash() == TBDSkillContent.bodyHash())
-}
-
-@Test func bodyHashIsHexEncoded64Chars() {
-    let hash = TBDSkillContent.bodyHash()
-    #expect(hash.count == 64)
-    #expect(hash.allSatisfy { $0.isHexDigit })
-}

@@ -266,10 +266,6 @@ final class AppState: ObservableObject {
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false
 
-    /// Cached skill installation status; refreshed on app activation and after install.
-    @Published var skillStatus: SkillStatusResult? = nil
-    @Published var skillInstallError: String? = nil
-
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient)
@@ -301,9 +297,6 @@ final class AppState: ObservableObject {
             await connectAndLoadInitialState()
             startPolling()
         }
-        Task { @MainActor in
-            await self.refreshSkillStatus()
-        }
     }
 
     // Note: AppState is singleton-lifetime in this app, so we deliberately
@@ -330,10 +323,6 @@ final class AppState: ObservableObject {
                 } catch {
                     logger.warning("setAppForegroundState(true) failed: \(error)")
                 }
-            }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                await self.refreshSkillStatus()
             }
         }
         let resigned = center.addObserver(

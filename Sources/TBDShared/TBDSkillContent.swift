@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 
 /// Canonical content for the `tbd` skill. Single source of truth — written to
 /// the fallback file at daemon startup, written to `~/.claude/skills/tbd/SKILL.md`
@@ -87,11 +86,4 @@ Use `--prompt-file -` with a heredoc to avoid shell escaping issues.
 If `TBD_WORKTREE_ID` isn't set, run `tbd worktree list` to find an ID, or `tbd worktree create` to make one. The CLI works from any shell on the same machine as the TBD daemon.
 """
 
-    /// SHA256 of `body`, hex-encoded (lowercase, 64 chars). Used to detect
-    /// whether an installed skill file matches the running daemon's content.
-    public static func bodyHash() -> String {
-        let data = Data(body.utf8)
-        let digest = SHA256.hash(data: data)
-        return digest.map { String(format: "%02x", $0) }.joined()
-    }
 }

@@ -200,10 +200,6 @@ public final class RPCRouter: Sendable {
                 return try await handleSessionMessages(request.paramsData)
             case RPCMethod.stateSubscribe:
                 return RPCResponse(error: "state.subscribe must be handled by SocketServer")
-            case RPCMethod.skillStatus:
-                return try await handleSkillStatus(request.paramsData)
-            case RPCMethod.skillInstall:
-                return try await handleSkillInstall(request.paramsData)
             case RPCMethod.daemonLegacyHooksStatus:
                 return try await handleDaemonLegacyHooksStatus()
             case RPCMethod.daemonRemoveLegacyGlobalHooks:
