@@ -11,30 +11,33 @@ import SwiftUI
 /// `canCollapse = false` on the sidebar item makes the layout deterministic.
 ///
 /// `AppState` is passed explicitly and re-injected as an environment object on every
-/// `NSHostingController` rootView (both at make and update time). `EnvironmentObject`
-/// does not auto-cross the SwiftUI -> AppKit -> SwiftUI boundary; skipping the
-/// re-injection would crash at runtime with "No ObservableObject of type AppState
-/// found" the first time the hosted SwiftUI views read state.
+/// `NSHostingController` rootView. `EnvironmentObject` does not auto-cross the
+/// SwiftUI -> AppKit -> SwiftUI boundary; skipping the re-injection would crash at
+/// runtime with "No ObservableObject of type AppState found".
 ///
-/// Generics note: we erase sidebar/detail to `AnyView` inside `updateNSViewController`
-/// when reassigning `rootView`. The alternative (preserving the concrete `Sidebar` /
-/// `Detail` generic types in the `NSHostingController<...>` cast) compiles, but the
-/// resulting `as? NSHostingController<ModifiedContent<Sidebar, ...>>` casts are very
-/// fragile to any future change to the `.environmentObject(...)` chain. AnyView
-/// erasure trades a negligible amount of view diffing efficiency for code that is
-/// readable and won't silently break when the wrapping modifiers change.
+/// Identity-preserving update path: rootView is reassigned with the same static type
+/// (`EnvironmentInjector<Sidebar>` / `EnvironmentInjector<Detail>`) on every update,
+/// so SwiftUI matches views by type identity and runs its normal structural reconcile.
+/// The earlier draft of this file used `AnyView` erasure inside `updateNSViewController`,
+/// which forced SwiftUI into a heuristic reconcile and surfaced as a "performed a
+/// reentrant operation in its NSTableView delegate" warning on the sidebar `List`.
 struct AppKitSplitView<Sidebar: View, Detail: View>: NSViewControllerRepresentable {
     let appState: AppState
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let detail: () -> Detail
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
 
     func makeNSViewController(context: Context) -> NSSplitViewController {
         let splitVC = NSSplitViewController()
         splitVC.splitView.autosaveName = "main.sidebar"
 
         let sidebarHost = NSHostingController(
-            rootView: AnyView(sidebar().environmentObject(appState))
+            rootView: EnvironmentInjector(appState: appState, content: sidebar())
         )
+        context.coordinator.sidebarHost = sidebarHost
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarHost)
         sidebarItem.canCollapse = false
         sidebarItem.minimumThickness = 220
@@ -49,8 +52,9 @@ struct AppKitSplitView<Sidebar: View, Detail: View>: NSViewControllerRepresentab
         )
 
         let detailHost = NSHostingController(
-            rootView: AnyView(detail().environmentObject(appState))
+            rootView: EnvironmentInjector(appState: appState, content: detail())
         )
+        context.coordinator.detailHost = detailHost
         let detailItem = NSSplitViewItem(viewController: detailHost)
         detailItem.canCollapse = false
 
@@ -61,18 +65,29 @@ struct AppKitSplitView<Sidebar: View, Detail: View>: NSViewControllerRepresentab
     }
 
     func updateNSViewController(_ splitVC: NSSplitViewController, context: Context) {
-        // Re-render hosted SwiftUI views so that observable state changes
-        // (e.g. AppState mutations) propagate. We re-attach the environment
-        // object on every update because the AnyView wrapping would otherwise
-        // hide the previously-injected EnvironmentObject from the new rootView.
-        let items = splitVC.splitViewItems
-        guard items.count == 2 else { return }
+        // Reassign rootView with the same static wrapper type so SwiftUI can
+        // match the view tree by identity and run a normal structural reconcile.
+        // Required for state read by the closures (e.g. ContentView's @AppStorage
+        // showFilePanel / filePanelWidth) to propagate into the hosted tree.
+        context.coordinator.sidebarHost?.rootView =
+            EnvironmentInjector(appState: appState, content: sidebar())
+        context.coordinator.detailHost?.rootView =
+            EnvironmentInjector(appState: appState, content: detail())
+    }
 
-        if let sidebarHost = items[0].viewController as? NSHostingController<AnyView> {
-            sidebarHost.rootView = AnyView(sidebar().environmentObject(appState))
-        }
-        if let detailHost = items[1].viewController as? NSHostingController<AnyView> {
-            detailHost.rootView = AnyView(detail().environmentObject(appState))
-        }
+    final class Coordinator {
+        fileprivate var sidebarHost: NSHostingController<EnvironmentInjector<Sidebar>>?
+        fileprivate var detailHost: NSHostingController<EnvironmentInjector<Detail>>?
+    }
+}
+
+/// Spellable wrapper around `.environmentObject(...)` so the hosted rootView has
+/// a concrete, generic-friendly type that the Coordinator can hold without
+/// resorting to `AnyView` erasure.
+private struct EnvironmentInjector<Content: View>: View {
+    let appState: AppState
+    let content: Content
+    var body: some View {
+        content.environmentObject(appState)
     }
 }
