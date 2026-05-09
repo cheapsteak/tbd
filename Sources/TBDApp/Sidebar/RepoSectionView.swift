@@ -26,7 +26,6 @@ private struct HoverPressButtonStyle: ButtonStyle {
 
 struct RepoSectionView: View {
     let repo: Repo
-    var isFirstSection: Bool = true
     @EnvironmentObject var appState: AppState
 
     @State private var isExpanded = true
@@ -151,7 +150,7 @@ struct RepoSectionView: View {
             }
             .frame(width: 20, height: 20)
         }
-        .frame(height: 20)
+        .frame(height: 22, alignment: .bottom)
         .contentShape(Rectangle())
         .onTapGesture {
             appState.selectRepo(id: repo.id)
@@ -165,7 +164,7 @@ struct RepoSectionView: View {
                 isEditing = true
             }
         }
-        .listRowInsets(EdgeInsets(top: isFirstSection ? 0 : 8, leading: 0, bottom: 0, trailing: 0))
+        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .tag(repo.id)
 

@@ -14,8 +14,8 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: $appState.selectedWorktreeIDs) {
-            ForEach(Array(filteredRepos.enumerated()), id: \.element.id) { index, repo in
-                RepoSectionView(repo: repo, isFirstSection: index == 0)
+            ForEach(filteredRepos) { repo in
+                RepoSectionView(repo: repo)
             }
         }
         .listStyle(.plain)
