@@ -9,10 +9,6 @@ struct EmojiPanelAnchor: NSViewRepresentable {
     let query: String
     @Binding var selectedIndex: Int
     let onSelect: (String) -> Void
-    /// Optional click-outside dismissal. Invoked when the user clicks anywhere
-    /// outside the floating panel while it's visible. Pass nil to keep the
-    /// rename-autocomplete behavior (no light-dismiss).
-    var onOutsideClick: (@MainActor () -> Void)? = nil
 
     func makeNSView(context: Context) -> NSView {
         let anchor = NSView(frame: .zero)
@@ -39,18 +35,13 @@ struct EmojiPanelAnchor: NSViewRepresentable {
                 coordinator.panel = panel
                 panel.show(relativeTo: nsView)
             }
-            if let onOutsideClick {
-                coordinator.installOutsideClickMonitor(onDismiss: onOutsideClick)
-            }
         } else {
-            coordinator.removeOutsideClickMonitor()
             coordinator.panel?.dismiss()
             coordinator.panel = nil
         }
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.removeOutsideClickMonitor()
         coordinator.panel?.dismiss()
         coordinator.panel = nil
     }
@@ -60,31 +51,6 @@ struct EmojiPanelAnchor: NSViewRepresentable {
     final class Coordinator {
         var anchor: NSView?
         var panel: FloatingPanel?
-        private var localMonitor: Any?
-        private var globalMonitor: Any?
-
-        func installOutsideClickMonitor(onDismiss: @escaping @MainActor () -> Void) {
-            // Already installed — leave the existing monitors in place.
-            guard localMonitor == nil, globalMonitor == nil else { return }
-            let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-            localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
-                guard let self, let panel = self.panel else { return event }
-                // NSEvent monitors fire on the main thread; jump to MainActor explicitly
-                // so the dismissal closure can touch SwiftUI state without warnings.
-                if event.window !== panel {
-                    Task { @MainActor in onDismiss() }
-                }
-                return event
-            }
-            globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { _ in
-                Task { @MainActor in onDismiss() }
-            }
-        }
-
-        func removeOutsideClickMonitor() {
-            if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
-            if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
-        }
     }
 }
 

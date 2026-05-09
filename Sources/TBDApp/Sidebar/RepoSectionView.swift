@@ -33,11 +33,6 @@ struct RepoSectionView: View {
     @State private var isHeaderHovered = false
     @State private var isSectionHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
-    @State private var emojiPickerSelectedIndex = 0
-
-    private var showEmojiPicker: Bool {
-        appState.activeEmojiPickerRepoID == repo.id
-    }
 
     private static func startsWithEmoji(_ name: String) -> Bool {
         guard let first = name.first else { return false }
@@ -74,44 +69,14 @@ struct RepoSectionView: View {
     var body: some View {
         HStack(spacing: 4) {
             if !Self.startsWithEmoji(repo.displayName) {
-                let repoID = repo.id
-                Button {
-                    if appState.activeEmojiPickerRepoID == repoID {
-                        appState.activeEmojiPickerRepoID = nil
-                    } else {
-                        appState.activeEmojiPickerRepoID = repoID
-                    }
-                } label: {
-                    Image(systemName: "folder")
-                        .font(.system(size: 11))
-                        .foregroundStyle(
-                            repo.status == .missing
-                                ? AnyShapeStyle(Color.secondary.opacity(0.5))
-                                : AnyShapeStyle(HierarchicalShapeStyle.secondary)
-                        )
-                        .frame(width: 18, height: 18)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Pick emoji")
-                .background(
-                    EmojiPanelAnchor(
-                        isPresented: showEmojiPicker,
-                        query: "",
-                        selectedIndex: $emojiPickerSelectedIndex,
-                        onSelect: { emoji in
-                            let newName = "\(emoji) \(repo.displayName)"
-                            Task {
-                                await appState.renameRepo(id: repo.id, displayName: newName)
-                            }
-                            appState.activeEmojiPickerRepoID = nil
-                            emojiPickerSelectedIndex = 0
-                        },
-                        onOutsideClick: { [weak appState] in
-                            appState?.activeEmojiPickerRepoID = nil
-                        }
+                Image(systemName: "folder")
+                    .font(.system(size: 11))
+                    .foregroundStyle(
+                        repo.status == .missing
+                            ? AnyShapeStyle(Color.secondary.opacity(0.5))
+                            : AnyShapeStyle(HierarchicalShapeStyle.secondary)
                     )
-                )
+                    .frame(width: 18, height: 18)
             }
             RenameableLabel(
                 text: repo.displayName,

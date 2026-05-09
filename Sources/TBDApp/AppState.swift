@@ -111,12 +111,6 @@ final class AppState: ObservableObject {
     /// before the daemon RPC has returned.
     @Published var isInitialStateLoaded: Bool = false
 
-    /// ID of the repo whose emoji picker is currently presented. Holding this in
-    /// shared state (rather than per-`RepoSectionView` `@State`) ensures only one
-    /// `FloatingPanel` is ever visible — opening picker B while A is open
-    /// implicitly dismisses A.
-    @Published var activeEmojiPickerRepoID: UUID?
-
     /// Buffers a deep-link target UUID when `.onOpenURL` fires before the
     /// initial state load completes. Drained at the end of
     /// `connectAndLoadInitialState()`. Internal-only — never written from
