@@ -15,19 +15,35 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # git-restore-mtime needs full history
+
+      # Restore source-file mtimes to their last git commit times BEFORE the
+      # cache restore. Without this, fresh checkout writes every source mtime
+      # to "now", which looks newer than what llbuild recorded in the cached
+      # `.build/`, so it rebuilds from scratch. (PR #82 trimmed `.build/` from
+      # the cache under the wrong assumption that fresh-VM inodes were the
+      # culprit; SPM actually emits `file-system: device-agnostic` so llbuild
+      # zeroes device+inode before equality. mtime drift was the real issue.)
+      - name: Restore source mtimes from git commit times
+        uses: chetan/git-restore-mtime-action@v2
 
       - name: Capture Swift toolchain version
         run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> $GITHUB_ENV
 
-      - name: Cache SwiftPM dependencies
+      - name: Cache SwiftPM build artifacts and dependencies
         uses: actions/cache@v4
         with:
           path: |
-            .build/checkouts
+            .build
             ~/Library/Caches/org.swift.swiftpm
-          key: spm-deps-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved') }}
+          # Primary key changes per source revision so we always know what we
+          # restored. restore-keys falls back to the most recent matching
+          # cache; llbuild's incremental build then only recompiles what
+          # actually differs.
+          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.resolved', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
-            spm-deps-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
+            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
 
       - name: Test
         run: swift test --parallel
