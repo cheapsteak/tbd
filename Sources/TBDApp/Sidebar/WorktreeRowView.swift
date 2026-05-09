@@ -125,6 +125,7 @@ struct WorktreeRowView: View {
             ) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(worktree.displayName)
+                        .font(.system(size: 13))
                         .fontWeight(hasBoldNotification ? .bold : .regular)
                         .lineLimit(1)
                         .truncationMode(.tail)

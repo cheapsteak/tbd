@@ -14,11 +14,13 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: $appState.selectedWorktreeIDs) {
-            ForEach(filteredRepos) { repo in
-                RepoSectionView(repo: repo)
+            ForEach(Array(filteredRepos.enumerated()), id: \.element.id) { index, repo in
+                RepoSectionView(repo: repo, isFirstSection: index == 0)
             }
         }
-        .listStyle(.sidebar)
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .environment(\.defaultMinListRowHeight, 26)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 Divider()

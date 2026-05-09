@@ -26,6 +26,7 @@ private struct HoverPressButtonStyle: ButtonStyle {
 
 struct RepoSectionView: View {
     let repo: Repo
+    var isFirstSection: Bool = true
     @EnvironmentObject var appState: AppState
 
     @State private var isExpanded = true
@@ -33,6 +34,13 @@ struct RepoSectionView: View {
     @State private var isHeaderHovered = false
     @State private var isSectionHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
+    @State private var showEmojiPicker = false
+    @State private var emojiPickerSelectedIndex = 0
+
+    private static func startsWithEmoji(_ name: String) -> Bool {
+        guard let first = name.first else { return false }
+        return first.unicodeScalars.contains { $0.properties.isEmoji && $0.value > 0x7F }
+    }
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -63,13 +71,38 @@ struct RepoSectionView: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "folder")
-                .font(.system(size: 11))
-                .foregroundStyle(
-                    repo.status == .missing
-                        ? AnyShapeStyle(Color.secondary.opacity(0.5))
-                        : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+            if !Self.startsWithEmoji(repo.displayName) {
+                Button {
+                    showEmojiPicker.toggle()
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.system(size: 11))
+                        .foregroundStyle(
+                            repo.status == .missing
+                                ? AnyShapeStyle(Color.secondary.opacity(0.5))
+                                : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+                        )
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Pick emoji")
+                .background(
+                    EmojiPanelAnchor(
+                        isPresented: showEmojiPicker,
+                        query: "",
+                        selectedIndex: $emojiPickerSelectedIndex,
+                        onSelect: { emoji in
+                            let newName = "\(emoji) \(repo.displayName)"
+                            Task {
+                                await appState.renameRepo(id: repo.id, displayName: newName)
+                            }
+                            showEmojiPicker = false
+                            emojiPickerSelectedIndex = 0
+                        }
+                    )
                 )
+            }
             RenameableLabel(
                 text: repo.displayName,
                 isEditing: $isEditing,
@@ -80,7 +113,9 @@ struct RepoSectionView: View {
                 }
             ) {
                 Text(repo.displayName)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .foregroundStyle(
                         repo.status == .missing
                             ? AnyShapeStyle(Color.secondary.opacity(0.5))
@@ -116,7 +151,7 @@ struct RepoSectionView: View {
             }
             .frame(width: 20, height: 20)
         }
-        .padding(.leading, -6)
+        .frame(height: 20)
         .contentShape(Rectangle())
         .onTapGesture {
             appState.selectRepo(id: repo.id)
@@ -130,7 +165,8 @@ struct RepoSectionView: View {
                 isEditing = true
             }
         }
-        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+        .listRowInsets(EdgeInsets(top: isFirstSection ? 0 : 8, leading: 0, bottom: 0, trailing: 0))
+        .listRowSeparator(.hidden)
         .tag(repo.id)
 
         if isExpanded {
@@ -155,13 +191,15 @@ struct RepoSectionView: View {
                     .frame(width: 20, height: 20)
                 }
                 .onHover { onSectionHoverChange($0) }
-                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                .listRowSeparator(.hidden)
                 .tag(main.id)
             }
             ForEach(worktrees) { worktree in
                 WorktreeRowView(worktree: worktree)
                     .onHover { onSectionHoverChange($0) }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
                     .tag(worktree.id)
             }
             .onMove { source, destination in
