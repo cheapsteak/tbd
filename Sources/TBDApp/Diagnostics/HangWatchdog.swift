@@ -154,6 +154,12 @@ final class HangWatchdog: @unchecked Sendable {
         queue.async { [self] in
             timer?.cancel()
             timer = nil
+            // Reset transition state so a subsequent start() doesn't fire a
+            // spurious "hang recovered" on the first fresh tick (the re-seeded
+            // lastTick would read tiny, but `wasHung == true` would still
+            // match the .toHealthy edge in evaluate()).
+            wasHung = false
+            hangStartedAtMach = 0
         }
     }
 
@@ -187,7 +193,7 @@ final class HangWatchdog: @unchecked Sendable {
         let lastTick = lastTickLock.withLock { $0 }
         let stallNs = Self.machDeltaToNanos(now: now, then: lastTick)
         let action = Self.evaluate(
-            nowNs: stallNs,
+            stallNs: stallNs,
             wasHung: wasHung,
             thresholdMs: thresholdMs
         )
@@ -225,7 +231,7 @@ final class HangWatchdog: @unchecked Sendable {
     /// on its arguments, not on `self` or any global state. Tests call this
     /// directly with synthetic inputs to cover all four branches without
     /// spinning up a timer.
-    static func evaluate(nowNs stallNs: UInt64, wasHung: Bool, thresholdMs: UInt64) -> HangWatchdogAction {
+    static func evaluate(stallNs: UInt64, wasHung: Bool, thresholdMs: UInt64) -> HangWatchdogAction {
         let thresholdNs = thresholdMs * 1_000_000
         let isHungNow = stallNs >= thresholdNs
         switch (wasHung, isHungNow) {

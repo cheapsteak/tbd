@@ -18,28 +18,28 @@ struct HangWatchdogTests {
     @Test func healthy_belowThreshold_isNoop() {
         // wasHung=false, stall<threshold — first tick of a healthy app.
         let stallNs: UInt64 = 100 * 1_000_000  // 100 ms
-        let action = HangWatchdog.evaluate(nowNs: stallNs, wasHung: false, thresholdMs: thresholdMs)
+        let action = HangWatchdog.evaluate(stallNs: stallNs, wasHung: false, thresholdMs: thresholdMs)
         #expect(action == .noop)
     }
 
     @Test func healthy_aboveThreshold_logsToHung() {
         // wasHung=false, stall>threshold — onset of a hang.
         let stallNs: UInt64 = 3_000 * 1_000_000  // 3 s
-        let action = HangWatchdog.evaluate(nowNs: stallNs, wasHung: false, thresholdMs: thresholdMs)
+        let action = HangWatchdog.evaluate(stallNs: stallNs, wasHung: false, thresholdMs: thresholdMs)
         #expect(action == .log(.toHung))
     }
 
     @Test func hung_aboveThreshold_isNoop() {
         // wasHung=true, stall>threshold — sustained hang. Must NOT re-log.
         let stallNs: UInt64 = 5_000 * 1_000_000  // 5 s
-        let action = HangWatchdog.evaluate(nowNs: stallNs, wasHung: true, thresholdMs: thresholdMs)
+        let action = HangWatchdog.evaluate(stallNs: stallNs, wasHung: true, thresholdMs: thresholdMs)
         #expect(action == .noop)
     }
 
     @Test func hung_belowThreshold_logsToHealthy() {
         // wasHung=true, stall<threshold — recovery edge.
         let stallNs: UInt64 = 50 * 1_000_000  // 50 ms
-        let action = HangWatchdog.evaluate(nowNs: stallNs, wasHung: true, thresholdMs: thresholdMs)
+        let action = HangWatchdog.evaluate(stallNs: stallNs, wasHung: true, thresholdMs: thresholdMs)
         #expect(action == .log(.toHealthy))
     }
 
@@ -47,7 +47,7 @@ struct HangWatchdogTests {
         // Stall exactly at threshold counts as hung (>=). Pinning this so a
         // future "off by one" refactor doesn't quietly drop the boundary tick.
         let stallNs: UInt64 = thresholdMs * 1_000_000
-        let action = HangWatchdog.evaluate(nowNs: stallNs, wasHung: false, thresholdMs: thresholdMs)
+        let action = HangWatchdog.evaluate(stallNs: stallNs, wasHung: false, thresholdMs: thresholdMs)
         #expect(action == .log(.toHung))
     }
 
