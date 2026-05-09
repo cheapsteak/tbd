@@ -33,8 +33,11 @@ struct RepoSectionView: View {
     @State private var isHeaderHovered = false
     @State private var isSectionHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
-    @State private var showEmojiPicker = false
     @State private var emojiPickerSelectedIndex = 0
+
+    private var showEmojiPicker: Bool {
+        appState.activeEmojiPickerRepoID == repo.id
+    }
 
     private static func startsWithEmoji(_ name: String) -> Bool {
         guard let first = name.first else { return false }
@@ -71,8 +74,13 @@ struct RepoSectionView: View {
     var body: some View {
         HStack(spacing: 4) {
             if !Self.startsWithEmoji(repo.displayName) {
+                let repoID = repo.id
                 Button {
-                    showEmojiPicker.toggle()
+                    if appState.activeEmojiPickerRepoID == repoID {
+                        appState.activeEmojiPickerRepoID = nil
+                    } else {
+                        appState.activeEmojiPickerRepoID = repoID
+                    }
                 } label: {
                     Image(systemName: "folder")
                         .font(.system(size: 11))
@@ -96,8 +104,11 @@ struct RepoSectionView: View {
                             Task {
                                 await appState.renameRepo(id: repo.id, displayName: newName)
                             }
-                            showEmojiPicker = false
+                            appState.activeEmojiPickerRepoID = nil
                             emojiPickerSelectedIndex = 0
+                        },
+                        onOutsideClick: { [weak appState] in
+                            appState?.activeEmojiPickerRepoID = nil
                         }
                     )
                 )
@@ -166,6 +177,7 @@ struct RepoSectionView: View {
         }
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
         .tag(repo.id)
 
         if isExpanded {
@@ -192,6 +204,7 @@ struct RepoSectionView: View {
                 .onHover { onSectionHoverChange($0) }
                 .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                 .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
                 .tag(main.id)
             }
             ForEach(worktrees) { worktree in
@@ -199,6 +212,7 @@ struct RepoSectionView: View {
                     .onHover { onSectionHoverChange($0) }
                     .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                     .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
                     .tag(worktree.id)
             }
             .onMove { source, destination in
