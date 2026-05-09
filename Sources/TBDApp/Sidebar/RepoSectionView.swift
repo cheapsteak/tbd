@@ -30,6 +30,28 @@ struct RepoSectionView: View {
 
     @State private var isExpanded = true
     @State private var isEditing = false
+    @State private var isHeaderHovered = false
+    @State private var isSectionHovered = false
+    @State private var hoverDebounceTask: Task<Void, Never>?
+
+    private func onSectionHoverChange(_ hovering: Bool) {
+        if hovering {
+            hoverDebounceTask?.cancel()
+            hoverDebounceTask = nil
+            if !isSectionHovered {
+                isSectionHovered = true
+            }
+        } else {
+            hoverDebounceTask?.cancel()
+            let task = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 80_000_000)
+                if !Task.isCancelled {
+                    isSectionHovered = false
+                }
+            }
+            hoverDebounceTask = task
+        }
+    }
 
     var mainWorktree: Worktree? {
         (appState.worktrees[repo.id] ?? [])
@@ -44,14 +66,6 @@ struct RepoSectionView: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Button(action: { isExpanded.toggle() }) {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.caption)
-                    .frame(width: 20, height: 20)
-            }
-            .buttonStyle(HoverPressButtonStyle())
-            .help(isExpanded ? "Collapse" : "Expand")
-
             RenameableLabel(
                 text: repo.displayName,
                 isEditing: $isEditing,
@@ -62,7 +76,7 @@ struct RepoSectionView: View {
                 }
             ) {
                 Text(repo.displayName)
-                    .font(.headline)
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(
                         repo.status == .missing
                             ? AnyShapeStyle(Color.secondary.opacity(0.5))
@@ -83,18 +97,28 @@ struct RepoSectionView: View {
 
             Spacer()
 
-            Button(action: createWorktree) {
-                Image(systemName: "plus")
-                    .font(.caption)
-                    .frame(width: 20, height: 20)
+            Group {
+                if isHeaderHovered {
+                    Button(action: { isExpanded.toggle() }) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(HoverPressButtonStyle())
+                    .help(isExpanded ? "Collapse" : "Expand")
+                } else {
+                    Color.clear
+                }
             }
-            .buttonStyle(HoverPressButtonStyle())
-            .help("New worktree")
-            .disabled(repo.status == .missing)
+            .frame(width: 20, height: 20)
         }
         .contentShape(Rectangle())
         .onTapGesture {
             appState.selectRepo(id: repo.id)
+        }
+        .onHover { hovering in
+            isHeaderHovered = hovering
+            onSectionHoverChange(hovering)
         }
         .contextMenu {
             Button("Rename...") {
@@ -106,13 +130,33 @@ struct RepoSectionView: View {
 
         if isExpanded {
             if let main = mainWorktree {
-                WorktreeRowView(worktree: main, isMain: true)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 0))
-                    .tag(main.id)
+                HStack(spacing: 0) {
+                    WorktreeRowView(worktree: main, isMain: true)
+                    Spacer()
+                    Group {
+                        if isSectionHovered {
+                            Button(action: createWorktree) {
+                                Image(systemName: "plus")
+                                    .font(.caption)
+                                    .frame(width: 20, height: 20)
+                            }
+                            .buttonStyle(HoverPressButtonStyle())
+                            .help("New worktree")
+                            .disabled(repo.status == .missing)
+                        } else {
+                            Color.clear
+                        }
+                    }
+                    .frame(width: 20, height: 20)
+                }
+                .onHover { onSectionHoverChange($0) }
+                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .tag(main.id)
             }
             ForEach(worktrees) { worktree in
                 WorktreeRowView(worktree: worktree)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 0))
+                    .onHover { onSectionHoverChange($0) }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                     .tag(worktree.id)
             }
             .onMove { source, destination in

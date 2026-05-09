@@ -156,8 +156,6 @@ struct WorktreeRowView: View {
                 appState.selectedWorktreeIDs = [worktree.id]
             }
         }
-        .padding(.vertical, 2)
-        .padding(.horizontal, 4)
         .help(isEditing ? "" : worktree.displayName)
         .background(
             RoundedRectangle(cornerRadius: 4)
