@@ -134,7 +134,7 @@ final class HangWatchdog: @unchecked Sendable {
 
             // Schedule the first heartbeat so the snapshot is populated even
             // if no view ever calls `recordContext`.
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { @MainActor [weak self] in
                 self?.recordTick()
             }
 
@@ -168,6 +168,7 @@ final class HangWatchdog: @unchecked Sendable {
     /// Called on the main queue (via the heartbeat dispatch and by `start`).
     /// Updates `lastTickAt` to "now" and refreshes the snapshot timestamp so
     /// the captured state reflects the last responsive moment.
+    @MainActor
     func recordTick() {
         let now = mach_absolute_time()
         lastTickLock.withLock { $0 = now }
@@ -220,7 +221,7 @@ final class HangWatchdog: @unchecked Sendable {
         // Schedule the next heartbeat. Always schedule — even during a hang
         // — so the same dispatch that completes when the main thread drains
         // is what trips the recovery edge on the next tick.
-        DispatchQueue.main.async { [weak self] in
+        DispatchQueue.main.async { @MainActor [weak self] in
             self?.recordTick()
         }
     }

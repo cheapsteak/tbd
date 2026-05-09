@@ -369,5 +369,9 @@ struct ChatBubbleParityPreviews: PreviewProvider {
             .padding()
         }
         .frame(width: 900, height: 800)
+        // Previews have no enclosing TranscriptItemsView to flip the
+        // env on hover. Force-enable here so reviewers can still copy
+        // text out of the preview while inspecting layout parity.
+        .environment(\.transcriptTextSelection, true)
     }
 }
