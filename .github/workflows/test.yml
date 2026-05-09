@@ -26,7 +26,7 @@ jobs:
       # culprit; SPM actually emits `file-system: device-agnostic` so llbuild
       # zeroes device+inode before equality. mtime drift was the real issue.)
       - name: Restore source mtimes from git commit times
-        uses: chetan/git-restore-mtime-action@v2
+        uses: chetan/git-restore-mtime-action@d186aca54f8760da4dec55313195e51ed3ebb0b3 # v2
 
       - name: Capture Swift toolchain version
         run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> $GITHUB_ENV
