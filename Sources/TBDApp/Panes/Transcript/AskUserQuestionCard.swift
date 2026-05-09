@@ -152,7 +152,7 @@ struct AskUserQuestionCard: View {
                 Text(fullInputJSON ?? inputJSON)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                    .transcriptSelectableText()
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
                     .background(Color(nsColor: .controlBackgroundColor))
@@ -259,7 +259,7 @@ private struct QuestionBubble: View {
                 Text(question.question)
                     .font(.subheadline)
                     .foregroundStyle(.primary)
-                    .textSelection(.enabled)
+                    .transcriptSelectableText()
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 // No header — pin the chevron to the trailing edge on the
@@ -269,7 +269,7 @@ private struct QuestionBubble: View {
                     Text(question.question)
                         .font(.subheadline)
                         .foregroundStyle(.primary)
-                        .textSelection(.enabled)
+                        .transcriptSelectableText()
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     chevron

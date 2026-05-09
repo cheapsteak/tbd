@@ -65,7 +65,7 @@ struct ChatBubbleView: View {
                 case .prose(let p):
                     Markdown(p)
                         .markdownTheme(.chatBubble)
-                        .textSelection(.enabled)
+                        .transcriptSelectableText()
                 case .code(let lang, let body):
                     codeBlock(language: lang, content: body)
                 }
@@ -95,7 +95,7 @@ struct ChatBubbleView: View {
             }
             Text(content)
                 .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
+                .transcriptSelectableText()
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
@@ -323,7 +323,7 @@ struct ChatBubbleParityPreviews: PreviewProvider {
         )) ?? AttributedString(prose)
         Text(attr)
             .font(.body)
-            .textSelection(.enabled)
+            .transcriptSelectableText()
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 11)
             .padding(.vertical, 8)
@@ -335,7 +335,7 @@ struct ChatBubbleParityPreviews: PreviewProvider {
     private static func newBubble(_ prose: String) -> some View {
         Markdown(prose)
             .markdownTheme(.chatBubble)
-            .textSelection(.enabled)
+            .transcriptSelectableText()
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 11)
             .padding(.vertical, 8)

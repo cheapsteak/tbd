@@ -58,7 +58,7 @@ struct ReadCard: View {
                 Text(fullResultText ?? r.text)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                    .transcriptSelectableText()
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color(nsColor: .textBackgroundColor).opacity(0.4))

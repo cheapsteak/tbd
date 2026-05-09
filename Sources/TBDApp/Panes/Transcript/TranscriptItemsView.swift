@@ -30,6 +30,16 @@ struct TranscriptItemsView: View {
     let terminalID: UUID?
     var depth: Int = 0
 
+    /// Tracks the most recently hovered top-level row. The latched row is the
+    /// only one that materializes `.textSelection(.enabled)` (via
+    /// `transcriptSelectableText` + `EnvironmentValues.transcriptTextSelection`)
+    /// — every other visible row renders plain `Text` to avoid the per-row
+    /// `NSTextField` tax that caused ~17 s layout hangs (see
+    /// `TranscriptSelectableText.swift`). The latch is intentional: we do NOT
+    /// clear on hover-exit so that drag-select still works when the cursor
+    /// briefly leaves the row geometry.
+    @State private var hoveredItemID: TranscriptItem.ID? = nil
+
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
     /// Tracks which terminal IDs have already emitted a `items.body` marker
@@ -81,6 +91,13 @@ struct TranscriptItemsView: View {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(items) { item in
                     rowFor(item)
+                        .environment(\.transcriptTextSelection, hoveredItemID == item.id)
+                        .onHover { hovering in
+                            // Latch on enter; intentionally do NOT clear on
+                            // exit so drag-select keeps working when the
+                            // cursor briefly leaves the row.
+                            if hovering { hoveredItemID = item.id }
+                        }
                     if item.id == latestUsageItemID, let usage = item.usage {
                         ContextUsageBadge(total: usage.contextTotal)
                             .padding(.leading, 12)
