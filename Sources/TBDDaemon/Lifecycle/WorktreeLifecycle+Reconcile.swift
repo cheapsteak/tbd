@@ -261,7 +261,8 @@ extension WorktreeLifecycle {
                 profileModel: resolvedProfile?.model,
                 cmd: nil,
                 shellFallback: defaultShell,
-                settingsOverlayPath: ClaudeHookOverlay.overlayPath
+                settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                pluginDirPath: PluginDirWriter().pluginDirPath()
             )
         } else if terminal.label == "Codex" {
             // Codex terminal — detected by label "Codex" (set during terminal creation).
