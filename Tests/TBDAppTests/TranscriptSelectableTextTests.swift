@@ -26,6 +26,7 @@ import Testing
 /// spindump-based bug repro: with the gate in place, hover-driven re-layout
 /// no longer multiplies across all visible rows.
 @Suite("TranscriptSelectableText")
+@MainActor
 struct TranscriptSelectableTextTests {
     @Test func env_default_is_false() {
         // Sanity: the default value of the env key is `false`, which means
