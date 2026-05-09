@@ -22,7 +22,7 @@ struct ThinkingRow: View {
                 .font(.caption2)
                 .italic()
                 .foregroundStyle(.tertiary)
-                .textSelection(.enabled)
+                .transcriptSelectableText()
                 .padding(.horizontal, 8)
         }
     }

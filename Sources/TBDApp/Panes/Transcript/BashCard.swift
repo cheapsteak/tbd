@@ -64,7 +64,7 @@ struct BashCard: View {
                         ScrollView(.vertical) {
                             Text(cmd)
                                 .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
+                                .transcriptSelectableText()
                                 .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -98,7 +98,7 @@ struct BashCard: View {
                             Text(fullResultText ?? r.text)
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(r.isError ? .red.opacity(0.85) : .secondary)
-                                .textSelection(.enabled)
+                                .transcriptSelectableText()
                                 .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }

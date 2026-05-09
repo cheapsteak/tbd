@@ -95,7 +95,7 @@ struct EditCard: View {
                     Text(r.text)
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.red)
-                        .textSelection(.enabled)
+                        .transcriptSelectableText()
                 } else {
                     ForEach(Array(hunks.enumerated()), id: \.offset) { idx, hunk in
                         diffHunk(hunk, language: language)
@@ -156,6 +156,6 @@ struct EditCard: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 4))
-        .textSelection(.enabled)
+        .transcriptSelectableText()
     }
 }

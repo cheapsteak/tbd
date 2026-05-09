@@ -215,6 +215,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         installSelfRelaunchHandler()
 
+        // Main-thread hang watchdog. Background timer detects when the main
+        // queue stops draining and emits a single os.Logger line per hang
+        // event with whatever app-state context has been recorded. See
+        // Diagnostics/HangWatchdog.swift.
+        HangWatchdog.shared.start()
+
         // Lifetime heartbeat — surfaces silent disappearances of windows / dock tile.
         let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
             MainActor.assumeIsolated {

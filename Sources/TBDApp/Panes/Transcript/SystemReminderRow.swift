@@ -37,7 +37,7 @@ struct SystemReminderRow: View {
             Text(text)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
-                .textSelection(.enabled)
+                .transcriptSelectableText()
                 .padding(.horizontal, 8)
         }
     }

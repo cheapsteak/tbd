@@ -57,7 +57,7 @@ struct WriteCard: View {
                         ScrollView(.vertical) {
                             Text(content)
                                 .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
+                                .transcriptSelectableText()
                                 .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }

@@ -65,7 +65,7 @@ struct ChatBubbleView: View {
                 case .prose(let p):
                     Markdown(p)
                         .markdownTheme(.chatBubble)
-                        .textSelection(.enabled)
+                        .transcriptSelectableText()
                 case .code(let lang, let body):
                     codeBlock(language: lang, content: body)
                 }
@@ -95,7 +95,7 @@ struct ChatBubbleView: View {
             }
             Text(content)
                 .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
+                .transcriptSelectableText()
                 .padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
@@ -283,6 +283,10 @@ struct ChatBubbleView_Previews: PreviewProvider {
             .padding()
         }
         .frame(width: 560, height: 720)
+        // Match ChatBubbleParityPreviews: previews have no enclosing
+        // TranscriptItemsView to flip the env on hover, so force-enable
+        // text selection for review ergonomics.
+        .environment(\.transcriptTextSelection, true)
     }
 }
 
@@ -323,7 +327,7 @@ struct ChatBubbleParityPreviews: PreviewProvider {
         )) ?? AttributedString(prose)
         Text(attr)
             .font(.body)
-            .textSelection(.enabled)
+            .transcriptSelectableText()
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 11)
             .padding(.vertical, 8)
@@ -335,7 +339,7 @@ struct ChatBubbleParityPreviews: PreviewProvider {
     private static func newBubble(_ prose: String) -> some View {
         Markdown(prose)
             .markdownTheme(.chatBubble)
-            .textSelection(.enabled)
+            .transcriptSelectableText()
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 11)
             .padding(.vertical, 8)
@@ -369,5 +373,9 @@ struct ChatBubbleParityPreviews: PreviewProvider {
             .padding()
         }
         .frame(width: 900, height: 800)
+        // Previews have no enclosing TranscriptItemsView to flip the
+        // env on hover. Force-enable here so reviewers can still copy
+        // text out of the preview while inspecting layout parity.
+        .environment(\.transcriptTextSelection, true)
     }
 }

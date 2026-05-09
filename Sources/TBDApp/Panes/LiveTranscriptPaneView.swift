@@ -141,6 +141,33 @@ struct LiveTranscriptPaneView: View {
             .onAppear {
                 let sidShort = Self.shortID(currentSessionID ?? "")
                 Self.perfLog.debug("view.appear sid=\(sidShort, privacy: .public) count=\(messages.count, privacy: .public)")
+                // Feed the hang watchdog so a stall caught during transcript
+                // layout has the focused terminal + item count attached.
+                let tidShort = String(terminalID.uuidString.suffix(4))
+                let count = messages.count
+                HangWatchdog.shared.recordContext { snap in
+                    snap.focusedTerminalIDShort = tidShort
+                    snap.transcriptItemCount = count
+                    snap.paneLabel = "liveTranscript"
+                }
+            }
+            .onChange(of: messages.count) { _, newCount in
+                let tidShort = String(terminalID.uuidString.suffix(4))
+                HangWatchdog.shared.recordContext { snap in
+                    snap.focusedTerminalIDShort = tidShort
+                    snap.transcriptItemCount = newCount
+                    snap.paneLabel = "liveTranscript"
+                }
+            }
+            .onDisappear {
+                // Clear the pane-specific fields so a hang in another pane
+                // (terminal, file viewer, etc.) doesn't get logged with a
+                // stale `pane=liveTranscript` tag and old item count.
+                HangWatchdog.shared.recordContext { snap in
+                    snap.focusedTerminalIDShort = nil
+                    snap.transcriptItemCount = nil
+                    snap.paneLabel = nil
+                }
             }
         }
     }
