@@ -32,7 +32,7 @@ struct RepoSectionView: View {
     @State private var isEditing = false
     @State private var isHeaderHovered = false
     @State private var isSectionHovered = false
-    @State private var hoverDebounceTask: Task<Void, Never>?
+    @State private var hoverDebounceTask: Task<Void, Error>?
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -43,13 +43,10 @@ struct RepoSectionView: View {
             }
         } else {
             hoverDebounceTask?.cancel()
-            let task = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 80_000_000)
-                if !Task.isCancelled {
-                    isSectionHovered = false
-                }
+            hoverDebounceTask = Task { @MainActor in
+                try await Task.sleep(nanoseconds: 80_000_000)
+                isSectionHovered = false
             }
-            hoverDebounceTask = task
         }
     }
 
