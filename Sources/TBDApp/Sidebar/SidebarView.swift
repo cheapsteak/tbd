@@ -36,18 +36,6 @@ struct SidebarView: View {
             }
             .background(.bar)
         }
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Picker("Filter", selection: $appState.repoFilter) {
-                    Text("All Repos").tag(UUID?.none)
-                    Divider()
-                    ForEach(appState.repos) { repo in
-                        Text(repo.displayName).tag(UUID?.some(repo.id))
-                    }
-                }
-                .pickerStyle(.menu)
-            }
-        }
     }
 
     private func addRepo() {
