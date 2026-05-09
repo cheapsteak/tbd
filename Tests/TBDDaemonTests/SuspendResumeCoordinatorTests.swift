@@ -53,10 +53,10 @@ struct SuspendResumeCoordinatorTests {
 
         await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: true)
 
-        try await Task.sleep(for: .seconds(5))
-
-        let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.suspendedAt == nil, "Resume should clear suspendedAt when suspendEnabled is true")
+        let cleared = try await waitUntil {
+            try await db.terminals.get(id: terminalID)?.suspendedAt == nil
+        }
+        #expect(cleared, "Resume should clear suspendedAt when suspendEnabled is true")
     }
 
     @Test func manualSuspendSkipsAlreadySuspended() async throws {
@@ -142,10 +142,11 @@ struct SuspendResumeCoordinatorTests {
         let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, modelProfileResolver: resolver)
 
         await coordinator.selectionChanged(to: [wt.id], suspendEnabled: true)
-        try await Task.sleep(for: .seconds(5))
 
-        let after = try await db.terminals.get(id: terminal.id)
-        #expect(after?.suspendedAt == nil)
+        let cleared = try await waitUntil {
+            try await db.terminals.get(id: terminal.id)?.suspendedAt == nil
+        }
+        #expect(cleared, "Resume should clear suspendedAt when suspendEnabled is true")
 
         // Find the createWindow invocation (it's the only dryRun call recorded here).
         let snap = recorded.snapshot()
@@ -174,10 +175,11 @@ struct SuspendResumeCoordinatorTests {
         let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, modelProfileResolver: nil)
 
         await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: true)
-        try await Task.sleep(for: .seconds(5))
 
-        let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.suspendedAt == nil)
+        let cleared = try await waitUntil {
+            try await db.terminals.get(id: terminalID)?.suspendedAt == nil
+        }
+        #expect(cleared, "Resume should clear suspendedAt when suspendEnabled is true")
 
         let joined = recorded.snapshot().map { $0.joined(separator: " ") }
         let resumeArg = joined.first { $0.contains("claude --resume") }
@@ -216,6 +218,24 @@ struct SuspendResumeCoordinatorTests {
 
         let after = try await db.terminals.get(id: terminal.id)
         #expect(after?.suspendedAt == nil, "Terminal should NOT be suspended when suspendEnabled is false")
+    }
+
+    /// Polls `condition` every 50ms until it returns true, up to `timeout`.
+    /// Use this when awaiting fire-and-forget actor work that has no
+    /// synchronization point — `Task.sleep(.seconds(N))` is brittle under
+    /// `swift test --parallel` load where scheduling delays can stretch
+    /// nominally sub-second work to many seconds.
+    private func waitUntil(
+        timeout: Duration = .seconds(30),
+        pollInterval: Duration = .milliseconds(50),
+        _ condition: () async throws -> Bool
+    ) async throws -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if try await condition() { return true }
+            try await Task.sleep(for: pollInterval)
+        }
+        return try await condition()
     }
 }
 
