@@ -30,12 +30,12 @@ struct HangWatchdogSnapshot: Equatable {
     /// `TranscriptItemsView.shortID`). `nil` when no terminal is focused or
     /// the snapshot has never been populated by a view.
     var focusedTerminalIDShort: String?
-    // TODO(hang-watchdog): plumb item count and pane label.
-    // The transcript pane and tab bar both have local view-tree state that
-    // would be ideal sources, but neither currently has a clean MainActor
-    // pull-point that doesn't introduce a coupling we'd have to undo. Leave
-    // these as TODO until a natural call site emerges (e.g. on top-level
-    // transcript onAppear / hovered-row change).
+    /// Set by `LiveTranscriptPaneView` on appear and on `messages.count`
+    /// change; cleared on disappear. `nil` when the live transcript pane is
+    /// not the active view — including before it has ever been visited and
+    /// after the user has navigated to a different pane. Other panes
+    /// (terminal, file viewer, code viewer, web view) don't yet feed the
+    /// snapshot — hangs in those panes log with `itemCount=-1 pane=-`.
     var transcriptItemCount: Int?
     var paneLabel: String?
 

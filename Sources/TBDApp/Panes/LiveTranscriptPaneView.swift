@@ -159,6 +159,16 @@ struct LiveTranscriptPaneView: View {
                     snap.paneLabel = "liveTranscript"
                 }
             }
+            .onDisappear {
+                // Clear the pane-specific fields so a hang in another pane
+                // (terminal, file viewer, etc.) doesn't get logged with a
+                // stale `pane=liveTranscript` tag and old item count.
+                HangWatchdog.shared.recordContext { snap in
+                    snap.focusedTerminalIDShort = nil
+                    snap.transcriptItemCount = nil
+                    snap.paneLabel = nil
+                }
+            }
         }
     }
 
