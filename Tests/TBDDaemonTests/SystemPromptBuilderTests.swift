@@ -154,10 +154,11 @@ struct SystemPromptBuilderTests {
         #expect(ctx.contains("`tbd` skill"))
     }
 
-    @Test("builtInTBDContext references absolute fallback path")
-    func slimContextReferencesFallbackPath() {
+    @Test("builtInTBDContext does not reference a fallback path")
+    func slimContextDoesNotReferenceFallbackPath() {
         let ctx = SystemPromptBuilder.builtInTBDContext
-        #expect(ctx.contains("/Library/Application Support/TBD/skill/SKILL.md"))
+        #expect(!ctx.contains("Application Support"))
+        #expect(!ctx.contains("If unavailable"))
     }
 
     @Test("builtInTBDContext is short (no longer a full CLI reference)")

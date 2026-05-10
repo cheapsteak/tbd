@@ -76,6 +76,16 @@ public final class Daemon: Sendable {
                 .error("Failed to write fallback skill file: \(String(describing: error), privacy: .public)")
         }
 
+        // Write the TBD-owned Claude plugin so newly spawned sessions can
+        // load the `tbd` skill via `--plugin-dir`. Idempotent; failures here
+        // are non-fatal (the slim system-prompt pointer still works).
+        do {
+            try PluginDirWriter().writePlugin()
+        } catch {
+            Logger(subsystem: "com.tbd.daemon", category: "plugin")
+                .error("Failed to write TBD plugin: \(String(describing: error), privacy: .public)")
+        }
+
         // Refresh the TBD-owned Claude settings overlay so newly spawned
         // Claude sessions register the SessionStart + Stop hooks. Idempotent;
         // failures degrade gracefully to the legacy cwd-based transcript

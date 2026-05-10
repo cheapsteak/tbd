@@ -1,10 +1,13 @@
 import Foundation
-import CryptoKit
 
-/// Canonical content for the `tbd` skill. Single source of truth — written to
-/// the fallback file at daemon startup, written to `~/.claude/skills/tbd/SKILL.md`
-/// when the user clicks "Install" in the app menu, and referenced (by absolute
-/// path) from the slim system-prompt pointer that fresh Claude sessions get.
+/// Canonical content for the `tbd` skill. Single source of truth used by two
+/// daemon writers at startup:
+/// - `SkillFileWriter` → `~/Library/Application Support/TBD/skill/SKILL.md`
+///   (env-var fallback referenced by `TBD_PROMPT_CONTEXT` for non–Claude-Code
+///   harnesses)
+/// - `PluginDirWriter` → `~/Library/Application Support/TBD/plugin/skills/tbd/SKILL.md`
+///   (loaded into TBD-spawned Claude sessions via `--plugin-dir`, where the
+///   skill registers as `tbd:tbd`)
 public enum TBDSkillContent {
 
     public static let body: String = """
@@ -79,7 +82,7 @@ Use `--prompt-file -` with a heredoc to avoid shell escaping issues.
 ## Env vars set in TBD-managed terminals
 
 - `TBD_WORKTREE_ID` — current worktree UUID.
-- `TBD_PROMPT_CONTEXT` — short pointer that names this skill and the absolute path to its fallback file (~/Library/Application Support/TBD/skill/SKILL.md). The skill body itself is not in env — read it from that path or via your harness's skill mechanism.
+- `TBD_PROMPT_CONTEXT` — short context hint confirming you're inside a TBD-managed session. The full `tbd` skill is loaded by your harness (Claude Code spawns it via `--plugin-dir`); other harnesses may fall back to reading `~/Library/Application Support/TBD/skill/SKILL.md`.
 - `TBD_PROMPT_INSTRUCTIONS` — per-repo custom instructions (if configured).
 
 ## Outside a TBD terminal
@@ -87,11 +90,4 @@ Use `--prompt-file -` with a heredoc to avoid shell escaping issues.
 If `TBD_WORKTREE_ID` isn't set, run `tbd worktree list` to find an ID, or `tbd worktree create` to make one. The CLI works from any shell on the same machine as the TBD daemon.
 """
 
-    /// SHA256 of `body`, hex-encoded (lowercase, 64 chars). Used to detect
-    /// whether an installed skill file matches the running daemon's content.
-    public static func bodyHash() -> String {
-        let data = Data(body.utf8)
-        let digest = SHA256.hash(data: data)
-        return digest.map { String(format: "%02x", $0) }.joined()
-    }
 }

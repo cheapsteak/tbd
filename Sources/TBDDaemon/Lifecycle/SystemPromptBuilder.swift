@@ -12,20 +12,14 @@ enum SystemPromptBuilder {
     static let defaultRenamePrompt = RepoConstants.defaultRenamePrompt
 
     /// Slim pointer injected via `--append-system-prompt` on fresh Claude
-    /// sessions. The full TBD reference content lives in the `tbd` skill
-    /// (registered at `~/.claude/skills/tbd/SKILL.md` after the user clicks
-    /// "Install TBD Skill" in the menu) and at the failsafe path resolved below.
+    /// sessions. The full TBD reference content lives in the `tbd` skill,
+    /// loaded into the spawned session via `--plugin-dir` from
+    /// `~/Library/Application Support/TBD/plugin/`.
     static var builtInTBDContext: String {
-        let appSupport = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.path
-            ?? (FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support")
-        let fallback = appSupport + "/TBD/skill/SKILL.md"
-        return """
-            You are running inside a TBD-managed worktree (a macOS worktree + terminal manager).
-            A `tbd` skill should be available — invoke it for worktree/terminal actions.
-            If unavailable, read its content directly from \(fallback).
-            """
+        """
+        You are running inside a TBD-managed worktree (a macOS worktree + terminal manager).
+        A `tbd` skill is available — invoke it for worktree/terminal actions.
+        """
     }
 
     /// Returns the individual prompt layers as env-var-name → value pairs.

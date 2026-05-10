@@ -321,4 +321,122 @@ struct ClaudeSpawnCommandBuilderTests {
         )
         #expect(r2.command == "/bin/zsh")
     }
+
+    // MARK: - pluginDirPath branch
+
+    @Test("plugin dir path nil → no --plugin-dir flag")
+    func pluginDirNotPassed() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            pluginDirPath: nil
+        )
+        #expect(!r.command.contains("--plugin-dir"))
+    }
+
+    @Test("plugin dir path supplied but missing → no --plugin-dir flag")
+    func pluginDirMissing() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            pluginDirPath: "/tmp/this-path-cannot-possibly-exist-\(UUID().uuidString)/plugin"
+        )
+        #expect(!r.command.contains("--plugin-dir"))
+    }
+
+    @Test("plugin dir present + resume → --plugin-dir flag emitted")
+    func pluginDirOnResume() throws {
+        let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-plugin-resume-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            pluginDirPath: tmpDir.path
+        )
+        #expect(r.command.contains("--plugin-dir"))
+        #expect(r.command.contains(tmpDir.path))
+    }
+
+    @Test("plugin dir present + fresh session → --plugin-dir flag emitted")
+    func pluginDirOnFresh() throws {
+        let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-plugin-fresh-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            pluginDirPath: tmpDir.path
+        )
+        #expect(r.command.contains("--session-id sid"))
+        #expect(r.command.contains("--plugin-dir"))
+    }
+
+    @Test("plugin dir + settings overlay both present → both flags emitted")
+    func pluginDirAndSettingsOverlay() throws {
+        let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-plugin-both-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let tmpFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-overlay-both-\(UUID().uuidString).json")
+        try "{}".data(using: .utf8)!.write(to: tmpFile)
+        defer { try? FileManager.default.removeItem(at: tmpFile) }
+
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            settingsOverlayPath: tmpFile.path,
+            pluginDirPath: tmpDir.path
+        )
+        #expect(r.command.contains("--settings"))
+        #expect(r.command.contains("--plugin-dir"))
+    }
+
+    @Test("--plugin-dir is NOT emitted in cmd or shell-fallback branches")
+    func pluginDirIgnoredForCmdBranch() throws {
+        let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-plugin-cmd-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: "ls -la",
+            shellFallback: "/bin/zsh",
+            pluginDirPath: tmpDir.path
+        )
+        #expect(r.command == "ls -la")
+        #expect(!r.command.contains("--plugin-dir"))
+    }
 }
