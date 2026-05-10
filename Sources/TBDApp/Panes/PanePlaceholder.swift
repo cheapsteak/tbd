@@ -87,6 +87,16 @@ struct PanePlaceholder: View {
         .onHover { hovering in
             isHeaderHovering = hovering
         }
+        .applyTranscriptCopyPathContextMenu(path: transcriptPath)
+    }
+
+    /// Resolved Claude session JSONL path for liveTranscript panes; nil otherwise.
+    private var transcriptPath: String? {
+        if case .liveTranscript(_, let terminalID) = content {
+            let path = terminal(for: terminalID)?.transcriptPath
+            return (path?.isEmpty ?? true) ? nil : path
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -372,6 +382,27 @@ struct PanePlaceholder: View {
             direction: direction,
             newContent: .terminal(terminalID: newTerminal.id)
         )
+    }
+}
+
+// MARK: - Transcript Copy Path Context Menu
+
+private extension View {
+    /// Attach the "Copy Conversation Path" context menu only when a transcript
+    /// path is available — non-transcript panes get no contextMenu at all so
+    /// right-click is a true no-op rather than showing an empty menu.
+    @ViewBuilder
+    func applyTranscriptCopyPathContextMenu(path: String?) -> some View {
+        if let path {
+            self.contextMenu {
+                Button("Copy Conversation Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(path, forType: .string)
+                }
+            }
+        } else {
+            self
+        }
     }
 }
 
