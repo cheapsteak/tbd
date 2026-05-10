@@ -33,6 +33,7 @@ struct RepoSectionView: View {
     @State private var isHeaderHovered = false
     @State private var isSectionHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
+    @State private var showRemoveConfirm = false
 
     private static func startsWithEmoji(_ name: String) -> Bool {
         guard let first = name.first else { return false }
@@ -64,6 +65,25 @@ struct RepoSectionView: View {
         (appState.worktrees[repo.id] ?? [])
             .filter { $0.status == .active || $0.status == .creating }
             .sorted { $0.sortOrder < $1.sortOrder }
+    }
+
+    private var activeWorktreeCount: Int {
+        (appState.worktrees[repo.id] ?? [])
+            .filter { $0.status == .active || $0.status == .creating }
+            .count
+    }
+
+    private var removeButtonLabel: String {
+        activeWorktreeCount > 0 ? "Archive Worktrees & Remove" : "Remove"
+    }
+
+    private var removeConfirmMessage: String {
+        let base = "This unregisters the repo from TBD. Your git repository and files on disk are not touched."
+        if activeWorktreeCount > 0 {
+            let plural = activeWorktreeCount == 1 ? "worktree" : "worktrees"
+            return "\(activeWorktreeCount) active \(plural) will be archived first.\n\n\(base)"
+        }
+        return base
     }
 
     var body: some View {
@@ -139,6 +159,22 @@ struct RepoSectionView: View {
             Button("Rename...") {
                 isEditing = true
             }
+            Divider()
+            Button("Remove from List...", role: .destructive) {
+                showRemoveConfirm = true
+            }
+        }
+        .confirmationDialog(
+            "Remove \(repo.displayName) from list?",
+            isPresented: $showRemoveConfirm,
+            titleVisibility: .visible
+        ) {
+            Button(removeButtonLabel, role: .destructive) {
+                Task { await appState.removeRepo(repoID: repo.id, force: activeWorktreeCount > 0) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(removeConfirmMessage)
         }
         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
