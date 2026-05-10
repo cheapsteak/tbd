@@ -1,9 +1,13 @@
 import Foundation
 
-/// Canonical content for the `tbd` skill. Single source of truth — written to
-/// the fallback file at daemon startup, written to `~/.claude/skills/tbd/SKILL.md`
-/// when the user clicks "Install" in the app menu, and referenced (by absolute
-/// path) from the slim system-prompt pointer that fresh Claude sessions get.
+/// Canonical content for the `tbd` skill. Single source of truth used by two
+/// daemon writers at startup:
+/// - `SkillFileWriter` → `~/Library/Application Support/TBD/skill/SKILL.md`
+///   (env-var fallback referenced by `TBD_PROMPT_CONTEXT` for non–Claude-Code
+///   harnesses)
+/// - `PluginDirWriter` → `~/Library/Application Support/TBD/plugin/skills/tbd/SKILL.md`
+///   (loaded into TBD-spawned Claude sessions via `--plugin-dir`, where the
+///   skill registers as `tbd:tbd`)
 public enum TBDSkillContent {
 
     public static let body: String = """
