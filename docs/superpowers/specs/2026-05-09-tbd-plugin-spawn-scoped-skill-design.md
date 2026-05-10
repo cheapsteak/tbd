@@ -54,7 +54,7 @@ The version field tracks `TBDConstants.version` (currently `"0.1.0"`), so every 
 ### 1. New writer: `PluginDirWriter` (Sources/TBDDaemon/Lifecycle/)
 
 Sibling of the existing `SkillFileWriter`. Writes:
-- `<root>/TBD/plugin/plugin.json`
+- `<root>/TBD/plugin/.claude-plugin/plugin.json`
 - `<root>/TBD/plugin/skills/tbd/SKILL.md`
 
 Idempotent atomic writes. Creates parent directories. Logs success/failure via `os.Logger` under `subsystem: "com.tbd.daemon", category: "skill"` (or new `"plugin"`). Failures non-fatal — the spawn pipeline gates on directory existence and silently skips `--plugin-dir` if absent, mirroring the existing `--settings` overlay gating.
