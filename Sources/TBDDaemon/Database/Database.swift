@@ -357,8 +357,8 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v19_channel_index") { db in
             try db.create(table: "channel_index") { t in
                 t.primaryKey("name", .text)
-                t.column("createdAt", .text).notNull()
-                t.column("lastMessageAt", .text)
+                t.column("createdAt", .datetime).notNull()
+                t.column("lastMessageAt", .datetime)
                 t.column("messageCount", .integer).notNull().defaults(to: 0)
             }
         }
