@@ -389,7 +389,7 @@ public actor SuspendResumeCoordinator {
             cmd: nil,
             shellFallback: defaultShell,
             settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-            pluginDirPath: PluginDirWriter().pluginDirPath()
+            pluginDirPath: PluginDirWriter.pluginDirPath
         )
         // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID into the resumed pane so
         // notifications and the SessionStart hook bridge attribute to the

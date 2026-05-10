@@ -206,7 +206,7 @@ extension RPCRouter {
             cmd: params.cmd,
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
             settingsOverlayPath: isClaudeType ? ClaudeHookOverlay.overlayPath : nil,
-            pluginDirPath: isClaudeType ? PluginDirWriter().pluginDirPath() : nil
+            pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil
         )
 
         let window = try await tmux.createWindow(
@@ -541,7 +541,7 @@ extension RPCRouter {
                 cmd: nil,
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-                pluginDirPath: PluginDirWriter().pluginDirPath()
+                pluginDirPath: PluginDirWriter.pluginDirPath
             )
             storedSessionID = resumeID
             scheduleRecapture = true
@@ -562,7 +562,7 @@ extension RPCRouter {
                 cmd: nil,
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-                pluginDirPath: PluginDirWriter().pluginDirPath()
+                pluginDirPath: PluginDirWriter.pluginDirPath
             )
             storedSessionID = newSessionID
             scheduleRecapture = false

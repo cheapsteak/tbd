@@ -30,10 +30,20 @@ struct PluginDirWriter {
 
     /// Absolute path to the plugin directory, e.g.
     /// `/Users/chang/Library/Application Support/TBD/plugin`.
-    /// Surfaced so the spawn builder can reference it without re-deriving.
+    /// Used by `writePlugin()` and by tests that inject a custom root.
     func pluginDirPath() -> String {
         applicationSupportRoot + "/TBD/plugin"
     }
+
+    /// Static convenience for production callers (spawn builder), evaluated once
+    /// at load time. Mirrors `ClaudeHookOverlay.overlayPath`. Tests that inject
+    /// `applicationSupportRoot` still go through the instance method.
+    static let pluginDirPath: String = {
+        let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        let root = urls.first?.path
+            ?? (FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support")
+        return root + "/TBD/plugin"
+    }()
 
     /// Write the plugin manifest and bundled skill body. Creates parent
     /// directories as needed. Atomic.
