@@ -160,7 +160,7 @@ struct LiveTranscriptPaneView: View {
                 }
             }
             .onChange(of: messages.last?.id) { oldID, newID in
-                guard let _ = oldID, let id = newID else { return }
+                guard let _ = oldID, let id = newID, atBottom else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
                     visibleID = id
                 }
