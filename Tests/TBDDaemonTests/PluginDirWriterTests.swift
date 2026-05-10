@@ -67,6 +67,15 @@ struct PluginDirWriterTests {
         #expect(writer.pluginDirPath() == "/var/test/TBD/plugin")
     }
 
+    @Test("static pluginDirPath matches default-init instance")
+    func staticPluginDirPathMatchesDefaultInstance() {
+        // Guards against drift between the static `let` (used by spawn callers)
+        // and the instance `pluginDirPath()` (used by tests + writePlugin) — both
+        // must resolve to the same path for the production root.
+        let defaultInstance = PluginDirWriter()
+        #expect(PluginDirWriter.pluginDirPath == defaultInstance.pluginDirPath())
+    }
+
     @Test("overwrites stale skill body on update")
     func overwritesStaleBody() throws {
         let tempRoot = NSTemporaryDirectory() + "tbd-plugin-test-\(UUID().uuidString)"

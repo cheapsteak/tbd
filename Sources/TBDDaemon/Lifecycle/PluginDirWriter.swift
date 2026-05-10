@@ -19,13 +19,16 @@ struct PluginDirWriter {
     let applicationSupportRoot: String
 
     init(applicationSupportRoot: String? = nil) {
-        if let explicit = applicationSupportRoot {
-            self.applicationSupportRoot = explicit
-        } else {
-            let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            self.applicationSupportRoot = urls.first?.path
-                ?? (FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support")
-        }
+        self.applicationSupportRoot = applicationSupportRoot ?? Self.defaultApplicationSupportRoot()
+    }
+
+    /// Resolve `~/Library/Application Support` (or the home-dir fallback if
+    /// the system query returns nothing). Shared by `init` and the static
+    /// `pluginDirPath` so they can't drift.
+    private static func defaultApplicationSupportRoot() -> String {
+        let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+        return urls.first?.path
+            ?? (FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support")
     }
 
     /// Absolute path to the plugin directory, e.g.
@@ -38,12 +41,7 @@ struct PluginDirWriter {
     /// Static convenience for production callers (spawn builder), evaluated once
     /// at load time. Mirrors `ClaudeHookOverlay.overlayPath`. Tests that inject
     /// `applicationSupportRoot` still go through the instance method.
-    static let pluginDirPath: String = {
-        let urls = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-        let root = urls.first?.path
-            ?? (FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Application Support")
-        return root + "/TBD/plugin"
-    }()
+    static let pluginDirPath: String = defaultApplicationSupportRoot() + "/TBD/plugin"
 
     /// Write the plugin manifest and bundled skill body. Creates parent
     /// directories as needed. Atomic.
