@@ -271,7 +271,8 @@ extension WorktreeLifecycle {
                 profileModel: resolvedProfile?.model,
                 cmd: nil,
                 shellFallback: defaultShell,
-                settingsOverlayPath: ClaudeHookOverlay.overlayPath
+                settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                pluginDirPath: PluginDirWriter.pluginDirPath
             )
             claudeCommand = spawn.command
             claudeSensitiveEnv = spawn.sensitiveEnv
@@ -340,7 +341,8 @@ extension WorktreeLifecycle {
                     profileModel: resolvedProfile?.model,
                     cmd: nil,
                     shellFallback: defaultShell,
-                    settingsOverlayPath: ClaudeHookOverlay.overlayPath
+                    settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                    pluginDirPath: PluginDirWriter.pluginDirPath
                 )
                 let perTermEnv: [String: String] = [
                     "TBD_WORKTREE_ID": worktreeID.uuidString,
