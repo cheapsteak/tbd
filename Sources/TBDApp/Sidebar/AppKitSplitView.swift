@@ -10,6 +10,16 @@ import SwiftUI
 /// the sidebar and never restoring it. Wrapping `NSSplitViewController` directly with
 /// `canCollapse = false` on the sidebar item makes the layout deterministic.
 ///
+/// Why each `NSHostingController` gets `sizingOptions = []`: by default an
+/// `NSHostingController` installs `.minSize`, `.intrinsicContentSize`, and `.maxSize`
+/// constraints sourced from the SwiftUI content. The intrinsic-size constraint
+/// leaks back up through the split view controller's view and into the
+/// `NSViewControllerRepresentable`'s SwiftUI host, which then sizes the entire
+/// split to that small value (~46 pt) and centers it vertically with empty space
+/// above and below. Clearing `sizingOptions` suppresses those constraints so the
+/// split fills whatever frame SwiftUI hands the representable. Background:
+/// https://mjtsai.com/blog/2023/08/03/how-nshostingview-determines-its-sizing/
+///
 /// `AppState` is passed explicitly and re-injected as an environment object on every
 /// `NSHostingController` rootView. `EnvironmentObject` does not auto-cross the
 /// SwiftUI -> AppKit -> SwiftUI boundary; skipping the re-injection would crash at
@@ -37,6 +47,7 @@ struct AppKitSplitView<Sidebar: View, Detail: View>: NSViewControllerRepresentab
         let sidebarHost = NSHostingController(
             rootView: EnvironmentInjector(appState: appState, content: sidebar())
         )
+        sidebarHost.sizingOptions = []
         context.coordinator.sidebarHost = sidebarHost
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarHost)
         sidebarItem.canCollapse = false
@@ -54,6 +65,7 @@ struct AppKitSplitView<Sidebar: View, Detail: View>: NSViewControllerRepresentab
         let detailHost = NSHostingController(
             rootView: EnvironmentInjector(appState: appState, content: detail())
         )
+        detailHost.sizingOptions = []
         context.coordinator.detailHost = detailHost
         let detailItem = NSSplitViewItem(viewController: detailHost)
         detailItem.canCollapse = false
