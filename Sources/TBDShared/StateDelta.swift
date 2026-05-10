@@ -12,6 +12,7 @@ public enum StateDelta: Codable, Sendable {
     case repoAdded(RepoDelta)
     case repoRemoved(RepoIDDelta)
     case repoRenamed(RepoRenameDelta)
+    case repoHiddenChanged(RepoHiddenDelta)
     case terminalCreated(TerminalDelta)
     case terminalRemoved(TerminalIDDelta)
     case worktreeConflictsChanged(WorktreeConflictDelta)
@@ -100,6 +101,15 @@ public struct RepoRenameDelta: Codable, Sendable {
     public let displayName: String
     public init(repoID: UUID, displayName: String) {
         self.repoID = repoID; self.displayName = displayName
+    }
+}
+
+/// Delta payload for repo hidden-flag change.
+public struct RepoHiddenDelta: Codable, Sendable {
+    public let repoID: UUID
+    public let hidden: Bool
+    public init(repoID: UUID, hidden: Bool) {
+        self.repoID = repoID; self.hidden = hidden
     }
 }
 

@@ -139,6 +139,11 @@ extension RPCRouter {
         }
 
         try await db.repos.setHidden(id: params.repoID, hidden: params.hidden)
+
+        subscriptions.broadcast(delta: .repoHiddenChanged(RepoHiddenDelta(
+            repoID: params.repoID, hidden: params.hidden
+        )))
+
         return .ok()
     }
 
