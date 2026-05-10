@@ -51,6 +51,22 @@ extension AppState {
         }
     }
 
+    /// Toggle whether a repo is hidden from the default sidebar view.
+    /// Updates local state optimistically before issuing the RPC.
+    func setRepoHidden(id: UUID, hidden: Bool) async {
+        if let idx = repos.firstIndex(where: { $0.id == id }) {
+            var repo = repos[idx]
+            repo.hidden = hidden
+            repos[idx] = repo
+        }
+        do {
+            try await daemonClient.setRepoHidden(id: id, hidden: hidden)
+        } catch {
+            logger.error("Failed to set repo hidden: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
     /// Rename a repo's display name. Updates local state optimistically before issuing the RPC.
     func renameRepo(id: UUID, displayName: String) async {
         if let idx = repos.firstIndex(where: { $0.id == id }) {
