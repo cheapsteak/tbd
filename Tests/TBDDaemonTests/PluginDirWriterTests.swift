@@ -14,7 +14,7 @@ struct PluginDirWriterTests {
         let writer = PluginDirWriter(applicationSupportRoot: tempRoot)
         try writer.writePlugin()
 
-        let manifestPath = tempRoot + "/TBD/plugin/plugin.json"
+        let manifestPath = tempRoot + "/TBD/plugin/.claude-plugin/plugin.json"
         let skillPath = tempRoot + "/TBD/plugin/skills/tbd/SKILL.md"
 
         #expect(FileManager.default.fileExists(atPath: manifestPath))
@@ -29,7 +29,7 @@ struct PluginDirWriterTests {
         let writer = PluginDirWriter(applicationSupportRoot: tempRoot)
         try writer.writePlugin()
 
-        let data = try Data(contentsOf: URL(fileURLWithPath: tempRoot + "/TBD/plugin/plugin.json"))
+        let data = try Data(contentsOf: URL(fileURLWithPath: tempRoot + "/TBD/plugin/.claude-plugin/plugin.json"))
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         #expect(json?["name"] as? String == "tbd")
         #expect(json?["version"] as? String == TBDConstants.version)

@@ -8,7 +8,7 @@ import os
 /// available in TBD-spawned sessions.
 ///
 /// Layout:
-///   <applicationSupportRoot>/TBD/plugin/plugin.json
+///   <applicationSupportRoot>/TBD/plugin/.claude-plugin/plugin.json
 ///   <applicationSupportRoot>/TBD/plugin/skills/tbd/SKILL.md
 ///
 /// Both files are derived from `TBDSkillContent.body` (single source of
@@ -39,7 +39,9 @@ struct PluginDirWriter {
     /// directories as needed. Atomic.
     func writePlugin() throws {
         let pluginDir = pluginDirPath()
+        let manifestDir = pluginDir + "/.claude-plugin"
         let skillDir = pluginDir + "/skills/tbd"
+        try FileManager.default.createDirectory(atPath: manifestDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: skillDir, withIntermediateDirectories: true)
 
         // Manifest
@@ -53,7 +55,7 @@ struct PluginDirWriter {
             options: [.prettyPrinted, .sortedKeys]
         )
         try manifestData.write(
-            to: URL(fileURLWithPath: pluginDir + "/plugin.json"),
+            to: URL(fileURLWithPath: manifestDir + "/plugin.json"),
             options: .atomic
         )
 
