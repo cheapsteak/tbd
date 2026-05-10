@@ -30,7 +30,8 @@ The existing `claude-overlay.json` (SessionStart + Stop hooks via `--settings`) 
 ~/Library/Application Support/TBD/
   skill/SKILL.md          ← unchanged (env-var fallback, kept for non-TBD harnesses)
   plugin/                 ← NEW
-    plugin.json
+    .claude-plugin/
+      plugin.json         ← Claude Code requires the manifest under .claude-plugin/
     skills/tbd/SKILL.md
 ```
 
