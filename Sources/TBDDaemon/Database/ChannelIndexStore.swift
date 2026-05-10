@@ -24,7 +24,7 @@ public struct ChannelIndexRecord: Codable, FetchableRecord, PersistableRecord, S
 public struct ChannelIndexStore: Sendable {
     let writer: any DatabaseWriter
 
-    public init(writer: any DatabaseWriter) {
+    init(writer: any DatabaseWriter) {
         self.writer = writer
     }
 

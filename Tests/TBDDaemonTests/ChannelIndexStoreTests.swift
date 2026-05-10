@@ -8,7 +8,7 @@ import Testing
     private func makeStore() throws -> (ChannelIndexStore, TBDDatabase, String) {
         let dbPath = NSTemporaryDirectory() + "tbd-cix-\(UUID().uuidString).db"
         let db = try TBDDatabase(path: dbPath)
-        return (ChannelIndexStore(writer: db.writerForTests), db, dbPath)
+        return (db.channels, db, dbPath)
     }
 
     @Test func recordOnFirstPostCreatesRow() async throws {

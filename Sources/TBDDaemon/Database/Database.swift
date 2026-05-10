@@ -13,6 +13,7 @@ public final class TBDDatabase: Sendable {
     public let worktrees: WorktreeStore
     public let terminals: TerminalStore
     public let notifications: NotificationStore
+    public let channels: ChannelIndexStore
     public let notes: NoteStore
     public let conductors: ConductorStore
     public let modelProfiles: ModelProfileStore
@@ -34,6 +35,7 @@ public final class TBDDatabase: Sendable {
         self.worktrees = WorktreeStore(writer: pool)
         self.terminals = TerminalStore(writer: pool)
         self.notifications = NotificationStore(writer: pool)
+        self.channels = ChannelIndexStore(writer: pool)
         self.notes = NoteStore(writer: pool)
         self.conductors = ConductorStore(writer: pool)
         self.modelProfiles = ModelProfileStore(writer: pool)
@@ -52,6 +54,7 @@ public final class TBDDatabase: Sendable {
         self.worktrees = WorktreeStore(writer: queue)
         self.terminals = TerminalStore(writer: queue)
         self.notifications = NotificationStore(writer: queue)
+        self.channels = ChannelIndexStore(writer: queue)
         self.notes = NoteStore(writer: queue)
         self.conductors = ConductorStore(writer: queue)
         self.modelProfiles = ModelProfileStore(writer: queue)
