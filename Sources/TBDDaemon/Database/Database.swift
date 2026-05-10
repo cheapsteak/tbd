@@ -354,6 +354,15 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v19_channel_index") { db in
+            try db.create(table: "channel_index") { t in
+                t.primaryKey("name", .text)
+                t.column("createdAt", .text).notNull()
+                t.column("lastMessageAt", .text)
+                t.column("messageCount", .integer).notNull().defaults(to: 0)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }
