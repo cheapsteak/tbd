@@ -333,6 +333,7 @@ struct TBDAppMain: App {
                 }
         }
         .defaultSize(width: 1200, height: 800)
+        .windowResizability(.contentMinSize)
         .commands {
             TBDCommands(appState: appState)
             ModelProfileMenu(appState: appState)
