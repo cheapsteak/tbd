@@ -27,6 +27,10 @@ struct LiveTranscriptPaneView: View {
     /// shown only when the user has consciously scrolled up.
     @State private var atBottom: Bool = true
 
+    /// Tracks the row at the bottom edge of the viewport. Drives re-entry
+    /// restoration via `.scrollPosition(id:)` and autoscroll on new messages.
+    @State private var visibleID: String?
+
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
@@ -126,6 +130,7 @@ struct LiveTranscriptPaneView: View {
                 TranscriptItemsView(items: messages, terminalID: terminalID)
             }
             .defaultScrollAnchor(.bottom)
+            .scrollPosition(id: $visibleID, anchor: .bottom)
             .onScrollGeometryChange(for: AtBottomGeometry.self) { geometry in
                 AtBottomGeometry(
                     contentHeight: geometry.contentSize.height,
@@ -149,6 +154,15 @@ struct LiveTranscriptPaneView: View {
                     snap.focusedTerminalIDShort = tidShort
                     snap.transcriptItemCount = count
                     snap.paneLabel = "liveTranscript"
+                }
+                if let id = visibleID {
+                    proxy.scrollTo(id, anchor: .bottom)
+                }
+            }
+            .onChange(of: messages.last?.id) { oldID, newID in
+                guard let _ = oldID, let id = newID else { return }
+                withAnimation(.easeOut(duration: 0.15)) {
+                    visibleID = id
                 }
             }
             .onChange(of: messages.count) { _, newCount in

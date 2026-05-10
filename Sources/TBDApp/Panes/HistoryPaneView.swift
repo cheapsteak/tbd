@@ -288,6 +288,10 @@ struct SessionTranscriptView: View {
     /// shown only when the user has consciously scrolled up.
     @State private var atBottom: Bool = true
 
+    /// Tracks the row at the bottom edge of the viewport. Drives re-entry
+    /// restoration via `.scrollPosition(id:)`.
+    @State private var visibleID: String?
+
     private var messages: [TranscriptItem] {
         appState.sessionTranscripts[sessionId] ?? []
     }
@@ -361,6 +365,7 @@ struct SessionTranscriptView: View {
                         TranscriptItemsView(items: messages, terminalID: nil)
                     }
                     .defaultScrollAnchor(.bottom)
+                    .scrollPosition(id: $visibleID, anchor: .bottom)
                     .onScrollGeometryChange(for: Bool.self) { geometry in
                         let viewportBottom = geometry.contentOffset.y + geometry.containerSize.height
                         let contentBottom = geometry.contentSize.height
@@ -390,6 +395,11 @@ struct SessionTranscriptView: View {
                         }
                     }
                     .animation(.easeInOut(duration: 0.2), value: atBottom)
+                    .onAppear {
+                        if let id = visibleID {
+                            proxy.scrollTo(id, anchor: .bottom)
+                        }
+                    }
                 }
             }
         }
