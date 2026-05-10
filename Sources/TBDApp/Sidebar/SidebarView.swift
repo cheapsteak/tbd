@@ -4,18 +4,23 @@ import TBDShared
 
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
+    @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
 
     var filteredRepos: [Repo] {
+        let base: [Repo]
         if let filterID = appState.repoFilter {
-            return appState.repos.filter { $0.id == filterID }
+            base = appState.repos.filter { $0.id == filterID }
+        } else {
+            base = appState.repos
         }
-        return appState.repos
+        return showHiddenRepos ? base : base.filter { !$0.hidden }
     }
 
     var body: some View {
         List(selection: $appState.selectedWorktreeIDs) {
             ForEach(filteredRepos) { repo in
                 RepoSectionView(repo: repo)
+                    .opacity(repo.hidden ? 0.55 : 1.0)
             }
         }
         .listStyle(.plain)
@@ -24,7 +29,7 @@ struct SidebarView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 Divider()
-                HStack {
+                HStack(spacing: 4) {
                     Button(action: addRepo) {
                         Label("Add Repository", systemImage: "plus.rectangle")
                             .font(.subheadline)
@@ -32,12 +37,41 @@ struct SidebarView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     Spacer()
+                    filterMenu
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             }
             .background(.bar)
         }
+    }
+
+    private var hiddenCount: Int {
+        appState.repos.filter { $0.hidden }.count
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            Toggle(isOn: $showHiddenRepos) {
+                if hiddenCount > 0 {
+                    Text("Show hidden repos (\(hiddenCount))")
+                } else {
+                    Text("Show hidden repos")
+                }
+            }
+        } label: {
+            Image(systemName: showHiddenRepos
+                  ? "line.3.horizontal.decrease.circle.fill"
+                  : "line.3.horizontal.decrease.circle")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Filter")
     }
 
     private func addRepo() {

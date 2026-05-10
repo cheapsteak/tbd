@@ -18,13 +18,14 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public var worktreeSlot: String?
     public var worktreeRoot: String?
     public var status: RepoStatus
+    public var hidden: Bool
 
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
                 displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
                 renamePrompt: String? = nil, customInstructions: String? = nil,
                 profileOverrideID: UUID? = nil,
                 worktreeSlot: String? = nil, worktreeRoot: String? = nil,
-                status: RepoStatus = .ok) {
+                status: RepoStatus = .ok, hidden: Bool = false) {
         self.id = id
         self.path = path
         self.remoteURL = remoteURL
@@ -37,12 +38,13 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         self.worktreeSlot = worktreeSlot
         self.worktreeRoot = worktreeRoot
         self.status = status
+        self.hidden = hidden
     }
 
     enum CodingKeys: String, CodingKey {
         case id, path, remoteURL, displayName, defaultBranch, createdAt
         case renamePrompt, customInstructions, profileOverrideID
-        case worktreeSlot, worktreeRoot, status
+        case worktreeSlot, worktreeRoot, status, hidden
     }
 
     public init(from decoder: Decoder) throws {
@@ -59,6 +61,7 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         worktreeSlot = try c.decodeIfPresent(String.self, forKey: .worktreeSlot)
         worktreeRoot = try c.decodeIfPresent(String.self, forKey: .worktreeRoot)
         status = try c.decodeIfPresent(RepoStatus.self, forKey: .status) ?? .ok
+        hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
     }
 }
 

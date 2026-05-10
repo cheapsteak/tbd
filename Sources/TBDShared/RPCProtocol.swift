@@ -137,6 +137,7 @@ public enum RPCMethod {
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
+    public static let repoSetHidden = "repo.setHidden"
     public static let sessionList = "session.list"
     public static let sessionMessages = "session.messages"
     public static let setMainAreaSize = "app.setMainAreaSize"
@@ -387,6 +388,14 @@ public struct RepoRenameParams: Codable, Sendable {
     public let displayName: String
     public init(repoID: UUID, displayName: String) {
         self.repoID = repoID; self.displayName = displayName
+    }
+}
+
+public struct RepoSetHiddenParams: Codable, Sendable {
+    public let repoID: UUID
+    public let hidden: Bool
+    public init(repoID: UUID, hidden: Bool) {
+        self.repoID = repoID; self.hidden = hidden
     }
 }
 

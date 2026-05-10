@@ -131,6 +131,17 @@ extension RPCRouter {
         return try RPCResponse(result: updated)
     }
 
+    func handleRepoSetHidden(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(RepoSetHiddenParams.self, from: paramsData)
+
+        guard try await db.repos.get(id: params.repoID) != nil else {
+            return RPCResponse(error: "Repository not found: \(params.repoID)")
+        }
+
+        try await db.repos.setHidden(id: params.repoID, hidden: params.hidden)
+        return .ok()
+    }
+
     func handleRepoRename(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(RepoRenameParams.self, from: paramsData)
 

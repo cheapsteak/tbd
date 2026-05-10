@@ -371,6 +371,14 @@ actor DaemonClient {
         )
     }
 
+    /// Toggle whether a repo is hidden from the sidebar by default.
+    func setRepoHidden(id: UUID, hidden: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.repoSetHidden,
+            params: RepoSetHiddenParams(repoID: id, hidden: hidden)
+        )
+    }
+
     /// Update per-repo instruction fields.
     func repoUpdateInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async throws -> Repo {
         return try await callAsync(

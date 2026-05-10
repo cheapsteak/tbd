@@ -348,6 +348,12 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v18_repo_hidden") { db in
+            try db.alter(table: "repo") { t in
+                t.add(column: "hidden", .boolean).notNull().defaults(to: false)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

@@ -159,6 +159,9 @@ struct RepoSectionView: View {
             Button("Rename...") {
                 isEditing = true
             }
+            Button(repo.hidden ? "Unhide" : "Hide") {
+                Task { await appState.setRepoHidden(id: repo.id, hidden: !repo.hidden) }
+            }
             Divider()
             Button("Remove from List...", role: .destructive) {
                 showRemoveConfirm = true

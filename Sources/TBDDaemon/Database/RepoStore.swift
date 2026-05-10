@@ -18,6 +18,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var worktree_slot: String?
     var worktree_root: String?
     var status: String
+    var hidden: Bool
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -32,6 +33,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.worktree_slot = repo.worktreeSlot
         self.worktree_root = repo.worktreeRoot
         self.status = repo.status.rawValue
+        self.hidden = repo.hidden
     }
 
     func toModel() -> Repo {
@@ -47,7 +49,8 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             profileOverrideID: profile_override_id.flatMap(UUID.init(uuidString:)),
             worktreeSlot: worktree_slot,
             worktreeRoot: worktree_root,
-            status: RepoStatus(rawValue: status) ?? .ok
+            status: RepoStatus(rawValue: status) ?? .ok,
+            hidden: hidden
         )
     }
 }
@@ -163,6 +166,16 @@ public struct RepoStore: Sendable {
             try db.execute(
                 sql: "UPDATE repo SET profile_override_id = NULL WHERE profile_override_id = ?",
                 arguments: [profileID.uuidString]
+            )
+        }
+    }
+
+    /// Set whether a repo is hidden from the sidebar by default.
+    public func setHidden(id: UUID, hidden: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET hidden = ? WHERE id = ?",
+                arguments: [hidden, id.uuidString]
             )
         }
     }
