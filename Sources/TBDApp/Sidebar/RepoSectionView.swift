@@ -126,6 +126,7 @@ struct RepoSectionView: View {
             .frame(width: 20, height: 20)
         }
         .frame(height: 22, alignment: .bottom)
+        .background(Color.white.opacity(0.0001))
         .contentShape(Rectangle())
         .onTapGesture {
             appState.selectRepo(id: repo.id)
@@ -146,6 +147,7 @@ struct RepoSectionView: View {
         if let main = mainWorktree {
             WorktreeRowView(worktree: main, isMain: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.0001))
                 .onHover { onSectionHoverChange($0) }
                 .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                 .listRowSeparator(.hidden)
@@ -154,6 +156,8 @@ struct RepoSectionView: View {
         }
         ForEach(worktrees) { worktree in
             WorktreeRowView(worktree: worktree)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.0001))
                 .onHover { onSectionHoverChange($0) }
                 .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                 .listRowSeparator(.hidden)
