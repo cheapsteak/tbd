@@ -55,6 +55,12 @@ import Testing
         #expect(normalized.count == 64)
     }
 
+    @Test func acceptsAtByteLimit() throws {
+        let s = String(repeating: "🔥", count: 50)  // 50 × 4 bytes = 200
+        let normalized = try validateChannelName(s)
+        #expect(normalized.utf8.count == 200)
+    }
+
     @Test func rejectsTooLongInBytes() {
         // 50 emoji × ~4 bytes = 200 bytes; 51 emoji = 204 bytes → reject
         let s = String(repeating: "🔥", count: 51)
