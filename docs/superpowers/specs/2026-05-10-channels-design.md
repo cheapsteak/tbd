@@ -41,8 +41,9 @@ their existing primitives (`Read`, `tail -f`, `cat`).
   existing files.
 - Subscriptions. Agents pull what they want; no server-side
   subscription state.
-- Auto-pruning. Files grow unbounded for now; add `archive` later if it
-  matters.
+- Auto-pruning. Files grow unbounded; explicit `tbd channels archive`
+  ships in v1 (see "Archive" below). Time-based or size-based auto-archive
+  is deferred.
 - Cross-channel "firehose" reads (`tbd channels read` with no name).
   Use `tbd channels list` for cross-channel awareness; revisit if it
   matters.
@@ -58,18 +59,42 @@ channel" step.
 
 ### Channel name validation
 
-Names are normalized to lowercase and validated at the RPC boundary:
+Names are validated at the RPC boundary. Arbitrary Unicode is allowed
+(emoji, non-Latin scripts), but the name must be safely usable as a
+filename on macOS APFS.
 
-- Pattern: `^[a-z0-9][a-z0-9_-]{0,63}$`
-- No leading/trailing whitespace, no slashes, no dots, no Unicode.
-- Names that fail validation are rejected with a clear error before
-  any file operation is attempted.
+**Length:** ≤ 64 grapheme clusters AND ≤ 200 UTF-8 bytes (filesystem
+max is 255, leaving headroom for the `.jsonl` suffix and `.lock`
+sidecar).
 
-This is strict by design. APFS is case-insensitive on the boot volume,
-which means `#Foo` and `#foo` resolve to the same file but would be
-distinct rows in the per-viewer cursor table; lowercasing eliminates the
-ambiguity. The pattern also closes the path-traversal vector
-(`../../etc/passwd` and friends) before file paths are constructed.
+**Forbidden characters (reject):**
+- `/` (path separator)
+- `\` (Windows path separator — defensive; cross-platform sanity)
+- NUL (`U+0000`)
+- All control characters (`U+0000`–`U+001F`, `U+007F`)
+
+**Forbidden whole-strings (reject):**
+- Empty string (after trim)
+- `.`
+- `..`
+- `_archive` (reserved — see "Archive" section)
+- Anything starting or ending with whitespace
+
+**Normalization (apply, then store):**
+- Apply Unicode NFC normalization. (`é` U+00E9 and `e` + U+0301 are
+  the same channel.)
+- Apply Unicode case folding (`String.localizedLowercase`). APFS is
+  case-insensitive on the boot volume; folding case-aliases the row
+  in `channel_index` so `#API-questions` and `#api-questions` resolve
+  to the same channel. The first writer's casing is *not* preserved
+  for display in v1; channels are referred to by their folded form.
+  (If display-casing matters later, an additional `display_name`
+  column on `channel_index` solves it without re-migrating.)
+
+Validation lives in `TBDShared` as a free function
+`validateChannelName(_:) -> Result<String, ChannelNameError>` so both
+the CLI and the daemon use exactly the same rules. No external
+dependency.
 
 ## Storage model
 
@@ -109,9 +134,7 @@ on first post by opening with `O_CREAT | O_WRONLY | O_APPEND`.
 
 ### SQLite (`~/tbd/state.db`)
 
-Two new tables. **`channel_index` is a derivable cache; `channel_cursor`
-is non-recoverable app state** (sibling to `notification` per the
-existing "NEVER delete `~/tbd/state.db`" rule).
+One new table — a derivable cache for fast channel listing:
 
 ```sql
 -- v18 migration:
@@ -121,20 +144,20 @@ CREATE TABLE channel_index (
   last_message_at TEXT,
   message_count INTEGER NOT NULL DEFAULT 0
 );
-
-CREATE TABLE channel_cursor (
-  viewer_id TEXT NOT NULL,        -- "app" for the SwiftUI app today
-  channel_name TEXT NOT NULL,
-  last_seen_seq INTEGER NOT NULL,
-  PRIMARY KEY (viewer_id, channel_name)
-);
 ```
 
-Both tables update on every successful post. `channel_index` could be
-rebuilt by walking `~/tbd/channels/*.jsonl`; `channel_cursor` could not.
-Per the project's standard rule, both shipping schemas (the GRDB Record
-type and the `TBDShared/Models.swift` Codable model) must be updated in
-the same commit as the migration.
+`channel_index` updates on every successful post and is rebuildable by
+walking `~/tbd/channels/*.jsonl` — losing the table at worst means a
+cold rebuild on next daemon startup, not data loss.
+
+A `channel_cursor` table for per-viewer "last read" state is **deferred
+to v2**, when the SwiftUI app sidebar lands and actually needs unread
+badges. Adding it later is a separate migration; carrying an unused
+table now would be dead weight.
+
+Per the project's standard rule, the GRDB Record type and the
+`TBDShared/Models.swift` Codable model are updated in the same commit
+as the migration.
 
 ### Per-channel file layout, end state
 
@@ -289,37 +312,130 @@ reads; it can be useful for one-off inspection.
 | `Read("~/tbd/channels/<name>.jsonl", offset=N)` | No | Direct file read with caveats |
 | `tbd channels list` | Yes (RPC for index) | Discovery |
 | `tbd channels post <name> <body>` | Yes (RPC; daemon writes) | Posting |
+| `tbd channels archive <name>` | Yes (RPC; daemon moves file) | Cleanup |
+
+## Archive
+
+Channels that have served their purpose can be archived. Auto-archival
+is **not** a v1 feature — only explicit `tbd channels archive <name>`
+is supported.
+
+### Layout
+
+Archived channels live in a sibling subdirectory under `~/tbd/channels/`:
+
+```
+~/tbd/channels/
+├── help.jsonl              # active
+├── help.lock
+├── api-questions.jsonl     # active
+├── api-questions.lock
+└── _archive/
+    ├── auth-rewrite-20260315-142301.jsonl
+    └── deprecated-thing-20260401-093017.jsonl
+```
+
+The `_archive` name is reserved (the channel-name validator rejects
+it), so a channel cannot shadow the archive directory.
+
+### `tbd channels archive <name>` (daemon-mediated)
+
+The daemon performs the move under the per-channel lock:
+
+1. Validate `<name>` per the channel-name rules above.
+2. Acquire the daemon's per-channel async lock for `<name>`.
+3. `flock(LOCK_EX)` on `~/tbd/channels/<name>.lock`.
+4. Compute archive timestamp (UTC, format `YYYYMMDD-HHMMSS`).
+5. Create `~/tbd/channels/_archive/` if it doesn't exist.
+6. `rename(2)` `~/tbd/channels/<name>.jsonl` →
+   `~/tbd/channels/_archive/<name>-<ts>.jsonl`.
+7. `unlink(2)` the `.lock` sidecar.
+8. Delete the row from `channel_index`.
+9. Release locks.
+10. Return `{archivedPath}` to the caller.
+
+The daemon's per-channel lock + `flock` together guarantee no
+in-flight `write(2)` is interleaved with the rename. (Without the
+daemon mediation, a `mv` from another process could leave the daemon's
+cached FD writing to the orphaned inode in `_archive/` — but we
+already chose reopen-per-write, so even that hazard is moot. The lock
+is belt-and-braces.)
+
+### Reading archived channels
+
+`tbd channels list --archived` lists archive entries with their
+original name and `archived_at` parsed from the filename.
+
+For reading the archive contents, use `cat` or `Read` on the file
+directly:
+
+```
+cat ~/tbd/channels/_archive/auth-rewrite-20260315-142301.jsonl
+```
+
+A dedicated `tbd channels read --archived <name> --at <ts>` is
+deferred; the file is plainly there and accessible.
+
+### Reusing an archived name
+
+After archive, posting to the same name creates a fresh channel —
+`channel_index` row is recreated, `seq` starts at 1, JSONL file is
+created from scratch. The archived file is untouched. Two completely
+independent histories coexist (one in `_archive/`, one in the active
+directory).
 
 ## Identity
 
-Reuse the prior attempt's mechanism. A tiny `PreToolUse` hook
-subcommand writes session identity to a temp file on every fire:
+**Reuses TBD's existing terminal-identity infrastructure. No new hook
+is added for channels.**
 
-```
-/tmp/tbd-session-${TMUX_PANE}
-```
+TBD already exposes everything channels needs:
 
-Contents:
+- `TBD_TERMINAL_ID` is set as an env var on every TBD-spawned terminal
+  (`Sources/TBDDaemon/Server/RPCRouter+TerminalHandlers.swift:100-101`).
+- The existing `SessionStart` hook (`tbd session-event`, registered by
+  `Sources/TBDDaemon/Hooks/ClaudeHookOverlay.swift:38-39`) fires on
+  every new Claude session — *including* after `/clear` and `/compact`
+  — reads stdin, and RPCs the daemon, which persists
+  `terminal_id → {session_id, transcript_path}` in the Terminal table.
+- The Terminal table is joined to a Worktree, which has a
+  `displayName` field (the user's custom name, defaulting to the
+  folder name).
 
-```json
-{"session_id": "abc-123", "transcript_path": "~/.claude/projects/.../sessions/abc-123.jsonl"}
-```
+So the daemon already knows, at any time, the session ID and worktree
+display name for every TBD-spawned pane.
 
-The hook subcommand (provisionally `tbd channels write-session-id`)
-does **only** this one thing: read the hook's stdin JSON, write the
-identity file. No daemon roundtrip. No throttle needed (purely local
-file write, sub-millisecond).
+`tbd channels post` uses this directly:
 
-`tbd channels post` reads `/tmp/tbd-session-${TMUX_PANE}` to resolve
-`{from_session, from_label}` automatically; agents never need to know
-their own identity. `--from` and `--from-label` flags exist as
-overrides for testing or non-TBD contexts.
+1. Read `TBD_TERMINAL_ID` from the environment. (Error clearly if
+   unset — the CLI is not running inside a TBD-managed terminal.)
+2. RPC `channels.post(name, body, terminalID)` to the daemon.
+3. Daemon resolves `from_session` (Terminal table's `sessionID`) and
+   `from_label` (joined Worktree's `displayName`) from the
+   `terminalID`. Errors clearly if the terminal is unknown.
+4. Daemon writes the JSONL line.
 
-This is **not** the descoped content-push hook. It only writes the
-identity file.
+The CLI accepts `--terminal-id`, `--from-session`, and `--from-label`
+flag overrides for testing and non-TBD contexts; these are not the
+common path.
 
-`tbd setup-hooks` is extended to install this `PreToolUse` hook
-alongside the existing `Stop` notification hook.
+### Why this is better than the prior attempt's `/tmp/tbd-session-${TMUX_PANE}` mechanism
+
+- **No new hook to install.** The `SessionStart` hook is already there
+  for an unrelated reason (the post-`/clear` transcript-freeze fix).
+- **Daemon-mediated identity.** Consistent with how everything else in
+  TBD resolves "who is this terminal."
+- **Survives `/clear` and `/compact`** because the existing
+  `SessionStart` hook re-fires.
+- **No `/tmp` files to manage or clean up** on terminal teardown.
+- **No `TMUX_PANE`-keyed state** that could be re-used by tmux when a
+  pane is closed and a new one takes its number.
+- **Channels doesn't touch `tbd setup-hooks` at all.**
+
+### What the agent sees in its context as a result of channels
+
+Nothing. The identity flow involves only the daemon and the CLI; no
+hook injects anything into the agent's conversation.
 
 ## CLI
 
@@ -328,8 +444,8 @@ alongside the existing `Stop` notification hook.
 | `tbd channels post <name> <body>` | Post a message. Body may be `-` to read from stdin. Stdout includes a copy-pasteable read suggestion. |
 | `tbd channels read <name> [--seq N \| --since N] [--limit N]` | Read messages. |
 | `tbd channels tail <name> [--follow] [--from-start]` | Tail a channel; `--follow` watches for new messages. |
-| `tbd channels list` | List channels with `last_message_at` and `message_count`. |
-| `tbd channels write-session-id` | Internal hook subcommand. Not user-facing. |
+| `tbd channels list [--archived]` | List channels with `last_message_at` and `message_count`. `--archived` lists archived channels instead. |
+| `tbd channels archive <name>` | Move the channel to `~/tbd/channels/_archive/<name>-<YYYYMMDD-HHMMSS>.jsonl`. Future posts to the same name create a fresh channel starting at `seq=1`. |
 
 ### `post` output
 
@@ -348,13 +464,13 @@ and agent B reads exactly that one message.
 
 | Method | Request | Response |
 |---|---|---|
-| `channels.post` | `{name, body, fromSession, fromLabel}` | `{seq, ts}` |
-| `channels.list` | `{}` | `[{name, createdAt, lastMessageAt, messageCount}]` |
+| `channels.post` | `{name, body, terminalID}` (with optional `fromSession`/`fromLabel` overrides for non-TBD callers) | `{seq, ts}` |
+| `channels.list` | `{includeArchived: Bool}` | `[{name, createdAt, lastMessageAt, messageCount, archivedAt?}]` |
+| `channels.archive` | `{name}` | `{archivedPath}` |
 
 That is the complete RPC surface for v1. Reads bypass the daemon. The
-shared model layer (`Sources/TBDShared/Models.swift`,
-`RPCProtocol.swift`) is updated in the same commit as the migration
-per the project's standard rule.
+shared model layer (`Sources/TBDShared/RPCProtocol.swift`) is updated
+in the same commit as the migration per the project's standard rule.
 
 ## Discovery
 
@@ -365,7 +481,8 @@ Two paths:
    the plugin shipped in commit `798293c`) gains a Channels section
    covering: what channels are, the post/read/tail commands, the
    `--seq` vs `--since` distinction, the post-output read-suggestion
-   pattern, and the caveats for direct `Read`.
+   pattern, the caveats for direct `Read`, and when/how to archive
+   (`tbd channels archive <name>`).
 
 The typical workflow is **human-mediated**: a user asks agent A to post
 something, then goes to agent B's pane and asks it to read. Agents do
@@ -373,12 +490,9 @@ not auto-discover or auto-poll.
 
 ## App UI
 
-Out of scope for v1. The SwiftUI app is unchanged.
-
-The `channel_cursor` table includes the row `viewer_id = "app"` for a
-future v2 sidebar; v1 simply does not write to it. (The presence of the
-table in the migration is fine — it is a no-op until the app starts
-using it.)
+Out of scope for v1. The SwiftUI app is unchanged. Per-viewer cursor
+state (the `channel_cursor` table) is also deferred — it lands with
+the v2 sidebar in its own migration.
 
 ## Adversarial review findings
 
@@ -389,7 +503,7 @@ run against an earlier draft of this design. Key calibrated findings:
 |---|---|---|
 | 1 | "PIPE_BUF makes O_APPEND atomic" claim is wrong (POSIX guarantees apply to pipes, not regular files; macOS PIPE_BUF is 512, not 4096) | **Removed.** Crash safety = serialization + `flock` + torn-line policy + `fsync`, not kernel atomicity. |
 | 3 | Torn-line recovery on startup is unspecified | **Resolved.** Truncate-to-last-newline policy with logging. |
-| 4 | `channel_cursor` claimed to be derivable but isn't | **Resolved.** Table is reframed as non-recoverable app state, sibling to `notification`. |
+| 4 | `channel_cursor` claimed to be derivable but isn't | **Resolved by deferral.** Table dropped from v1 entirely; per-viewer cursor lands with the v2 sidebar in its own migration, where its non-derivable nature can be documented honestly. |
 | 6 | `Read --offset` is line-numbered and diverges from `seq` | **Documented.** TBD skill recommends CLI; direct `Read` is supported with caveats noted. |
 | 7 | Channel name validation undefined; APFS case-insensitivity, path traversal | **Resolved.** Strict regex + lowercasing at RPC boundary. |
 | 8 | Cached file handles survive `unlink`/atomic-save | **Resolved.** Reopen-per-write; no cached FDs. |
@@ -416,8 +530,6 @@ run against an earlier draft of this design. Key calibrated findings:
   plan to specify after looking at what's available in the daemon's
   per-pane state. Whatever is chosen should be stable for the
   lifetime of the pane.
-- **No automatic pruning.** Files grow unbounded. For the expected
-  usage (humans post sporadically), this should not bite for a long
-  time. If/when it does, an `archive` subcommand that moves a channel
-  file to `~/tbd/channels/_archive/<name>-<ts>.jsonl` is the obvious
-  v2 addition.
+- **No automatic pruning.** Explicit `tbd channels archive <name>`
+  ships in v1. Time-based or size-based auto-archive is deferred until
+  there's evidence anyone wants it.
