@@ -131,6 +131,15 @@ public final class ConductorManager: Sendable {
         let conductorDir = TBDConstants.conductorsDir.appendingPathComponent(name)
         var shellCommand = "claude --dangerously-skip-permissions"
 
+        // Load the `tbd` skill (CLI driver) into conductor sessions — they're
+        // TBD-spawned just like worktree terminals, and `buildForConductor` below
+        // tells them the skill is available. Gate on the directory existing so a
+        // missing plugin write at startup doesn't break conductor spawns.
+        let pluginDir = PluginDirWriter.pluginDirPath
+        if FileManager.default.fileExists(atPath: pluginDir) {
+            shellCommand += " --plugin-dir \(SystemPromptBuilder.shellEscape(pluginDir))"
+        }
+
         // Inject TBD context + general instructions (single-repo only)
         let repoIDs = conductor.repos
         let singleRepo: Repo?
