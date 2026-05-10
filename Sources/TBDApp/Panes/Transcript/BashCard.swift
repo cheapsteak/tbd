@@ -68,7 +68,9 @@ struct BashCard: View {
                                 .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .frame(maxHeight: commandContainerExpanded ? .infinity : 120)
+                        // Finite cap (not .infinity) so _FlexFrameLayout short-circuits inside
+                        // LazyVStack — see #129. .infinity forces per-row content measurement.
+                        .frame(maxHeight: commandContainerExpanded ? 600 : 120)
                         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
 
@@ -102,7 +104,9 @@ struct BashCard: View {
                                 .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .frame(maxHeight: containerExpanded ? .infinity : 120)
+                        // Finite cap (not .infinity) so _FlexFrameLayout short-circuits inside
+                        // LazyVStack — see #129. .infinity forces per-row content measurement.
+                        .frame(maxHeight: containerExpanded ? 600 : 120)
                         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
 
