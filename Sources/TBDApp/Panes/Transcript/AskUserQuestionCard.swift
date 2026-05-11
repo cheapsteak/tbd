@@ -199,7 +199,7 @@ private struct QuestionBubble: View {
     let timestamp: Date?
     let selectedIndices: Set<Int>
 
-    @State private var expanded = false
+    @State private var expanded = true
 
     private var hasHeader: Bool {
         if let h = question.header, !h.isEmpty, h != question.question {
