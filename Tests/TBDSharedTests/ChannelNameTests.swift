@@ -68,4 +68,15 @@ import Testing
             try validateChannelName(s)
         }
     }
+
+    @Test func stripsLeadingHash() throws {
+        let normalized = try validateChannelName("#help")
+        #expect(normalized == "help")
+    }
+
+    @Test func keepsNonLeadingHash() throws {
+        // Internal # is allowed (not in forbidden set); only LEADING # is stripped.
+        let normalized = try validateChannelName("a#b")
+        #expect(normalized == "a#b")
+    }
 }

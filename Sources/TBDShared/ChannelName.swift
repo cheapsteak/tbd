@@ -15,14 +15,22 @@ public enum ChannelNameError: Error, Equatable, Sendable {
 /// See `docs/superpowers/specs/2026-05-10-channels-design.md` for the
 /// rationale behind each rule.
 public func validateChannelName(_ raw: String) throws -> String {
-    if raw.isEmpty { throw ChannelNameError.empty }
-    if raw.first?.isWhitespace == true || raw.last?.isWhitespace == true {
+    // Strip a single leading '#' for Slack-style ergonomics. This lets
+    // `tbd channels post #help …` and `tbd channels post help …` resolve
+    // to the same channel. We only strip ONE — `##foo` is still rejected
+    // by the forbidden-character check below (well, `#` isn't forbidden,
+    // so `##foo` becomes `#foo` and is accepted as a literal channel name
+    // — that's intentional; it just means "Slack-prefix UX, not literal").
+    let input = raw.hasPrefix("#") ? String(raw.dropFirst()) : raw
+
+    if input.isEmpty { throw ChannelNameError.empty }
+    if input.first?.isWhitespace == true || input.last?.isWhitespace == true {
         throw ChannelNameError.leadingOrTrailingWhitespace
     }
 
     // Reject forbidden characters before normalization so error messages
     // reference the original character the user typed.
-    for ch in raw {
+    for ch in input {
         for scalar in ch.unicodeScalars {
             if scalar.value == 0x2F           // '/'
                 || scalar.value == 0x5C       // '\\'
@@ -33,7 +41,7 @@ public func validateChannelName(_ raw: String) throws -> String {
         }
     }
 
-    let folded = raw.precomposedStringWithCanonicalMapping.lowercased()
+    let folded = input.precomposedStringWithCanonicalMapping.lowercased()
 
     if folded == "." || folded == ".." || folded == "_archive" {
         throw ChannelNameError.reservedName(folded)
