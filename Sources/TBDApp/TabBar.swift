@@ -1,6 +1,25 @@
 import AppKit
 import SwiftUI
 import TBDShared
+import UniformTypeIdentifiers
+
+/// Transferable payload identifying a tab during drag/drop. App-only — never crosses the wire.
+struct TabDragPayload: Codable, Transferable {
+    let tabID: UUID
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .tbdTabDrag)
+    }
+}
+
+extension UTType {
+    static let tbdTabDrag = UTType(exportedAs: "com.tbd.app.tab-drag")
+}
+
+private struct TabWidthPreference: PreferenceKey {
+    static let defaultValue: CGFloat = 100
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
 
 // MARK: - TabBar
 
@@ -8,6 +27,7 @@ import TBDShared
 /// Replaces the former TerminalTabBar.
 struct TabBar: View {
     let tabs: [Tab]
+    let worktreeID: UUID
     @Binding var activeTabIndex: Int
     var onAddShell: () -> Void = {}
     var onAddClaude: () -> Void = {}
@@ -34,6 +54,7 @@ struct TabBar: View {
                 TabBarItem(
                     tab: tab,
                     index: index,
+                    worktreeID: worktreeID,
                     isSelected: index == activeTabIndex,
                     terminal: terminalForTab(tab.id),
                     onSelect: { activeTabIndex = index },
@@ -170,6 +191,7 @@ private class MenuCoordinator: NSObject {
 private struct TabBarItem: View {
     let tab: Tab
     let index: Int
+    let worktreeID: UUID
     let isSelected: Bool
     let terminal: Terminal?
     let onSelect: () -> Void
@@ -180,6 +202,9 @@ private struct TabBarItem: View {
 
     @State private var isHovering = false
     @State private var isHoveringClose = false
+    @State private var isEditing: Bool = false
+    @State private var dropEdge: DropEdge? = nil
+    @State private var measuredWidth: CGFloat = 100
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @EnvironmentObject private var appState: AppState
 
@@ -190,6 +215,11 @@ private struct TabBarItem: View {
     private var isCodeViewer: Bool {
         if case .codeViewer = tab.content { return true }
         return false
+    }
+
+    private var isRenameable: Bool {
+        if case .codeViewer = tab.content { return false }
+        return true
     }
 
     private var isClaudeTerminal: Bool {
@@ -228,11 +258,36 @@ private struct TabBarItem: View {
                         .frame(width: 14)
                         .padding(.trailing, 3)
 
-                    Text(tabLabel)
+                    if isEditing {
+                        RenameableLabel(
+                            text: tabLabel,
+                            isEditing: $isEditing,
+                            onCommit: { newText in
+                                Task {
+                                    await appState.renameTab(
+                                        tabID: tab.id,
+                                        worktreeID: worktreeID,
+                                        newLabel: newText
+                                    )
+                                }
+                            },
+                            displayContent: {
+                                Text(tabLabel)
+                                    .font(.system(size: 11))
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
+                            }
+                        )
                         .font(.system(size: 11))
-                        .lineLimit(1)
-                        .fixedSize()
-                        .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
+                        .frame(minWidth: 40)
+                    } else {
+                        Text(tabLabel)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .fixedSize()
+                            .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
+                    }
                 }
             }
             .buttonStyle(.plain)
@@ -264,10 +319,63 @@ private struct TabBarItem: View {
                 ? Color(nsColor: .controlBackgroundColor)
                 : (isHovering ? Color.primary.opacity(0.04) : Color.clear)
         )
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: TabWidthPreference.self, value: geo.size.width)
+            }
+        )
+        .onPreferenceChange(TabWidthPreference.self) { measuredWidth = $0 }
         .animation(.easeInOut(duration: 0.1), value: isHovering)
         .contextMenu { contextMenuContent }
         .onHover { hovering in
             isHovering = hovering
+        }
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                guard isRenameable else { return }
+                if !isSelected { onSelect() }
+                isEditing = true
+            }
+        )
+        .opacity(appState.draggingTabID == tab.id ? 0.4 : 1)
+        .overlay(alignment: dropEdge == .leading ? .leading : .trailing) {
+            if dropEdge != nil {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.accentColor)
+                    .frame(width: 2)
+                    .padding(.vertical, 2)
+                    .transition(.opacity)
+            }
+        }
+        .draggable(TabDragPayload(tabID: tab.id)) {
+            // Drag preview: a translucent copy of the tab content.
+            HStack(spacing: 0) {
+                tabIconView.frame(width: 14).padding(.trailing, 3)
+                Text(tabLabel).font(.system(size: 11)).lineLimit(1).fixedSize()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(4)
+            .opacity(0.85)
+            .onAppear { appState.draggingTabID = tab.id }
+        }
+        .dropDestination(for: TabDragPayload.self) { payloads, location in
+            defer { dropEdge = nil; appState.draggingTabID = nil }
+            guard let payload = payloads.first,
+                  payload.tabID != tab.id else { return false }
+            let edge: DropEdge = (location.x < measuredWidth / 2) ? .leading : .trailing
+            appState.reorderTab(
+                draggedID: payload.tabID,
+                in: worktreeID,
+                relativeTo: tab.id,
+                edge: edge
+            )
+            return true
+        } isTargeted: { targeted in
+            if !targeted {
+                dropEdge = nil
+            }
         }
     }
 
@@ -355,6 +463,14 @@ private struct TabBarItem: View {
             Divider()
         }
 
+        if isRenameable {
+            Button("Rename Tab") {
+                if !isSelected { onSelect() }
+                isEditing = true
+            }
+            Divider()
+        }
+
         Button(action: onClose) {
             Label("Close Tab", systemImage: "xmark")
         }
@@ -436,7 +552,11 @@ private struct TabBarItem: View {
             return url.host ?? "Web"
         case .codeViewer(_, let path):
             return URL(fileURLWithPath: path).lastPathComponent
-        case .note:
+        case .note(let noteID):
+            let allNotes = appState.notes.values.flatMap { $0 }
+            if let title = allNotes.first(where: { $0.id == noteID })?.title, !title.isEmpty {
+                return title
+            }
             return "Note \(index + 1)"
         case .liveTranscript:
             return "Transcript"

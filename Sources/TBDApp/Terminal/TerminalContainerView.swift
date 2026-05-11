@@ -140,6 +140,7 @@ struct SingleWorktreeView: View {
                 if !worktreeTabs.isEmpty {
                     TabBar(
                         tabs: worktreeTabs,
+                        worktreeID: worktreeID,
                         activeTabIndex: Binding(
                             get: { activeTabIndex },
                             set: { activeTabIndex = $0 }
