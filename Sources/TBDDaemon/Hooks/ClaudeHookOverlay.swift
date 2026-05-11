@@ -44,6 +44,18 @@ public enum ClaudeHookOverlay {
     static let stopCommand =
         #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
 
+    /// Bridges the `PreToolUse:AskUserQuestion` hook into TBD. Captures the
+    /// tool input and tool_use_id so the transcript pane can render the
+    /// question before Claude flushes the assistant message to the JSONL.
+    static let askUserQuestionPreCommand =
+        #"tbd ask-user-question pre 2>/dev/null || true"#
+
+    /// Bridges the `PostToolUse:AskUserQuestion` hook into TBD. Defensive
+    /// only — see RPCRouter+TerminalHandlers.swift for why we rely on JSONL
+    /// dedupe rather than eager cleanup.
+    static let askUserQuestionPostCommand =
+        #"tbd ask-user-question post 2>/dev/null || true"#
+
     /// Build the JSON-encoded overlay body.
     public static func generateBody() throws -> Data {
         let body: [String: Any] = [
@@ -60,6 +72,22 @@ public enum ClaudeHookOverlay {
                     [
                         "hooks": [
                             ["type": "command", "command": stopCommand]
+                        ]
+                    ]
+                ],
+                "PreToolUse": [
+                    [
+                        "matcher": "AskUserQuestion",
+                        "hooks": [
+                            ["type": "command", "command": askUserQuestionPreCommand]
+                        ]
+                    ]
+                ],
+                "PostToolUse": [
+                    [
+                        "matcher": "AskUserQuestion",
+                        "hooks": [
+                            ["type": "command", "command": askUserQuestionPostCommand]
                         ]
                     ]
                 ]
