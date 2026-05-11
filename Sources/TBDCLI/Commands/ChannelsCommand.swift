@@ -12,7 +12,8 @@ struct ChannelsCommand: AsyncParsableCommand {
             ChannelsPostCommand.self,
             ChannelsReadCommand.self,
             ChannelsTailCommand.self,
-            // list / archive added in later tasks
+            ChannelsListCommand.self,
+            ChannelsArchiveCommand.self,
         ]
     )
 }
@@ -264,5 +265,106 @@ struct ChannelsTailCommand: AsyncParsableCommand {
         }
         // Anything after the last newline is a partial write in progress;
         // the next event will see it complete.
+    }
+}
+
+// MARK: - list
+
+struct ChannelsListCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list",
+        abstract: "List channels"
+    )
+
+    @Flag(name: .long, help: "List archived channels instead of active ones")
+    var archived: Bool = false
+
+    mutating func run() async throws {
+        if archived {
+            try printArchived()
+            return
+        }
+
+        let client = SocketClient()
+        guard client.isDaemonRunning else {
+            FileHandle.standardError.write(Data("error: TBD daemon is not running\n".utf8))
+            throw ExitCode.failure
+        }
+
+        let result: ChannelsListResult = try client.call(
+            method: RPCMethod.channelsList,
+            params: ChannelsListParams(includeArchived: false),
+            resultType: ChannelsListResult.self
+        )
+
+        if result.channels.isEmpty {
+            print("No channels yet. Post one with `tbd channels post <name> <body>`.")
+            return
+        }
+
+        let nameWidth = max(4, result.channels.map { $0.name.count }.max() ?? 0)
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        print("\(pad("NAME", nameWidth))  COUNT  LAST")
+        for ch in result.channels {
+            let count = String(ch.messageCount)
+            let last = ch.lastMessageAt.map { fmt.string(from: $0) } ?? "—"
+            print("\(pad(ch.name, nameWidth))  \(pad(count, 5))  \(last)")
+        }
+    }
+
+    private func printArchived() throws {
+        let dir = TBDConstants.channelsArchiveDir
+        guard FileManager.default.fileExists(atPath: dir.path) else {
+            print("No archived channels.")
+            return
+        }
+        let entries = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.hasSuffix(".jsonl") }
+            .sorted()
+        if entries.isEmpty {
+            print("No archived channels.")
+            return
+        }
+        print("ARCHIVED CHANNEL FILES:")
+        for entry in entries {
+            print("  \(dir.appendingPathComponent(entry).path)")
+        }
+    }
+
+    private func pad(_ s: String, _ width: Int) -> String {
+        s + String(repeating: " ", count: max(0, width - s.count))
+    }
+}
+
+// MARK: - archive
+
+struct ChannelsArchiveCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "archive",
+        abstract: "Archive a channel (move to ~/tbd/channels/_archive/)"
+    )
+
+    @Argument(help: "Channel name (without leading '#').")
+    var name: String
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        guard client.isDaemonRunning else {
+            FileHandle.standardError.write(Data("error: TBD daemon is not running\n".utf8))
+            throw ExitCode.failure
+        }
+
+        do {
+            let result: ChannelsArchiveResult = try client.call(
+                method: RPCMethod.channelsArchive,
+                params: ChannelsArchiveParams(name: name),
+                resultType: ChannelsArchiveResult.self
+            )
+            print("Archived #\(name) → \(result.archivedPath)")
+        } catch {
+            FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+            throw ExitCode.failure
+        }
     }
 }
