@@ -34,9 +34,15 @@ Today the tab strip in `Sources/TBDApp/TabBar.swift` shows auto-derived labels:
 - Reordering the `+` (new-tab) and history buttons in the tab strip.
 - Live-syncing tab metadata between multiple TBDApp instances.
 
-## Follow-ups (deferred)
+## Active-tab focus persistence (scoped in)
 
-- **Persist active-tab focus per worktree.** Today `AppState.activeTabIndices: [UUID: Int]` stores which tab is focused in each worktree, but it's in-memory only and resets on app launch. A future change can add an `active_tab_id: TEXT` column on the `worktree` table (storing the `Tab.id` UUID, not a positional index, so it stays correct across reorders) and an `app.setActiveTab` RPC. The current change's data model intentionally leaves this column off — defer until there's a user request for tab focus to survive restart.
+Today `AppState.activeTabIndices: [UUID: Int]` stores which tab is focused in each worktree, but it's in-memory only and resets on app launch. With reorder support landing, we also persist the active tab so a user's exact workspace state survives restart.
+
+**Schema:** add `activeTabID: TEXT` (nullable) on the `worktree` table — same migration is fine, but since v19 is already shipped, this uses a new migration `v20_worktree_active_tab`. We store the `Tab.id` UUID (not a positional index) so the value stays correct across reorders.
+
+**RPC:** new method `worktree.setActiveTab` with params `{ worktreeID: UUID, tabID: UUID? }`. nil clears the stored value (e.g., on close of the last tab).
+
+**App-side wiring:** `tab.list` response gains an `activeTabID: UUID?` field. On worktree first appearance, after `loadTabStates` hydrates `worktreeTabOrders`, also resolve `activeTabID` → set `activeTabIndices[worktreeID]` to the matching position. When the user clicks a different tab, write through to the daemon (fire-and-forget). Persisted active tab gracefully degrades: if the stored `activeTabID` no longer exists in the worktree's reconciled tabs, fall back to index 0.
 
 ## Reference: iTerm2
 
