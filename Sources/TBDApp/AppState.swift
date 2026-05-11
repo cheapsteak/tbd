@@ -515,7 +515,7 @@ final class AppState: ObservableObject {
             await loadModelProfiles()
             startSubscription()
             await refreshPRStatuses()
-            let suspendEnabled = AppState.autoSuspendClaudeEnabled()
+            let suspendEnabled = AppState.autoSuspendClaudeEnabled(defaults: userDefaults)
             Task { [selectedWorktreeIDs] in
                 try? await daemonClient.worktreeSelectionChanged(
                     selectedWorktreeIDs: selectedWorktreeIDs,
