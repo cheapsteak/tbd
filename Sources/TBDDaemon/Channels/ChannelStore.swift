@@ -24,6 +24,10 @@ public enum ChannelStoreError: Error, CustomStringConvertible {
 }
 
 public struct ChannelPostResult: Sendable {
+    /// Canonical (normalized, lowercased) channel name. The CLI echoes
+    /// this in the paste suggestion so users see the same form
+    /// `channels list` prints, not whatever casing they typed.
+    public let name: String
     public let seq: Int
     public let ts: Date
 }
@@ -94,7 +98,7 @@ public final class ChannelStore: @unchecked Sendable {
             // post/archive can't interleave at the index layer.
             try index.recordPostSync(name: normalized, at: ts)
 
-            return ChannelPostResult(seq: nextSeq, ts: ts)
+            return ChannelPostResult(name: normalized, seq: nextSeq, ts: ts)
         }
 
         return result

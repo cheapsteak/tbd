@@ -100,8 +100,11 @@ struct ChannelsPostCommand: AsyncParsableCommand {
                 resultType: ChannelsPostResult.self
             )
             // Friendly output: include a copy-pasteable read suggestion.
-            print("Posted to #\(name) (seq \(result.seq))")
-            print("→ tbd channels read \(name) --seq \(result.seq)")
+            // Use the canonical (normalized) name from the daemon, not the
+            // raw `name` the user typed, so the suggestion matches what
+            // `tbd channels list` shows.
+            print("Posted to #\(result.name) (seq \(result.seq))")
+            print("→ tbd channels read \(result.name) --seq \(result.seq)")
         } catch {
             FileHandle.standardError.write(Data("error: \(error)\n".utf8))
             throw ExitCode.failure

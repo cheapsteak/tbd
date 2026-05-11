@@ -845,9 +845,12 @@ public struct ChannelsPostParams: Codable, Sendable {
 }
 
 public struct ChannelsPostResult: Codable, Sendable {
+    public let name: String
     public let seq: Int
     public let ts: Date
-    public init(seq: Int, ts: Date) { self.seq = seq; self.ts = ts }
+    public init(name: String, seq: Int, ts: Date) {
+        self.name = name; self.seq = seq; self.ts = ts
+    }
 }
 
 public struct ChannelsListParams: Codable, Sendable {

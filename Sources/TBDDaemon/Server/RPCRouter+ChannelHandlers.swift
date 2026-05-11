@@ -37,7 +37,7 @@ extension RPCRouter {
                 fromSession: fromSession,
                 fromLabel: fromLabel
             )
-            return try RPCResponse(result: ChannelsPostResult(seq: result.seq, ts: result.ts))
+            return try RPCResponse(result: ChannelsPostResult(name: result.name, seq: result.seq, ts: result.ts))
         } catch {
             logger.error("channels.post failed: \(String(describing: error), privacy: .public)")
             return RPCResponse(error: "channels.post failed: \(error)")
