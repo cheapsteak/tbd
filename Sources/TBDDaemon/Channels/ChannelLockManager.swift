@@ -20,6 +20,13 @@ actor ChannelLockManager {
         locks[name] = made
         return made
     }
+
+    /// Drop the per-channel actor for `name`. Call this after archiving
+    /// a channel so the dictionary doesn't accumulate stale entries
+    /// across the daemon's lifetime.
+    func evict(_ name: String) {
+        locks.removeValue(forKey: name)
+    }
 }
 
 /// One channel's async-serial queue. Posts arrive concurrently; this

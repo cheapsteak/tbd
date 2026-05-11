@@ -204,6 +204,13 @@ public final class ChannelStore: @unchecked Sendable {
             return archivedPath
         }
 
+        // Eviction happens *after* the per-channel lock body returns. The
+        // ChannelSerial actor for this name has no remaining work (we just
+        // archived the file and deleted the index row), so dropping it
+        // prevents `locks` from accumulating stale entries over the
+        // daemon's lifetime as channels are created and archived.
+        await lockManager.evict(normalized)
+
         return archivedPath
     }
 
