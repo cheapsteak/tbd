@@ -127,18 +127,10 @@ struct LiveTranscriptPaneView: View {
     private var transcriptWithAutoscroll: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                TranscriptItemsView(items: messages, terminalID: terminalID)
+                TranscriptItemsView(items: messages, terminalID: terminalID, atBottom: $atBottom)
             }
             .defaultScrollAnchor(.bottom)
             .scrollPosition(id: $visibleID, anchor: .bottom)
-            .onScrollGeometryChange(for: AtBottomGeometry.self) { geometry in
-                AtBottomGeometry(
-                    contentHeight: geometry.contentSize.height,
-                    viewportBottom: geometry.contentOffset.y + geometry.containerSize.height
-                )
-            } action: { _, new in
-                atBottom = new.contentHeight - new.viewportBottom < 50
-            }
             .overlay(alignment: .bottomTrailing) {
                 jumpToBottomButton(proxy: proxy)
             }
@@ -299,11 +291,4 @@ struct LiveTranscriptPaneView: View {
 private struct TaskKey: Equatable {
     let terminalID: UUID
     let retryToken: Int
-}
-
-/// Inputs to the at-bottom check, ferried through `onScrollGeometryChange`'s
-/// Equatable transform. `atBottom` is true when `contentHeight - viewportBottom < 50`.
-private struct AtBottomGeometry: Equatable {
-    let contentHeight: CGFloat
-    let viewportBottom: CGFloat
 }

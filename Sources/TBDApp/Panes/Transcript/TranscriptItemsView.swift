@@ -29,6 +29,15 @@ struct TranscriptItemsView: View {
     let items: [TranscriptItem]
     let terminalID: UUID?
     var depth: Int = 0
+    /// Optional upward-flowing at-bottom signal. Only the top-level
+    /// (`depth == 0`) live transcript pane passes a binding; nested
+    /// subagent timelines and history views leave it `nil`. A 1pt
+    /// `Color.clear` sentinel appended after the top-level `ForEach`
+    /// flips this on `.onAppear`/`.onDisappear`, replacing the prior
+    /// `.onScrollGeometryChange` reader that forced the LazyVStack to
+    /// compute its full content size on every scroll event (see issue
+    /// #129, Gemini's hypothesis).
+    var atBottom: Binding<Bool>? = nil
 
     /// Tracks the most recently hovered top-level row. The latched row is the
     /// only one that materializes `.textSelection(.enabled)` (via
@@ -111,6 +120,16 @@ struct TranscriptItemsView: View {
                             .padding(.top, 2)
                     }
                 }
+                // 1pt at-bottom sentinel. Sibling of the ForEach inside
+                // the LazyVStack, so it's lazily realized only when the
+                // viewport reaches the bottom; that realization is the
+                // at-bottom signal. Replaces .onScrollGeometryChange to
+                // avoid forcing LazyVStack to compute its full content
+                // size each scroll event (see issue #129).
+                Color.clear
+                    .frame(height: 1)
+                    .onAppear { atBottom?.wrappedValue = true }
+                    .onDisappear { atBottom?.wrappedValue = false }
             }
             .padding(.vertical, 8)
         } else {
