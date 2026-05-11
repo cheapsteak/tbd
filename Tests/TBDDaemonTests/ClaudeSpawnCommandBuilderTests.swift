@@ -218,6 +218,72 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == nil)
     }
 
+    // MARK: - ANTHROPIC_CONFIG_DIR isolation for proxy profiles
+
+    @Test("proxy profile + profileConfigDir → ANTHROPIC_CONFIG_DIR injected")
+    func proxyProfileInjectsConfigDir() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: "sk-proxy-key",
+            profileKind: .apiKey,
+            profileBaseURL: "http://127.0.0.1:3456",
+            profileModel: "gpt-5-codex",
+            profileConfigDir: "/Users/me/tbd/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == "/Users/me/tbd/profiles/abc/claude")
+        #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3456")
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == "sk-proxy-key")
+    }
+
+    @Test("direct-Claude profile (no baseURL) → ANTHROPIC_CONFIG_DIR NOT injected")
+    func directClaudeProfileSkipsConfigDir() {
+        // Even if a configDir were somehow supplied, builder must skip it when
+        // baseURL is nil — otherwise we'd isolate the direct-Claude profile
+        // from the user's ~/.claude OAuth login.
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: "oauth-tok",
+            profileKind: .oauth,
+            profileBaseURL: nil,
+            profileModel: nil,
+            profileConfigDir: "/should/not/be/used",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == nil)
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-tok")
+    }
+
+    @Test("proxy profile but no profileConfigDir → ANTHROPIC_CONFIG_DIR NOT injected")
+    func proxyProfileWithoutConfigDirSkipsInjection() {
+        // Builder is pure — if the caller failed to resolve a config dir
+        // (e.g. mkdir errored), we still spawn rather than crash. The user
+        // will see the auth-conflict warning but the terminal works.
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: "sk-proxy",
+            profileKind: .apiKey,
+            profileBaseURL: "http://127.0.0.1:3456",
+            profileModel: nil,
+            profileConfigDir: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == nil)
+        #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3456")
+    }
+
     // MARK: - settingsOverlayPath branch
 
     @Test("settings overlay path absent → no --settings flag in command")

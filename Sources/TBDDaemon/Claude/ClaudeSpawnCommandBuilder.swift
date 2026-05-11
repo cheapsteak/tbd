@@ -42,6 +42,7 @@ enum ClaudeSpawnCommandBuilder {
         profileKind: CredentialKind? = nil,
         profileBaseURL: String? = nil,
         profileModel: String? = nil,
+        profileConfigDir: String? = nil,
         cmd: String?,
         shellFallback: String,
         settingsOverlayPath: String? = nil,
@@ -98,6 +99,15 @@ enum ClaudeSpawnCommandBuilder {
         }
         if let baseURL = profileBaseURL { env["ANTHROPIC_BASE_URL"] = baseURL }
         if let model = profileModel { env["ANTHROPIC_MODEL"] = model }
+        // Only inject ANTHROPIC_CONFIG_DIR for proxy profiles. For direct
+        // (claude.ai) profiles, the spawned `claude` should keep reading
+        // `~/.claude` so the user's OAuth login works. For proxy profiles,
+        // isolating the config dir prevents Claude Code's >=2.1.x "Auth
+        // conflict: Both a token (claude.ai) and an API key (ANTHROPIC_API_KEY)
+        // are set" warning from firing.
+        if let configDir = profileConfigDir, profileBaseURL != nil {
+            env["ANTHROPIC_CONFIG_DIR"] = configDir
+        }
         return Result(command: base, sensitiveEnv: env)
     }
 }

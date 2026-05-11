@@ -386,6 +386,7 @@ public actor SuspendResumeCoordinator {
             profileKind: resolvedProfile?.kind,
             profileBaseURL: resolvedProfile?.baseURL,
             profileModel: resolvedProfile?.model,
+            profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
             cmd: nil,
             shellFallback: defaultShell,
             settingsOverlayPath: ClaudeHookOverlay.overlayPath,
