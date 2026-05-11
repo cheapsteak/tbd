@@ -33,7 +33,7 @@ public func validateChannelName(_ raw: String) throws -> String {
         }
     }
 
-    let folded = raw.precomposedStringWithCanonicalMapping.localizedLowercase
+    let folded = raw.precomposedStringWithCanonicalMapping.lowercased()
 
     if folded == "." || folded == ".." || folded == "_archive" {
         throw ChannelNameError.reservedName(folded)
