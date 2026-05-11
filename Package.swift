@@ -83,5 +83,12 @@ let package = Package(
                 "TBDApp",
             ]
         ),
+        .testTarget(
+            name: "TBDCLITests",
+            dependencies: [
+                "TBDCLI",
+                "TBDShared",
+            ]
+        ),
     ]
 )
