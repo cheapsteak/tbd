@@ -224,14 +224,14 @@ struct ChannelsTailCommand: AsyncParsableCommand {
             return
         }
 
-        // --follow: the file must exist for DispatchSource to watch it.
-        // Create it if absent so we don't wait forever on a non-existent file.
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+        // --follow requires the channel file to exist. We do NOT create it
+        // here — that would silently produce a ghost channel with no
+        // `channel_index` row, identical to the bug fixed for the non-follow
+        // branch. The user must `tbd channels post <name> "…"` first to
+        // materialize the channel.
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            FileHandle.standardError.write(Data("error: no such channel #\(normalized) (post to create it first)\n".utf8))
+            throw ExitCode.failure
         }
 
         let handle = try FileHandle(forReadingFrom: url)
