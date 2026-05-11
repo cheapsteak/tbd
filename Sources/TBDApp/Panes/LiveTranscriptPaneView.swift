@@ -156,7 +156,9 @@ struct LiveTranscriptPaneView: View {
                     snap.paneLabel = "liveTranscript"
                 }
                 if let id = visibleID {
+                    let scrollInterval = TranscriptSignposts.signposter.beginInterval("transcript.scrollTo")
                     proxy.scrollTo(id, anchor: .bottom)
+                    TranscriptSignposts.signposter.endInterval("transcript.scrollTo", scrollInterval)
                 }
             }
             .onChange(of: messages.last?.id) { oldID, newID in
@@ -191,9 +193,11 @@ struct LiveTranscriptPaneView: View {
         if !atBottom {
             Button {
                 guard let lastID = messages.last?.id else { return }
+                let scrollInterval = TranscriptSignposts.signposter.beginInterval("transcript.scrollTo")
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(lastID, anchor: .bottom)
                 }
+                TranscriptSignposts.signposter.endInterval("transcript.scrollTo", scrollInterval)
             } label: {
                 Image(systemName: "arrow.down.circle.fill")
                     .font(.system(size: 28))
@@ -244,6 +248,7 @@ struct LiveTranscriptPaneView: View {
             // Resolved sessionID may differ from terminal.claudeSessionID if a rollover
             // happened mid-flight; trust the daemon's resolution.
             let resolvedSID = result.sessionID ?? sid
+            let swapInterval = TranscriptSignposts.signposter.beginInterval("transcript.swap")
             let didChange: Bool = await MainActor.run {
                 Self.perfLog.debug("pollOnce.mainActor.start sid=\(sidShort, privacy: .public)")
                 let mainActorStart = ContinuousClock.now
@@ -267,6 +272,7 @@ struct LiveTranscriptPaneView: View {
                 Self.perfLog.debug("pollOnce.mainActor.end sid=\(sidShort, privacy: .public) elapsed_ms=\(mainActorMs, privacy: .public) equal_ms=\(equalMs, privacy: .public) swap_ms=\(swapMs, privacy: .public)")
                 return !equal
             }
+            TranscriptSignposts.signposter.endInterval("transcript.swap", swapInterval)
             changed = didChange
         } catch {
             failureCount += 1

@@ -52,6 +52,13 @@ struct TranscriptItemsView: View {
     }
 
     var body: some View {
+        let intervalState = TranscriptSignposts.signposter.beginInterval("transcript.items.body")
+        defer { TranscriptSignposts.signposter.endInterval("transcript.items.body", intervalState) }
+        return bodyView
+    }
+
+    @ViewBuilder
+    private var bodyView: some View {
         let _ = {
             guard depth == 0, items.count > 100, let tid = terminalID else { return }
             Self.bodyLogged.withLock { logged in
