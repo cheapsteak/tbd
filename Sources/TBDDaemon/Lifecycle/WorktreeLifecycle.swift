@@ -52,6 +52,7 @@ public struct WorktreeLifecycle: Sendable {
     public let hooks: HookResolver
     public let subscriptions: StateSubscriptionManager?
     public let modelProfileResolver: ModelProfileResolver?
+    public let pendingQuestions: PendingQuestionStore
 
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
@@ -64,7 +65,8 @@ public struct WorktreeLifecycle: Sendable {
         tmux: TmuxManager,
         hooks: HookResolver,
         subscriptions: StateSubscriptionManager? = nil,
-        modelProfileResolver: ModelProfileResolver? = nil
+        modelProfileResolver: ModelProfileResolver? = nil,
+        pendingQuestions: PendingQuestionStore = PendingQuestionStore()
     ) {
         self.db = db
         self.git = git
@@ -72,5 +74,6 @@ public struct WorktreeLifecycle: Sendable {
         self.hooks = hooks
         self.subscriptions = subscriptions
         self.modelProfileResolver = modelProfileResolver
+        self.pendingQuestions = pendingQuestions
     }
 }

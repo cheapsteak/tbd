@@ -258,6 +258,7 @@ extension RPCRouter {
 
         // Delete from DB
         try await db.terminals.delete(id: params.terminalID)
+        await pendingQuestions.clear(terminalID: params.terminalID)
 
         subscriptions.broadcast(delta: .terminalRemoved(TerminalIDDelta(
             terminalID: terminal.id

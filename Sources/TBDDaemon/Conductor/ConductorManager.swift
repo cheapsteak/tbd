@@ -5,11 +5,17 @@ import TBDShared
 public final class ConductorManager: Sendable {
     let db: TBDDatabase
     let tmux: TmuxManager
+    let pendingQuestions: PendingQuestionStore
     private let _suggestions = OSAllocatedUnfairLock(initialState: [String: ConductorSuggestion]())
 
-    public init(db: TBDDatabase, tmux: TmuxManager) {
+    public init(
+        db: TBDDatabase,
+        tmux: TmuxManager,
+        pendingQuestions: PendingQuestionStore = PendingQuestionStore()
+    ) {
         self.db = db
         self.tmux = tmux
+        self.pendingQuestions = pendingQuestions
     }
 
     // MARK: - Suggestions
@@ -125,6 +131,7 @@ public final class ConductorManager: Sendable {
             }
             // Window is dead — clean up stale terminal record
             try await db.terminals.delete(id: existingTerminalID)
+            await pendingQuestions.clear(terminalID: existingTerminalID)
             try await db.conductors.updateTerminalID(conductorID: conductor.id, terminalID: nil)
         }
 
@@ -191,6 +198,7 @@ public final class ConductorManager: Sendable {
                 windowID: terminal.tmuxWindowID
             )
             try await db.terminals.delete(id: terminalID)
+            await pendingQuestions.clear(terminalID: terminalID)
         }
 
         try await db.conductors.updateTerminalID(conductorID: conductor.id, terminalID: nil)

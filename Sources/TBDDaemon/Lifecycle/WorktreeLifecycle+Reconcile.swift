@@ -112,6 +112,9 @@ extension WorktreeLifecycle {
                 }
             }
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+            for terminal in terminals {
+                await pendingQuestions.clear(terminalID: terminal.id)
+            }
             try await db.worktrees.archive(id: wt.id)
         }
 
@@ -153,6 +156,7 @@ extension WorktreeLifecycle {
                     let alive = await tmux.windowExists(server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
                     if !alive {
                         try? await db.terminals.delete(id: terminal.id)
+                        await pendingQuestions.clear(terminalID: terminal.id)
                     }
                 } else {
                     do {

@@ -34,7 +34,8 @@ public final class RPCRouter: Sendable {
         prManager: PRStatusManager = PRStatusManager(),
         conductorManager: ConductorManager? = nil,
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
-        modelProfileResolver: ModelProfileResolver? = nil
+        modelProfileResolver: ModelProfileResolver? = nil,
+        pendingQuestions: PendingQuestionStore = PendingQuestionStore()
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -52,9 +53,11 @@ public final class RPCRouter: Sendable {
         self.suspendResumeCoordinator = SuspendResumeCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver
         )
-        self.conductorManager = conductorManager ?? ConductorManager(db: db, tmux: tmux)
+        self.conductorManager = conductorManager ?? ConductorManager(
+            db: db, tmux: tmux, pendingQuestions: pendingQuestions
+        )
         self.usageFetcher = usageFetcher
-        self.pendingQuestions = PendingQuestionStore()
+        self.pendingQuestions = pendingQuestions
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
