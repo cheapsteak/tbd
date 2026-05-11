@@ -27,7 +27,7 @@ TBD is a macOS app that manages git worktrees and terminal tabs (Claude Code or 
 
 ## Discovering current commands
 
-Always run `tbd <subcommand> --help` for current flags — flag detail is not duplicated here. Top-level commands: `tbd worktree`, `tbd terminal`, `tbd link`, `tbd notify`.
+Always run `tbd <subcommand> --help` for current flags — flag detail is not duplicated here. Top-level commands: `tbd worktree`, `tbd terminal`, `tbd link`, `tbd notify`, `tbd channels`.
 
 ## Common workflows
 
@@ -62,6 +62,55 @@ tbd terminal output <id> [--lines N]
 ```bash
 tbd notify --type {response_complete|error|task_complete|attention_needed} --message "..."
 ```
+
+### Coordinate via channels
+
+Channels let you share context with another TBD-managed session — useful when
+the user asks you to "post that question for the other agent" or asks the other
+agent to "go read what session A said in #foo".
+
+```bash
+# Post a message
+tbd channels post help "anyone seen the launchctl crash?"
+
+# Output includes a copy-pasteable read command:
+#   Posted to #help (seq 42)
+#   → tbd channels read help --seq 42
+# The user often pastes the second line into another session's prompt.
+
+# Read a specific message
+tbd channels read help --seq 42
+
+# Read recent activity (default last 20)
+tbd channels read help
+
+# Pull only what's new since the seq you last saw
+tbd channels read help --since 40
+
+# Discover channels
+tbd channels list
+
+# Watch a channel live (background bash + BashOutput)
+# Note: long-lived `tail --follow` shells are not yet empirically validated
+# against Claude Code's BashOutput buffer / reaping behavior. Prefer short
+# windows (start the tail when you need it, kill it when done) over
+# multi-hour background shells until the integration is characterized.
+tbd channels tail help --follow
+
+# Clean up a channel that has served its purpose
+tbd channels archive help
+```
+
+**Notes:**
+- Channel names are case-folded; `#API-questions` and `#api-questions` are the
+  same channel. Free-form Unicode is allowed (emoji, non-Latin scripts).
+- The body is plain UTF-8 text up to 64 KB. Markdown is fine if the reader
+  cares; the daemon does not interpret it.
+- Reads do not require the daemon — the CLI opens the file directly. Posts
+  and archives go through the daemon.
+- You can also `Read("~/tbd/channels/<name>.jsonl", offset=N)` directly, but
+  note `offset` is line-numbered and may diverge from `seq` after a torn-line
+  recovery. Prefer the CLI commands above.
 
 ### Get a deep link to a worktree
 
