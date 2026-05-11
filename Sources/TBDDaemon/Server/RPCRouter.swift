@@ -19,6 +19,7 @@ public final class RPCRouter: Sendable {
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
+    public let pendingQuestions: PendingQuestionStore
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -53,6 +54,7 @@ public final class RPCRouter: Sendable {
         )
         self.conductorManager = conductorManager ?? ConductorManager(db: db, tmux: tmux)
         self.usageFetcher = usageFetcher
+        self.pendingQuestions = PendingQuestionStore()
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -154,6 +156,10 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalTranscript(request.paramsData)
             case RPCMethod.terminalTranscriptItemFullBody:
                 return try await handleTerminalTranscriptItemFullBody(request.paramsData)
+            case RPCMethod.terminalAskUserQuestionPending:
+                return try await handleTerminalAskUserQuestionPending(request.paramsData)
+            case RPCMethod.terminalAskUserQuestionCleared:
+                return try await handleTerminalAskUserQuestionCleared(request.paramsData)
             case RPCMethod.conductorSetup:
                 return try await handleConductorSetup(request.paramsData)
             case RPCMethod.conductorStart:
