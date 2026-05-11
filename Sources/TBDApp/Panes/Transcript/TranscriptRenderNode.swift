@@ -95,7 +95,11 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
             }
 
         case .thinking, .slashCommand:
-            continue  // filtered above; kept here for switch exhaustiveness
+            // .thinking is filtered earlier by isHiddenInTranscript;
+            // .slashCommand reaches here (TranscriptParser folds it into
+            // .userPrompt in practice, so this branch is effectively dead).
+            // Both are dropped from the render list.
+            continue
         }
     }
     return out
