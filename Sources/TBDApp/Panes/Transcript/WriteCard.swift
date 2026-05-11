@@ -63,7 +63,7 @@ struct WriteCard: View {
                         }
                         // Finite cap (not .infinity) so _FlexFrameLayout short-circuits inside
                         // LazyVStack — see #129. .infinity forces per-row content measurement.
-                        .frame(maxHeight: containerExpanded ? 600 : 120)
+                        .frame(maxHeight: containerExpanded ? TranscriptCardLayout.expandedMaxHeight : TranscriptCardLayout.collapsedMaxHeight)
                         .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
 
