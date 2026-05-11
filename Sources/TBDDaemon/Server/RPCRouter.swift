@@ -18,6 +18,7 @@ public final class RPCRouter: Sendable {
     public let conductorManager: ConductorManager
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
+    public let channelStore: ChannelStore
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public let pendingQuestions: PendingQuestionStore
 
@@ -35,7 +36,8 @@ public final class RPCRouter: Sendable {
         conductorManager: ConductorManager? = nil,
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
         modelProfileResolver: ModelProfileResolver? = nil,
-        pendingQuestions: PendingQuestionStore = PendingQuestionStore()
+        pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        channelStore: ChannelStore? = nil
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -58,6 +60,10 @@ public final class RPCRouter: Sendable {
         )
         self.usageFetcher = usageFetcher
         self.pendingQuestions = pendingQuestions
+        self.channelStore = channelStore ?? ChannelStore(
+            channelsDir: TBDConstants.channelsDir,
+            index: db.channels
+        )
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -125,6 +131,12 @@ public final class RPCRouter: Sendable {
                 return try await handleNotificationsList()
             case RPCMethod.notificationsMarkRead:
                 return try await handleNotificationsMarkRead(request.paramsData)
+            case RPCMethod.channelsPost:
+                return try await handleChannelsPost(request.paramsData)
+            case RPCMethod.channelsList:
+                return try await handleChannelsList(request.paramsData)
+            case RPCMethod.channelsArchive:
+                return try await handleChannelsArchive(request.paramsData)
             case RPCMethod.cleanup:
                 return try await handleCleanup()
             case RPCMethod.prList:

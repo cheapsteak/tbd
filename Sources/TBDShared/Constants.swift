@@ -10,6 +10,8 @@ public enum TBDConstants {
     public static let portFilePath = configDir.appendingPathComponent("port").path
     public static let conductorsDir = configDir.appendingPathComponent("conductors")
     public static let reposDir = configDir.appendingPathComponent("repos")
+    public static let channelsDir = configDir.appendingPathComponent("channels")
+    public static let channelsArchiveDir = channelsDir.appendingPathComponent("_archive")
 
     public static func hookPath(repoID: UUID, eventName: String) -> String {
         reposDir

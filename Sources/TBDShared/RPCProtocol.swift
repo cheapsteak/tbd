@@ -96,6 +96,9 @@ public enum RPCMethod {
     public static let resolvePath = "resolve.path"
     public static let notificationsList = "notifications.list"
     public static let notificationsMarkRead = "notifications.markRead"
+    public static let channelsPost = "channels.post"
+    public static let channelsList = "channels.list"
+    public static let channelsArchive = "channels.archive"
     public static let prList    = "pr.list"
     public static let prRefresh = "pr.refresh"
     public static let cleanup = "cleanup"
@@ -824,4 +827,56 @@ public struct TerminalAskUserQuestionClearedParams: Codable, Sendable {
         self.terminalID = terminalID
         self.toolUseID = toolUseID
     }
+}
+
+// MARK: - Channels
+
+public struct ChannelsPostParams: Codable, Sendable {
+    public let name: String
+    public let body: String
+    public let terminalID: UUID?       // resolved → fromSession + fromLabel by daemon
+    public let fromSession: String?    // override (for non-TBD callers)
+    public let fromLabel: String?      // override (for non-TBD callers)
+    public init(name: String, body: String, terminalID: UUID? = nil,
+                fromSession: String? = nil, fromLabel: String? = nil) {
+        self.name = name; self.body = body; self.terminalID = terminalID
+        self.fromSession = fromSession; self.fromLabel = fromLabel
+    }
+}
+
+public struct ChannelsPostResult: Codable, Sendable {
+    public let seq: Int
+    public let ts: Date
+    public init(seq: Int, ts: Date) { self.seq = seq; self.ts = ts }
+}
+
+public struct ChannelsListParams: Codable, Sendable {
+    public let includeArchived: Bool
+    public init(includeArchived: Bool = false) { self.includeArchived = includeArchived }
+}
+
+public struct ChannelSummary: Codable, Sendable {
+    public let name: String
+    public let createdAt: Date
+    public let lastMessageAt: Date?
+    public let messageCount: Int
+    public init(name: String, createdAt: Date, lastMessageAt: Date?, messageCount: Int) {
+        self.name = name; self.createdAt = createdAt
+        self.lastMessageAt = lastMessageAt; self.messageCount = messageCount
+    }
+}
+
+public struct ChannelsListResult: Codable, Sendable {
+    public let channels: [ChannelSummary]
+    public init(channels: [ChannelSummary]) { self.channels = channels }
+}
+
+public struct ChannelsArchiveParams: Codable, Sendable {
+    public let name: String
+    public init(name: String) { self.name = name }
+}
+
+public struct ChannelsArchiveResult: Codable, Sendable {
+    public let archivedPath: String
+    public init(archivedPath: String) { self.archivedPath = archivedPath }
 }
