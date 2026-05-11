@@ -134,6 +134,8 @@ public enum RPCMethod {
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalSessionEvent = "terminal.sessionEvent"
+    public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
+    public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
@@ -781,5 +783,36 @@ public struct TerminalSessionEventParams: Codable, Sendable {
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
         self.source = source
+    }
+}
+
+/// PreToolUse:AskUserQuestion hook bridge — fires when Claude is about to
+/// render the question picker. The daemon stores this payload and uses it
+/// to synthesize a transcript item while the assistant `tool_use` line is
+/// still missing from the JSONL.
+public struct TerminalAskUserQuestionPendingParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let toolUseID: String
+    public let inputJSON: String
+    public let timestampMillis: Int64
+    public init(terminalID: UUID, toolUseID: String, inputJSON: String, timestampMillis: Int64) {
+        self.terminalID = terminalID
+        self.toolUseID = toolUseID
+        self.inputJSON = inputJSON
+        self.timestampMillis = timestampMillis
+    }
+}
+
+/// PostToolUse:AskUserQuestion hook bridge — fires after the user has
+/// answered. The handler is intentionally a no-op today; the merger
+/// performs lazy cleanup when it observes the matching `tool_use` line in
+/// the JSONL. Keeping the wire format reserved means a future change to
+/// eager cleanup won't ship a protocol break.
+public struct TerminalAskUserQuestionClearedParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let toolUseID: String
+    public init(terminalID: UUID, toolUseID: String) {
+        self.terminalID = terminalID
+        self.toolUseID = toolUseID
     }
 }
