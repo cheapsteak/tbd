@@ -535,3 +535,21 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable 
         }
     }
 }
+
+// MARK: - Tab Metadata
+
+/// Per-tab metadata persisted in the daemon DB. A row exists only when
+/// a tab has user-set metadata; absence means "use auto-derived defaults".
+public struct TabState: Codable, Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public var worktreeID: UUID
+    public var label: String?
+    public var createdAt: Date
+
+    public init(id: UUID, worktreeID: UUID, label: String? = nil, createdAt: Date = Date()) {
+        self.id = id
+        self.worktreeID = worktreeID
+        self.label = label
+        self.createdAt = createdAt
+    }
+}
