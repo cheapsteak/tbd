@@ -358,20 +358,13 @@ struct SessionTranscriptView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        TranscriptItemsView(items: messages, terminalID: nil)
+                        TranscriptItemsView(items: messages, terminalID: nil, atBottom: $atBottom)
                     }
                     .defaultScrollAnchor(.bottom)
-                    .onScrollGeometryChange(for: Bool.self) { geometry in
-                        let viewportBottom = geometry.contentOffset.y + geometry.containerSize.height
-                        let contentBottom = geometry.contentSize.height
-                        return contentBottom - viewportBottom < 50
-                    } action: { _, newAtBottom in
-                        atBottom = newAtBottom
-                    }
                     .overlay(alignment: .bottomTrailing) {
                         if !atBottom {
                             Button {
-                                guard let lastID = messages.last?.id else { return }
+                                guard let lastID = lastRenderedNodeID(for: messages) else { return }
                                 withAnimation(.easeOut(duration: 0.2)) {
                                     proxy.scrollTo(lastID, anchor: .bottom)
                                 }

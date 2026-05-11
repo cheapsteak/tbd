@@ -2,9 +2,9 @@ import SwiftUI
 import TBDShared
 
 /// Curated renderer for the `Task` / `Agent` subagent-dispatch tool.
-/// The actual subagent conversation is rendered separately by
-/// SubagentDisclosure beneath the parent card — this card only summarizes
-/// the dispatch (description, agent type chip, prompt preview, result).
+/// The subagent's activity is summarized separately by `SubagentSummaryRow`
+/// beneath the parent card — this card only summarizes the dispatch
+/// (description, agent type chip, prompt preview, result).
 struct AgentCard: View {
     let id: String
     let inputJSON: String

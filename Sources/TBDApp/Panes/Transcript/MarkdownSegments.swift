@@ -13,6 +13,8 @@ enum MarkdownSegments {
     }
 
     static func split(_ text: String) -> [Segment] {
+        let signpostState = TranscriptSignposts.signposter.beginInterval("transcript.markdown.segment")
+        defer { TranscriptSignposts.signposter.endInterval("transcript.markdown.segment", signpostState) }
         var segments: [Segment] = []
         let lines = text.components(separatedBy: "\n")
 

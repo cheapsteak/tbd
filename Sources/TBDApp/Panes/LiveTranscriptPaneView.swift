@@ -127,18 +127,10 @@ struct LiveTranscriptPaneView: View {
     private var transcriptWithAutoscroll: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                TranscriptItemsView(items: messages, terminalID: terminalID)
+                TranscriptItemsView(items: messages, terminalID: terminalID, atBottom: $atBottom)
             }
             .defaultScrollAnchor(.bottom)
             .scrollPosition(id: $visibleID, anchor: .bottom)
-            .onScrollGeometryChange(for: AtBottomGeometry.self) { geometry in
-                AtBottomGeometry(
-                    contentHeight: geometry.contentSize.height,
-                    viewportBottom: geometry.contentOffset.y + geometry.containerSize.height
-                )
-            } action: { _, new in
-                atBottom = new.contentHeight - new.viewportBottom < 50
-            }
             .overlay(alignment: .bottomTrailing) {
                 jumpToBottomButton(proxy: proxy)
             }
@@ -156,13 +148,16 @@ struct LiveTranscriptPaneView: View {
                     snap.paneLabel = "liveTranscript"
                 }
                 if let id = visibleID {
+                    let scrollInterval = TranscriptSignposts.signposter.beginInterval("transcript.scrollTo")
                     proxy.scrollTo(id, anchor: .bottom)
+                    TranscriptSignposts.signposter.endInterval("transcript.scrollTo", scrollInterval)
                 }
             }
             .onChange(of: messages.last?.id) { oldID, newID in
-                guard let _ = oldID, let id = newID, atBottom else { return }
+                guard let _ = oldID, let _ = newID, atBottom else { return }
+                guard let targetID = lastRenderedNodeID(for: messages) else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
-                    visibleID = id
+                    visibleID = targetID
                 }
             }
             .onChange(of: messages.count) { _, newCount in
@@ -190,10 +185,12 @@ struct LiveTranscriptPaneView: View {
     private func jumpToBottomButton(proxy: ScrollViewProxy) -> some View {
         if !atBottom {
             Button {
-                guard let lastID = messages.last?.id else { return }
+                guard let lastID = lastRenderedNodeID(for: messages) else { return }
+                let scrollInterval = TranscriptSignposts.signposter.beginInterval("transcript.scrollTo")
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(lastID, anchor: .bottom)
                 }
+                TranscriptSignposts.signposter.endInterval("transcript.scrollTo", scrollInterval)
             } label: {
                 Image(systemName: "arrow.down.circle.fill")
                     .font(.system(size: 28))
@@ -244,6 +241,7 @@ struct LiveTranscriptPaneView: View {
             // Resolved sessionID may differ from terminal.claudeSessionID if a rollover
             // happened mid-flight; trust the daemon's resolution.
             let resolvedSID = result.sessionID ?? sid
+            let swapInterval = TranscriptSignposts.signposter.beginInterval("transcript.swap")
             let didChange: Bool = await MainActor.run {
                 Self.perfLog.debug("pollOnce.mainActor.start sid=\(sidShort, privacy: .public)")
                 let mainActorStart = ContinuousClock.now
@@ -267,6 +265,7 @@ struct LiveTranscriptPaneView: View {
                 Self.perfLog.debug("pollOnce.mainActor.end sid=\(sidShort, privacy: .public) elapsed_ms=\(mainActorMs, privacy: .public) equal_ms=\(equalMs, privacy: .public) swap_ms=\(swapMs, privacy: .public)")
                 return !equal
             }
+            TranscriptSignposts.signposter.endInterval("transcript.swap", swapInterval)
             changed = didChange
         } catch {
             failureCount += 1
@@ -293,11 +292,4 @@ struct LiveTranscriptPaneView: View {
 private struct TaskKey: Equatable {
     let terminalID: UUID
     let retryToken: Int
-}
-
-/// Inputs to the at-bottom check, ferried through `onScrollGeometryChange`'s
-/// Equatable transform. `atBottom` is true when `contentHeight - viewportBottom < 50`.
-private struct AtBottomGeometry: Equatable {
-    let contentHeight: CGFloat
-    let viewportBottom: CGFloat
 }
