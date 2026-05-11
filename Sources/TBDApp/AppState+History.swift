@@ -101,7 +101,7 @@ extension AppState {
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
             tabs[worktreeID, default: []].append(tab)
             let index = (tabs[worktreeID]?.count ?? 1) - 1
-            activeTabIndices[worktreeID] = index
+            setActiveTab(worktreeID: worktreeID, tabIndex: index)
             historyActiveWorktrees.remove(worktreeID)
         } catch {
             handleConnectionError(error)

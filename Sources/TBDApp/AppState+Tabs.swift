@@ -31,9 +31,37 @@ extension AppState {
                 tabs[worktreeID] = arr
                 applyStoredOrder(worktreeID: worktreeID)
             }
+            // Hydrate the persisted active tab. Must run AFTER applyStoredOrder
+            // so the resolved index reflects the persisted order. If the stored
+            // ID no longer exists (tab was deleted), gracefully fall through and
+            // leave activeTabIndices unchanged (defaults to 0 at the view layer).
+            if let activeID = response.activeTabID,
+               let arr = tabs[worktreeID],
+               let idx = arr.firstIndex(where: { $0.id == activeID }) {
+                activeTabIndices[worktreeID] = idx
+            }
         } catch {
             logger.error("loadTabStates failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
             handleConnectionError(error)
+        }
+    }
+
+    // MARK: - Active tab persistence
+
+    /// Update the in-memory active tab index for a worktree AND persist the
+    /// underlying tab.id to the daemon. Use this anywhere the UI changes the
+    /// active selection so the choice survives a restart.
+    func setActiveTab(worktreeID: UUID, tabIndex: Int) {
+        activeTabIndices[worktreeID] = tabIndex
+        guard let arr = tabs[worktreeID], arr.indices.contains(tabIndex) else { return }
+        let tabID = arr[tabIndex].id
+        Task {
+            do {
+                try await daemonClient.setActiveTab(worktreeID: worktreeID, tabID: tabID)
+            } catch {
+                logger.error("setActiveTab persist failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+                handleConnectionError(error)
+            }
         }
     }
 
