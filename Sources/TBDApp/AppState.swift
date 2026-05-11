@@ -167,6 +167,8 @@ final class AppState: ObservableObject {
     }
     @Published var tabs: [UUID: [Tab]] = [:]
     @Published var activeTabIndices: [UUID: Int] = [:]
+    @Published var worktreeTabOrders: [UUID: [UUID]] = [:]
+    @Published var draggingTabID: UUID? = nil
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
     @Published var suspendingTerminalIDs: Set<UUID> = []
