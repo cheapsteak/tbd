@@ -34,6 +34,10 @@ Today the tab strip in `Sources/TBDApp/TabBar.swift` shows auto-derived labels:
 - Reordering the `+` (new-tab) and history buttons in the tab strip.
 - Live-syncing tab metadata between multiple TBDApp instances.
 
+## Follow-ups (deferred)
+
+- **Persist active-tab focus per worktree.** Today `AppState.activeTabIndices: [UUID: Int]` stores which tab is focused in each worktree, but it's in-memory only and resets on app launch. A future change can add an `active_tab_id: TEXT` column on the `worktree` table (storing the `Tab.id` UUID, not a positional index, so it stays correct across reorders) and an `app.setActiveTab` RPC. The current change's data model intentionally leaves this column off — defer until there's a user request for tab focus to survive restart.
+
 ## Reference: iTerm2
 
 iTerm2 has a `titleOverride: NSString?` on `PTYTab` (saved in arrangements, reverts to auto-derived when nil) — that's the same pattern as our `Tab.label: String?`. iTerm2 has no inline rename UI; titles come from escape sequences or scripts/API. Tab order in iTerm2 is encoded as the natural NSArray order in `TERMINAL_ARRANGEMENT_TABS` (no separate sort-order field). Drag is implemented in `PSMTabBarControl`, a custom `NSView` that hooks `-[NSTabView moveTabViewItem:toIndex:]`. Layout (splits) is a recursive plist dict on the tab — they don't normalize splits into a separate store. Persistence is lazy: arrangements only write on explicit save events, not per-change.
