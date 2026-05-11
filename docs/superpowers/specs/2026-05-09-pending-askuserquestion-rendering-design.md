@@ -16,6 +16,7 @@ Render the question (header, prompt, options) inside the TBD transcript pane as 
 - **Answering from inside TBD.** Routing keystrokes back through tmux into the Claude TUI is a separate, larger problem.
 - **Tmux screen-scrape fallback.** If the hook didn't fire (daemon was down, hook overlay not picked up by an already-running session), the synthetic card will not appear. The user still sees the question in the terminal pane itself; the transcript pane just won't show it until JSONL catches up after the answer. This is the same degraded-but-correct behavior we have today.
 - **Other pending states.** This design covers `AskUserQuestion` only. It does not attempt to surface permission prompts (`approve Bash`, etc.) — those have a different UX shape.
+- **Subagent (Task) AskUserQuestion.** When a Task subagent calls `AskUserQuestion`, the eventual real `tool_use` lands nested inside the parent `toolCall`'s `Subagent.items`, not at the top level. Top-level dedupe + top-level placement would render the synthetic incorrectly. Subagent questions therefore degrade to today's behavior (visible only after answer). Recursing into `Subagent.items` for dedupe and rendering the synthetic in the correct nested slot is tracked as a follow-up. We can detect this at the CLI bridge by inspecting `cwd` / `transcript_path` from the hook payload against the parent terminal's main JSONL — if they diverge (subagent transcripts live under a `subagents/` sibling), the bridge does not RPC the daemon at all. This keeps the synthetic out of the top-level items list for subagent calls.
 
 ## Signal Source
 
@@ -26,6 +27,26 @@ This is structured, version-stable, and addressable per matcher — strictly bet
 - The session file `~/.claude/sessions/<pid>.json` carries `status: "waiting"` and `waitingFor: "approve AskUserQuestion"` but never the question content.
 - Tmux pane capture has the rendered TUI but parsing it is brittle to formatting changes.
 - The JSONL records `attachment.type: "hook_success"` lines after PreToolUse hooks run, but these don't carry `tool_input`.
+
+### Empirically verified payload shape
+
+Captured live from Claude Code 2.1.138 by installing a `cat > file` hook on `PreToolUse:AskUserQuestion`:
+
+```json
+{
+  "session_id": "B88113CA-EAF0-41D7-AEF7-C4AB2FB449CF",
+  "transcript_path": "/Users/chang/.claude/projects/.../<sid>.jsonl",
+  "cwd": "...",
+  "permission_mode": "bypassPermissions",
+  "effort": { "level": "high" },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_input": { "questions": [ { "question": "...", "header": "...", "options": [ ... ], "multiSelect": false } ] },
+  "tool_use_id": "toolu_01JLbNo3vYeQp2TVif7Cd8Mn"
+}
+```
+
+Confirms the load-bearing assumption: `tool_use_id` is present on PreToolUse for this matcher, in the same `toolu_…` format that the assistant `tool_use.id` later carries into the JSONL. Exact-string match works as a dedupe key.
 
 ## Architecture
 
@@ -61,11 +82,15 @@ The overlay is regenerated on every daemon startup, so the new hooks take effect
 Add `Sources/TBDCLI/Commands/AskUserQuestionEventCommand.swift`, modeled directly on `SessionEventCommand`. Two subcommands:
 
 - `tbd ask-user-question pre` — invoked from `PreToolUse`. Reads stdin, decodes Claude's hook payload (`tool_use_id`, `tool_input`, plus the standard envelope fields), reads `TBD_TERMINAL_ID` from env, RPCs `terminal.askUserQuestionPending`. Silent on every error path; exit 0 always.
-- `tbd ask-user-question post` — invoked from `PostToolUse`. Same shape, RPCs `terminal.askUserQuestionCleared`.
+- `tbd ask-user-question post` — invoked from `PostToolUse`. Same shape, RPCs `terminal.askUserQuestionCleared` (which is a no-op today; see §3).
 
 Both commands cap stdin at 1 MiB matching `SessionEventCommand`. Both return immediately if `TBD_TERMINAL_ID` is missing or malformed (covers non-TBD-spawned sessions that somehow inherit the overlay).
 
-The PreToolUse stdin payload, per Claude Code's hook contract, includes `tool_input` as a structured JSON object containing the questions array. The CLI command re-serializes `tool_input` with `JSONSerialization` (sorted keys) into a string and passes it through. The daemon does no further interpretation — it stores the JSON verbatim and lets the SwiftUI card decode it the same way it decodes JSONL-backed input.
+The PreToolUse stdin payload includes `tool_input` as a structured JSON object containing the questions array (empirically verified — see §Signal Source). The CLI command re-serializes `tool_input` with `JSONSerialization` (sorted keys) into a string and passes it through. The daemon does no further interpretation — it stores the JSON verbatim and lets the SwiftUI card decode it the same way it decodes JSONL-backed input.
+
+**Subagent detection.** Before issuing the RPC, the `pre` subcommand compares the payload's `transcript_path` to a hint about the parent terminal's expected JSONL path. If the path lives under a `subagents/` subdirectory of the project, the subagent-question case (see §Non-Goals), the CLI exits silently without RPCing. This keeps subagent questions out of the synthetic-merge path entirely. Tests cover both branches (main-agent path: RPC fires; subagent path: no RPC).
+
+**Observability.** Each subcommand emits exactly one `logger.debug` line via `os.Logger` (subsystem `com.tbd.cli`, category `askUserQuestion`) — `"pre delivered toolUseID=… terminalID=…"` or `"pre suppressed reason=subagent|noTerminalID|rpcFailed"`. Per project policy, debug-level logs are silent by default and surfaced via `log stream --level debug`. This is the only diagnostic path; hook stderr stays empty so nothing leaks into the user's terminal.
 
 ### 3. RPC additions
 
@@ -90,17 +115,22 @@ public struct TerminalAskUserQuestionClearedParams: Codable, Sendable {
 
 Both return void (`.ok()`). No client-side response handling needed.
 
+PostToolUse is intentionally a defensive signal only — see §6 for why we don't clear on PostToolUse. The `…Cleared` RPC exists so the daemon could choose to drop a pending entry early in the rare case of a same-cycle redundant question, but the *default* merger path doesn't call it. Concretely, `handleTerminalAskUserQuestionCleared` is a no-op today (logs only); we keep the wire format reserved so we don't have to ship a protocol change if we later want it.
+
 ### 4. Daemon state store
 
 New file `Sources/TBDDaemon/AskUserQuestion/PendingQuestionStore.swift`:
 
 ```swift
 actor PendingQuestionStore {
-    private var pending: [UUID: PendingAskUserQuestion] = [:]
+    private var pending: [Key: PendingAskUserQuestion] = [:]
+    struct Key: Hashable, Sendable { let terminalID: UUID; let toolUseID: String }
+
     func set(terminalID: UUID, _ value: PendingAskUserQuestion)
     func clear(terminalID: UUID, toolUseID: String)
     func clear(terminalID: UUID)              // called on terminal-close
-    func get(terminalID: UUID) -> PendingAskUserQuestion?
+    func entries(forTerminal: UUID) -> [PendingAskUserQuestion]
+    func gcExpired(now: Date, maxAge: Duration)
 }
 
 struct PendingAskUserQuestion: Sendable {
@@ -110,9 +140,13 @@ struct PendingAskUserQuestion: Sendable {
 }
 ```
 
-Single instance held by the daemon, injected into the relevant RPC handlers. Memory-only — daemon restart wipes it, which is correct behavior: after a daemon restart, the JSONL is the only authoritative source and any in-flight question will simply not get a synthetic card until answered. This is acceptable degradation.
+Keyed on `(terminalID, toolUseID)` rather than `terminalID` alone — so two pending questions on the same terminal coexist (rare, but happens during session restore/replay, or if a hook bug double-fires). Stored as a list returned by `entries(forTerminal:)`; merger iterates them.
 
-`clear(terminalID:)` (no toolUseID) is invoked from terminal-close paths so a closed pane never leaves a phantom card on the next reopen.
+Memory-only — daemon restart wipes it. After a daemon restart, the JSONL is the only authoritative source and any in-flight question simply doesn't get a synthetic card until answered. Acceptable degradation.
+
+`clear(terminalID:)` (no toolUseID) is invoked from terminal-close paths so a closed pane never leaves a phantom entry on the next reopen.
+
+**TTL.** Stranded entries (e.g., a user-installed PreToolUse hook on the same matcher returned `decision: "block"`, so no answer ever comes; or daemon-vs-Claude lifetime mismatch) are reaped via `gcExpired` called from `handleTerminalTranscript` with `maxAge: .seconds(900)` (15 min). Cheap — runs O(entries) per poll, entries are tiny.
 
 ### 5. RPC handlers
 
@@ -141,41 +175,61 @@ func handleTerminalAskUserQuestionCleared(_ paramsData: Data) async throws -> RP
 
 Wire into `RPCRouter.route(...)` next to existing terminal handlers.
 
-### 6. Transcript merge
+### 6. Transcript merge — and lazy cleanup that avoids flicker
 
-In `handleTerminalTranscript` (`Sources/TBDDaemon/Server/RPCRouter+TerminalHandlers.swift`), after `messages = TranscriptParser.parse(...)` (or cache hit), perform the synthetic-item merge before building the response:
+In `handleTerminalTranscript` (`Sources/TBDDaemon/Server/RPCRouter+TerminalHandlers.swift`), after `messages = TranscriptParser.parse(...)` (or cache hit), perform GC + merge before building the response:
 
 ```swift
+await pendingQuestions.gcExpired(now: Date(), maxAge: .seconds(900))
+
+let jsonlIDs: Set<String> = {
+    var ids = Set<String>()
+    for item in messages {
+        if case let .toolCall(id, _, _, _, _, _, _, _) = item { ids.insert(id) }
+    }
+    return ids
+}()
+
 var finalMessages = messages
-if let pending = await pendingQuestions.get(terminalID: params.terminalID) {
-    let alreadyInJSONL = messages.contains { item in
-        if case let .toolCall(id, _, _, _, _, _, _, _) = item {
-            return id == pending.toolUseID
-        }
-        return false
+for pending in await pendingQuestions.entries(forTerminal: params.terminalID) {
+    if jsonlIDs.contains(pending.toolUseID) {
+        // JSONL caught up. Drop the entry now — keeps the store small,
+        // avoids ever surfacing a "ghost" synthetic for an answered question.
+        await pendingQuestions.clear(terminalID: params.terminalID,
+                                     toolUseID: pending.toolUseID)
+        continue
     }
-    if !alreadyInJSONL {
-        finalMessages.append(.toolCall(
-            id: pending.toolUseID,
-            name: "AskUserQuestion",
-            inputJSON: pending.inputJSON,
-            inputTruncatedTo: nil,
-            result: nil,
-            subagent: nil,
-            timestamp: pending.timestamp,
-            usage: nil
-        ))
-    }
+    finalMessages.append(.toolCall(
+        id: pending.toolUseID,
+        name: "AskUserQuestion",
+        inputJSON: pending.inputJSON,
+        inputTruncatedTo: nil,   // synthetic input is always uncapped
+        result: nil,
+        subagent: nil,
+        timestamp: pending.timestamp,
+        usage: nil
+    ))
 }
 ```
 
 The cache (`TranscriptParseCache`) continues to cache the JSONL-derived items only; the synthetic merge happens post-cache-lookup so pending-state changes are reflected on every poll without cache invalidation.
 
-The dedupe key is `tool_use_id`, which Claude assigns once and reuses in both the PreToolUse hook payload and the eventual JSONL `tool_use` block. A real JSONL line landing for the same `tool_use_id` always wins.
+**Why lazy cleanup avoids flicker.** A naive design clears pending state when the PostToolUse hook fires. But Claude flushes the assistant `tool_use` line to JSONL slightly *after* PostToolUse returns. A poll landing in that gap would show the synthetic disappear and then the real card appear with the answer — a visible flicker. Lazy cleanup means the synthetic stays visible (with "Waiting for response…") until the JSONL line lands, at which point the real card replaces it in the same render slot. PostToolUse becomes a defensive-only signal — see §3.
+
+The dedupe key is `tool_use_id`, which Claude assigns once and reuses in both the PreToolUse hook payload (empirically verified, see §Signal Source) and the eventual JSONL `tool_use` block.
+
+**`inputTruncatedTo` is always `nil` on synthetic items.** The CLI bridge never caps the JSON; the merger never sets the field. This keeps the synthetic out of the truncation-footer code path in `AskUserQuestionCard` (which would otherwise call `terminal.transcriptItemFullBody` with a `tool_use_id` that doesn't exist in JSONL yet, getting back "Output no longer available.").
 
 ### 7. Terminal-close cleanup
 
-In the terminal lifecycle paths that already exist (closing a terminal, archiving a worktree), call `pendingQuestions.clear(terminalID:)`. This is a single line in each cleanup site.
+Call `pendingQuestions.clear(terminalID:)` from every code path that terminates a terminal so the store can't grow phantom entries. The exhaustive list — verified by grepping for terminal teardown sites in `Sources/TBDDaemon/` — is:
+
+- Worktree archive (`Sources/TBDDaemon/Lifecycle/WorktreeLifecycle+Archive.swift`).
+- `tbd terminal close` / explicit terminal close (`RPCRouter+TerminalHandlers.swift` close handlers).
+- Tmux session death detection (the existing watcher that detects tmux-side closes and updates terminal status).
+- Daemon shutdown (memory-only store, so no action needed — process exit clears it).
+
+Each non-shutdown site adds one line. Tests cover each path's call into the clear method.
 
 ### 8. UI
 
@@ -194,25 +248,31 @@ Per project policy on branching conditionals, every new branch gets a test on ea
 - Existing `SessionStart` and `Stop` entries are unchanged.
 
 **`AskUserQuestionEventCommand` payload parsing**
-- Given a representative PreToolUse stdin payload (real shape captured from a live session), the command extracts `tool_use_id` and a re-serialized `tool_input` JSON.
+- Given a representative PreToolUse stdin payload (real shape captured from a live session — checked into the test fixtures), the command extracts `tool_use_id` and a re-serialized `tool_input` JSON.
 - Missing `TBD_TERMINAL_ID`: command exits silently.
 - Malformed JSON: command exits silently.
 - Stdin > 1 MiB: command exits silently.
+- Subagent transcript path (`transcript_path` under `/subagents/`): command exits silently without RPCing the daemon.
+- Main-agent transcript path: command issues the RPC.
 
 **`PendingQuestionStore`**
-- `set` then `get` returns the stored value.
+- `set` then `entries(forTerminal:)` returns the stored value.
 - `clear(terminalID:toolUseID:)` for the matching toolUseID removes the entry; mismatched toolUseID is a no-op.
-- `clear(terminalID:)` removes the entry regardless of toolUseID.
+- `clear(terminalID:)` removes all entries for that terminal regardless of toolUseID.
+- Two `set` calls on the same terminal with different toolUseIDs → both entries present.
+- `gcExpired(now:, maxAge:)` removes entries older than `maxAge`; younger entries are kept.
 
 **Transcript merge (the branching gate)**
-- Pending state present, no matching JSONL item → synthetic `toolCall` appended at tail.
-- Pending state present, JSONL contains a `tool_use` with the same `tool_use_id` → no synthetic appended (real wins).
+- Pending state present, no matching JSONL item → synthetic `toolCall` appended at tail with `inputTruncatedTo: nil`, `result: nil`, `subagent: nil`.
+- Pending state present, JSONL contains a `tool_use` with the same `tool_use_id` → no synthetic appended (real wins) AND the entry is removed from `PendingQuestionStore` by the merger (lazy cleanup).
 - Pending state absent → output byte-identical to `TranscriptParser.parse(filePath:)` (the gated-off ungated-behavior check).
-- Synthetic appended once cleared by `terminal.askUserQuestionCleared` → next call returns no synthetic.
+- Two pending entries on the same terminal with different `toolUseID`s → both appear in the output (keying preserves both).
+- Pending entry older than 15 minutes → reaped by `gcExpired`, not surfaced.
 
 **RPC round-trip**
 - `terminal.askUserQuestionPending` then `terminal.transcript` returns a transcript including the synthetic.
-- Then `terminal.askUserQuestionCleared` then `terminal.transcript` returns a transcript without the synthetic.
+- A second `terminal.transcript` call once the JSONL contains the real `tool_use`+`tool_result` → no synthetic; pending store is empty for that terminalID.
+- `terminal.askUserQuestionCleared` is a no-op today; test asserts `entries(forTerminal:)` is unchanged after calling it (the wire format reservation, not behavior).
 
 ## Restart and verification per CLAUDE.md
 
@@ -223,9 +283,11 @@ Manual verification: open a TBD-spawned Claude session, ask Claude to invoke `As
 ## Risks and mitigations
 
 - **Hook didn't fire (daemon was down when PreToolUse triggered).** Synthetic card won't appear; user sees the question in the terminal pane only. Same degraded behavior as today. Acceptable.
-- **PostToolUse failed to fire (daemon down between Pre and Post).** JSONL dedupe handles it: when the assistant `tool_use` lands in JSONL after the answer, the synthetic is suppressed by `tool_use_id` match.
-- **Stale pending entry from a crashed Claude session.** Daemon restart wipes the in-memory store. Terminal-close also clears the entry. The only stuck-state path is "Claude crashed, daemon kept running, terminal still open." Manageable scope; if it becomes common, add a TTL.
-- **Hook overlay merge order.** Claude merges `--settings` array entries with the user's settings.json by concatenation + dedupe. Adding new matchers cannot conflict with user hooks on the same matcher — both run. Confirmed by the existing `SessionStart` overlay coexisting with user hooks.
+- **Flicker on answer (PostToolUse clears too early).** Mitigated by lazy cleanup inside the merger — pending state lives until the JSONL match is observed, so the synthetic stays on-screen continuously through the transition.
+- **Stale pending entry.** Two pressure-release valves: `gcExpired` (15-minute TTL) handles the "user-installed PreToolUse blocked the call" case where no answer/JSONL ever lands; terminal-close paths handle the "user killed the terminal mid-question" case; daemon restart handles everything else.
+- **Hook overlay merge order vs. user hooks on the same matcher.** Claude merges `--settings` array entries with the user's settings.json by concatenation + dedupe. If the user has their own `PreToolUse:AskUserQuestion` hook, both run. If theirs returns `decision: "block"`, Claude skips the tool call entirely — our pending entry strands until TTL reaps it. Acceptable failure mode.
+- **Concurrent same-terminal questions.** Keying on `(terminalID, toolUseID)` rather than `terminalID` alone means two pending questions coexist; merger surfaces both. Order in the items list reflects pending-store insertion order; identical to JSONL ordering once they flush.
+- **Subagent (Task) AskUserQuestion.** The CLI bridge suppresses the RPC for subagent transcripts (see §Non-Goals and §2 in Architecture), so the synthetic never appears at the top level. Subagent questions are visible only after answer — same as today.
 
 ## Files touched
 
