@@ -21,6 +21,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var sortOrder: Int
     var archivedHeadSHA: String?
     var tabOrder: String  // JSON array of UUID strings, e.g. "[]" or "[\"...\",\"...\"]"
+    var activeTabID: String?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -41,6 +42,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
                 data: JSONEncoder().encode(sessions), encoding: .utf8)
         }
         self.tabOrder = "[]"  // overwritten by GRDB when fetched; only "new worktree" path uses this initializer
+        self.activeTabID = nil  // new worktrees start with no stored selection
     }
 
     func toModel() -> Worktree {
@@ -363,6 +365,28 @@ public struct WorktreeStore: Sendable {
             try db.execute(
                 sql: "UPDATE worktree SET tabOrder = ? WHERE id = ?",
                 arguments: [json, worktreeID.uuidString]
+            )
+        }
+    }
+
+    /// Read the `activeTabID` column for a worktree. Returns nil for missing
+    /// worktrees, NULL columns, or strings that don't decode as a UUID.
+    public func getActiveTabID(worktreeID: UUID) async throws -> UUID? {
+        try await writer.read { db in
+            guard let record = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),
+                  let raw = record.activeTabID else {
+                return nil
+            }
+            return UUID(uuidString: raw)
+        }
+    }
+
+    /// Set or clear (`nil`) the persisted active tab UUID for a worktree.
+    public func setActiveTabID(worktreeID: UUID, tabID: UUID?) async throws {
+        _ = try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET activeTabID = ? WHERE id = ?",
+                arguments: [tabID?.uuidString, worktreeID.uuidString]
             )
         }
     }

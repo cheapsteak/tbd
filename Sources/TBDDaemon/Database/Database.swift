@@ -369,6 +369,12 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v20_worktree_active_tab") { db in
+            try db.alter(table: "worktree") { t in
+                t.add(column: "activeTabID", .text)  // nullable
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }
