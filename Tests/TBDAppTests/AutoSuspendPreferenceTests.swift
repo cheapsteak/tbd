@@ -7,47 +7,55 @@ import Testing
 /// build the `worktree.selectionChanged` RPC params. Regression coverage for
 /// a bug where the reconnect path ignored the toggle and always sent
 /// `suspendEnabled=true`, causing real Claude sessions to receive `/exit`.
+///
+/// Isolation matters: TBDApp ships as an unbundled SPM executable, so its
+/// `UserDefaults.standard` domain is `TBDApp.plist` in the developer's home
+/// — the SAME domain a running production TBDApp reads via `@AppStorage`.
+/// An earlier version of these tests mutated `.standard`, which clobbered the
+/// live app's preferences mid-test and triggered a real Claude `/exit`. Every
+/// test below now drives the helper through a per-test `UserDefaults(suiteName:)`
+/// so `.standard` is never touched.
 
 @MainActor
 @Suite("Auto-suspend Claude preference")
 struct AutoSuspendPreferenceTests {
     private let key = AppState.autoSuspendClaudeKey
 
-    private func withPreference(_ value: Bool?, _ body: () throws -> Void) rethrows {
-        let prior = UserDefaults.standard.object(forKey: key)
-        if let value {
-            UserDefaults.standard.set(value, forKey: key)
-        } else {
-            UserDefaults.standard.removeObject(forKey: key)
-        }
+    /// Build an isolated UserDefaults domain, run the body with it, and tear
+    /// the domain down afterwards so nothing persists across tests.
+    private func withIsolatedDefaults(
+        seed: Bool?,
+        _ body: (UserDefaults) -> Void
+    ) {
+        let suiteName = "TBDAppTests.AutoSuspend.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
         defer {
-            if let prior {
-                UserDefaults.standard.set(prior, forKey: key)
-            } else {
-                UserDefaults.standard.removeObject(forKey: key)
-            }
+            defaults.removePersistentDomain(forName: suiteName)
         }
-        try body()
+        if let seed {
+            defaults.set(seed, forKey: key)
+        }
+        body(defaults)
     }
 
     @Test("returns true when toggle is on")
-    func enabledWhenOn() throws {
-        try withPreference(true) {
-            #expect(AppState.autoSuspendClaudeEnabled == true)
+    func enabledWhenOn() {
+        withIsolatedDefaults(seed: true) { defaults in
+            #expect(AppState.autoSuspendClaudeEnabled(defaults: defaults) == true)
         }
     }
 
     @Test("returns false when toggle is off — the regressed branch")
-    func disabledWhenOff() throws {
-        try withPreference(false) {
-            #expect(AppState.autoSuspendClaudeEnabled == false)
+    func disabledWhenOff() {
+        withIsolatedDefaults(seed: false) { defaults in
+            #expect(AppState.autoSuspendClaudeEnabled(defaults: defaults) == false)
         }
     }
 
     @Test("defaults to true when the user has never touched the toggle")
-    func defaultsToTrueWhenUnset() throws {
-        try withPreference(nil) {
-            #expect(AppState.autoSuspendClaudeEnabled == true)
+    func defaultsToTrueWhenUnset() {
+        withIsolatedDefaults(seed: nil) { defaults in
+            #expect(AppState.autoSuspendClaudeEnabled(defaults: defaults) == true)
         }
     }
 }
