@@ -202,8 +202,10 @@ public final class ChannelStore: @unchecked Sendable {
                 .path
             try FileManager.default.moveItem(atPath: activePath, toPath: archivedPath)
 
-            // Remove the lock sidecar (best-effort; lock FD is already closed
-            // by `defer` above, but unlink can race with that).
+            // Remove the lock sidecar (best-effort). On macOS, unlink while
+            // the fd is still open just removes the directory entry — the
+            // lock remains exclusive until `release()` fires in the defer
+            // above, so this is safe.
             try? FileManager.default.removeItem(atPath: lockPath(for: normalized))
 
             seqCache.withLock { _ = $0.removeValue(forKey: normalized) }
