@@ -19,6 +19,7 @@ public final class TBDDatabase: Sendable {
     public let modelProfileUsage: ModelProfileUsageStore
     public let config: ConfigStore
     public let meta: TBDMetaStore
+    public let tabs: TabStore
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
     public init(path: String) throws {
@@ -40,6 +41,7 @@ public final class TBDDatabase: Sendable {
         self.modelProfileUsage = ModelProfileUsageStore(writer: pool)
         self.config = ConfigStore(writer: pool)
         self.meta = TBDMetaStore(writer: pool)
+        self.tabs = TabStore(writer: pool)
         try Self.migrate(writer: pool)
     }
 
@@ -58,6 +60,7 @@ public final class TBDDatabase: Sendable {
         self.modelProfileUsage = ModelProfileUsageStore(writer: queue)
         self.config = ConfigStore(writer: queue)
         self.meta = TBDMetaStore(writer: queue)
+        self.tabs = TabStore(writer: queue)
         try Self.migrate(writer: queue)
     }
 
