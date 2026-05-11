@@ -28,18 +28,24 @@ public struct ChannelIndexStore: Sendable {
         self.writer = writer
     }
 
+    /// Single source of truth for the upsert SQL used by both the async and
+    /// sync `recordPost` variants. Keeping these aligned matters: divergence
+    /// between the two would produce subtly different index state depending
+    /// on which call site landed last.
+    private static let upsertSQL = """
+        INSERT INTO channel_index (name, createdAt, lastMessageAt, messageCount)
+        VALUES (?, ?, ?, 1)
+        ON CONFLICT(name) DO UPDATE SET
+            lastMessageAt = excluded.lastMessageAt,
+            messageCount = messageCount + 1
+        """
+
     /// Upsert: create the row if missing, increment `messageCount` and bump
     /// `lastMessageAt` if present.
     public func recordPost(name: String, at timestamp: Date) async throws {
         try await writer.write { db in
             try db.execute(
-                sql: """
-                    INSERT INTO channel_index (name, createdAt, lastMessageAt, messageCount)
-                    VALUES (?, ?, ?, 1)
-                    ON CONFLICT(name) DO UPDATE SET
-                        lastMessageAt = excluded.lastMessageAt,
-                        messageCount = messageCount + 1
-                    """,
+                sql: Self.upsertSQL,
                 arguments: [name, timestamp, timestamp]
             )
         }
@@ -55,13 +61,7 @@ public struct ChannelIndexStore: Sendable {
     public func recordPostSync(name: String, at timestamp: Date) throws {
         try writer.write { db in
             try db.execute(
-                sql: """
-                    INSERT INTO channel_index (name, createdAt, lastMessageAt, messageCount)
-                    VALUES (?, ?, ?, 1)
-                    ON CONFLICT(name) DO UPDATE SET
-                        lastMessageAt = excluded.lastMessageAt,
-                        messageCount = messageCount + 1
-                    """,
+                sql: Self.upsertSQL,
                 arguments: [name, timestamp, timestamp]
             )
         }
