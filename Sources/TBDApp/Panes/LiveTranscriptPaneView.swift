@@ -154,9 +154,10 @@ struct LiveTranscriptPaneView: View {
                 }
             }
             .onChange(of: messages.last?.id) { oldID, newID in
-                guard let _ = oldID, let id = newID, atBottom else { return }
+                guard let _ = oldID, let _ = newID, atBottom else { return }
+                guard let targetID = lastRenderedNodeID(for: messages) else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
-                    visibleID = id
+                    visibleID = targetID
                 }
             }
             .onChange(of: messages.count) { _, newCount in
@@ -184,7 +185,7 @@ struct LiveTranscriptPaneView: View {
     private func jumpToBottomButton(proxy: ScrollViewProxy) -> some View {
         if !atBottom {
             Button {
-                guard let lastID = messages.last?.id else { return }
+                guard let lastID = lastRenderedNodeID(for: messages) else { return }
                 let scrollInterval = TranscriptSignposts.signposter.beginInterval("transcript.scrollTo")
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(lastID, anchor: .bottom)

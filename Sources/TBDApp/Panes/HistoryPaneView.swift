@@ -364,7 +364,7 @@ struct SessionTranscriptView: View {
                     .overlay(alignment: .bottomTrailing) {
                         if !atBottom {
                             Button {
-                                guard let lastID = messages.last?.id else { return }
+                                guard let lastID = lastRenderedNodeID(for: messages) else { return }
                                 withAnimation(.easeOut(duration: 0.2)) {
                                     proxy.scrollTo(lastID, anchor: .bottom)
                                 }
