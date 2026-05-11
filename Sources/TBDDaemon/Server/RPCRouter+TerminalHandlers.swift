@@ -931,13 +931,22 @@ extension RPCRouter {
             }
             filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
         }
-        let messages: [TranscriptItem]
+        let parsed: [TranscriptItem]
         if let cached = await TranscriptParseCache.shared.get(filePath: filePath) {
-            messages = cached
+            parsed = cached
         } else {
-            messages = TranscriptParser.parse(filePath: filePath)
-            await TranscriptParseCache.shared.put(filePath: filePath, result: messages)
+            parsed = TranscriptParser.parse(filePath: filePath)
+            await TranscriptParseCache.shared.put(filePath: filePath, result: parsed)
         }
+
+        await pendingQuestions.gcExpired(now: Date(), maxAge: .seconds(900))
+        let entries = await pendingQuestions.entries(forTerminal: params.terminalID)
+        let merged = AskUserQuestionMerger.merge(jsonlItems: parsed, pending: entries)
+        for satisfiedID in merged.satisfiedToolUseIDs {
+            await pendingQuestions.clear(terminalID: params.terminalID, toolUseID: satisfiedID)
+        }
+        let messages = merged.items
+
         let result = TerminalTranscriptResult(messages: messages, sessionID: sessionID)
         response = try RPCResponse(result: result)
         responseBytes = response.result?.utf8.count ?? 0
