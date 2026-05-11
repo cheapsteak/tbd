@@ -1,4 +1,6 @@
 import ArgumentParser
+import Darwin
+import Dispatch
 import Foundation
 import TBDShared
 
@@ -9,7 +11,8 @@ struct ChannelsCommand: AsyncParsableCommand {
         subcommands: [
             ChannelsPostCommand.self,
             ChannelsReadCommand.self,
-            // tail / list / archive added in later tasks
+            ChannelsTailCommand.self,
+            // list / archive added in later tasks
         ]
     )
 }
@@ -175,5 +178,91 @@ struct ChannelsReadCommand: AsyncParsableCommand {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let ts = formatter.string(from: m.ts)
         return "[\(ts)] (seq \(m.seq)) \(m.fromLabel): \(m.body)"
+    }
+}
+
+// MARK: - tail
+
+struct ChannelsTailCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "tail",
+        abstract: "Stream new messages from a channel as they arrive"
+    )
+
+    @Argument(help: "Channel name (without leading '#').")
+    var name: String
+
+    @Flag(name: .long, help: "Keep watching after the current end of file")
+    var follow: Bool = false
+
+    @Flag(name: .long, help: "Show all existing messages before tailing")
+    var fromStart: Bool = false
+
+    mutating func run() async throws {
+        let normalized = try validateChannelName(name)
+        let url = TBDConstants.channelsDir.appendingPathComponent("\(normalized).jsonl")
+
+        // Ensure the file exists so we have something to open. (If the
+        // channel hasn't been posted to yet, --follow would otherwise wait
+        // forever on a non-existent file.)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        if !fromStart {
+            try handle.seekToEnd()
+        }
+
+        // Print whatever is already there if --from-start.
+        try printNewLines(handle: handle)
+
+        if !follow { return }
+
+        // SIGINT must be ignored *before* installing the dispatch source, or
+        // the default handler can fire between setup steps.
+        signal(SIGINT, SIG_IGN)
+        let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        signalSource.setEventHandler { Darwin.exit(0) }
+        signalSource.resume()
+
+        // Watch for VNODE_WRITE | VNODE_EXTEND on the file.
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: handle.fileDescriptor,
+            eventMask: [.write, .extend],
+            queue: .global(qos: .utility)
+        )
+        let stream = AsyncStream<Void> { continuation in
+            source.setEventHandler { continuation.yield(()) }
+            source.setCancelHandler { continuation.finish() }
+            source.resume()
+        }
+
+        for await _ in stream {
+            try printNewLines(handle: handle)
+        }
+    }
+
+    private func printNewLines(handle: FileHandle) throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        // Read whatever is available now.
+        guard let chunk = try handle.read(upToCount: Int.max), !chunk.isEmpty else { return }
+        var lineStart = 0
+        for (idx, byte) in chunk.enumerated() where byte == 0x0A {
+            let lineData = chunk.subdata(in: lineStart..<idx)
+            lineStart = idx + 1
+            guard let msg = try? ChannelMessage.decodeLine(lineData) else { continue }
+            let ts = formatter.string(from: msg.ts)
+            print("[\(ts)] (seq \(msg.seq)) \(msg.fromLabel): \(msg.body)")
+        }
+        // Anything after the last newline is a partial write in progress;
+        // the next event will see it complete.
     }
 }
