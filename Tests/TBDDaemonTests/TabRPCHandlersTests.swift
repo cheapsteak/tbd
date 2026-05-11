@@ -137,6 +137,50 @@ import Foundation
         #expect(tabs.isEmpty)
     }
 
+    @Test func setActiveTabPersistsAndTabListReturnsIt() async throws {
+        let (db, worktreeID) = try await makeFixture()
+        let router = makeRouter(db: db)
+        let tabID = UUID()
+
+        // Initially tab.list reports activeTabID = nil.
+        let initialListReq = try RPCRequest(
+            method: RPCMethod.tabList,
+            params: TabListParams(worktreeID: worktreeID)
+        )
+        let initialResp = await router.handle(initialListReq)
+        #expect(initialResp.success)
+        let initialDecoded = try initialResp.decodeResult(TabListResponse.self)
+        #expect(initialDecoded.activeTabID == nil)
+
+        // worktree.setActiveTab writes the ID.
+        let setReq = try RPCRequest(
+            method: RPCMethod.worktreeSetActiveTab,
+            params: WorktreeSetActiveTabParams(worktreeID: worktreeID, tabID: tabID)
+        )
+        let setResp = await router.handle(setReq)
+        #expect(setResp.success)
+        #expect(setResp.error == nil)
+
+        // Subsequent tab.list returns it.
+        let listReq = try RPCRequest(
+            method: RPCMethod.tabList,
+            params: TabListParams(worktreeID: worktreeID)
+        )
+        let listResp = await router.handle(listReq)
+        let decoded = try listResp.decodeResult(TabListResponse.self)
+        #expect(decoded.activeTabID == tabID)
+
+        // nil clears.
+        let clearReq = try RPCRequest(
+            method: RPCMethod.worktreeSetActiveTab,
+            params: WorktreeSetActiveTabParams(worktreeID: worktreeID, tabID: nil)
+        )
+        _ = await router.handle(clearReq)
+        let clearedResp = await router.handle(listReq)
+        let clearedDecoded = try clearedResp.decodeResult(TabListResponse.self)
+        #expect(clearedDecoded.activeTabID == nil)
+    }
+
     @Test func deletingNoteDeletesItsTabRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(

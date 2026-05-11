@@ -119,3 +119,27 @@ import TBDShared
     state.applyStoredOrder(worktreeID: worktreeID)
     #expect(state.tabs[worktreeID]!.map(\.id) == ids)
 }
+
+@MainActor
+@Test func setActiveTabUpdatesInMemoryIndex() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let ids = [UUID(), UUID(), UUID()]
+    state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
+    // The daemon RPC will fail (no daemon running) but the synchronous
+    // in-memory mutation still happens first.
+    state.setActiveTab(worktreeID: worktreeID, tabIndex: 2)
+    #expect(state.activeTabIndices[worktreeID] == 2)
+}
+
+@MainActor
+@Test func setActiveTabIgnoresOutOfBoundsIndexForPersistButStillStoresIndex() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let ids = [UUID(), UUID()]
+    state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
+    // Out-of-bounds index — helper still updates the dictionary so the view
+    // layer can recover; the persist path bails before constructing a tab ID.
+    state.setActiveTab(worktreeID: worktreeID, tabIndex: 99)
+    #expect(state.activeTabIndices[worktreeID] == 99)
+}
