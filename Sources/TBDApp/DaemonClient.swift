@@ -723,6 +723,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the worktree's active tab so it survives app restart.
+    /// `tabID = nil` clears the stored selection.
+    func setActiveTab(worktreeID: UUID, tabID: UUID?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeSetActiveTab,
+            params: WorktreeSetActiveTabParams(worktreeID: worktreeID, tabID: tabID)
+        )
+    }
+
     /// List notes, optionally filtered by worktree.
     func listNotes(worktreeID: UUID? = nil) async throws -> [Note] {
         return try await callAsync(
