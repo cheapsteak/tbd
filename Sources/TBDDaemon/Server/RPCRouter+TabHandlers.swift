@@ -32,6 +32,13 @@ extension RPCRouter {
         let params = try decoder.decode(TabListParams.self, from: paramsData)
         let tabs = try await db.tabs.listForWorktree(worktreeID: params.worktreeID)
         let order = try await db.worktrees.getTabOrder(worktreeID: params.worktreeID)
-        return try RPCResponse(result: TabListResponse(tabs: tabs, order: order))
+        let activeTabID = try await db.worktrees.getActiveTabID(worktreeID: params.worktreeID)
+        return try RPCResponse(result: TabListResponse(tabs: tabs, order: order, activeTabID: activeTabID))
+    }
+
+    func handleWorktreeSetActiveTab(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeSetActiveTabParams.self, from: paramsData)
+        try await db.worktrees.setActiveTabID(worktreeID: params.worktreeID, tabID: params.tabID)
+        return .ok()
     }
 }

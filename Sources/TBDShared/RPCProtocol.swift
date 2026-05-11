@@ -148,6 +148,7 @@ public enum RPCMethod {
     public static let tabSetLabel = "tab.setLabel"
     public static let tabSetOrder = "tab.setOrder"
     public static let tabList     = "tab.list"
+    public static let worktreeSetActiveTab = "worktree.setActiveTab"
 }
 
 // MARK: - Legacy Hook Detection / Removal
@@ -859,8 +860,19 @@ public struct TabListParams: Codable, Sendable {
 public struct TabListResponse: Codable, Sendable {
     public let tabs: [TabState]   // only tabs with overrides
     public let order: [UUID]      // contents of worktree.tab_order; [] if never reordered
-    public init(tabs: [TabState], order: [UUID]) {
+    public let activeTabID: UUID?  // persisted active tab UUID, nil if never set
+    public init(tabs: [TabState], order: [UUID], activeTabID: UUID? = nil) {
         self.tabs = tabs
         self.order = order
+        self.activeTabID = activeTabID
+    }
+}
+
+public struct WorktreeSetActiveTabParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let tabID: UUID?  // nil clears the stored selection
+    public init(worktreeID: UUID, tabID: UUID?) {
+        self.worktreeID = worktreeID
+        self.tabID = tabID
     }
 }
