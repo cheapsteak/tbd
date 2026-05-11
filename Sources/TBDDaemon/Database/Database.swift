@@ -354,6 +354,18 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v19_tabs_and_order") { db in
+            try db.create(table: "tab") { t in
+                t.column("id", .text).primaryKey()
+                t.column("worktreeID", .text).notNull()
+                t.column("label", .text)         // nullable = use auto-derived
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.alter(table: "worktree") { t in
+                t.add(column: "tabOrder", .text).notNull().defaults(to: "[]")
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }
