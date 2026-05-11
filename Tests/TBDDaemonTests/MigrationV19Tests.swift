@@ -87,4 +87,20 @@ import GRDB
         try await db.tabs.deleteForWorktree(worktreeID: wt.id)
         #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).isEmpty)
     }
+
+    @Test func tabOrderRoundTrip() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/v19e-repo", displayName: "V19e", defaultBranch: "main"
+        )
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/v19e-repo/wt", tmuxServer: "tbd-v19e"
+        )
+        #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id).isEmpty)
+        let ids = [UUID(), UUID(), UUID()]
+        try await db.worktrees.setTabOrder(worktreeID: wt.id, tabIDs: ids)
+        let fetched = try await db.worktrees.getTabOrder(worktreeID: wt.id)
+        #expect(fetched == ids)
+    }
 }
