@@ -10,10 +10,10 @@ import Testing
 /// quadrants of the state machine.
 @Suite("HangWatchdog")
 struct HangWatchdogTests {
-    /// 1500 ms threshold matches `HangWatchdog.defaultThresholdMs`. Tests that
+    /// 1000 ms threshold matches `HangWatchdog.defaultThresholdMs`. Tests that
     /// follow choose stall values clearly above/below this so a small drift
     /// in the constant doesn't silently break the suite.
-    private let thresholdMs: UInt64 = 1500
+    private let thresholdMs: UInt64 = 1000
 
     @Test func healthy_belowThreshold_isNoop() {
         // wasHung=false, stall<threshold — first tick of a healthy app.

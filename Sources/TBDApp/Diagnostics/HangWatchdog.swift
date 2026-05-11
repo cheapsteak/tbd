@@ -75,9 +75,11 @@ final class HangWatchdog: @unchecked Sendable {
     // MARK: Configuration
 
     /// Threshold in milliseconds beyond which a stall is reported as a hang.
-    /// 1500 ms is comfortably above the worst non-hang transcript layout pause
-    /// we've measured but well below the 17 s hangs in `crash.log`.
-    static let defaultThresholdMs: UInt64 = 1500
+    /// 1000 ms catches sub-second hangs like the 1.05 s sample on 2026-05-10
+    /// (issue #129) — at the previous 1500 ms threshold that event slipped
+    /// past our own diagnostics even though the macOS hang reporter caught
+    /// it. Still well above any expected steady-state main-thread pause.
+    static let defaultThresholdMs: UInt64 = 1000
 
     /// Background tick interval. 250 ms gives sub-half-second detection of
     /// onset and recovery without meaningful battery cost — the timer just
