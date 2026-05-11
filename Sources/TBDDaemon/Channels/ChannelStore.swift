@@ -10,6 +10,7 @@ public enum ChannelStoreError: Error, CustomStringConvertible {
     case writeFailed(path: String, errno: Int32)
     case fsyncFailed(path: String, errno: Int32)
     case openFailed(path: String, errno: Int32)
+    case channelNotFound(name: String)
 
     public var description: String {
         switch self {
@@ -17,6 +18,7 @@ public enum ChannelStoreError: Error, CustomStringConvertible {
         case .writeFailed(let p, let e): return "write(\(p)) failed: errno=\(e)"
         case .fsyncFailed(let p, let e): return "fsync(\(p)) failed: errno=\(e)"
         case .openFailed(let p, let e): return "open(\(p)) failed: errno=\(e)"
+        case .channelNotFound(let n): return "channel not found: \(n)"
         }
     }
 }
@@ -175,7 +177,7 @@ public final class ChannelStore: @unchecked Sendable {
         let archivedPath: String = try await lockManager.withLock(normalized) { [self] in
             let activePath = filePath(for: normalized)
             guard FileManager.default.fileExists(atPath: activePath) else {
-                throw ChannelStoreError.openFailed(path: activePath, errno: ENOENT)
+                throw ChannelStoreError.channelNotFound(name: normalized)
             }
 
             // Hold the cross-process lock for the rename.
