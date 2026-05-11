@@ -110,4 +110,54 @@ import Foundation
         #expect(!resp.success)
         #expect(resp.error != nil)
     }
+
+    @Test func deletingTerminalDeletesItsTabRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/cleanup-t-repo-\(UUID().uuidString)",
+            displayName: "C", defaultBranch: "main"
+        )
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/cleanup-t-repo/wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-cleanup-t"
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1"
+        )
+        try await db.tabs.setLabel(tabID: terminal.id, worktreeID: wt.id, label: "Mine")
+
+        let router = makeRouter(db: db)
+        let req = try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: terminal.id)
+        )
+        _ = await router.handle(req)
+        let tabs = try await db.tabs.listForWorktree(worktreeID: wt.id)
+        #expect(tabs.isEmpty)
+    }
+
+    @Test func deletingNoteDeletesItsTabRow() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/cleanup-n-repo-\(UUID().uuidString)",
+            displayName: "C", defaultBranch: "main"
+        )
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/cleanup-n-repo/wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-cleanup-n"
+        )
+        let note = try await db.notes.create(worktreeID: wt.id)
+        try await db.tabs.setLabel(tabID: note.id, worktreeID: wt.id, label: "MyNote")
+
+        let router = makeRouter(db: db)
+        let req = try RPCRequest(
+            method: RPCMethod.noteDelete,
+            params: NoteDeleteParams(noteID: note.id)
+        )
+        _ = await router.handle(req)
+        let tabs = try await db.tabs.listForWorktree(worktreeID: wt.id)
+        #expect(tabs.isEmpty)
+    }
 }
