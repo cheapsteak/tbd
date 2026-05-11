@@ -145,6 +145,9 @@ public enum RPCMethod {
     public static let setMainAreaSize = "app.setMainAreaSize"
     public static let daemonLegacyHooksStatus = "daemon.legacyHooksStatus"
     public static let daemonRemoveLegacyGlobalHooks = "daemon.removeLegacyGlobalHooks"
+    public static let tabSetLabel = "tab.setLabel"
+    public static let tabSetOrder = "tab.setOrder"
+    public static let tabList     = "tab.list"
 }
 
 // MARK: - Legacy Hook Detection / Removal
@@ -823,5 +826,41 @@ public struct TerminalAskUserQuestionClearedParams: Codable, Sendable {
     public init(terminalID: UUID, toolUseID: String) {
         self.terminalID = terminalID
         self.toolUseID = toolUseID
+    }
+}
+
+// MARK: - Tab Params
+
+public struct TabSetLabelParams: Codable, Sendable {
+    public let tabID: UUID
+    public let worktreeID: UUID
+    public let label: String?  // nil = clear override (delete row)
+    public init(tabID: UUID, worktreeID: UUID, label: String?) {
+        self.tabID = tabID
+        self.worktreeID = worktreeID
+        self.label = label
+    }
+}
+
+public struct TabSetOrderParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let tabIDs: [UUID]
+    public init(worktreeID: UUID, tabIDs: [UUID]) {
+        self.worktreeID = worktreeID
+        self.tabIDs = tabIDs
+    }
+}
+
+public struct TabListParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct TabListResponse: Codable, Sendable {
+    public let tabs: [TabState]   // only tabs with overrides
+    public let order: [UUID]      // contents of worktree.tab_order; [] if never reordered
+    public init(tabs: [TabState], order: [UUID]) {
+        self.tabs = tabs
+        self.order = order
     }
 }
