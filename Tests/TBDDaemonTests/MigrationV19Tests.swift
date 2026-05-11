@@ -3,7 +3,7 @@ import GRDB
 import Testing
 @testable import TBDDaemonLib
 
-@Suite struct MigrationV18Tests {
+@Suite struct MigrationV19Tests {
 
     @Test func createsChannelIndexTable() throws {
         let dbPath = NSTemporaryDirectory() + "tbd-v18-\(UUID().uuidString).db"
