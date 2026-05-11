@@ -204,9 +204,25 @@ struct ChannelsTailCommand: AsyncParsableCommand {
         let normalized = try validateChannelName(name)
         let url = TBDConstants.channelsDir.appendingPathComponent("\(normalized).jsonl")
 
-        // Ensure the file exists so we have something to open. (If the
-        // channel hasn't been posted to yet, --follow would otherwise wait
-        // forever on a non-existent file.)
+        // Without --follow: read whatever's in the file (if any) and exit.
+        // Do NOT create the file — that would silently produce a ghost
+        // channel with no `channel_index` row.
+        if !follow {
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                FileHandle.standardError.write(Data("error: no such channel #\(normalized)\n".utf8))
+                throw ExitCode.failure
+            }
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            if !fromStart {
+                try handle.seekToEnd()
+            }
+            try printNewLines(handle: handle)
+            return
+        }
+
+        // --follow: the file must exist for DispatchSource to watch it.
+        // Create it if absent so we don't wait forever on a non-existent file.
         if !FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
@@ -224,8 +240,6 @@ struct ChannelsTailCommand: AsyncParsableCommand {
 
         // Print whatever is already there if --from-start.
         try printNewLines(handle: handle)
-
-        if !follow { return }
 
         // SIGINT must be ignored *before* installing the dispatch source, or
         // the default handler can fire between setup steps.
