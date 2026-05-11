@@ -162,6 +162,13 @@ public final class ChannelStore: @unchecked Sendable {
             if ftruncate(fd, off_t(lastGoodEnd)) != 0 {
                 throw ChannelStoreError.writeFailed(path: path, errno: errno)
             }
+            // Make the truncate durable so a crash before the OS flushes
+            // doesn't leave the torn line on disk for the next start to
+            // recover again. Recovery is idempotent, so this is correctness
+            // polish rather than a fix for a known bug.
+            if fsync(fd) != 0 {
+                throw ChannelStoreError.fsyncFailed(path: path, errno: errno)
+            }
         }
         return highest
     }
