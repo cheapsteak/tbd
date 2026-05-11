@@ -188,13 +188,19 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
             // would overwrite the snapshot. The view will be recreated with a new
             // .id when tmuxWindowID changes after resume completes.
             guard !suspendedOnCreate else { return }
-            context.coordinator.startTmuxClient(
-                terminalView: tv,
-                bridge: tmuxBridge,
-                server: tmuxServer,
-                windowID: tmuxWindowID,
-                panelID: terminalID
-            )
+            // Detach to a Task so `prepareSession` (which spawns tmux subprocesses)
+            // doesn't block the main thread. `startTmuxClient` hops back to
+            // `@MainActor` once the tmux args come back.
+            Task { [weak coordinator = context.coordinator, weak tv] in
+                guard let coordinator, let tv else { return }
+                await coordinator.startTmuxClient(
+                    terminalView: tv,
+                    bridge: tmuxBridge,
+                    server: tmuxServer,
+                    windowID: tmuxWindowID,
+                    panelID: terminalID
+                )
+            }
         }
 
         // Register snapshot provider so SidebarContextMenu can capture this view
@@ -232,14 +238,18 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         private var recreationAttempts = 0
         private static let maxRecreationAttempts = 2
 
+        @MainActor
         func startTmuxClient(
             terminalView: TerminalView,
             bridge: TmuxBridge,
             server: String,
             windowID: String,
             panelID: UUID
-        ) {
-            guard let args = bridge.prepareSession(
+        ) async {
+            // `prepareSession` is non-isolated and awaits tmux subprocesses
+            // off the main actor — Swift releases main while we suspend here,
+            // so SwiftUI's render loop is no longer blocked while tmux runs.
+            guard let args = await bridge.prepareSession(
                 panelID: panelID,
                 server: server,
                 windowID: windowID
@@ -281,8 +291,10 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
             )
 
             // Send correct initial size from SwiftTerm's own computed dimensions
-            // (accounts for scroller width and actual cell metrics)
-            MainActor.assumeIsolated {
+            // (accounts for scroller width and actual cell metrics).
+            // The enclosing function is `@MainActor async`, so we're already
+            // main-isolated here — no `assumeIsolated` wrapper needed.
+            do {
                 let cols = terminalView.terminal.cols
                 let rows = terminalView.terminal.rows
                 if cols > 0 && rows > 0 && process.childfd >= 0 {

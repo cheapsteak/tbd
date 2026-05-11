@@ -40,30 +40,34 @@ final class TmuxBridge: @unchecked Sendable {
     /// Tracks active grouped sessions: maps panel UUID -> grouped session name
     private var activeSessions: [UUID: String] = [:]
 
-    /// Serial background queue for fire-and-forget tmux teardown. SwiftUI's
-    /// `dismantleNSView` runs on the main thread mid-layout, and a synchronous
-    /// `Process.waitUntilExit` there pumps the runloop while a layout pass is
-    /// in flight — that re-enters AppKit and crashes via a null function
-    /// pointer in the layout observer. Off-main keeps the runloop quiet.
+    /// Serial background queue retained for any future synchronous teardown
+    /// needs. Today cleanup is fire-and-forget via `Task { ... }` invoking
+    /// the async `runTmux`, which uses `Process.terminationHandler` (no
+    /// `waitUntilExit`) so it doesn't pump the main runloop.
     private let cleanupQueue = DispatchQueue(label: "com.tbd.app.tmux-cleanup", qos: .utility)
 
     /// Prepare a tmux grouped session for a specific panel.
     /// Creates a grouped session linked to "main", selects the right window,
     /// and returns the tmux arguments needed for SwiftTerm to attach.
     ///
+    /// Async to keep the main thread responsive: the underlying `Process`
+    /// invocations no longer use `waitUntilExit` and instead suspend on
+    /// `terminationHandler` via `withCheckedContinuation`. Callers should
+    /// invoke this from a `Task`, not synchronously from `makeNSView`.
+    ///
     /// - Parameters:
     ///   - panelID: Unique ID for this terminal panel (used as session name suffix)
     ///   - server: tmux server socket name (e.g. "tbd-a1b2c3d4")
     ///   - windowID: tmux window ID to display (e.g. "@3")
     /// - Returns: Array of arguments for the tmux attach command, or nil on failure
-    func prepareSession(panelID: UUID, server: String, windowID: String) -> [String]? {
+    func prepareSession(panelID: UUID, server: String, windowID: String) async -> [String]? {
         let sessionName = "tbd-view-\(panelID.uuidString.prefix(8).lowercased())"
 
         // Single tmux invocation: create grouped session + select the target window.
         // Global options (status, borders, etc.) are set once by the daemon at server creation.
         // tmux returns the exit code of the last chained command, so if new-session
         // fails (session exists) but select-window succeeds, result.success is true.
-        let result = runTmux(server: server, args: [
+        let result = await runTmux(server: server, args: [
             "new-session", "-d", "-t", "main", "-s", sessionName, ";",
             "select-window", "-t", "\(sessionName):\(windowID)"
         ])
@@ -74,19 +78,19 @@ final class TmuxBridge: @unchecked Sendable {
             //  (b) new-session succeeded, select-window failed (window dead)
             // Retry select-window alone to distinguish. Kill-session is safe in both
             // cases since session names are UUID-based (no collision risk).
-            let selectResult = runTmux(server: server, args: [
+            let selectResult = await runTmux(server: server, args: [
                 "select-window", "-t", "\(sessionName):\(windowID)"
             ])
             if !selectResult.success {
                 debugLog("PREPARE: window \(windowID) is dead on server \(server)")
-                let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
+                let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
                 return nil
             }
         }
 
-        lock.lock()
-        activeSessions[panelID] = sessionName
-        lock.unlock()
+        lock.withLock {
+            activeSessions[panelID] = sessionName
+        }
 
         debugLog("PREPARE: panelID=\(panelID.uuidString.prefix(8)) server=\(server) window=\(windowID) session=\(sessionName)")
 
@@ -107,8 +111,8 @@ final class TmuxBridge: @unchecked Sendable {
         }
         lock.unlock()
 
-        cleanupQueue.async { [self] in
-            let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
+        Task.detached { [self] in
+            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
             debugLog("CLEANUP: panelID=\(panelID.uuidString.prefix(8)) session=\(sessionName)")
         }
     }
@@ -120,9 +124,9 @@ final class TmuxBridge: @unchecked Sendable {
         activeSessions.removeAll()
         lock.unlock()
 
-        cleanupQueue.async { [self] in
+        Task.detached { [self] in
             for (_, sessionName) in sessions {
-                let _ = runTmux(server: server, args: ["kill-session", "-t", sessionName])
+                let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
             }
             debugLog("CLEANUP ALL: server=\(server)")
         }
@@ -135,25 +139,42 @@ final class TmuxBridge: @unchecked Sendable {
         let output: String
     }
 
-    private func runTmux(server: String, args: [String]) -> TmuxResult {
-        let process = Process()
-        let outPipe = Pipe()
-        let errPipe = Pipe()
+    /// Run a tmux subprocess without blocking the calling thread.
+    ///
+    /// Uses `Process.terminationHandler` + `withCheckedContinuation` instead of
+    /// `waitUntilExit`. Calling this from the main thread used to dominate
+    /// `makeNSView` for tens to hundreds of ms per panel (tmux fork+exec +
+    /// new-session/select-window), starving SwiftUI's render loop so newly
+    /// inserted terminal panels never displayed content.
+    private func runTmux(server: String, args: [String]) async -> TmuxResult {
+        await withCheckedContinuation { continuation in
+            let process = Process()
+            let outPipe = Pipe()
+            let errPipe = Pipe()
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["tmux", "-L", server] + args
-        process.standardOutput = outPipe
-        process.standardError = errPipe
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["tmux", "-L", server] + args
+            process.standardOutput = outPipe
+            process.standardError = errPipe
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: outData + errData, encoding: .utf8) ?? ""
-            return TmuxResult(success: process.terminationStatus == 0, output: output.trimmingCharacters(in: .whitespacesAndNewlines))
-        } catch {
-            return TmuxResult(success: false, output: error.localizedDescription)
+            process.terminationHandler = { _ in
+                let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: outData + errData, encoding: .utf8) ?? ""
+                continuation.resume(returning: TmuxResult(
+                    success: process.terminationStatus == 0,
+                    output: output.trimmingCharacters(in: .whitespacesAndNewlines)
+                ))
+            }
+
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(returning: TmuxResult(
+                    success: false,
+                    output: error.localizedDescription
+                ))
+            }
         }
     }
 }
