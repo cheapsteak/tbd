@@ -155,6 +155,53 @@ public final class ChannelStore: @unchecked Sendable {
         return highest
     }
 
+    /// Move the channel file to `_archive/<name>-<YYYYMMDD-HHMMSS>.jsonl`,
+    /// remove the lock sidecar, and delete the index row. Returns the
+    /// archived path.
+    public func archive(name: String) async throws -> String {
+        let normalized = try validateChannelName(name)
+
+        // Synchronous file work under the per-channel lock; DB cleanup outside.
+        // (Same actor-reentrancy lesson as `post`: no `await` inside withLock.)
+        let archivedPath: String = try await lockManager.withLock(normalized) { [self] in
+            let activePath = filePath(for: normalized)
+            guard FileManager.default.fileExists(atPath: activePath) else {
+                throw ChannelStoreError.openFailed(path: activePath, errno: ENOENT)
+            }
+
+            // Hold the cross-process lock for the rename.
+            let lock = try FileLock.acquire(path: lockPath(for: normalized))
+            defer { try? lock.release() }
+
+            try ensureDir(archiveDir)
+            let stamp = Self.timestampFormatter.string(from: Date())
+            let archivedPath = archiveDir
+                .appendingPathComponent("\(normalized)-\(stamp).jsonl")
+                .path
+            try FileManager.default.moveItem(atPath: activePath, toPath: archivedPath)
+
+            // Remove the lock sidecar (best-effort; lock FD is already closed
+            // by `defer` above, but unlink can race with that).
+            try? FileManager.default.removeItem(atPath: lockPath(for: normalized))
+
+            seqCache.removeValue(forKey: normalized)
+            return archivedPath
+        }
+
+        // DB index update outside the per-channel lock.
+        try await index.delete(name: normalized)
+        return archivedPath
+    }
+
+    /// `YYYYMMDD-HHMMSS` in UTC, for archive filenames.
+    static let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
     private func appendLine(channel: String, line: Data) throws {
         let path = filePath(for: channel)
         let fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
