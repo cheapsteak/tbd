@@ -74,4 +74,52 @@ import Testing
             _ = try await store.archive(name: "ghost")
         }
     }
+
+    /// Regression: post and archive used to issue their channel_index
+    /// writes *outside* the per-channel lock. If `delete` landed before
+    /// `recordPost`, the upsert resurrected the row for a channel whose
+    /// JSONL had already been moved to `_archive/` — `tbd channels list`
+    /// showed a phantom active channel with no backing file.
+    ///
+    /// With both DB calls now inside the per-channel lock, the index and
+    /// the filesystem can never disagree: either the row exists and the
+    /// active file exists, or neither does. This test races the two
+    /// operations across multiple iterations to amplify the chance of
+    /// catching a regression. It is non-deterministic — the bug doesn't
+    /// fire on every run — but with the fix in place it can never
+    /// observe the inconsistent state, so it cannot false-positive.
+    @Test func archiveDoesNotResurrectIndexRowFromInflightPost() async throws {
+        for _ in 0..<10 {
+            let (store, tmp, dbPath) = try makeStore()
+            defer { try? FileManager.default.removeItem(at: tmp) }
+
+            // Establish the channel so the racing `post` is "update" not "insert".
+            _ = try await store.post(name: "ghosted", body: "first",
+                                     fromSession: "s", fromLabel: "L")
+
+            // Concurrently kick off another post and an archive. Whichever
+            // wins the per-channel lock first, both should leave the index
+            // and filesystem in agreement when they're done.
+            async let p: () = {
+                _ = try? await store.post(name: "ghosted", body: "racing",
+                                          fromSession: "s", fromLabel: "L")
+            }()
+            async let a: () = {
+                _ = try? await store.archive(name: "ghosted")
+            }()
+            _ = await (p, a)
+
+            // Read the index. Either the channel is archived (no row, no
+            // active file) OR the post landed first and the channel is
+            // still active. The buggy interleaving (row exists but file
+            // gone, or file exists but no row) must never be observed.
+            let db = try TBDDatabase(path: dbPath)
+            let entries = try await db.channels.list(includeArchived: false)
+            let activePath = tmp.appendingPathComponent("channels/ghosted.jsonl").path
+            let activeFileExists = FileManager.default.fileExists(atPath: activePath)
+            let indexHasRow = entries.contains { $0.name == "ghosted" }
+            #expect(activeFileExists == indexHasRow,
+                    "phantom row: index says active=\(indexHasRow) but file exists=\(activeFileExists)")
+        }
+    }
 }

@@ -45,6 +45,28 @@ public struct ChannelIndexStore: Sendable {
         }
     }
 
+    /// Synchronous variant of `recordPost`. Blocks the calling thread until
+    /// the GRDB writer queue completes the upsert. Used from inside the
+    /// per-channel async lock in `ChannelStore`, where awaiting the async
+    /// variant would (a) re-enter the actor system after releasing the lock
+    /// is no longer guarded, opening a post/archive race on the index row,
+    /// and (b) reintroduce the actor-reentrancy hazard the per-channel
+    /// lock was meant to close.
+    public func recordPostSync(name: String, at timestamp: Date) throws {
+        try writer.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO channel_index (name, createdAt, lastMessageAt, messageCount)
+                    VALUES (?, ?, ?, 1)
+                    ON CONFLICT(name) DO UPDATE SET
+                        lastMessageAt = excluded.lastMessageAt,
+                        messageCount = messageCount + 1
+                    """,
+                arguments: [name, timestamp, timestamp]
+            )
+        }
+    }
+
     /// List all channels ordered by most-recent activity first.
     public func list(includeArchived: Bool) async throws -> [ChannelIndexRecord] {
         // includeArchived is a no-op in v1 — archived channels live as
@@ -62,6 +84,16 @@ public struct ChannelIndexStore: Sendable {
     /// Remove the row (used on archive).
     public func delete(name: String) async throws {
         try await writer.write { db in
+            _ = try ChannelIndexRecord.deleteOne(db, key: name)
+        }
+    }
+
+    /// Synchronous variant of `delete`. See `recordPostSync` for the
+    /// rationale; both are paired so that `ChannelStore.archive` can
+    /// commit its DB cleanup inside the same per-channel lock that
+    /// renamed the file, eliminating the post/archive resurrection race.
+    public func deleteSync(name: String) throws {
+        try writer.write { db in
             _ = try ChannelIndexRecord.deleteOne(db, key: name)
         }
     }

@@ -36,10 +36,15 @@ public final class ChannelStore: @unchecked Sendable {
     private let index: ChannelIndexStore
     private let lockManager = ChannelLockManager()
 
-    // Protected by per-channel async locks (ChannelLockManager). Mutations
-    // happen only inside `withLock`, so the Dictionary is never touched
-    // concurrently for the same key. @unchecked is justified by that contract.
-    private var seqCache: [String: Int] = [:]
+    // Per-channel async locks (ChannelLockManager) serialize work for a
+    // single channel name, but `post`/`archive` against *different* names
+    // run on different actors and can mutate this Dictionary in parallel.
+    // Swift Dictionary is COW: concurrent structural mutations from
+    // different threads can corrupt the buffer or crash on resize even
+    // when the keys differ. Hold an unfair lock around every read/write.
+    // The lock is taken only for in-memory dictionary access — never
+    // across file I/O or `await` boundaries — so contention is minimal.
+    private let seqCache = OSAllocatedUnfairLock<[String: Int]>(initialState: [:])
 
     public init(channelsDir: URL, index: ChannelIndexStore) {
         self.channelsDir = channelsDir
@@ -61,9 +66,12 @@ public final class ChannelStore: @unchecked Sendable {
             throw ChannelStoreError.bodyTooLarge(bytes: bodyBytes)
         }
 
-        // Inside the per-channel lock: only synchronous file work.
-        // No `await` inside the closure body means no actor reentrancy
-        // and no parallel attempts to acquire the same flock.
+        // Inside the per-channel lock: only synchronous work. No `await`
+        // inside the closure body means no actor reentrancy and no
+        // parallel attempts to acquire the same flock. The DB index
+        // update uses the *synchronous* GRDB write so it sits inside
+        // this lock too — that's what guarantees `archive` can't race
+        // an in-flight `post` and resurrect the index row after delete.
         let result: ChannelPostResult = try await lockManager.withLock(normalized) { [self] in
             try ensureDir(channelsDir)
             let lock = try FileLock.acquire(path: lockPath(for: normalized))
@@ -77,15 +85,16 @@ public final class ChannelStore: @unchecked Sendable {
                                      body: body)
             let line = try msg.encodeLine()
             try appendLine(channel: normalized, line: line)
-            seqCache[normalized] = nextSeq
+            seqCache.withLock { $0[normalized] = nextSeq }
+
+            // DB write inside the per-channel lock; synchronous so we
+            // don't reintroduce the actor-reentrancy hazard, and so
+            // post/archive can't interleave at the index layer.
+            try index.recordPostSync(name: normalized, at: ts)
+
             return ChannelPostResult(seq: nextSeq, ts: ts)
         }
 
-        // DB index update outside the per-channel lock (no serialization
-        // requirement here; ChannelIndexStore already serializes via its
-        // own writer queue, and ordering of `recordPost` calls only affects
-        // `lastMessageAt` precedence — not correctness).
-        try await index.recordPost(name: normalized, at: result.ts)
         return result
     }
 
@@ -109,9 +118,9 @@ public final class ChannelStore: @unchecked Sendable {
     /// running torn-line recovery as a side effect). Returns the highest
     /// known seq, or 0 if the channel has no file yet.
     func ensureSeqCachePopulated(for name: String) throws -> Int {
-        if let cached = seqCache[name] { return cached }
+        if let cached = seqCache.withLock({ $0[name] }) { return cached }
         let highest = try recoverAndScanHighestSeq(name: name)
-        seqCache[name] = highest
+        seqCache.withLock { $0[name] = highest }
         return highest
     }
 
@@ -184,12 +193,17 @@ public final class ChannelStore: @unchecked Sendable {
             // by `defer` above, but unlink can race with that).
             try? FileManager.default.removeItem(atPath: lockPath(for: normalized))
 
-            seqCache.removeValue(forKey: normalized)
+            seqCache.withLock { _ = $0.removeValue(forKey: normalized) }
+
+            // DB delete inside the per-channel lock; synchronous to
+            // match `post` and prevent the post/archive race that would
+            // otherwise let an in-flight `recordPost` resurrect the row
+            // after we deleted it.
+            try index.deleteSync(name: normalized)
+
             return archivedPath
         }
 
-        // DB index update outside the per-channel lock.
-        try await index.delete(name: normalized)
         return archivedPath
     }
 
