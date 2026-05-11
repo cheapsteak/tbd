@@ -137,10 +137,12 @@ public final class Daemon: Sendable {
             repos: database.repos,
             config: database.config
         )
+        let pendingQuestions = PendingQuestionStore()
         let lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
-            modelProfileResolver: modelProfileResolver
+            modelProfileResolver: modelProfileResolver,
+            pendingQuestions: pendingQuestions
         )
         let prManager = PRStatusManager()
 
@@ -153,7 +155,8 @@ public final class Daemon: Sendable {
             startTime: startTime,
             subscriptions: subs,
             prManager: prManager,
-            modelProfileResolver: modelProfileResolver
+            modelProfileResolver: modelProfileResolver,
+            pendingQuestions: pendingQuestions
         )
         self.router = rpcRouter
 
