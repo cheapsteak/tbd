@@ -91,12 +91,17 @@ struct TranscriptItemsView: View {
                         if hovering { hoveredItemID = node.id }
                     }
             }
-            // 1pt at-bottom sentinel. Sibling of the ForEach inside the
-            // LazyVStack, so it's lazily realized only when the viewport
-            // reaches the bottom; that realization is the at-bottom
-            // signal. Replaces .onScrollGeometryChange to avoid forcing
-            // LazyVStack to compute its full content size each scroll
-            // event (see issue #129).
+            // 1pt sentinel that drives `atBottom`. Replaced the prior
+            // `.onScrollGeometryChange(for: AtBottomGeometry.self)` reader that
+            // computed at-bottom via `contentHeight - viewportBottom < 50` —
+            // reading `contentSize.height` on a `ScrollView { LazyVStack }`
+            // forced the LazyVStack to compute total content size on every
+            // scroll event, contributing to the estimatedCount recursion in #129.
+            //
+            // Effective at-bottom threshold is ~0pt (was 50pt). Trade-off: during
+            // auto-scroll animations the sentinel briefly exits the viewport as
+            // new content lands, so the jump-to-bottom button may flash for the
+            // animation duration. Acceptable for the perf win.
             Color.clear
                 .frame(height: 1)
                 .onAppear { atBottom?.wrappedValue = true }
