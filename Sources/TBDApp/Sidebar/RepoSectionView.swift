@@ -28,9 +28,7 @@ struct RepoSectionView: View {
     let repo: Repo
     @EnvironmentObject var appState: AppState
 
-    @State private var isExpanded = true
     @State private var isEditing = false
-    @State private var isHeaderHovered = false
     @State private var isSectionHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
     @State private var showRemoveConfirm = false
@@ -132,14 +130,15 @@ struct RepoSectionView: View {
             Spacer()
 
             Group {
-                if isHeaderHovered {
-                    Button(action: { isExpanded.toggle() }) {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                if isSectionHovered {
+                    Button(action: createWorktree) {
+                        Image(systemName: "plus")
                             .font(.caption)
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(HoverPressButtonStyle())
-                    .help(isExpanded ? "Collapse" : "Expand")
+                    .help("New worktree")
+                    .disabled(repo.status == .missing)
                 } else {
                     Color.clear
                 }
@@ -147,12 +146,12 @@ struct RepoSectionView: View {
             .frame(width: 20, height: 20)
         }
         .frame(height: 22, alignment: .bottom)
+        .background(Color.white.opacity(0.0001))
         .contentShape(Rectangle())
         .onTapGesture {
             appState.selectRepo(id: repo.id)
         }
         .onHover { hovering in
-            isHeaderHovered = hovering
             onSectionHoverChange(hovering)
         }
         .contextMenu {
@@ -184,44 +183,28 @@ struct RepoSectionView: View {
         .listRowBackground(Color.clear)
         .tag(repo.id)
 
-        if isExpanded {
-            if let main = mainWorktree {
-                HStack(spacing: 0) {
-                    WorktreeRowView(worktree: main, isMain: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Group {
-                        if isSectionHovered {
-                            Button(action: createWorktree) {
-                                Image(systemName: "plus")
-                                    .font(.caption)
-                                    .frame(width: 20, height: 20)
-                            }
-                            .buttonStyle(HoverPressButtonStyle())
-                            .help("New worktree")
-                            .disabled(repo.status == .missing)
-                        } else {
-                            Color.clear
-                        }
-                    }
-                    .frame(width: 20, height: 20)
-                }
+        if let main = mainWorktree {
+            WorktreeRowView(worktree: main, isMain: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.0001))
                 .onHover { onSectionHoverChange($0) }
                 .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
                 .tag(main.id)
-            }
-            ForEach(worktrees) { worktree in
-                WorktreeRowView(worktree: worktree)
-                    .onHover { onSectionHoverChange($0) }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                    .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
-                    .tag(worktree.id)
-            }
-            .onMove { source, destination in
-                appState.reorderWorktrees(repoID: repo.id, fromOffsets: source, toOffset: destination)
-            }
+        }
+        ForEach(worktrees) { worktree in
+            WorktreeRowView(worktree: worktree)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.0001))
+                .onHover { onSectionHoverChange($0) }
+                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+                .tag(worktree.id)
+        }
+        .onMove { source, destination in
+            appState.reorderWorktrees(repoID: repo.id, fromOffsets: source, toOffset: destination)
         }
     }
 
