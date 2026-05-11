@@ -283,7 +283,13 @@ final class AppState: ObservableObject {
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var focusObservers: [NSObjectProtocol] = []
 
-    init() {
+    /// UserDefaults domain this AppState reads instance-level preferences from.
+    /// Production uses `.standard`; tests inject a per-suite `UserDefaults(suiteName:)`
+    /// so they never clobber the developer's running app preferences.
+    let userDefaults: UserDefaults
+
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
         restoreLayouts()
         if let saved = UserDefaults.standard.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
@@ -509,7 +515,7 @@ final class AppState: ObservableObject {
             await loadModelProfiles()
             startSubscription()
             await refreshPRStatuses()
-            let suspendEnabled = AppState.autoSuspendClaudeEnabled
+            let suspendEnabled = AppState.autoSuspendClaudeEnabled(defaults: userDefaults)
             Task { [selectedWorktreeIDs] in
                 try? await daemonClient.worktreeSelectionChanged(
                     selectedWorktreeIDs: selectedWorktreeIDs,
@@ -925,7 +931,7 @@ final class AppState: ObservableObject {
 
     /// Whether the WIP main-area resize broadcast is enabled. Default false.
     private var terminalAutoResizeEnabled: Bool {
-        UserDefaults.standard.bool(forKey: Self.terminalAutoResizeKey)
+        userDefaults.bool(forKey: Self.terminalAutoResizeKey)
     }
 
     /// UserDefaults key mirroring the `@AppStorage("autoSuspendClaude")`
@@ -936,8 +942,10 @@ final class AppState: ObservableObject {
 
     /// Whether auto-suspend is enabled. Defaults to true when the user has
     /// never touched the toggle, matching the `@AppStorage` defaults.
-    static var autoSuspendClaudeEnabled: Bool {
-        UserDefaults.standard.object(forKey: autoSuspendClaudeKey) as? Bool ?? true
+    /// Tests pass a private `UserDefaults(suiteName:)` so they never mutate
+    /// the developer's live app preferences.
+    static func autoSuspendClaudeEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? true
     }
 
     /// Convert the current `mainAreaSize` (pixels) into tmux cell dimensions
