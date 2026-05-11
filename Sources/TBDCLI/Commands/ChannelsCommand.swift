@@ -200,6 +200,7 @@ struct ChannelsTailCommand: AsyncParsableCommand {
     var fromStart: Bool = false
 
     mutating func run() async throws {
+        setbuf(stdout, nil)  // line-buffer-or-immediate stdout so piped readers see output
         let normalized = try validateChannelName(name)
         let url = TBDConstants.channelsDir.appendingPathComponent("\(normalized).jsonl")
 
