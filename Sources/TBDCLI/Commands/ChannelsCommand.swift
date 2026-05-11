@@ -8,7 +8,8 @@ struct ChannelsCommand: AsyncParsableCommand {
         abstract: "Inter-session message channels",
         subcommands: [
             ChannelsPostCommand.self,
-            // read / tail / list / archive added in later tasks
+            ChannelsReadCommand.self,
+            // tail / list / archive added in later tasks
         ]
     )
 }
@@ -101,5 +102,78 @@ struct ChannelsPostCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("error: \(error)\n".utf8))
             throw ExitCode.failure
         }
+    }
+}
+
+// MARK: - read
+
+struct ChannelsReadCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "read",
+        abstract: "Read messages from a channel (direct file read; daemon not required)"
+    )
+
+    @Argument(help: "Channel name (without leading '#').")
+    var name: String
+
+    @Option(name: .long, help: "Show just the message with this seq")
+    var seq: Int?
+
+    @Option(name: .long, help: "Show messages with seq > this value")
+    var since: Int?
+
+    @Option(name: .long, help: "Maximum number of messages to print (default 20)")
+    var limit: Int = 20
+
+    func validate() throws {
+        if seq != nil && since != nil {
+            throw ValidationError("--seq and --since are mutually exclusive")
+        }
+    }
+
+    mutating func run() async throws {
+        let normalized: String
+        do {
+            normalized = try validateChannelName(name)
+        } catch {
+            FileHandle.standardError.write(Data("error: invalid channel name: \(error)\n".utf8))
+            throw ExitCode.failure
+        }
+
+        let path = TBDConstants.channelsDir.appendingPathComponent("\(normalized).jsonl").path
+        guard FileManager.default.fileExists(atPath: path) else {
+            FileHandle.standardError.write(Data("error: no such channel #\(normalized)\n".utf8))
+            throw ExitCode.failure
+        }
+
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        var matched: [(seq: Int, formatted: String)] = []
+        var lineStart = 0
+        for (idx, byte) in data.enumerated() where byte == 0x0A {
+            let lineData = data.subdata(in: lineStart..<idx)
+            lineStart = idx + 1
+            guard let msg = try? ChannelMessage.decodeLine(lineData) else { continue }
+
+            if let s = seq, msg.seq != s { continue }
+            if let since = since, msg.seq <= since { continue }
+
+            matched.append((msg.seq, format(msg)))
+        }
+
+        // Apply limit (most recent N when no --seq filter)
+        let toPrint: ArraySlice<(seq: Int, formatted: String)>
+        if seq != nil {
+            toPrint = matched[...]
+        } else {
+            toPrint = matched.suffix(limit)[...]
+        }
+        for entry in toPrint { print(entry.formatted) }
+    }
+
+    private func format(_ m: ChannelMessage) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let ts = formatter.string(from: m.ts)
+        return "[\(ts)] (seq \(m.seq)) \(m.fromLabel): \(m.body)"
     }
 }
