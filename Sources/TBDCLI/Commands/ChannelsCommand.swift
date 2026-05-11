@@ -248,20 +248,34 @@ struct ChannelsTailCommand: AsyncParsableCommand {
         signalSource.setEventHandler { Darwin.exit(0) }
         signalSource.resume()
 
-        // Watch for VNODE_WRITE | VNODE_EXTEND on the file.
+        // Watch for VNODE_WRITE | VNODE_EXTEND on the file. Also watch for
+        // VNODE_DELETE | VNODE_RENAME so we exit cleanly when the channel is
+        // archived (rename(2) into _archive/) instead of blocking forever.
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: handle.fileDescriptor,
-            eventMask: [.write, .extend],
+            eventMask: [.write, .extend, .delete, .rename],
             queue: .global(qos: .utility)
         )
-        let stream = AsyncStream<Void> { continuation in
-            source.setEventHandler { continuation.yield(()) }
+        let stream = AsyncStream<DispatchSource.FileSystemEvent> { continuation in
+            source.setEventHandler {
+                let data = source.data
+                let isLifecycle = data.contains(.delete) || data.contains(.rename)
+                continuation.yield(data)
+                if isLifecycle {
+                    continuation.finish()
+                }
+            }
             source.setCancelHandler { continuation.finish() }
             source.resume()
         }
 
-        for await _ in stream {
+        for await event in stream {
             try printNewLines(handle: handle)
+            if event.contains(.delete) || event.contains(.rename) {
+                // File was removed/archived. Drain anything remaining (above) and exit.
+                FileHandle.standardError.write(Data("(channel file gone — exiting tail)\n".utf8))
+                return
+            }
         }
     }
 
