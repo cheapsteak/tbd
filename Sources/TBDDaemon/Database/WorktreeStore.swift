@@ -22,6 +22,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var archivedHeadSHA: String?
     var tabOrder: String  // JSON array of UUID strings, e.g. "[]" or "[\"...\",\"...\"]"
     var activeTabID: String?
+    var parentWorktreeID: String?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -43,6 +44,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         }
         self.tabOrder = "[]"  // overwritten by GRDB when fetched; only "new worktree" path uses this initializer
         self.activeTabID = nil  // new worktrees start with no stored selection
+        self.parentWorktreeID = wt.parentWorktreeID?.uuidString
     }
 
     func toModel() -> Worktree {
@@ -65,7 +67,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             tmuxServer: tmuxServer,
             archivedClaudeSessions: sessions,
             sortOrder: sortOrder,
-            archivedHeadSHA: archivedHeadSHA
+            archivedHeadSHA: archivedHeadSHA,
+            parentWorktreeID: parentWorktreeID.flatMap { UUID(uuidString: $0) }
         )
     }
 }
