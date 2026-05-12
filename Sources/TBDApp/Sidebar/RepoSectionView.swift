@@ -30,6 +30,7 @@ struct RepoSectionView: View {
 
     @State private var isEditing = false
     @State private var isSectionHovered = false
+    @State private var isChevronHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
     @State private var showRemoveConfirm = false
 
@@ -94,7 +95,8 @@ struct RepoSectionView: View {
                     .frame(width: 18, height: 18)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(HoverPressButtonStyle())
+            .buttonStyle(.plain)
+            .onHover { isChevronHovered = $0 }
             .help(repo.expanded ? "Collapse" : "Expand")
             RenameableLabel(
                 text: repo.displayName,
@@ -115,6 +117,7 @@ struct RepoSectionView: View {
                             : AnyShapeStyle(appState.selectedRepoID == repo.id ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
                     )
             }
+            .padding(.leading, -4)
 
             if repo.status == .missing {
                 Text("[missing]")
@@ -191,6 +194,7 @@ struct RepoSectionView: View {
                 WorktreeRowView(worktree: main, isMain: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.white.opacity(0.0001))
+                    .opacity(isChevronHovered ? 0.5 : 1.0)
                     .onHover { onSectionHoverChange($0) }
                     .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                     .listRowSeparator(.hidden)
@@ -201,6 +205,7 @@ struct RepoSectionView: View {
                 WorktreeRowView(worktree: worktree)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.white.opacity(0.0001))
+                    .opacity(isChevronHovered ? 0.5 : 1.0)
                     .onHover { onSectionHoverChange($0) }
                     .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                     .listRowSeparator(.hidden)
