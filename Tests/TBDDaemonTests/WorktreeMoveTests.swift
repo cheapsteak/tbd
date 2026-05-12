@@ -98,3 +98,48 @@ import TBDShared
         #expect(try await db.worktrees.get(id: c.id)?.parentWorktreeID == b.id)
     }
 }
+
+@Suite struct WorktreeCreateWithParentTests {
+
+    func makeDB() throws -> TBDDatabase { try TBDDatabase(inMemory: true) }
+
+    @Test func createWithParentSetsField() async throws {
+        let db = try makeDB()
+        let repo = try await db.repos.create(
+            path: "/tmp/r-\(UUID())", displayName: "R", defaultBranch: "main"
+        )
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "p", branch: "tbd/p",
+            path: "/tmp/p-\(UUID())", tmuxServer: "srv"
+        )
+        let child = try await db.worktrees.create(
+            repoID: repo.id, name: "c", branch: "tbd/c",
+            path: "/tmp/c-\(UUID())", tmuxServer: "srv",
+            parentWorktreeID: parent.id
+        )
+        #expect(child.parentWorktreeID == parent.id)
+    }
+
+    @Test func sortOrderScopedToParentGroup() async throws {
+        let db = try makeDB()
+        let repo = try await db.repos.create(
+            path: "/tmp/r-\(UUID())", displayName: "R", defaultBranch: "main"
+        )
+        let parent = try await db.worktrees.create(
+            repoID: repo.id, name: "p", branch: "tbd/p",
+            path: "/tmp/p-\(UUID())", tmuxServer: "srv"
+        )
+        let c1 = try await db.worktrees.create(
+            repoID: repo.id, name: "c1", branch: "tbd/c1",
+            path: "/tmp/c1-\(UUID())", tmuxServer: "srv",
+            parentWorktreeID: parent.id
+        )
+        let c2 = try await db.worktrees.create(
+            repoID: repo.id, name: "c2", branch: "tbd/c2",
+            path: "/tmp/c2-\(UUID())", tmuxServer: "srv",
+            parentWorktreeID: parent.id
+        )
+        #expect(c1.sortOrder != c2.sortOrder)
+        #expect(c2.sortOrder > c1.sortOrder)
+    }
+}

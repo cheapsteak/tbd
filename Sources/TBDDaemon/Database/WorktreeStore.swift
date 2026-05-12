@@ -100,7 +100,10 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Create a new worktree. The displayName defaults to the name.
-    /// Automatically assigns sortOrder = max(sortOrder) + 1 for the repo.
+    /// Automatically assigns sortOrder = max(sortOrder) + 1 scoped to the
+    /// new worktree's sibling group (same parentWorktreeID), so nested
+    /// children get their own contiguous ordering separate from top-level
+    /// worktrees in the same repo.
     public func create(
         repoID: UUID,
         name: String,
@@ -108,14 +111,24 @@ public struct WorktreeStore: Sendable {
         branch: String,
         path: String,
         tmuxServer: String,
-        status: WorktreeStatus = .active
+        status: WorktreeStatus = .active,
+        parentWorktreeID: UUID? = nil
     ) async throws -> Worktree {
         try await writer.write { db in
-            let maxOrder = try Int.fetchOne(
-                db,
-                sql: "SELECT MAX(sortOrder) FROM worktree WHERE repoID = ?",
-                arguments: [repoID.uuidString]
-            ) ?? 0
+            let maxOrder: Int
+            if let pid = parentWorktreeID {
+                maxOrder = try Int.fetchOne(
+                    db,
+                    sql: "SELECT MAX(sortOrder) FROM worktree WHERE parentWorktreeID = ?",
+                    arguments: [pid.uuidString]
+                ) ?? 0
+            } else {
+                maxOrder = try Int.fetchOne(
+                    db,
+                    sql: "SELECT MAX(sortOrder) FROM worktree WHERE repoID = ? AND parentWorktreeID IS NULL",
+                    arguments: [repoID.uuidString]
+                ) ?? 0
+            }
             let wt = Worktree(
                 repoID: repoID,
                 name: name,
@@ -124,7 +137,8 @@ public struct WorktreeStore: Sendable {
                 path: path,
                 status: status,
                 tmuxServer: tmuxServer,
-                sortOrder: maxOrder + 1
+                sortOrder: maxOrder + 1,
+                parentWorktreeID: parentWorktreeID
             )
             let record = WorktreeRecord(from: wt)
             try record.insert(db)
