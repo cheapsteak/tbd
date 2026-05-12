@@ -59,24 +59,24 @@ import TBDShared
 }
 
 @MainActor
-@Test func renameTabWithEmptyStringClearsLabel() async {
+@Test func renameTabWithEmptyStringClearsLabel() {
     let state = AppState()
     let worktreeID = UUID()
     let tabID = UUID()
     state.tabs[worktreeID] = [Tab(id: tabID, content: .terminal(terminalID: tabID), label: "old")]
     // Daemon RPC will fail (no daemon running in tests) but the synchronous
     // in-memory mutation still happens first.
-    await state.renameTab(tabID: tabID, worktreeID: worktreeID, newLabel: "   ")
+    state.renameTab(tabID: tabID, worktreeID: worktreeID, newLabel: "   ")
     #expect(state.tabs[worktreeID]!.first?.label == nil)
 }
 
 @MainActor
-@Test func renameTabTrimsAndUpdatesInMemory() async {
+@Test func renameTabTrimsAndUpdatesInMemory() {
     let state = AppState()
     let worktreeID = UUID()
     let tabID = UUID()
     state.tabs[worktreeID] = [Tab(id: tabID, content: .terminal(terminalID: tabID), label: nil)]
-    await state.renameTab(tabID: tabID, worktreeID: worktreeID, newLabel: "  Hello  ")
+    state.renameTab(tabID: tabID, worktreeID: worktreeID, newLabel: "  Hello  ")
     #expect(state.tabs[worktreeID]!.first?.label == "Hello")
 }
 

@@ -99,7 +99,11 @@ extension AppState {
 
     /// Rename a tab. Empty / whitespace-only string clears the override
     /// (tab reverts to auto-derived label). Same-as-displayed is a no-op.
-    func renameTab(tabID: UUID, worktreeID: UUID, newLabel: String) async {
+    ///
+    /// Synchronous so the in-memory label mutation and SwiftUI's exit-from-edit-mode
+    /// re-render batch into a single frame — otherwise the tab briefly flashes the
+    /// pre-rename label before the update lands. Persistence is fire-and-forget.
+    func renameTab(tabID: UUID, worktreeID: UUID, newLabel: String) {
         let trimmed = newLabel.trimmingCharacters(in: .whitespaces)
         guard var arr = tabs[worktreeID],
               let idx = arr.firstIndex(where: { $0.id == tabID }) else { return }
@@ -110,11 +114,13 @@ extension AppState {
         }
         arr[idx].label = newValue
         tabs[worktreeID] = arr
-        do {
-            try await daemonClient.setTabLabel(tabID: tabID, worktreeID: worktreeID, label: newValue)
-        } catch {
-            logger.error("renameTab persist failed for \(tabID, privacy: .public): \(error, privacy: .public)")
-            handleConnectionError(error)
+        Task {
+            do {
+                try await daemonClient.setTabLabel(tabID: tabID, worktreeID: worktreeID, label: newValue)
+            } catch {
+                logger.error("renameTab persist failed for \(tabID, privacy: .public): \(error, privacy: .public)")
+                handleConnectionError(error)
+            }
         }
     }
 

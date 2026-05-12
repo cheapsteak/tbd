@@ -16,6 +16,15 @@ struct RenameableLabel<DisplayContent: View>: View {
     var onCancel: () -> Void = {}
     var onStartEditing: () -> Void = {}
     var onStopEditing: () -> Void = {}
+    /// Font for the inline editor. Default mirrors the sidebar's 13pt system font.
+    var editorFont: NSFont? = nil
+    /// When true, the entire text is selected the first time the editor gains focus.
+    var selectAllOnEnterEditing: Bool = false
+    /// When true, committing an empty string still calls `onCommit("")`. Use this for
+    /// renames where "clear" is a meaningful action (e.g. clearing an override to fall
+    /// back to a computed default). Default false preserves the safer behavior of
+    /// treating empty-on-Enter like a cancel.
+    var allowsEmptyCommit: Bool = false
     @ViewBuilder let displayContent: () -> DisplayContent
 
     @State private var editText = ""
@@ -59,7 +68,9 @@ struct RenameableLabel<DisplayContent: View>: View {
                     guard emojiQuery != nil, let emoji = selectedEmoji() else { return false }
                     replaceColonQuery(with: emoji)
                     return true
-                }
+                },
+                font: editorFont,
+                selectAllOnFocus: selectAllOnEnterEditing
             )
             .onChange(of: editText) { _, _ in
                 updateEmojiQuery()
@@ -97,7 +108,12 @@ struct RenameableLabel<DisplayContent: View>: View {
         let trimmed = editText.trimmingCharacters(in: .whitespaces)
         isEditing = false
         onStopEditing()
-        guard !trimmed.isEmpty, trimmed != text else { return }
+        if trimmed.isEmpty {
+            // Treat empty as "clear" when the caller opted in; otherwise cancel.
+            if allowsEmptyCommit { onCommit("") }
+            return
+        }
+        guard trimmed != text else { return }
         onCommit(trimmed)
     }
 

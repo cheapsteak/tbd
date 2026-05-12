@@ -263,14 +263,15 @@ private struct TabBarItem: View {
                             text: tabLabel,
                             isEditing: $isEditing,
                             onCommit: { newText in
-                                Task {
-                                    await appState.renameTab(
-                                        tabID: tab.id,
-                                        worktreeID: worktreeID,
-                                        newLabel: newText
-                                    )
-                                }
+                                appState.renameTab(
+                                    tabID: tab.id,
+                                    worktreeID: worktreeID,
+                                    newLabel: newText
+                                )
                             },
+                            editorFont: .systemFont(ofSize: 11),
+                            selectAllOnEnterEditing: true,
+                            allowsEmptyCommit: true,
                             displayContent: {
                                 Text(tabLabel)
                                     .font(.system(size: 11))
@@ -280,7 +281,7 @@ private struct TabBarItem: View {
                             }
                         )
                         .font(.system(size: 11))
-                        .frame(minWidth: 40)
+                        .frame(width: max(60, measuredWidth - 50))
                     } else {
                         Text(tabLabel)
                             .font(.system(size: 11))
