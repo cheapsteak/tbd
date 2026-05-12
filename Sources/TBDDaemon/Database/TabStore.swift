@@ -30,6 +30,13 @@ struct TabRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 
 /// CRUD for tab metadata. Rows are sparse — only present when a tab has
 /// user-set metadata (currently just a custom label).
+///
+/// NOTE: The `tab` table has no FK to `worktree`, so worktree-level
+/// cleanups are explicit — see `deleteForWorktree(...)` and the call
+/// sites in `WorktreeLifecycle+Archive.swift`, `WorktreeLifecycle+Reconcile.swift`,
+/// and the per-row deletes in `handleTerminalDelete` / `handleNoteDelete`.
+/// When adding a new code path that removes worktrees or their underlying
+/// terminals/notes, mirror those deletes here too.
 public struct TabStore: Sendable {
     let writer: any DatabaseWriter
 
@@ -51,7 +58,6 @@ public struct TabStore: Sendable {
                 // would otherwise reset it. Use upsert semantics manually.
                 if var existing = try TabRecord.fetchOne(db, key: tabID.uuidString) {
                     existing.label = label
-                    existing.worktreeID = worktreeID.uuidString
                     try existing.update(db)
                 } else {
                     try record.insert(db)

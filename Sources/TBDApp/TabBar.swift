@@ -426,6 +426,10 @@ private struct TabBarItem: View {
             .cornerRadius(4)
             .opacity(0.85)
             .onAppear { appState.draggingTabID = tab.id }
+            // Drag preview is dismissed on any drag end — drop, drop-outside-window,
+            // Escape, drop on a non-target. Covers cancel paths that neither the
+            // per-tab delegate nor the outer catch-all see.
+            .onDisappear { appState.draggingTabID = nil }
         }
         // Use onDrop+DropDelegate (instead of .dropDestination) so we get
         // info.location during hover via dropUpdated, which is required to
