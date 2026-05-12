@@ -4,6 +4,8 @@ import TBDShared
 struct WorktreeRowView: View {
     let worktree: Worktree
     var isMain: Bool = false
+    var indentLevel: Int = 0
+    var sectionRepoID: UUID? = nil
     @EnvironmentObject var appState: AppState
     @State private var isEditing = false
 
@@ -137,7 +139,15 @@ struct WorktreeRowView: View {
                 }
                 .allowsHitTesting(false)
             }
+            if let sectionRepoID, sectionRepoID != worktree.repoID,
+               let homeRepo = appState.repoName(for: worktree.repoID) {
+                Text("(\(homeRepo))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
+        .padding(.leading, CGFloat(indentLevel) * 12)
         .contentShape(Rectangle())
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
