@@ -27,10 +27,6 @@ struct LiveTranscriptPaneView: View {
     /// shown only when the user has consciously scrolled up.
     @State private var atBottom: Bool = true
 
-    /// Tracks the row at the bottom edge of the viewport. Drives re-entry
-    /// restoration via `.scrollPosition(id:)` and autoscroll on new messages.
-    @State private var visibleID: String?
-
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
@@ -129,12 +125,11 @@ struct LiveTranscriptPaneView: View {
             ScrollView {
                 TranscriptItemsView(items: messages, terminalID: terminalID, atBottom: $atBottom)
             }
-            .defaultScrollAnchor(.bottom)
-            .scrollPosition(id: $visibleID, anchor: .bottom)
+            .defaultScrollAnchor(.bottom, for: .initialOffset)
             .overlay(alignment: .bottomTrailing) {
                 jumpToBottomButton(proxy: proxy)
+                    .animation(.easeInOut(duration: 0.2), value: atBottom)
             }
-            .animation(.easeInOut(duration: 0.2), value: atBottom)
             .onAppear {
                 let sidShort = Self.shortID(currentSessionID ?? "")
                 Self.perfLog.debug("view.appear sid=\(sidShort, privacy: .public) count=\(messages.count, privacy: .public)")
@@ -147,18 +142,15 @@ struct LiveTranscriptPaneView: View {
                     snap.transcriptItemCount = count
                     snap.paneLabel = "liveTranscript"
                 }
-                if let id = visibleID {
-                    let scrollInterval = TranscriptSignposts.signposter.beginInterval("transcript.scrollTo")
-                    proxy.scrollTo(id, anchor: .bottom)
-                    TranscriptSignposts.signposter.endInterval("transcript.scrollTo", scrollInterval)
-                }
             }
             .onChange(of: messages.last?.id) { oldID, newID in
                 guard let _ = oldID, let _ = newID, atBottom else { return }
                 guard let targetID = lastRenderedNodeID(for: messages) else { return }
+                let scrollInterval = TranscriptSignposts.signposter.beginInterval("transcript.scrollTo")
                 withAnimation(.easeOut(duration: 0.15)) {
-                    visibleID = targetID
+                    proxy.scrollTo(targetID, anchor: .bottom)
                 }
+                TranscriptSignposts.signposter.endInterval("transcript.scrollTo", scrollInterval)
             }
             .onChange(of: messages.count) { _, newCount in
                 let tidShort = String(terminalID.uuidString.suffix(4))
