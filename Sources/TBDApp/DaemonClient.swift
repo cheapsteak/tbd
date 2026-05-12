@@ -451,6 +451,19 @@ actor DaemonClient {
         )
     }
 
+    /// Move a worktree to a new parent (or top-level) and sortOrder.
+    func moveWorktree(worktreeID: UUID, newParentID: UUID?, newSortOrder: Int) async throws {
+        _ = try await callAsync(
+            method: RPCMethod.worktreeMove,
+            params: WorktreeMoveParams(
+                worktreeID: worktreeID,
+                newParentID: newParentID,
+                newSortOrder: newSortOrder
+            ),
+            resultType: WorktreeMoveResult.self
+        )
+    }
+
     /// Set or clear the pin on a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) async throws {
         try await callVoidAsync(

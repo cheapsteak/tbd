@@ -267,6 +267,56 @@ extension AppState {
         }
     }
 
+    // MARK: - Move (nested worktrees)
+
+    /// Move a worktree to a new parent (or top-level) and sortOrder.
+    /// Optimistic local update; rolls back on RPC error.
+    func moveWorktree(id: UUID, newParentID: UUID?, newSortOrder: Int) {
+        let snapshot = worktrees
+        if let repoID = repoIDForWorktree(id), var rows = worktrees[repoID] {
+            if let idx = rows.firstIndex(where: { $0.id == id }) {
+                rows[idx].parentWorktreeID = newParentID
+                rows[idx].sortOrder = newSortOrder
+                worktrees[repoID] = rows
+            }
+        }
+        Task {
+            do {
+                try await daemonClient.moveWorktree(
+                    worktreeID: id, newParentID: newParentID, newSortOrder: newSortOrder
+                )
+            } catch {
+                logger.error("moveWorktree failed: \(error.localizedDescription)")
+                await MainActor.run { self.worktrees = snapshot }
+            }
+        }
+    }
+
+    /// All worktrees whose parentWorktreeID == parentID, across all repos, in sortOrder.
+    /// Only active or creating worktrees are returned.
+    func children(of parentID: UUID) -> [Worktree] {
+        worktrees.values
+            .flatMap { $0 }
+            .filter { $0.parentWorktreeID == parentID && ($0.status == .active || $0.status == .creating) }
+            .sorted { $0.sortOrder < $1.sortOrder }
+    }
+
+    /// Find a worktree by id across all repos.
+    func findWorktree(id: UUID) -> Worktree? {
+        for (_, rows) in worktrees {
+            if let wt = rows.first(where: { $0.id == id }) { return wt }
+        }
+        return nil
+    }
+
+    /// Repo ID of the repo containing the given worktree, if any.
+    private func repoIDForWorktree(_ id: UUID) -> UUID? {
+        for (rid, rows) in worktrees where rows.contains(where: { $0.id == id }) {
+            return rid
+        }
+        return nil
+    }
+
     // MARK: - Keyboard Shortcut Actions
 
     /// All worktrees in sidebar order (sorted by repo, then by sortOrder).

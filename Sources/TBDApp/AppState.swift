@@ -425,8 +425,27 @@ final class AppState: ObservableObject {
             Task { [weak self] in await self?.loadModelProfiles() }
         case .terminalSessionUpdated(let d):
             applyTerminalSessionDelta(d)
+        case .worktreeMoved(let d):
+            applyWorktreeMovedDelta(d)
         default:
             break
+        }
+    }
+
+    /// Apply a worktree move (new parent + sortOrder) directly to the in-memory
+    /// model so the sidebar reflects the change without waiting for the next
+    /// `worktree.list` poll. Searches all repos for the worktree — moves
+    /// across repos aren't supported by the daemon today, so we mutate in
+    /// place once we find it.
+    private func applyWorktreeMovedDelta(_ delta: WorktreeMovedDelta) {
+        for (repoID, rows) in worktrees {
+            if let idx = rows.firstIndex(where: { $0.id == delta.worktreeID }) {
+                var updated = rows
+                updated[idx].parentWorktreeID = delta.newParentID
+                updated[idx].sortOrder = delta.newSortOrder
+                worktrees[repoID] = updated
+                break
+            }
         }
     }
 
