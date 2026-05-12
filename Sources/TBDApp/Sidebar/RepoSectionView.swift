@@ -30,13 +30,9 @@ struct RepoSectionView: View {
 
     @State private var isEditing = false
     @State private var isSectionHovered = false
+    @State private var isChevronHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
     @State private var showRemoveConfirm = false
-
-    private static func startsWithEmoji(_ name: String) -> Bool {
-        guard let first = name.first else { return false }
-        return first.unicodeScalars.contains { $0.properties.isEmoji && $0.value > 0x7F }
-    }
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -86,8 +82,10 @@ struct RepoSectionView: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            if !Self.startsWithEmoji(repo.displayName) {
-                Image(systemName: "folder")
+            Button {
+                Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
+            } label: {
+                Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
                     .font(.system(size: 11))
                     .foregroundStyle(
                         repo.status == .missing
@@ -95,7 +93,11 @@ struct RepoSectionView: View {
                             : AnyShapeStyle(HierarchicalShapeStyle.secondary)
                     )
                     .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .onHover { isChevronHovered = $0 }
+            .help(repo.expanded ? "Collapse" : "Expand")
             RenameableLabel(
                 text: repo.displayName,
                 isEditing: $isEditing,
@@ -115,6 +117,7 @@ struct RepoSectionView: View {
                             : AnyShapeStyle(appState.selectedRepoID == repo.id ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
                     )
             }
+            .padding(.leading, -2)
 
             if repo.status == .missing {
                 Text("[missing]")
@@ -155,6 +158,9 @@ struct RepoSectionView: View {
             onSectionHoverChange(hovering)
         }
         .contextMenu {
+            Button(repo.expanded ? "Collapse" : "Expand") {
+                Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
+            }
             Button("Rename...") {
                 isEditing = true
             }
@@ -178,33 +184,37 @@ struct RepoSectionView: View {
         } message: {
             Text(removeConfirmMessage)
         }
-        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+        .listRowInsets(EdgeInsets(top: 0, leading: -2, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
         .tag(repo.id)
 
-        if let main = mainWorktree {
-            WorktreeRowView(worktree: main, isMain: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.0001))
-                .onHover { onSectionHoverChange($0) }
-                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                .listRowSeparator(.hidden)
+        if repo.expanded {
+            if let main = mainWorktree {
+                WorktreeRowView(worktree: main, isMain: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.0001))
+                    .opacity(isChevronHovered ? 0.7 : 1.0)
+                    .onHover { onSectionHoverChange($0) }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .tag(main.id)
+            }
+            ForEach(worktrees) { worktree in
+                WorktreeRowView(worktree: worktree)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.0001))
+                    .opacity(isChevronHovered ? 0.7 : 1.0)
+                    .onHover { onSectionHoverChange($0) }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
-                .tag(main.id)
-        }
-        ForEach(worktrees) { worktree in
-            WorktreeRowView(worktree: worktree)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.0001))
-                .onHover { onSectionHoverChange($0) }
-                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-                .tag(worktree.id)
-        }
-        .onMove { source, destination in
-            appState.reorderWorktrees(repoID: repo.id, fromOffsets: source, toOffset: destination)
+                    .tag(worktree.id)
+            }
+            .onMove { source, destination in
+                appState.reorderWorktrees(repoID: repo.id, fromOffsets: source, toOffset: destination)
+            }
         }
     }
 

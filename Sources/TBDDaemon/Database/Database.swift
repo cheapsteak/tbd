@@ -375,6 +375,12 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v21_repo_expanded") { db in
+            try db.alter(table: "repo") { t in
+                t.add(column: "expanded", .boolean).notNull().defaults(to: true)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

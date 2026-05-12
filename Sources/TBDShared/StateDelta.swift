@@ -13,6 +13,7 @@ public enum StateDelta: Codable, Sendable {
     case repoRemoved(RepoIDDelta)
     case repoRenamed(RepoRenameDelta)
     case repoHiddenChanged(RepoHiddenDelta)
+    case repoExpandedChanged(RepoExpandedDelta)
     case terminalCreated(TerminalDelta)
     case terminalRemoved(TerminalIDDelta)
     case worktreeConflictsChanged(WorktreeConflictDelta)
@@ -110,6 +111,15 @@ public struct RepoHiddenDelta: Codable, Sendable {
     public let hidden: Bool
     public init(repoID: UUID, hidden: Bool) {
         self.repoID = repoID; self.hidden = hidden
+    }
+}
+
+/// Delta payload for repo expand/collapse change.
+public struct RepoExpandedDelta: Codable, Sendable {
+    public let repoID: UUID
+    public let expanded: Bool
+    public init(repoID: UUID, expanded: Bool) {
+        self.repoID = repoID; self.expanded = expanded
     }
 }
 

@@ -44,4 +44,31 @@ import Foundation
             try await db.repos.rename(id: UUID(), displayName: "anything")
         }
     }
+
+    // MARK: - Expand/collapse persistence
+
+    @Test func repoStoreDefaultExpandedIsTrue() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/r-\(UUID())", displayName: "x", defaultBranch: "main"
+        )
+        // Newly created repos must start expanded so worktree rows are visible.
+        #expect(repo.expanded == true)
+        let fetched = try await db.repos.get(id: repo.id)
+        #expect(fetched?.expanded == true)
+    }
+
+    @Test func repoStoreCollapsedRoundTrips() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/r-\(UUID())", displayName: "x", defaultBranch: "main"
+        )
+        try await db.repos.setExpanded(id: repo.id, expanded: false)
+        let collapsed = try await db.repos.get(id: repo.id)
+        #expect(collapsed?.expanded == false)
+
+        try await db.repos.setExpanded(id: repo.id, expanded: true)
+        let expanded = try await db.repos.get(id: repo.id)
+        #expect(expanded?.expanded == true)
+    }
 }

@@ -147,6 +147,22 @@ extension RPCRouter {
         return .ok()
     }
 
+    func handleRepoSetExpanded(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(RepoSetExpandedParams.self, from: paramsData)
+
+        guard try await db.repos.get(id: params.repoID) != nil else {
+            return RPCResponse(error: "Repository not found: \(params.repoID)")
+        }
+
+        try await db.repos.setExpanded(id: params.repoID, expanded: params.expanded)
+
+        subscriptions.broadcast(delta: .repoExpandedChanged(RepoExpandedDelta(
+            repoID: params.repoID, expanded: params.expanded
+        )))
+
+        return .ok()
+    }
+
     func handleRepoRename(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(RepoRenameParams.self, from: paramsData)
 

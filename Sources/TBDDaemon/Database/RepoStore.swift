@@ -19,6 +19,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var worktree_root: String?
     var status: String
     var hidden: Bool
+    var expanded: Bool
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -34,6 +35,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.worktree_root = repo.worktreeRoot
         self.status = repo.status.rawValue
         self.hidden = repo.hidden
+        self.expanded = repo.expanded
     }
 
     func toModel() -> Repo {
@@ -50,7 +52,8 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             worktreeSlot: worktree_slot,
             worktreeRoot: worktree_root,
             status: RepoStatus(rawValue: status) ?? .ok,
-            hidden: hidden
+            hidden: hidden,
+            expanded: expanded
         )
     }
 }
@@ -176,6 +179,17 @@ public struct RepoStore: Sendable {
             try db.execute(
                 sql: "UPDATE repo SET hidden = ? WHERE id = ?",
                 arguments: [hidden, id.uuidString]
+            )
+        }
+    }
+
+    /// Set whether the repo section is expanded in the sidebar (worktree
+    /// rows visible). Defaults to true; persisted across app restarts.
+    public func setExpanded(id: UUID, expanded: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET expanded = ? WHERE id = ?",
+                arguments: [expanded, id.uuidString]
             )
         }
     }

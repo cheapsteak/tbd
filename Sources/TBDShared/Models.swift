@@ -19,13 +19,18 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     public var worktreeRoot: String?
     public var status: RepoStatus
     public var hidden: Bool
+    /// Whether the repo's worktree rows are shown in the sidebar. Defaults to
+    /// expanded (true). Collapsing hides the main worktree row and all child
+    /// worktree rows beneath the repo header.
+    public var expanded: Bool
 
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
                 displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
                 renamePrompt: String? = nil, customInstructions: String? = nil,
                 profileOverrideID: UUID? = nil,
                 worktreeSlot: String? = nil, worktreeRoot: String? = nil,
-                status: RepoStatus = .ok, hidden: Bool = false) {
+                status: RepoStatus = .ok, hidden: Bool = false,
+                expanded: Bool = true) {
         self.id = id
         self.path = path
         self.remoteURL = remoteURL
@@ -39,12 +44,13 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         self.worktreeRoot = worktreeRoot
         self.status = status
         self.hidden = hidden
+        self.expanded = expanded
     }
 
     enum CodingKeys: String, CodingKey {
         case id, path, remoteURL, displayName, defaultBranch, createdAt
         case renamePrompt, customInstructions, profileOverrideID
-        case worktreeSlot, worktreeRoot, status, hidden
+        case worktreeSlot, worktreeRoot, status, hidden, expanded
     }
 
     public init(from decoder: Decoder) throws {
@@ -62,6 +68,7 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         worktreeRoot = try c.decodeIfPresent(String.self, forKey: .worktreeRoot)
         status = try c.decodeIfPresent(RepoStatus.self, forKey: .status) ?? .ok
         hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
+        expanded = try c.decodeIfPresent(Bool.self, forKey: .expanded) ?? true
     }
 }
 
