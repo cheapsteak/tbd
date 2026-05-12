@@ -12,6 +12,12 @@ struct InlineTextField: NSViewRepresentable {
     var onKeyDown: ((_ key: UInt16) -> Bool)?
     /// Called when Tab or Space is pressed. Return true to consume the event.
     var onSpecialKey: ((_ key: SpecialKey) -> Bool)?
+    /// Font to apply to the NSTextField. Defaults to the system size.
+    var font: NSFont? = nil
+    /// When true, the entire text is selected on first focus (instead of
+    /// preserving the cursor at `cursorPosition`). Use for type-to-replace
+    /// rename flows; leave false for click-to-position editing.
+    var selectAllOnFocus: Bool = false
 
     enum SpecialKey {
         case tab, space
@@ -24,7 +30,7 @@ struct InlineTextField: NSViewRepresentable {
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: NSFont.systemFontSize)
+        field.font = font ?? .systemFont(ofSize: NSFont.systemFontSize)
         field.cell?.isScrollable = true
         field.cell?.wraps = false
         field.cell?.lineBreakMode = .byClipping
@@ -56,8 +62,16 @@ struct InlineTextField: NSViewRepresentable {
                 if needsFocus {
                     nsView.window?.makeFirstResponder(nsView)
                 }
-                // Set cursor position after focus is established and text is updated
-                if needsFocus || textChanged {
+                // On first focus of this editing session, optionally select all so
+                // the user can type-to-replace. After that, fall back to cursor
+                // positioning (so re-focus after losing focus doesn't lose the cursor).
+                if needsFocus, selectAllOnFocus, !context.coordinator.didInitialSelectAll {
+                    if let editor = nsView.currentEditor() {
+                        let utf16Count = (editor.string as NSString).length
+                        editor.selectedRange = NSRange(location: 0, length: utf16Count)
+                        context.coordinator.didInitialSelectAll = true
+                    }
+                } else if needsFocus || textChanged {
                     if let editor = nsView.currentEditor() {
                         let utf16Count = (editor.string as NSString).length
                         let pos = min(cursorPosition, utf16Count)
@@ -82,6 +96,7 @@ struct InlineTextField: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: InlineTextField
         var monitor: Any?
+        var didInitialSelectAll: Bool = false
 
         init(_ parent: InlineTextField) {
             self.parent = parent

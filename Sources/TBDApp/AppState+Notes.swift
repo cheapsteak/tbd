@@ -12,7 +12,7 @@ extension AppState {
         do {
             let note = try await daemonClient.createNote(worktreeID: worktreeID)
             notes[worktreeID, default: []].append(note)
-            let tab = Tab(id: note.id, content: .note(noteID: note.id), label: note.title)
+            let tab = Tab(id: note.id, content: .note(noteID: note.id), label: nil)
             tabs[worktreeID, default: []].append(tab)
         } catch {
             logger.error("Failed to create note: \(error)")
@@ -26,12 +26,6 @@ extension AppState {
             let updated = try await daemonClient.updateNote(noteID: noteID, title: title, content: content)
             if let idx = notes[worktreeID]?.firstIndex(where: { $0.id == noteID }) {
                 notes[worktreeID]?[idx] = updated
-            }
-            // Update tab label if title changed
-            if let newTitle = title {
-                if let tabIdx = tabs[worktreeID]?.firstIndex(where: { $0.id == noteID }) {
-                    tabs[worktreeID]?[tabIdx].label = newTitle
-                }
             }
         } catch {
             logger.error("Failed to update note: \(error)")

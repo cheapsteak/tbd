@@ -112,6 +112,7 @@ extension WorktreeLifecycle {
                 }
             }
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+            try await db.tabs.deleteForWorktree(worktreeID: wt.id)
             for terminal in terminals {
                 await pendingQuestions.clear(terminalID: terminal.id)
             }

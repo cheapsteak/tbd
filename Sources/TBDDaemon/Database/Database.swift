@@ -19,6 +19,7 @@ public final class TBDDatabase: Sendable {
     public let modelProfileUsage: ModelProfileUsageStore
     public let config: ConfigStore
     public let meta: TBDMetaStore
+    public let tabs: TabStore
 
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
     public init(path: String) throws {
@@ -40,6 +41,7 @@ public final class TBDDatabase: Sendable {
         self.modelProfileUsage = ModelProfileUsageStore(writer: pool)
         self.config = ConfigStore(writer: pool)
         self.meta = TBDMetaStore(writer: pool)
+        self.tabs = TabStore(writer: pool)
         try Self.migrate(writer: pool)
     }
 
@@ -58,6 +60,7 @@ public final class TBDDatabase: Sendable {
         self.modelProfileUsage = ModelProfileUsageStore(writer: queue)
         self.config = ConfigStore(writer: queue)
         self.meta = TBDMetaStore(writer: queue)
+        self.tabs = TabStore(writer: queue)
         try Self.migrate(writer: queue)
     }
 
@@ -351,6 +354,24 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v18_repo_hidden") { db in
             try db.alter(table: "repo") { t in
                 t.add(column: "hidden", .boolean).notNull().defaults(to: false)
+            }
+        }
+
+        migrator.registerMigration("v19_tabs_and_order") { db in
+            try db.create(table: "tab") { t in
+                t.column("id", .text).primaryKey()
+                t.column("worktreeID", .text).notNull()
+                t.column("label", .text)         // nullable = use auto-derived
+                t.column("createdAt", .datetime).notNull()
+            }
+            try db.alter(table: "worktree") { t in
+                t.add(column: "tabOrder", .text).notNull().defaults(to: "[]")
+            }
+        }
+
+        migrator.registerMigration("v20_worktree_active_tab") { db in
+            try db.alter(table: "worktree") { t in
+                t.add(column: "activeTabID", .text)  // nullable
             }
         }
 

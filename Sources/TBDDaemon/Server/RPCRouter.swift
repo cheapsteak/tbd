@@ -215,6 +215,14 @@ public final class RPCRouter: Sendable {
                 return try await handleDaemonLegacyHooksStatus()
             case RPCMethod.daemonRemoveLegacyGlobalHooks:
                 return try await handleDaemonRemoveLegacyGlobalHooks()
+            case RPCMethod.tabSetLabel:
+                return try await handleTabSetLabel(request.paramsData)
+            case RPCMethod.tabSetOrder:
+                return try await handleTabSetOrder(request.paramsData)
+            case RPCMethod.tabList:
+                return try await handleTabList(request.paramsData)
+            case RPCMethod.worktreeSetActiveTab:
+                return try await handleWorktreeSetActiveTab(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

@@ -167,6 +167,8 @@ final class AppState: ObservableObject {
     }
     @Published var tabs: [UUID: [Tab]] = [:]
     @Published var activeTabIndices: [UUID: Int] = [:]
+    @Published var worktreeTabOrders: [UUID: [UUID]] = [:]
+    @Published var draggingTabID: UUID? = nil
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
     @Published var suspendingTerminalIDs: Set<UUID> = []
@@ -715,6 +717,7 @@ final class AppState: ObservableObject {
     /// terminals that aren't already represented (either as a tab root or
     /// embedded in another tab's split layout).
     private func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
+        let alreadyLoadedOrder = worktreeTabOrders[worktreeID] != nil
         var currentTabs = tabs[worktreeID] ?? []
         let terminalIDs = Set(terminals.map(\.id))
 
@@ -750,6 +753,10 @@ final class AppState: ObservableObject {
         }
 
         tabs[worktreeID] = currentTabs
+        applyStoredOrder(worktreeID: worktreeID)
+        if !alreadyLoadedOrder {
+            Task { await loadTabStates(worktreeID: worktreeID) }
+        }
     }
 
     /// Reconcile note tabs — remove tabs whose note no longer exists,
@@ -773,10 +780,11 @@ final class AppState: ObservableObject {
 
         // Add tabs for notes not already represented
         for note in notes where !noteIDsInTabs.contains(note.id) {
-            currentTabs.append(Tab(id: note.id, content: .note(noteID: note.id), label: note.title))
+            currentTabs.append(Tab(id: note.id, content: .note(noteID: note.id), label: nil))
         }
 
         tabs[worktreeID] = currentTabs
+        applyStoredOrder(worktreeID: worktreeID)
     }
 
     /// Poll all cached PR statuses from the daemon (background, every ~30s).

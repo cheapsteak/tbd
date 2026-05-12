@@ -107,7 +107,7 @@ struct SingleWorktreeView: View {
     private var activeTabIndex: Int {
         get { appState.activeTabIndices[worktreeID] ?? 0 }
         nonmutating set {
-            appState.activeTabIndices[worktreeID] = newValue
+            appState.setActiveTab(worktreeID: worktreeID, tabIndex: newValue)
             appState.historyActiveWorktrees.remove(worktreeID)
         }
     }
@@ -140,6 +140,7 @@ struct SingleWorktreeView: View {
                 if !worktreeTabs.isEmpty {
                     TabBar(
                         tabs: worktreeTabs,
+                        worktreeID: worktreeID,
                         activeTabIndex: Binding(
                             get: { activeTabIndex },
                             set: { activeTabIndex = $0 }

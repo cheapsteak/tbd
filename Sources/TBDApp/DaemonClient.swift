@@ -696,6 +696,42 @@ actor DaemonClient {
         )
     }
 
+    // MARK: - Tabs
+
+    /// List per-tab metadata + stored tab order for a worktree.
+    func listTabs(worktreeID: UUID) async throws -> TabListResponse {
+        return try await callAsync(
+            method: RPCMethod.tabList,
+            params: TabListParams(worktreeID: worktreeID),
+            resultType: TabListResponse.self
+        )
+    }
+
+    /// Set or clear a tab's custom label. `label = nil` clears the override.
+    func setTabLabel(tabID: UUID, worktreeID: UUID, label: String?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.tabSetLabel,
+            params: TabSetLabelParams(tabID: tabID, worktreeID: worktreeID, label: label)
+        )
+    }
+
+    /// Set the stored tab order for a worktree.
+    func setTabOrder(worktreeID: UUID, tabIDs: [UUID]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.tabSetOrder,
+            params: TabSetOrderParams(worktreeID: worktreeID, tabIDs: tabIDs)
+        )
+    }
+
+    /// Persist the worktree's active tab so it survives app restart.
+    /// `tabID = nil` clears the stored selection.
+    func setActiveTab(worktreeID: UUID, tabID: UUID?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeSetActiveTab,
+            params: WorktreeSetActiveTabParams(worktreeID: worktreeID, tabID: tabID)
+        )
+    }
+
     /// List notes, optionally filtered by worktree.
     func listNotes(worktreeID: UUID? = nil) async throws -> [Note] {
         return try await callAsync(
