@@ -85,6 +85,7 @@ public enum RPCMethod {
     public static let worktreeRevive = "worktree.revive"
     public static let worktreeRename = "worktree.rename"
     public static let worktreeReorder = "worktree.reorder"
+    public static let worktreeMove = "worktree.move"
     public static let terminalCreate = "terminal.create"
     public static let terminalList = "terminal.list"
     public static let terminalSend = "terminal.send"
@@ -425,9 +426,18 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// default and produce hard-wrapped scrollback that can never be reflowed.
     public let cols: Int?
     public let rows: Int?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil) {
+    // Nested-worktree support. All optional, defaulted for backward compat.
+    public var parentWorktreeID: UUID?     // --parent
+    public var siblingOfWorktreeID: UUID?  // --sibling (caller worktree id)
+    public var callerWorktreeID: UUID?     // TBD_WORKTREE_ID env
+    public var suppressAutoParent: Bool?   // --no-parent
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
+        self.parentWorktreeID = parentWorktreeID
+        self.siblingOfWorktreeID = siblingOfWorktreeID
+        self.callerWorktreeID = callerWorktreeID
+        self.suppressAutoParent = suppressAutoParent
     }
 }
 
@@ -478,6 +488,22 @@ public struct WorktreeReorderParams: Codable, Sendable {
     public init(repoID: UUID, worktreeIDs: [UUID]) {
         self.repoID = repoID; self.worktreeIDs = worktreeIDs
     }
+}
+
+public struct WorktreeMoveParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let newParentID: UUID?
+    public let newSortOrder: Int
+
+    public init(worktreeID: UUID, newParentID: UUID?, newSortOrder: Int) {
+        self.worktreeID = worktreeID
+        self.newParentID = newParentID
+        self.newSortOrder = newSortOrder
+    }
+}
+
+public struct WorktreeMoveResult: Codable, Sendable {
+    public init() {}
 }
 
 public enum TerminalCreateType: String, Codable, Sendable {
