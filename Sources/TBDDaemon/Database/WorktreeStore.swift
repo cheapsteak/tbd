@@ -91,6 +91,14 @@ public enum WorktreeMoveError: Error, CustomStringConvertible {
     }
 }
 
+public enum WorktreeArchiveError: Error, CustomStringConvertible {
+    case hasActiveChildren
+
+    public var description: String {
+        "Archive nested worktrees first."
+    }
+}
+
 /// Provides CRUD operations for worktrees.
 public struct WorktreeStore: Sendable {
     let writer: any DatabaseWriter
@@ -241,6 +249,28 @@ public struct WorktreeStore: Sendable {
                 record.archivedHeadSHA = sha
             }
             try record.update(db)
+        }
+    }
+
+    /// Throws `WorktreeArchiveError.hasActiveChildren` if the worktree has any
+    /// direct children with status `.active` or `.creating`. Used as a precheck
+    /// by the archive RPC handler so app and CLI surface the same error.
+    public func assertArchivable(id: UUID) async throws {
+        try await writer.read { db in
+            let activeRaw = WorktreeStatus.active.rawValue
+            let creatingRaw = WorktreeStatus.creating.rawValue
+            let count = try Int.fetchOne(
+                db,
+                sql: """
+                SELECT COUNT(*) FROM worktree
+                WHERE parentWorktreeID = ?
+                  AND status IN (?, ?)
+                """,
+                arguments: [id.uuidString, activeRaw, creatingRaw]
+            ) ?? 0
+            if count > 0 {
+                throw WorktreeArchiveError.hasActiveChildren
+            }
         }
     }
 
