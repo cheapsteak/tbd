@@ -38,6 +38,18 @@ struct RepoSectionView: View {
         return first.unicodeScalars.contains { $0.properties.isEmoji && $0.value > 0x7F }
     }
 
+    private static func leadingEmoji(_ name: String) -> String? {
+        guard startsWithEmoji(name), let first = name.first else { return nil }
+        return String(first)
+    }
+
+    private static func nameWithoutLeadingEmoji(_ name: String) -> String {
+        guard startsWithEmoji(name) else { return name }
+        var rest = name.dropFirst()
+        if rest.first == " " { rest = rest.dropFirst() }
+        return String(rest)
+    }
+
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
             hoverDebounceTask?.cancel()
@@ -86,25 +98,11 @@ struct RepoSectionView: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            if !Self.startsWithEmoji(repo.displayName) {
-                if isSectionHovered {
-                    Button {
-                        Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
-                    } label: {
-                        Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 11))
-                            .foregroundStyle(
-                                repo.status == .missing
-                                    ? AnyShapeStyle(Color.secondary.opacity(0.5))
-                                    : AnyShapeStyle(HierarchicalShapeStyle.secondary)
-                            )
-                            .frame(width: 18, height: 18)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(HoverPressButtonStyle())
-                    .help(repo.expanded ? "Collapse" : "Expand")
-                } else {
-                    Image(systemName: "folder")
+            if isSectionHovered {
+                Button {
+                    Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
+                } label: {
+                    Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 11))
                         .foregroundStyle(
                             repo.status == .missing
@@ -112,7 +110,23 @@ struct RepoSectionView: View {
                                 : AnyShapeStyle(HierarchicalShapeStyle.secondary)
                         )
                         .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(HoverPressButtonStyle())
+                .help(repo.expanded ? "Collapse" : "Expand")
+            } else if let emoji = Self.leadingEmoji(repo.displayName) {
+                Text(emoji)
+                    .font(.system(size: 12))
+                    .frame(width: 18, height: 18)
+            } else {
+                Image(systemName: "folder")
+                    .font(.system(size: 11))
+                    .foregroundStyle(
+                        repo.status == .missing
+                            ? AnyShapeStyle(Color.secondary.opacity(0.5))
+                            : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+                    )
+                    .frame(width: 18, height: 18)
             }
             RenameableLabel(
                 text: repo.displayName,
@@ -123,7 +137,7 @@ struct RepoSectionView: View {
                     }
                 }
             ) {
-                Text(repo.displayName)
+                Text(Self.nameWithoutLeadingEmoji(repo.displayName))
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.tail)
