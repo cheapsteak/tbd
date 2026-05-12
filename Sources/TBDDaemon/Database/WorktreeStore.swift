@@ -73,6 +73,24 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     }
 }
 
+public enum WorktreeMoveError: Error, CustomStringConvertible {
+    case selfReference
+    case cycle
+    case parentNotFound
+    case parentIsMain
+    case worktreeNotFound
+
+    public var description: String {
+        switch self {
+        case .selfReference: return "A worktree cannot be its own parent."
+        case .cycle: return "This move would create a cycle in the worktree tree."
+        case .parentNotFound: return "Parent worktree not found."
+        case .parentIsMain: return "Cannot nest under the main worktree."
+        case .worktreeNotFound: return "Worktree not found."
+        }
+    }
+}
+
 /// Provides CRUD operations for worktrees.
 public struct WorktreeStore: Sendable {
     let writer: any DatabaseWriter
@@ -314,6 +332,60 @@ public struct WorktreeStore: Sendable {
                 .filter(Column("path") == path)
                 .fetchOne(db)?
                 .toModel()
+        }
+    }
+
+    /// Move a worktree to a new parent (or top-level) and a new sort-order
+    /// position within its destination sibling group.
+    /// Validates: not-self, parent exists, parent is not `main`, no cycle.
+    /// Renumbers siblings in the destination group so the moved row lands at
+    /// the requested sortOrder.
+    public func move(worktreeID: UUID, newParentID: UUID?, newSortOrder: Int) async throws {
+        try await writer.write { db in
+            guard let movingRecord = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString) else {
+                throw WorktreeMoveError.worktreeNotFound
+            }
+
+            if let pid = newParentID {
+                if pid == worktreeID {
+                    throw WorktreeMoveError.selfReference
+                }
+                guard let parent = try WorktreeRecord.fetchOne(db, key: pid.uuidString) else {
+                    throw WorktreeMoveError.parentNotFound
+                }
+                if parent.status == WorktreeStatus.main.rawValue {
+                    throw WorktreeMoveError.parentIsMain
+                }
+                // Cycle check: walk up from parent; if we ever hit `worktreeID`, cycle.
+                var cursor: String? = parent.parentWorktreeID
+                while let curID = cursor {
+                    if curID == worktreeID.uuidString {
+                        throw WorktreeMoveError.cycle
+                    }
+                    cursor = try WorktreeRecord.fetchOne(db, key: curID)?.parentWorktreeID
+                }
+            }
+
+            // Renumber destination siblings: shift sortOrder of siblings >= newSortOrder by +1,
+            // then set moving to newSortOrder.
+            let parentArg = newParentID?.uuidString
+            if let p = parentArg {
+                try db.execute(
+                    sql: "UPDATE worktree SET sortOrder = sortOrder + 1 WHERE parentWorktreeID = ? AND sortOrder >= ? AND id != ?",
+                    arguments: [p, newSortOrder, worktreeID.uuidString]
+                )
+            } else {
+                // Top-level siblings = same repo, parent null. Exclude main from sibling group (it has its own status).
+                try db.execute(
+                    sql: "UPDATE worktree SET sortOrder = sortOrder + 1 WHERE repoID = ? AND parentWorktreeID IS NULL AND sortOrder >= ? AND id != ?",
+                    arguments: [movingRecord.repoID, newSortOrder, worktreeID.uuidString]
+                )
+            }
+
+            try db.execute(
+                sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
+                arguments: [parentArg, newSortOrder, worktreeID.uuidString]
+            )
         }
     }
 
