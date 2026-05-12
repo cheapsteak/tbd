@@ -21,6 +21,62 @@ private struct TabWidthPreference: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
+/// DropDelegate so we can read `info.location` during hover via `dropUpdated`,
+/// which is the only API path that gives us cursor position before drop time.
+/// Drives the leading/trailing insertion indicator on the targeted tab.
+private struct TabDropDelegate: DropDelegate {
+    let targetTabID: UUID
+    let worktreeID: UUID
+    let measuredWidth: CGFloat
+    @Binding var dropEdge: DropEdge?
+    let appState: AppState
+
+    private func edge(for location: CGPoint) -> DropEdge {
+        location.x < measuredWidth / 2 ? .leading : .trailing
+    }
+
+    func dropEntered(info: DropInfo) {
+        dropEdge = edge(for: info.location)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        dropEdge = edge(for: info.location)
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        dropEdge = nil
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let dropEdgeValue = edge(for: info.location)
+        let providers = info.itemProviders(for: [UTType.tbdTabDrag])
+        guard let provider = providers.first else {
+            dropEdge = nil
+            appState.draggingTabID = nil
+            return false
+        }
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.tbdTabDrag.identifier) { data, _ in
+            Task { @MainActor in
+                defer {
+                    dropEdge = nil
+                    appState.draggingTabID = nil
+                }
+                guard let data,
+                      let payload = try? JSONDecoder().decode(TabDragPayload.self, from: data),
+                      payload.tabID != targetTabID else { return }
+                appState.reorderTab(
+                    draggedID: payload.tabID,
+                    in: worktreeID,
+                    relativeTo: targetTabID,
+                    edge: dropEdgeValue
+                )
+            }
+        }
+        return true
+    }
+}
+
 // MARK: - TabBar
 
 /// Generic tab bar that renders Tab items with type-appropriate icons and labels.
@@ -28,6 +84,7 @@ private struct TabWidthPreference: PreferenceKey {
 struct TabBar: View {
     let tabs: [Tab]
     let worktreeID: UUID
+    @EnvironmentObject private var appState: AppState
     @Binding var activeTabIndex: Int
     var onAddShell: () -> Void = {}
     var onAddClaude: () -> Void = {}
@@ -86,6 +143,14 @@ struct TabBar: View {
         .padding(.horizontal, 0)
         .frame(height: 30)
         .background(Color(nsColor: .windowBackgroundColor))
+        // Catch-all so dropping a tab on the +/history button or empty
+        // strip space still clears `draggingTabID`. Returns false (no
+        // reorder), but ends the visual "dragging" state. Per-tab drop
+        // delegates above handle real reorders.
+        .onDrop(of: [UTType.tbdTabDrag], isTargeted: nil) { _ in
+            appState.draggingTabID = nil
+            return false
+        }
     }
 }
 
@@ -348,6 +413,7 @@ private struct TabBarItem: View {
                     .transition(.opacity)
             }
         }
+        .animation(.easeInOut(duration: 0.1), value: dropEdge)
         .draggable(TabDragPayload(tabID: tab.id)) {
             // Drag preview: a translucent copy of the tab content.
             HStack(spacing: 0) {
@@ -361,23 +427,19 @@ private struct TabBarItem: View {
             .opacity(0.85)
             .onAppear { appState.draggingTabID = tab.id }
         }
-        .dropDestination(for: TabDragPayload.self) { payloads, location in
-            defer { dropEdge = nil; appState.draggingTabID = nil }
-            guard let payload = payloads.first,
-                  payload.tabID != tab.id else { return false }
-            let edge: DropEdge = (location.x < measuredWidth / 2) ? .leading : .trailing
-            appState.reorderTab(
-                draggedID: payload.tabID,
-                in: worktreeID,
-                relativeTo: tab.id,
-                edge: edge
+        // Use onDrop+DropDelegate (instead of .dropDestination) so we get
+        // info.location during hover via dropUpdated, which is required to
+        // render the leading/trailing insertion indicator before drop time.
+        .onDrop(
+            of: [UTType.tbdTabDrag],
+            delegate: TabDropDelegate(
+                targetTabID: tab.id,
+                worktreeID: worktreeID,
+                measuredWidth: measuredWidth,
+                dropEdge: $dropEdge,
+                appState: appState
             )
-            return true
-        } isTargeted: { targeted in
-            if !targeted {
-                dropEdge = nil
-            }
-        }
+        )
     }
 
     private func formatProfileHeader(_ profileID: UUID?) -> String {
