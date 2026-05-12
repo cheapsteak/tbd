@@ -194,7 +194,7 @@ struct RepoSectionView: View {
                 WorktreeRowView(worktree: main, isMain: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.white.opacity(0.0001))
-                    .opacity(isChevronHovered ? 0.75 : 1.0)
+                    .opacity(isChevronHovered ? 0.7 : 1.0)
                     .onHover { onSectionHoverChange($0) }
                     .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                     .listRowSeparator(.hidden)
@@ -205,7 +205,7 @@ struct RepoSectionView: View {
                 WorktreeRowView(worktree: worktree)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.white.opacity(0.0001))
-                    .opacity(isChevronHovered ? 0.75 : 1.0)
+                    .opacity(isChevronHovered ? 0.7 : 1.0)
                     .onHover { onSectionHoverChange($0) }
                     .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
                     .listRowSeparator(.hidden)
