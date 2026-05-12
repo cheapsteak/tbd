@@ -360,29 +360,31 @@ struct SessionTranscriptView: View {
                     ScrollView {
                         TranscriptItemsView(items: messages, terminalID: nil, atBottom: $atBottom)
                     }
-                    .defaultScrollAnchor(.bottom)
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .overlay(alignment: .bottomTrailing) {
-                        if !atBottom {
-                            Button {
-                                guard let lastID = lastRenderedNodeID(for: messages) else { return }
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    proxy.scrollTo(lastID, anchor: .bottom)
+                        Group {
+                            if !atBottom {
+                                Button {
+                                    guard let lastID = lastRenderedNodeID(for: messages) else { return }
+                                    withAnimation(.easeOut(duration: 0.2)) {
+                                        proxy.scrollTo(lastID, anchor: .bottom)
+                                    }
+                                } label: {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .font(.system(size: 28))
+                                        .symbolRenderingMode(.palette)
+                                        .foregroundStyle(.white, Color.accentColor)
+                                        .background(.ultraThinMaterial, in: Circle())
+                                        .shadow(radius: 4)
                                 }
-                            } label: {
-                                Image(systemName: "arrow.down.circle.fill")
-                                    .font(.system(size: 28))
-                                    .symbolRenderingMode(.palette)
-                                    .foregroundStyle(.white, Color.accentColor)
-                                    .background(.ultraThinMaterial, in: Circle())
-                                    .shadow(radius: 4)
+                                .buttonStyle(.plain)
+                                .padding(16)
+                                .transition(.scale(scale: 0.5).combined(with: .opacity))
+                                .help("Scroll to bottom")
                             }
-                            .buttonStyle(.plain)
-                            .padding(16)
-                            .transition(.scale(scale: 0.5).combined(with: .opacity))
-                            .help("Scroll to bottom")
                         }
+                        .animation(.easeInOut(duration: 0.2), value: atBottom)
                     }
-                    .animation(.easeInOut(duration: 0.2), value: atBottom)
                 }
             }
         }
