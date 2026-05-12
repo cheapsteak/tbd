@@ -143,3 +143,40 @@ import TBDShared
         #expect(c2.sortOrder > c1.sortOrder)
     }
 }
+
+@Suite struct WorktreeReconcileOrphanTests {
+
+    @Test func parentPointingAtMissingWorktreeIsNulled() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/r-\(UUID())", displayName: "R", defaultBranch: "main")
+        let p = try await db.worktrees.create(repoID: repo.id, name: "p", branch: "tbd/p", path: "/tmp/p-\(UUID())", tmuxServer: "srv")
+        let c = try await db.worktrees.create(
+            repoID: repo.id, name: "c", branch: "tbd/c",
+            path: "/tmp/c-\(UUID())", tmuxServer: "srv",
+            parentWorktreeID: p.id
+        )
+
+        try await db.worktrees.delete(id: p.id)
+        try await db.worktrees.nullOrphanedParents()
+
+        let updated = try await db.worktrees.get(id: c.id)
+        #expect(updated?.parentWorktreeID == nil)
+    }
+
+    @Test func parentPointingAtArchivedWorktreeIsLeftAlone() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/r-\(UUID())", displayName: "R", defaultBranch: "main")
+        let p = try await db.worktrees.create(repoID: repo.id, name: "p", branch: "tbd/p", path: "/tmp/p-\(UUID())", tmuxServer: "srv")
+        let c = try await db.worktrees.create(
+            repoID: repo.id, name: "c", branch: "tbd/c",
+            path: "/tmp/c-\(UUID())", tmuxServer: "srv",
+            parentWorktreeID: p.id
+        )
+        try await db.worktrees.updateStatus(id: p.id, status: .archived)
+
+        try await db.worktrees.nullOrphanedParents()
+
+        let updated = try await db.worktrees.get(id: c.id)
+        #expect(updated?.parentWorktreeID == p.id)
+    }
+}

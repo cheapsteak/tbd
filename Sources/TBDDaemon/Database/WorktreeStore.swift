@@ -172,6 +172,19 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Null out any `parentWorktreeID` that doesn't reference an existing row.
+    /// Called on daemon startup to handle out-of-band parent removal.
+    public func nullOrphanedParents() async throws {
+        try await writer.write { db in
+            try db.execute(sql: """
+                UPDATE worktree
+                SET parentWorktreeID = NULL
+                WHERE parentWorktreeID IS NOT NULL
+                  AND parentWorktreeID NOT IN (SELECT id FROM worktree)
+            """)
+        }
+    }
+
     /// Create a synthetic "main" worktree entry pointing at the repo root.
     public func createMain(
         repoID: UUID,
