@@ -117,7 +117,7 @@ struct RepoSectionView: View {
                             : AnyShapeStyle(appState.selectedRepoID == repo.id ? HierarchicalShapeStyle.primary : HierarchicalShapeStyle.secondary)
                     )
             }
-            .padding(.leading, -4)
+            .padding(.leading, -2)
 
             if repo.status == .missing {
                 Text("[missing]")
