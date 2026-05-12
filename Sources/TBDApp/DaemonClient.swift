@@ -379,6 +379,14 @@ actor DaemonClient {
         )
     }
 
+    /// Toggle whether a repo section is expanded in the sidebar.
+    func setRepoExpanded(id: UUID, expanded: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.repoSetExpanded,
+            params: RepoSetExpandedParams(repoID: id, expanded: expanded)
+        )
+    }
+
     /// Update per-repo instruction fields.
     func repoUpdateInstructions(repoID: UUID, renamePrompt: String?, customInstructions: String?) async throws -> Repo {
         return try await callAsync(

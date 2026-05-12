@@ -67,6 +67,22 @@ extension AppState {
         }
     }
 
+    /// Toggle whether a repo section is expanded in the sidebar.
+    /// Updates local state optimistically before issuing the RPC.
+    func setRepoExpanded(id: UUID, expanded: Bool) async {
+        if let idx = repos.firstIndex(where: { $0.id == id }) {
+            var repo = repos[idx]
+            repo.expanded = expanded
+            repos[idx] = repo
+        }
+        do {
+            try await daemonClient.setRepoExpanded(id: id, expanded: expanded)
+        } catch {
+            logger.error("Failed to set repo expanded: \(error)")
+            handleConnectionError(error)
+        }
+    }
+
     /// Rename a repo's display name. Updates local state optimistically before issuing the RPC.
     func renameRepo(id: UUID, displayName: String) async {
         if let idx = repos.firstIndex(where: { $0.id == id }) {

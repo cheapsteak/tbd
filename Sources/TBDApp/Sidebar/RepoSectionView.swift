@@ -87,14 +87,32 @@ struct RepoSectionView: View {
     var body: some View {
         HStack(spacing: 4) {
             if !Self.startsWithEmoji(repo.displayName) {
-                Image(systemName: "folder")
-                    .font(.system(size: 11))
-                    .foregroundStyle(
-                        repo.status == .missing
-                            ? AnyShapeStyle(Color.secondary.opacity(0.5))
-                            : AnyShapeStyle(HierarchicalShapeStyle.secondary)
-                    )
-                    .frame(width: 18, height: 18)
+                if isSectionHovered {
+                    Button {
+                        Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
+                    } label: {
+                        Image(systemName: repo.expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 11))
+                            .foregroundStyle(
+                                repo.status == .missing
+                                    ? AnyShapeStyle(Color.secondary.opacity(0.5))
+                                    : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+                            )
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(HoverPressButtonStyle())
+                    .help(repo.expanded ? "Collapse" : "Expand")
+                } else {
+                    Image(systemName: "folder")
+                        .font(.system(size: 11))
+                        .foregroundStyle(
+                            repo.status == .missing
+                                ? AnyShapeStyle(Color.secondary.opacity(0.5))
+                                : AnyShapeStyle(HierarchicalShapeStyle.secondary)
+                        )
+                        .frame(width: 18, height: 18)
+                }
             }
             RenameableLabel(
                 text: repo.displayName,
@@ -155,6 +173,9 @@ struct RepoSectionView: View {
             onSectionHoverChange(hovering)
         }
         .contextMenu {
+            Button(repo.expanded ? "Collapse" : "Expand") {
+                Task { await appState.setRepoExpanded(id: repo.id, expanded: !repo.expanded) }
+            }
             Button("Rename...") {
                 isEditing = true
             }
@@ -183,28 +204,30 @@ struct RepoSectionView: View {
         .listRowBackground(Color.clear)
         .tag(repo.id)
 
-        if let main = mainWorktree {
-            WorktreeRowView(worktree: main, isMain: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.0001))
-                .onHover { onSectionHoverChange($0) }
-                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                .listRowSeparator(.hidden)
+        if repo.expanded {
+            if let main = mainWorktree {
+                WorktreeRowView(worktree: main, isMain: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.0001))
+                    .onHover { onSectionHoverChange($0) }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .tag(main.id)
+            }
+            ForEach(worktrees) { worktree in
+                WorktreeRowView(worktree: worktree)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.0001))
+                    .onHover { onSectionHoverChange($0) }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
+                    .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
-                .tag(main.id)
-        }
-        ForEach(worktrees) { worktree in
-            WorktreeRowView(worktree: worktree)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.0001))
-                .onHover { onSectionHoverChange($0) }
-                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-                .tag(worktree.id)
-        }
-        .onMove { source, destination in
-            appState.reorderWorktrees(repoID: repo.id, fromOffsets: source, toOffset: destination)
+                    .tag(worktree.id)
+            }
+            .onMove { source, destination in
+                appState.reorderWorktrees(repoID: repo.id, fromOffsets: source, toOffset: destination)
+            }
         }
     }
 
