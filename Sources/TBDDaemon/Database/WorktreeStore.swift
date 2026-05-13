@@ -172,17 +172,28 @@ public struct WorktreeStore: Sendable {
         }
     }
 
-    /// NULL out any `parentWorktreeID` that references a row no longer in the
-    /// table (e.g. the parent was deleted out-of-band by a manual sqlite edit
-    /// or a future regression). Safe to call on every reconcile — a single
-    /// `UPDATE … NOT IN (SELECT id FROM worktree)`.
+    /// NULL out `parentWorktreeID` for rows whose parent is either missing or
+    /// archived. Both cases would leave the child unreachable in the sidebar:
+    /// 1. **Missing parent** — deleted out-of-band (manual sqlite edit / future
+    ///    regression).
+    /// 2. **Archived parent** — `assertArchivable` allows archiving a parent
+    ///    once all its children are archived; if the user later revives the
+    ///    child but not the parent, the child's `parentWorktreeID` still points
+    ///    at an archived row. The sidebar's `topLevelWorktrees` filter excludes
+    ///    children-of-anything, and `WorktreeSubtreeView` never visits an
+    ///    archived parent's subtree — so the revived child becomes invisible.
+    ///    Promoting it to top-level here matches the "if parent disappears,
+    ///    null the pointer" pattern.
+    /// Safe to call on every reconcile — single UPDATE with a NOT IN subquery.
     public func nullOrphanedParents() async throws {
         try await writer.write { db in
             try db.execute(sql: """
                 UPDATE worktree
                 SET parentWorktreeID = NULL
                 WHERE parentWorktreeID IS NOT NULL
-                  AND parentWorktreeID NOT IN (SELECT id FROM worktree)
+                  AND parentWorktreeID NOT IN (
+                    SELECT id FROM worktree WHERE status NOT IN ('archived')
+                  )
             """)
         }
     }

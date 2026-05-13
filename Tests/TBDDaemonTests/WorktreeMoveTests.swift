@@ -163,7 +163,13 @@ import TBDShared
         #expect(updated?.parentWorktreeID == nil)
     }
 
-    @Test func parentPointingAtArchivedWorktreeIsLeftAlone() async throws {
+    @Test func parentPointingAtArchivedWorktreeIsNulled() async throws {
+        // Scenario: A→B→C, archive C (leaf), archive B (allowed — no active
+        // children block it), revive C. C's parentWorktreeID still points at
+        // archived B. Without this fix C is active but invisible in the
+        // sidebar (topLevelWorktrees excludes children, WorktreeSubtreeView
+        // never visits an archived parent's subtree). Reconcile promotes C
+        // to top-level by nulling the pointer.
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/r-\(UUID())", displayName: "R", defaultBranch: "main")
         let p = try await db.worktrees.create(repoID: repo.id, name: "p", branch: "tbd/p", path: "/tmp/p-\(UUID())", tmuxServer: "srv")
@@ -177,7 +183,7 @@ import TBDShared
         try await db.worktrees.nullOrphanedParents()
 
         let updated = try await db.worktrees.get(id: c.id)
-        #expect(updated?.parentWorktreeID == p.id)
+        #expect(updated?.parentWorktreeID == nil)
     }
 
     @Test func cycleParentPointerIsBrokenByReconcile() async throws {
