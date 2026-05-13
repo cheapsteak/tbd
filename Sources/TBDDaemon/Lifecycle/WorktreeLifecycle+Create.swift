@@ -302,7 +302,8 @@ extension WorktreeLifecycle {
             tmuxPaneID: window1.paneID,
             label: skipClaude ? "shell" : "Claude Code",
             claudeSessionID: claudeSessionID,
-            profileID: pinnedProfileID
+            profileID: pinnedProfileID,
+            kind: skipClaude ? .shell : .claude
         )
 
         // Create terminal 2: setup hook
@@ -324,7 +325,8 @@ extension WorktreeLifecycle {
             worktreeID: worktreeID,
             tmuxWindowID: window2.windowID,
             tmuxPaneID: window2.paneID,
-            label: "setup"
+            label: "setup",
+            kind: .shell
         )
 
         // Restore additional archived Claude sessions (beyond the first which was used above)
@@ -367,7 +369,8 @@ extension WorktreeLifecycle {
                     tmuxPaneID: window.paneID,
                     label: "Claude Code",
                     claudeSessionID: sessionID,
-                    profileID: resolvedProfile?.profileID
+                    profileID: resolvedProfile?.profileID,
+                    kind: .claude
                 )
             }
         }

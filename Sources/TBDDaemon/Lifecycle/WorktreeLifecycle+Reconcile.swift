@@ -270,9 +270,9 @@ extension WorktreeLifecycle {
                 settingsOverlayPath: ClaudeHookOverlay.overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath
             )
-        } else if terminal.label == "Codex" {
-            // Codex terminal — detected by label "Codex" (set during terminal creation).
-            // No structured type field exists; label matching is the only discriminator available.
+        } else if terminal.kind == .codex || terminal.label == "Codex" {
+            // Codex terminal — detected by kind (primary signal) or legacy label fallback.
+            // kind is the primary discriminator; label is checked for backward compatibility.
             let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
             env["CODEX_HOME"] = codexHome.path
             spawn = ClaudeSpawnCommandBuilder.build(

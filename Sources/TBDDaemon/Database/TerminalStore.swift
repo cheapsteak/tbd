@@ -18,6 +18,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var suspendedSnapshot: String?
     var profile_id: String?
     var transcriptPath: String?
+    var kind: String?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -32,6 +33,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.suspendedSnapshot = terminal.suspendedSnapshot
         self.profile_id = terminal.profileID?.uuidString
         self.transcriptPath = terminal.transcriptPath
+        self.kind = terminal.kind?.rawValue
     }
 
     func toModel() -> Terminal {
@@ -47,7 +49,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             suspendedAt: suspendedAt,
             suspendedSnapshot: suspendedSnapshot,
             profileID: profile_id.flatMap(UUID.init(uuidString:)),
-            transcriptPath: transcriptPath
+            transcriptPath: transcriptPath,
+            kind: kind.flatMap(TerminalKind.init(rawValue:))
         )
     }
 }
@@ -73,7 +76,8 @@ public struct TerminalStore: Sendable {
         tmuxPaneID: String,
         label: String? = nil,
         claudeSessionID: String? = nil,
-        profileID: UUID? = nil
+        profileID: UUID? = nil,
+        kind: TerminalKind? = nil
     ) async throws -> Terminal {
         let terminal = Terminal(
             id: id,
@@ -82,7 +86,8 @@ public struct TerminalStore: Sendable {
             tmuxPaneID: tmuxPaneID,
             label: label,
             claudeSessionID: claudeSessionID,
-            profileID: profileID
+            profileID: profileID,
+            kind: kind
         )
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in

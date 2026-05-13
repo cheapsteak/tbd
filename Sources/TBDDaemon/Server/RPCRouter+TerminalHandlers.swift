@@ -133,7 +133,8 @@ extension RPCRouter {
                 tmuxPaneID: window.paneID,
                 label: "Codex",
                 claudeSessionID: nil,
-                profileID: nil
+                profileID: nil,
+                kind: .codex
             )
 
             subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -221,6 +222,7 @@ extension RPCRouter {
             rows: resolvedRows
         )
 
+        let terminalKind: TerminalKind? = isClaudeType ? .claude : .shell
         let terminal = try await db.terminals.create(
             id: plannedTerminalID,
             worktreeID: params.worktreeID,
@@ -228,7 +230,8 @@ extension RPCRouter {
             tmuxPaneID: window.paneID,
             label: label,
             claudeSessionID: claudeSessionID,
-            profileID: resolvedProfile?.profileID
+            profileID: resolvedProfile?.profileID,
+            kind: terminalKind
         )
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
@@ -305,40 +308,74 @@ extension RPCRouter {
             rows: resolvedRows
         )
 
-        // Create a new tmux window with a default shell.
-        // Defensively set TBD_WORKTREE_ID even though the recreated pane runs a
-        // plain shell — the user may run `tbd` CLI commands or launch `claude`
-        // themselves from that shell, and those tools resolve the worktree from
-        // the env. Without this set, the pane would inherit whatever TBD_WORKTREE_ID
-        // got baked into the tmux server's global env, leaking another worktree's
-        // identity into this one.
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        let env: [String: String] = ["TBD_WORKTREE_ID": worktree.id.uuidString]
-        let window = try await tmux.createWindow(
-            server: worktree.tmuxServer,
-            session: "main",
-            cwd: worktree.path,
-            shellCommand: shell,
-            env: env,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
+        // Branch on terminal kind: codex stays codex; shell/claude become shell
+        if terminal.kind == .codex || terminal.label == "Codex" {
+            // Recreate as codex — preserve identity
+            let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
+            var codexEnv: [String: String] = [:]
+            codexEnv["TBD_WORKTREE_ID"] = worktree.id.uuidString
+            codexEnv["TBD_TERMINAL_ID"] = terminal.id.uuidString
+            codexEnv["CODEX_HOME"] = codexHome.path
 
-        // Update the terminal record with new window/pane IDs and clear stale
-        // Claude metadata — the recreated window runs a plain shell, not Claude.
-        try await db.terminals.updateTmuxIDs(
-            id: params.terminalID,
-            windowID: window.windowID,
-            paneID: window.paneID
-        )
-        try await db.terminals.clearRecreated(id: params.terminalID)
+            let window = try await tmux.createWindow(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                shellCommand: "codex --full-auto",
+                env: codexEnv,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
 
-        // Return updated terminal
-        guard let updated = try await db.terminals.get(id: params.terminalID) else {
-            return RPCResponse(error: "Terminal not found after update")
+            // Update tmux IDs but DO NOT call clearRecreated — that nukes the label and kind
+            try await db.terminals.updateTmuxIDs(
+                id: params.terminalID,
+                windowID: window.windowID,
+                paneID: window.paneID
+            )
+
+            // Return updated terminal
+            guard let updated = try await db.terminals.get(id: params.terminalID) else {
+                return RPCResponse(error: "Terminal not found after update")
+            }
+
+            return try RPCResponse(result: updated)
+        } else {
+            // Recreate as shell (claude or shell terminal becomes a plain shell)
+            // Defensively set TBD_WORKTREE_ID even though the recreated pane runs a
+            // plain shell — the user may run `tbd` CLI commands or launch `claude`
+            // themselves from that shell, and those tools resolve the worktree from
+            // the env. Without this set, the pane would inherit whatever TBD_WORKTREE_ID
+            // got baked into the tmux server's global env, leaking another worktree's
+            // identity into this one.
+            let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            let env: [String: String] = ["TBD_WORKTREE_ID": worktree.id.uuidString]
+            let window = try await tmux.createWindow(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                shellCommand: shell,
+                env: env,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+
+            // Update the terminal record with new window/pane IDs and clear stale
+            // Claude metadata — the recreated window runs a plain shell, not Claude.
+            try await db.terminals.updateTmuxIDs(
+                id: params.terminalID,
+                windowID: window.windowID,
+                paneID: window.paneID
+            )
+            try await db.terminals.clearRecreated(id: params.terminalID)
+
+            // Return updated terminal
+            guard let updated = try await db.terminals.get(id: params.terminalID) else {
+                return RPCResponse(error: "Terminal not found after update")
+            }
+
+            return try RPCResponse(result: updated)
         }
-
-        return try RPCResponse(result: updated)
     }
 
     func handleTerminalOutput(_ paramsData: Data) async throws -> RPCResponse {
@@ -596,7 +633,8 @@ extension RPCRouter {
             tmuxPaneID: window.paneID,
             label: "claude",
             claudeSessionID: storedSessionID,
-            profileID: resolved?.profileID
+            profileID: resolved?.profileID,
+            kind: .claude
         )
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(

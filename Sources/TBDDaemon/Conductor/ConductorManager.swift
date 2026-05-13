@@ -176,7 +176,8 @@ public final class ConductorManager: Sendable {
             worktreeID: worktreeID,
             tmuxWindowID: window.windowID,
             tmuxPaneID: window.paneID,
-            label: "conductor:\(name)"
+            label: "conductor:\(name)",
+            kind: .shell
         )
 
         try await db.conductors.updateTerminalID(conductorID: conductor.id, terminalID: terminal.id)

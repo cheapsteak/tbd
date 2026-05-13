@@ -292,7 +292,7 @@ private struct TabBarItem: View {
     }
 
     private var isCodexTerminal: Bool {
-        terminal?.label == "Codex"
+        terminal?.kind == .codex || terminal?.label == "Codex"
     }
 
     private var isSuspended: Bool {
