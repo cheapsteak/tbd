@@ -360,7 +360,7 @@ extension AppState {
                 .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
                 .sorted { $0.sortOrder < $1.sortOrder }
             for wt in topLevel {
-                appendSubtree(wt, into: &result)
+                appendSubtree(wt, depth: 0, into: &result)
             }
         }
         return result
@@ -369,10 +369,15 @@ extension AppState {
     /// Depth-first append: the worktree itself, then its children (across all
     /// repos, since a child can have a different `repoID` from its parent),
     /// recursively. Used by `allWorktreesOrdered` to match sidebar order.
-    private func appendSubtree(_ wt: Worktree, into result: inout [Worktree]) {
+    /// Caps recursion at 50 to mirror `WorktreeSubtreeView.kMaxSubtreeDepth`
+    /// in case a cyclic parent chain ever makes it into the in-memory state
+    /// (DB-side cycle guards make this unlikely, but the keyboard-nav path
+    /// shouldn't blow the stack while the renderer gracefully degrades).
+    private func appendSubtree(_ wt: Worktree, depth: Int, into result: inout [Worktree]) {
         result.append(wt)
+        guard depth < 50 else { return }
         for child in children(of: wt.id) {
-            appendSubtree(child, into: &result)
+            appendSubtree(child, depth: depth + 1, into: &result)
         }
     }
 
