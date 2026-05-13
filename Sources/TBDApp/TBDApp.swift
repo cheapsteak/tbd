@@ -6,6 +6,7 @@ import TBDShared
 import os
 
 internal let lifecycleLogger = Logger(subsystem: "com.tbd.app", category: "lifecycle")
+private let windowChromeLogger = Logger(subsystem: "com.tbd.app", category: "window-chrome")
 
 // MARK: - Crash diagnostics
 
@@ -221,6 +222,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Diagnostics/HangWatchdog.swift.
         HangWatchdog.shared.start()
 
+        // Apply sidebar-under-titlebar chrome to the main window. SwiftUI scenes
+        // create their NSWindow asynchronously after didFinishLaunching, so defer
+        // a tick — then re-apply once more on a short delay as a defensive measure
+        // in case SwiftUI re-applies its own styleMask during initial layout.
+        DispatchQueue.main.async {
+            Self.applyMainWindowChrome()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            Self.applyMainWindowChrome()
+        }
+
         // Lifetime heartbeat — surfaces silent disappearances of windows / dock tile.
         let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
             MainActor.assumeIsolated {
@@ -229,10 +241,84 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let active = NSApp.isActive
                 let hasKey = NSApp.keyWindow != nil
                 lifecycleLogger.info("heartbeat policy=\(policy, privacy: .public) windows=\(count, privacy: .public) active=\(active, privacy: .public) keyWindow=\(hasKey, privacy: .public)")
+                Self.applyMainWindowChrome()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         heartbeatTimer = timer
+    }
+
+    /// Make the main window's titlebar transparent and enable full-size content view
+    /// so the sidebar's vibrant material paints up under the titlebar (Tower /
+    /// Finder / Xcode look). Idempotent — safe to call repeatedly.
+    @MainActor
+    static func applyMainWindowChrome() {
+        // The main SwiftUI Window is the one whose identifier matches the scene's
+        // declared id ("main"). Fall back to the first window with title "TBD" /
+        // first regular window if identifier matching fails.
+        let window: NSWindow? = NSApp.windows.first { win in
+            win.styleMask.contains(.titled) && win.isVisible &&
+            !win.className.contains("Panel") &&
+            !win.className.contains("StatusBar") &&
+            !(win.className.contains("Menu"))
+        }
+        guard let window else {
+            windowChromeLogger.debug("applyMainWindowChrome: no candidate window yet (windows=\(NSApp.windows.count, privacy: .public))")
+            return
+        }
+        let wasTransparent = window.titlebarAppearsTransparent
+        let hadFullSize = window.styleMask.contains(.fullSizeContentView)
+        window.titlebarAppearsTransparent = true
+        window.styleMask.insert(.fullSizeContentView)
+        window.titlebarSeparatorStyle = .none
+        window.toolbarStyle = .unified
+        if !wasTransparent || !hadFullSize {
+            // State transition — SwiftUI either hadn't applied the chrome yet or just reverted it.
+            windowChromeLogger.info("Applied chrome to \(window.title, privacy: .public) (transparent: \(wasTransparent, privacy: .public)->\(window.titlebarAppearsTransparent, privacy: .public), fullSize: \(hadFullSize, privacy: .public)->\(window.styleMask.contains(.fullSizeContentView), privacy: .public))")
+        }
+
+        Self.lockSidebarOpen(in: window)
+    }
+
+    /// Walks the window's view hierarchy to find SwiftUI's internal NSSplitViewController
+    /// and clears both collapse flags on its sidebar item. SwiftUI's NavigationSplitView
+    /// auto-collapses the sidebar on narrow widths and on wake-from-sleep transients;
+    /// this is the AppKit-level escape hatch. Source: Apple Dev Forums thread 727968.
+    /// Idempotent — safe to call repeatedly.
+    @MainActor
+    static func lockSidebarOpen(in window: NSWindow) {
+        guard let contentView = window.contentView,
+              let splitVC = findSplitViewController(in: contentView),
+              let sidebarItem = splitVC.splitViewItems.first else {
+            return
+        }
+        let wasCollapsible = sidebarItem.canCollapse
+        let wasResizeCollapsible = sidebarItem.canCollapseFromWindowResize
+        sidebarItem.canCollapse = false
+        sidebarItem.canCollapseFromWindowResize = false
+        if wasCollapsible || wasResizeCollapsible {
+            // State transition — SwiftUI rebuilt the controller or hadn't been touched yet.
+            windowChromeLogger.info("Locked sidebar open on \(String(describing: type(of: splitVC)), privacy: .public) (canCollapse: \(wasCollapsible, privacy: .public)->false, canCollapseFromWindowResize: \(wasResizeCollapsible, privacy: .public)->false)")
+        }
+    }
+
+    /// Depth-first search for an NSSplitViewController in the responder chain of any
+    /// descendant view. SwiftUI places its NSSplitViewController as the nextResponder
+    /// of the NSSplitView it owns; we walk subviews looking for that backing chain.
+    @MainActor
+    private static func findSplitViewController(in root: NSView) -> NSSplitViewController? {
+        var stack: [NSView] = [root]
+        while let view = stack.popLast() {
+            var responder: NSResponder? = view.nextResponder
+            while let current = responder {
+                if let splitVC = current as? NSSplitViewController {
+                    return splitVC
+                }
+                responder = current.nextResponder
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return nil
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -334,6 +420,7 @@ struct TBDAppMain: App {
         }
         .defaultSize(width: 1200, height: 800)
         .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
             TBDCommands(appState: appState)
             ModelProfileMenu(appState: appState)
