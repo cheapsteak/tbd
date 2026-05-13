@@ -1,0 +1,39 @@
+# Lint scope. These keys take GLOB syntax.
+included:
+  - Sources
+
+excluded:
+  - .build
+  - Sources/TBDCLI   # CLI tool: print() to stdout is intentional user output
+
+# Default rules disabled for PR1 minimum-scope adoption. Each rule fired on
+# existing code; rather than reformat now, we silence and revisit per-rule.
+disabled_rules:
+  - cyclomatic_complexity            # large RPC routers exceed default 10
+  - file_length                      # several legitimate >400-line files
+  - for_where                        # stylistic; existing for/if pattern is fine
+  - force_try                        # used in a few startup paths; revisit later
+  - function_body_length             # SwiftUI view bodies and routers exceed
+  - function_parameter_count         # several constructors take many args
+  - identifier_name                  # short names like db, wt, fm are deliberate
+  - implicit_optional_initialization # stylistic
+  - large_tuple                      # used in a couple of return types
+  - line_length                      # many legitimate long lines (URLs, etc.)
+  - nesting                          # nested types used in a few places
+  - trailing_comma                   # stylistic
+  - type_body_length                 # several large type bodies
+  - unneeded_synthesized_initializer # stylistic
+  - unused_optional_binding          # stylistic
+  - vertical_whitespace              # stylistic
+
+custom_rules:
+  no_print_in_sources:
+    name: "No print() in Sources/"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/(TBDShared|TBDDaemonLib|TBDDaemon|TBDApp)/.*\\.swift"
+    regex: '\b(?:Swift\.|Foundation\.)?print\s*\('
+    match_kinds:
+      - identifier
+    message: "Use os.Logger instead of print() in Sources/. See CLAUDE.md."
+    severity: error

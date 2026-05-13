@@ -14,11 +14,13 @@ let package = Package(
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
+        .package(url: "https://github.com/SimplyDanny/SwiftLintPlugins", from: "0.63.2"),
     ],
     targets: [
         .target(
             name: "TBDShared",
-            path: "Sources/TBDShared"
+            path: "Sources/TBDShared",
+            plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")]
         ),
         .target(
             name: "TBDDaemonLib",
@@ -30,7 +32,8 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Sources/TBDDaemon",
-            exclude: ["main.swift"]
+            exclude: ["main.swift"],
+            plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")]
         ),
         .executableTarget(
             name: "TBDDaemon",
@@ -39,7 +42,8 @@ let package = Package(
             ],
             path: "Sources/TBDDaemon",
             exclude: ["Database", "Git", "Hooks", "Tmux", "Lifecycle", "Server", "SSH", "PR", "Keychain", "Claude", "ModelProfile", "AskUserQuestion", "Daemon.swift", "PIDFile.swift"],
-            sources: ["main.swift"]
+            sources: ["main.swift"],
+            plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")]
         ),
         .executableTarget(
             name: "TBDCLI",
@@ -63,7 +67,8 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
             path: "Sources/TBDApp",
-            resources: [.copy("Resources/Icons")]
+            resources: [.copy("Resources/Icons")],
+            plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")]
         ),
         .testTarget(
             name: "TBDSharedTests",
