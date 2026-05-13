@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
 
 /// Central database class that manages the SQLite connection and exposes store accessors.
@@ -21,8 +22,15 @@ public final class TBDDatabase: Sendable {
     public let meta: TBDMetaStore
     public let tabs: TabStore
 
+    private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
+
     /// Create a production database at the given file path with WAL mode and a DatabasePool.
     public init(path: String) throws {
+        // Capture existence BEFORE DatabasePool opens the file — opening
+        // creates an empty DB on the first launch, so we'd otherwise lose the
+        // ability to distinguish "first launch" from "upgrade".
+        let fileExisted = FileManager.default.fileExists(atPath: path)
+
         var config = Configuration()
         #if DEBUG
         config.prepareDatabase { db in
@@ -42,7 +50,17 @@ public final class TBDDatabase: Sendable {
         self.config = ConfigStore(writer: pool)
         self.meta = TBDMetaStore(writer: pool)
         self.tabs = TabStore(writer: pool)
-        try Self.migrate(writer: pool)
+
+        let migrator = Self.buildMigrator()
+        if fileExisted {
+            let hasPending = try pool.read { db in
+                try !migrator.hasCompletedMigrations(db)
+            }
+            if hasPending {
+                Self.takePreMigrationSnapshot(pool: pool, path: path)
+            }
+        }
+        try migrator.migrate(pool)
     }
 
     /// Create an in-memory database for testing using DatabaseQueue.
@@ -61,10 +79,32 @@ public final class TBDDatabase: Sendable {
         self.config = ConfigStore(writer: queue)
         self.meta = TBDMetaStore(writer: queue)
         self.tabs = TabStore(writer: queue)
-        try Self.migrate(writer: queue)
+        try Self.buildMigrator().migrate(queue)
     }
 
-    private static func migrate(writer: any DatabaseWriter) throws {
+    /// Best-effort pre-migration snapshot. Failures are logged, not thrown —
+    /// the migration must still be allowed to proceed even if e.g. the disk
+    /// is full or the parent directory isn't writable.
+    private static func takePreMigrationSnapshot(pool: DatabasePool, path: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        let stamp = formatter.string(from: Date())
+        let snapshotPath = "\(path).pre-migration.\(stamp)"
+        do {
+            try pool.write { db in
+                try db.execute(sql: "VACUUM INTO ?", arguments: [snapshotPath])
+            }
+            logger.info("Pre-migration snapshot written to \(snapshotPath, privacy: .public)")
+        } catch {
+            logger.error(
+                "Pre-migration snapshot failed at \(snapshotPath, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+        }
+    }
+
+    private static func buildMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
 
         migrator.registerMigration("v1") { db in
@@ -398,6 +438,6 @@ public final class TBDDatabase: Sendable {
             }
         }
 
-        try migrator.migrate(writer)
+        return migrator
     }
 }
