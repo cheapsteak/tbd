@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeHandlers")
 
 extension RPCRouter {
 
@@ -42,7 +45,7 @@ extension RPCRouter {
                 subs.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
                     worktreeID: pending.id
                 )))
-                print("[RPCRouter] Background worktree creation failed for \(pending.id): \(error)")
+                logger.error("background worktreeCreate failed for \(pending.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
 
