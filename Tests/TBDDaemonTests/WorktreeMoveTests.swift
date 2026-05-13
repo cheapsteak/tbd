@@ -200,7 +200,7 @@ import TBDShared
             )
         }
 
-        try await db.worktrees.nullOrphanedParents()
+        try await db.worktrees.breakCyclicParents()
 
         // The walk starting from `a` revisits `a` and nulls its parent — that's
         // enough to break the cycle. `b` retains its parent pointing at `a`,

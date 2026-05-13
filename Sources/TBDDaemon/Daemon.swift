@@ -172,6 +172,14 @@ public final class Daemon: Sendable {
 
         // 11. Reconcile worktrees for all known repos
         await rpcRouter.suspendResumeCoordinator.reconcileOnStartup()
+        // Break any cyclic parent pointers in the worktree tree (manual sqlite
+        // edits, future regressions). Once at startup only — the cycle guard
+        // in WorktreeStore.move prevents new cycles via normal operations.
+        do {
+            try await database.worktrees.breakCyclicParents()
+        } catch {
+            print("[Daemon] Warning: breakCyclicParents failed at startup: \(error)")
+        }
         do {
             let repos = try await database.repos.list()
             for repo in repos {

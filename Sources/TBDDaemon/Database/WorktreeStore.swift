@@ -172,29 +172,31 @@ public struct WorktreeStore: Sendable {
         }
     }
 
-    /// Null out parent pointers that would corrupt the worktree tree:
-    /// 1. Parents that reference a missing row (orphans).
-    /// 2. Parents that participate in a cycle (e.g. A.parent = B and B.parent = A
-    ///    after a manual `sqlite3` edit). `WorktreeStore.move()`'s cycle guard
-    ///    prevents new cycles from forming through normal operations, but we
-    ///    still need to defuse any that exist at startup — otherwise
-    ///    `WorktreeSubtreeView`'s recursive render would stack-overflow.
-    /// Called on daemon startup.
+    /// NULL out any `parentWorktreeID` that references a row no longer in the
+    /// table (e.g. the parent was deleted out-of-band by a manual sqlite edit
+    /// or a future regression). Safe to call on every reconcile — a single
+    /// `UPDATE … NOT IN (SELECT id FROM worktree)`.
     public func nullOrphanedParents() async throws {
         try await writer.write { db in
-            // Pass 1: orphans (parent pointer references a missing row).
             try db.execute(sql: """
                 UPDATE worktree
                 SET parentWorktreeID = NULL
                 WHERE parentWorktreeID IS NOT NULL
                   AND parentWorktreeID NOT IN (SELECT id FROM worktree)
             """)
+        }
+    }
 
-            // Pass 2: cycles. For each row with a non-null parent, walk upward
-            // with a visited set. If we revisit a node, the chain is cyclic;
-            // null the original row's parent to break the cycle. We null only
-            // the row we started from (not every member of the cycle) so the
-            // damage is minimal and predictable.
+    /// Walk every row with a non-null `parentWorktreeID` and break any cycles
+    /// found (A.parent=B, B.parent=A) by NULLing the parent on the row we
+    /// started from. `WorktreeStore.move()`'s cycle guard prevents new cycles
+    /// through normal operations, so this only catches DB damage from manual
+    /// sqlite edits or regressions — call it at daemon startup, NOT on every
+    /// reconcile. (Reconcile fires from cleanup RPCs and periodic git sweeps;
+    /// running this O(N) walk every time is wasted work for the common case
+    /// of a healthy DB.)
+    public func breakCyclicParents() async throws {
+        try await writer.write { db in
             let rows = try Row.fetchAll(db, sql: """
                 SELECT id, parentWorktreeID FROM worktree
                 WHERE parentWorktreeID IS NOT NULL
