@@ -179,4 +179,35 @@ import TBDShared
         let updated = try await db.worktrees.get(id: c.id)
         #expect(updated?.parentWorktreeID == p.id)
     }
+
+    @Test func cycleParentPointerIsBrokenByReconcile() async throws {
+        // The public API can't create a cycle (WorktreeStore.move's cycle guard
+        // refuses), so simulate a manually-introduced one by writing the
+        // forbidden state directly through the writer.
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/r-\(UUID())", displayName: "R", defaultBranch: "main")
+        let a = try await db.worktrees.create(repoID: repo.id, name: "a", branch: "tbd/a", path: "/tmp/a-\(UUID())", tmuxServer: "srv")
+        let b = try await db.worktrees.create(
+            repoID: repo.id, name: "b", branch: "tbd/b",
+            path: "/tmp/b-\(UUID())", tmuxServer: "srv",
+            parentWorktreeID: a.id
+        )
+        // Inject: a.parent = b (giving us a <-> b cycle).
+        try await db.worktrees.writer.write { dbConn in
+            try dbConn.execute(
+                sql: "UPDATE worktree SET parentWorktreeID = ? WHERE id = ?",
+                arguments: [b.id.uuidString, a.id.uuidString]
+            )
+        }
+
+        try await db.worktrees.nullOrphanedParents()
+
+        // The walk starting from `a` revisits `a` and nulls its parent — that's
+        // enough to break the cycle. `b` retains its parent pointing at `a`,
+        // which is now a clean depth-1 chain.
+        let updatedA = try await db.worktrees.get(id: a.id)
+        let updatedB = try await db.worktrees.get(id: b.id)
+        #expect(updatedA?.parentWorktreeID == nil)
+        #expect(updatedB?.parentWorktreeID == a.id)
+    }
 }

@@ -172,16 +172,52 @@ public struct WorktreeStore: Sendable {
         }
     }
 
-    /// Null out any `parentWorktreeID` that doesn't reference an existing row.
-    /// Called on daemon startup to handle out-of-band parent removal.
+    /// Null out parent pointers that would corrupt the worktree tree:
+    /// 1. Parents that reference a missing row (orphans).
+    /// 2. Parents that participate in a cycle (e.g. A.parent = B and B.parent = A
+    ///    after a manual `sqlite3` edit). `WorktreeStore.move()`'s cycle guard
+    ///    prevents new cycles from forming through normal operations, but we
+    ///    still need to defuse any that exist at startup — otherwise
+    ///    `WorktreeSubtreeView`'s recursive render would stack-overflow.
+    /// Called on daemon startup.
     public func nullOrphanedParents() async throws {
         try await writer.write { db in
+            // Pass 1: orphans (parent pointer references a missing row).
             try db.execute(sql: """
                 UPDATE worktree
                 SET parentWorktreeID = NULL
                 WHERE parentWorktreeID IS NOT NULL
                   AND parentWorktreeID NOT IN (SELECT id FROM worktree)
             """)
+
+            // Pass 2: cycles. For each row with a non-null parent, walk upward
+            // with a visited set. If we revisit a node, the chain is cyclic;
+            // null the original row's parent to break the cycle. We null only
+            // the row we started from (not every member of the cycle) so the
+            // damage is minimal and predictable.
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, parentWorktreeID FROM worktree
+                WHERE parentWorktreeID IS NOT NULL
+            """)
+            for row in rows {
+                guard let rowID = row["id"] as String? else { continue }
+                var cursor: String? = row["parentWorktreeID"] as String?
+                var visited: Set<String> = [rowID]
+                while let curID = cursor {
+                    if !visited.insert(curID).inserted {
+                        try db.execute(
+                            sql: "UPDATE worktree SET parentWorktreeID = NULL WHERE id = ?",
+                            arguments: [rowID]
+                        )
+                        break
+                    }
+                    cursor = try Row.fetchOne(
+                        db,
+                        sql: "SELECT parentWorktreeID FROM worktree WHERE id = ?",
+                        arguments: [curID]
+                    )?["parentWorktreeID"] as String?
+                }
+            }
         }
     }
 
