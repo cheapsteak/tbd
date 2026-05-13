@@ -414,9 +414,17 @@ public struct WorktreeStore: Sendable {
                     throw WorktreeMoveError.parentIsMain
                 }
                 // Cycle check: walk up from parent; if we ever hit `worktreeID`, cycle.
+                // The `visited` set defends against a pre-existing cycle in the DB
+                // (manual edit or future regression) by treating any revisit as a
+                // cycle too — otherwise the loop would spin forever inside the
+                // write transaction and block the database.
                 var cursor: String? = parent.parentWorktreeID
+                var visited: Set<String> = [pid.uuidString]
                 while let curID = cursor {
                     if curID == worktreeID.uuidString {
+                        throw WorktreeMoveError.cycle
+                    }
+                    if !visited.insert(curID).inserted {
                         throw WorktreeMoveError.cycle
                     }
                     cursor = try WorktreeRecord.fetchOne(db, key: curID)?.parentWorktreeID
