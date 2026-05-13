@@ -28,6 +28,12 @@ jobs:
       - name: Restore source mtimes from git commit times
         uses: chetan/git-restore-mtime-action@d186aca54f8760da4dec55313195e51ed3ebb0b3 # v2
 
+      - name: Install tmux
+        # macos-15 runners don't ship tmux. The reconcile reboot-recovery
+        # regression test (WorktreeLifecycleTests.testRecreateAfterRebootBootstrapKillOrdering)
+        # drives TmuxManager against a real tmux server on a unique socket.
+        run: brew install tmux
+
       - name: Capture Swift toolchain version
         run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> $GITHUB_ENV
 
