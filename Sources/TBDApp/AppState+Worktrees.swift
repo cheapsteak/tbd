@@ -286,12 +286,12 @@ extension AppState {
         var topLevel = rows
             .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
             .sorted { $0.sortOrder < $1.sortOrder }
-        logger.notice("reorderTopLevel BEFORE: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public)")
+        logger.debug("reorderTopLevel BEFORE: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public)")
         // Items the user is moving (typically one).
         let movedIDs = source.map { topLevel[$0].id }
         // Apply the swap to derive the new top-level order.
         topLevel.move(fromOffsets: source, toOffset: destination)
-        logger.notice("reorderTopLevel AFTER: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public)")
+        logger.debug("reorderTopLevel AFTER: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public)")
 
         // Optimistic local update: reassign sortOrders for the new top-level order.
         for (i, wt) in topLevel.enumerated() {
@@ -308,7 +308,7 @@ extension AppState {
         _ = movedIDs  // suppress unused warning; kept for log readability earlier
         Task {
             do {
-                logger.notice("RPC worktree.reorder ids=\(orderedIDs.map { $0.uuidString.prefix(8) }.joined(separator: ","), privacy: .public)")
+                logger.debug("RPC worktree.reorder ids=\(orderedIDs.map { $0.uuidString.prefix(8) }.joined(separator: ","), privacy: .public)")
                 try await daemonClient.reorderWorktrees(repoID: repoID, worktreeIDs: orderedIDs)
             } catch {
                 logger.error("reorderTopLevelWorktrees RPC failed: \(error.localizedDescription, privacy: .public)")
