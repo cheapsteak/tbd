@@ -291,7 +291,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     static func lockSidebarOpen(in window: NSWindow) {
         guard let contentView = window.contentView,
               let splitVC = findSplitViewController(in: contentView),
-              let sidebarItem = splitVC.splitViewItems.first else {
+              let sidebarItem = splitVC.splitViewItems.first,
+              sidebarItem.behavior == .sidebar else {
+            // .sidebar guard: if the detail pane ever hosts its own
+            // NSSplitViewController (nested NavigationSplitView, NavigationView),
+            // the DFS could return the inner one and we'd lock the wrong pane.
             return
         }
         let wasCollapsible = sidebarItem.canCollapse
