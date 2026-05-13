@@ -253,15 +253,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Finder / Xcode look). Idempotent — safe to call repeatedly.
     @MainActor
     static func applyMainWindowChrome() {
-        // The main SwiftUI Window is the one whose identifier matches the scene's
-        // declared id ("main"). Fall back to the first window with title "TBD" /
-        // first regular window if identifier matching fails.
-        let window: NSWindow? = NSApp.windows.first { win in
-            win.styleMask.contains(.titled) && win.isVisible &&
-            !win.className.contains("Panel") &&
-            !win.className.contains("StatusBar") &&
-            !(win.className.contains("Menu"))
-        }
+        // Prefer SwiftUI's scene identifier ("main" from `Window("TBD", id: "main")`).
+        // Fall back to a regular-window heuristic only if that finds nothing —
+        // the Settings scene can produce another titled visible window during
+        // state restoration, so a pure heuristic could grab the wrong one.
+        let window: NSWindow? = NSApp.windows.first { $0.identifier?.rawValue == "main" }
+            ?? NSApp.windows.first { win in
+                win.styleMask.contains(.titled) && win.isVisible &&
+                !win.className.contains("Panel") &&
+                !win.className.contains("StatusBar") &&
+                !(win.className.contains("Menu"))
+            }
         guard let window else {
             windowChromeLogger.debug("applyMainWindowChrome: no candidate window yet (windows=\(NSApp.windows.count, privacy: .public))")
             return
