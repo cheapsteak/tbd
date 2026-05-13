@@ -144,6 +144,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+public enum TerminalKind: String, Codable, Sendable {
+    case shell
+    case claude
+    case codex
+}
+
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var worktreeID: UUID
@@ -162,13 +168,15 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// `/compact` rollovers (where Claude may pick a different
     /// `~/.claude/projects/` subdirectory than cwd would suggest).
     public var transcriptPath: String?
+    public var kind: TerminalKind?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
                 pinnedAt: Date? = nil, claudeSessionID: String? = nil,
                 suspendedAt: Date? = nil, suspendedSnapshot: String? = nil,
                 profileID: UUID? = nil,
-                transcriptPath: String? = nil) {
+                transcriptPath: String? = nil,
+                kind: TerminalKind? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -181,6 +189,12 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.suspendedSnapshot = suspendedSnapshot
         self.profileID = profileID
         self.transcriptPath = transcriptPath
+        self.kind = kind
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
+        case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
     }
 
     public init(from decoder: Decoder) throws {
@@ -197,6 +211,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         suspendedSnapshot = try c.decodeIfPresent(String.self, forKey: .suspendedSnapshot)
         profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
+        kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
     }
 }
 

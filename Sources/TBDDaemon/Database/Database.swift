@@ -381,6 +381,16 @@ public final class TBDDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v22_terminal_kind") { db in
+            try db.alter(table: "terminal") { t in
+                t.add(column: "kind", .text)
+            }
+            // Backfill from existing label heuristics
+            try db.execute(sql: "UPDATE terminal SET kind = 'codex' WHERE label = 'Codex'")
+            try db.execute(sql: "UPDATE terminal SET kind = 'claude' WHERE kind IS NULL AND claudeSessionID IS NOT NULL")
+            try db.execute(sql: "UPDATE terminal SET kind = 'shell' WHERE kind IS NULL")
+        }
+
         try migrator.migrate(writer)
     }
 }
