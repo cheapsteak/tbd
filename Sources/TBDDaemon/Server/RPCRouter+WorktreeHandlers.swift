@@ -152,6 +152,6 @@ extension RPCRouter {
             newSortOrder: params.newSortOrder
         )))
 
-        return try RPCResponse(result: WorktreeMoveResult())
+        return .ok()
     }
 }

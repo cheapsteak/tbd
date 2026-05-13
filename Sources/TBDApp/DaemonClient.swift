@@ -453,14 +453,13 @@ actor DaemonClient {
 
     /// Move a worktree to a new parent (or top-level) and sortOrder.
     func moveWorktree(worktreeID: UUID, newParentID: UUID?, newSortOrder: Int) async throws {
-        _ = try await callAsync(
+        try await callVoidAsync(
             method: RPCMethod.worktreeMove,
             params: WorktreeMoveParams(
                 worktreeID: worktreeID,
                 newParentID: newParentID,
                 newSortOrder: newSortOrder
-            ),
-            resultType: WorktreeMoveResult.self
+            )
         )
     }
 

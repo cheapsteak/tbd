@@ -502,10 +502,6 @@ public struct WorktreeMoveParams: Codable, Sendable {
     }
 }
 
-public struct WorktreeMoveResult: Codable, Sendable {
-    public init() {}
-}
-
 public enum TerminalCreateType: String, Codable, Sendable {
     case shell
     case claude

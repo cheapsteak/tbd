@@ -6,8 +6,8 @@ private let subtreeLogger = Logger(subsystem: "com.tbd.app", category: "sidebar-
 
 /// Hard recursion cap to defend against a cyclic `parentWorktreeID` chain in
 /// the DB (e.g. introduced by a manual `sqlite3` edit that slipped past
-/// `WorktreeStore.nullOrphanedParents()`'s cycle pass). Without this guard,
-/// `WorktreeSubtreeView` would stack-overflow on any cyclic graph.
+/// `WorktreeStore.breakCyclicParents()` at daemon startup). Without this
+/// guard, `WorktreeSubtreeView` would stack-overflow on any cyclic graph.
 private let kMaxSubtreeDepth = 50
 
 /// Renders a worktree row plus its descendants, recursively.
