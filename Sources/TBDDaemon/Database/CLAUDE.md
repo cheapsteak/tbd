@@ -24,10 +24,12 @@ debuggable.
 
 ## Don't edit existing migration bodies
 
-v1 through v22 are frozen. They have run on user machines; mutating them now
+v1 through v23 are frozen. They have run on user machines; mutating them now
 would either be a no-op (because GRDB skips them) or cause a fresh
 divergence between dev and prod schemas. The helpers are for FUTURE
-migrations only.
+migrations only. (v23 landed on `main` in #143 before this PR opened, so it
+is grandfathered into the frozen range even though its body uses raw
+`t.add(column:)`.)
 
 ## Pre-migration snapshot
 
