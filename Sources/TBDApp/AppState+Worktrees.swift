@@ -341,10 +341,41 @@ extension AppState {
 
     // MARK: - Keyboard Shortcut Actions
 
-    /// All worktrees in sidebar order (sorted by repo, then by sortOrder).
+    /// All worktrees in **visual sidebar order**: each repo's main row (if any),
+    /// then a depth-first walk of top-level worktrees followed by their
+    /// descendants. Matches what the user sees in the sidebar so cmd+N keyboard
+    /// shortcuts (via `selectWorktreeByIndex`) land on the right row.
+    ///
+    /// `sortOrder` is scoped per sibling group (top-level OR children-of-X), so
+    /// a flat repo-wide sort by `sortOrder` would collapse two namespaces
+    /// together and put nested children with `sortOrder: 0` ahead of top-level
+    /// rows with `sortOrder: 1+`.
     var allWorktreesOrdered: [Worktree] {
-        repos.flatMap { repo in
-            (worktrees[repo.id] ?? []).sorted { $0.sortOrder < $1.sortOrder }
+        var result: [Worktree] = []
+        for repo in repos {
+            let inRepo = worktrees[repo.id] ?? []
+            // Main row first (if present in this repo).
+            if let main = inRepo.first(where: { $0.status == .main }) {
+                result.append(main)
+            }
+            // Top-level active/creating worktrees in this repo, sorted by sortOrder.
+            let topLevel = inRepo
+                .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
+                .sorted { $0.sortOrder < $1.sortOrder }
+            for wt in topLevel {
+                appendSubtree(wt, into: &result)
+            }
+        }
+        return result
+    }
+
+    /// Depth-first append: the worktree itself, then its children (across all
+    /// repos, since a child can have a different `repoID` from its parent),
+    /// recursively. Used by `allWorktreesOrdered` to match sidebar order.
+    private func appendSubtree(_ wt: Worktree, into result: inout [Worktree]) {
+        result.append(wt)
+        for child in children(of: wt.id) {
+            appendSubtree(child, into: &result)
         }
     }
 
