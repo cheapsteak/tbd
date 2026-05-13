@@ -11,8 +11,8 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil) async throws -> Worktree {
-        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude)
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false) async throws -> Worktree {
+        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent)
         try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows)
         guard let completed = try await db.worktrees.get(id: pending.id) else {
             throw WorktreeLifecycleError.worktreeNotFound(pending.id)
@@ -25,11 +25,20 @@ extension WorktreeLifecycle {
     /// Phase 1: Synchronous-fast. Generates a name, inserts a DB row with
     /// `status = .creating`, and returns the worktree immediately.
     /// NO git operations happen here.
-    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false) async throws -> Worktree {
+    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false) async throws -> Worktree {
         // 1. Fetch repo
         guard let repo = try await db.repos.get(id: repoID) else {
             throw WorktreeLifecycleError.repoNotFound(repoID)
         }
+
+        // 1a. Resolve parent worktree (caller/sibling/explicit → parent id, or nil)
+        let resolvedParent = try await ParentResolver.resolve(
+            db: db,
+            explicitParent: parentWorktreeID,
+            siblingOf: siblingOfWorktreeID,
+            caller: callerWorktreeID,
+            suppressAutoParent: suppressAutoParent
+        )
 
         // 2. Generate name and construct path
         let name = folder ?? NameGenerator.generate()
@@ -60,7 +69,8 @@ extension WorktreeLifecycle {
             branch: branch,
             path: worktreePath,
             tmuxServer: tmuxServer,
-            status: .creating
+            status: .creating,
+            parentWorktreeID: resolvedParent
         )
 
         return worktree

@@ -22,13 +22,20 @@ extension WorktreeLifecycle {
     ///   - force: If true, skip running the archive hook.
     /// Phase 1 (fast): Validates, updates DB status, kills tmux windows.
     /// Returns the worktree and repo for phase 2.
-    public func beginArchiveWorktree(worktreeID: UUID) async throws -> (Worktree, Repo) {
+    public func beginArchiveWorktree(worktreeID: UUID, force: Bool = false) async throws -> (Worktree, Repo) {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
 
         if worktree.status == .main {
             throw WorktreeLifecycleError.invalidOperation("Cannot archive the main branch worktree")
+        }
+
+        // Refuse to archive a worktree whose direct children are still active
+        // or being created. `force` bypasses the check for cascade flows like
+        // repo deletion. Performed before any tmux/disk work.
+        if !force {
+            try await db.worktrees.assertArchivable(id: worktreeID)
         }
 
         guard let repo = try await db.repos.get(id: worktree.repoID) else {
@@ -136,7 +143,7 @@ extension WorktreeLifecycle {
 
     /// Legacy all-in-one archive (used by CLI).
     public func archiveWorktree(worktreeID: UUID, force: Bool = false) async throws {
-        let (worktree, repo) = try await beginArchiveWorktree(worktreeID: worktreeID)
+        let (worktree, repo) = try await beginArchiveWorktree(worktreeID: worktreeID, force: force)
         await completeArchiveWorktree(worktree: worktree, repo: repo, force: force)
     }
 

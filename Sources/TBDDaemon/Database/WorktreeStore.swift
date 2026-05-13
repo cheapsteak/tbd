@@ -22,6 +22,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var archivedHeadSHA: String?
     var tabOrder: String  // JSON array of UUID strings, e.g. "[]" or "[\"...\",\"...\"]"
     var activeTabID: String?
+    var parentWorktreeID: String?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -43,6 +44,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         }
         self.tabOrder = "[]"  // overwritten by GRDB when fetched; only "new worktree" path uses this initializer
         self.activeTabID = nil  // new worktrees start with no stored selection
+        self.parentWorktreeID = wt.parentWorktreeID?.uuidString
     }
 
     func toModel() -> Worktree {
@@ -65,8 +67,43 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             tmuxServer: tmuxServer,
             archivedClaudeSessions: sessions,
             sortOrder: sortOrder,
-            archivedHeadSHA: archivedHeadSHA
+            archivedHeadSHA: archivedHeadSHA,
+            parentWorktreeID: parentWorktreeID.flatMap { UUID(uuidString: $0) }
         )
+    }
+}
+
+/// Errors raised when validating a worktree's parent relationship. Named
+/// `WorktreeMoveError` for historical reasons (introduced with `move()`) but
+/// also raised by `ParentResolver` during worktree *creation* — the parent
+/// validation rules (`parentNotFound`, `parentIsMain`, `parentIsArchived`)
+/// apply identically at both call sites. The `selfReference` and `cycle`
+/// cases are move-only by construction (a brand-new row has no descendants).
+public enum WorktreeMoveError: Error, CustomStringConvertible {
+    case selfReference
+    case cycle
+    case parentNotFound
+    case parentIsMain
+    case parentIsArchived
+    case worktreeNotFound
+
+    public var description: String {
+        switch self {
+        case .selfReference: return "A worktree cannot be its own parent."
+        case .cycle: return "This move would create a cycle in the worktree tree."
+        case .parentNotFound: return "Parent worktree not found."
+        case .parentIsMain: return "Cannot nest under the main worktree."
+        case .parentIsArchived: return "Cannot nest under an archived worktree."
+        case .worktreeNotFound: return "Worktree not found."
+        }
+    }
+}
+
+public enum WorktreeArchiveError: Error, CustomStringConvertible {
+    case hasActiveChildren
+
+    public var description: String {
+        "Archive nested worktrees first."
     }
 }
 
@@ -79,7 +116,10 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Create a new worktree. The displayName defaults to the name.
-    /// Automatically assigns sortOrder = max(sortOrder) + 1 for the repo.
+    /// Automatically assigns sortOrder = max(sortOrder) + 1 scoped to the
+    /// new worktree's sibling group (same parentWorktreeID), so nested
+    /// children get their own contiguous ordering separate from top-level
+    /// worktrees in the same repo.
     public func create(
         repoID: UUID,
         name: String,
@@ -87,14 +127,24 @@ public struct WorktreeStore: Sendable {
         branch: String,
         path: String,
         tmuxServer: String,
-        status: WorktreeStatus = .active
+        status: WorktreeStatus = .active,
+        parentWorktreeID: UUID? = nil
     ) async throws -> Worktree {
         try await writer.write { db in
-            let maxOrder = try Int.fetchOne(
-                db,
-                sql: "SELECT MAX(sortOrder) FROM worktree WHERE repoID = ?",
-                arguments: [repoID.uuidString]
-            ) ?? 0
+            let maxOrder: Int
+            if let pid = parentWorktreeID {
+                maxOrder = try Int.fetchOne(
+                    db,
+                    sql: "SELECT MAX(sortOrder) FROM worktree WHERE parentWorktreeID = ?",
+                    arguments: [pid.uuidString]
+                ) ?? 0
+            } else {
+                maxOrder = try Int.fetchOne(
+                    db,
+                    sql: "SELECT MAX(sortOrder) FROM worktree WHERE repoID = ? AND parentWorktreeID IS NULL",
+                    arguments: [repoID.uuidString]
+                ) ?? 0
+            }
             let wt = Worktree(
                 repoID: repoID,
                 name: name,
@@ -103,7 +153,8 @@ public struct WorktreeStore: Sendable {
                 path: path,
                 status: status,
                 tmuxServer: tmuxServer,
-                sortOrder: maxOrder + 1
+                sortOrder: maxOrder + 1,
+                parentWorktreeID: parentWorktreeID
             )
             let record = WorktreeRecord(from: wt)
             try record.insert(db)
@@ -126,6 +177,68 @@ public struct WorktreeStore: Sendable {
     public func delete(id: UUID) async throws {
         _ = try await writer.write { db in
             try WorktreeRecord.deleteOne(db, key: id.uuidString)
+        }
+    }
+
+    /// NULL out `parentWorktreeID` for rows whose parent is either missing or
+    /// archived. Both cases would leave the child unreachable in the sidebar:
+    /// 1. **Missing parent** — deleted out-of-band (manual sqlite edit / future
+    ///    regression).
+    /// 2. **Archived parent** — `assertArchivable` allows archiving a parent
+    ///    once all its children are archived; if the user later revives the
+    ///    child but not the parent, the child's `parentWorktreeID` still points
+    ///    at an archived row. The sidebar's `topLevelWorktrees` filter excludes
+    ///    children-of-anything, and `WorktreeSubtreeView` never visits an
+    ///    archived parent's subtree — so the revived child becomes invisible.
+    ///    Promoting it to top-level here matches the "if parent disappears,
+    ///    null the pointer" pattern.
+    /// Safe to call on every reconcile — single UPDATE with a NOT IN subquery.
+    public func nullOrphanedParents() async throws {
+        try await writer.write { db in
+            try db.execute(sql: """
+                UPDATE worktree
+                SET parentWorktreeID = NULL
+                WHERE parentWorktreeID IS NOT NULL
+                  AND parentWorktreeID NOT IN (
+                    SELECT id FROM worktree WHERE status NOT IN ('archived')
+                  )
+            """)
+        }
+    }
+
+    /// Walk every row with a non-null `parentWorktreeID` and break any cycles
+    /// found (A.parent=B, B.parent=A) by NULLing the parent on the row we
+    /// started from. `WorktreeStore.move()`'s cycle guard prevents new cycles
+    /// through normal operations, so this only catches DB damage from manual
+    /// sqlite edits or regressions — call it at daemon startup, NOT on every
+    /// reconcile. (Reconcile fires from cleanup RPCs and periodic git sweeps;
+    /// running this O(N) walk every time is wasted work for the common case
+    /// of a healthy DB.)
+    public func breakCyclicParents() async throws {
+        try await writer.write { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, parentWorktreeID FROM worktree
+                WHERE parentWorktreeID IS NOT NULL
+            """)
+            for row in rows {
+                guard let rowID = row["id"] as String? else { continue }
+                var cursor: String? = row["parentWorktreeID"] as String?
+                var visited: Set<String> = [rowID]
+                while let curID = cursor {
+                    if !visited.insert(curID).inserted {
+                        try db.execute(
+                            sql: "UPDATE worktree SET parentWorktreeID = NULL WHERE id = ?",
+                            arguments: [rowID]
+                        )
+                        break
+                    }
+                    cursor = try Row.fetchOne(
+                        db,
+                        sql: "SELECT parentWorktreeID FROM worktree WHERE id = ?",
+                        arguments: [curID]
+                    )?["parentWorktreeID"] as String?
+                }
+            }
         }
     }
 
@@ -206,6 +319,37 @@ public struct WorktreeStore: Sendable {
                 record.archivedHeadSHA = sha
             }
             try record.update(db)
+        }
+    }
+
+    /// Throws `WorktreeArchiveError.hasActiveChildren` if the worktree has any
+    /// **direct** children with status `.active` or `.creating`. Used as a precheck
+    /// by the archive RPC handler so app and CLI surface the same error.
+    ///
+    /// Note: only depth-1 children are checked here. A tree shape like
+    /// `A → B(archived) → C(active)` would let `A` be archived because its
+    /// only direct child `B` is already archived; `C` then briefly points at
+    /// an archived ancestor. That window is closed by `nullOrphanedParents`
+    /// on the next reconcile (which now treats archived parents the same as
+    /// missing ones), so `C` self-promotes to top-level rather than going
+    /// invisible. Deepening the check to "any active descendant" would block
+    /// legitimate archive cascades, so the current depth-1 scope is intentional.
+    public func assertArchivable(id: UUID) async throws {
+        try await writer.read { db in
+            let activeRaw = WorktreeStatus.active.rawValue
+            let creatingRaw = WorktreeStatus.creating.rawValue
+            let count = try Int.fetchOne(
+                db,
+                sql: """
+                SELECT COUNT(*) FROM worktree
+                WHERE parentWorktreeID = ?
+                  AND status IN (?, ?)
+                """,
+                arguments: [id.uuidString, activeRaw, creatingRaw]
+            ) ?? 0
+            if count > 0 {
+                throw WorktreeArchiveError.hasActiveChildren
+            }
         }
     }
 
@@ -314,8 +458,82 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// Move a worktree to a new parent (or top-level) and a new sort-order
+    /// position within its destination sibling group.
+    /// Validates: not-self, parent exists, parent is not `main`, no cycle.
+    /// Renumbers siblings in the destination group so the moved row lands at
+    /// the requested sortOrder.
+    public func move(worktreeID: UUID, newParentID: UUID?, newSortOrder: Int) async throws {
+        try await writer.write { db in
+            guard let movingRecord = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString) else {
+                throw WorktreeMoveError.worktreeNotFound
+            }
+
+            if let pid = newParentID {
+                if pid == worktreeID {
+                    throw WorktreeMoveError.selfReference
+                }
+                guard let parent = try WorktreeRecord.fetchOne(db, key: pid.uuidString) else {
+                    throw WorktreeMoveError.parentNotFound
+                }
+                if parent.status == WorktreeStatus.main.rawValue {
+                    throw WorktreeMoveError.parentIsMain
+                }
+                if parent.status == WorktreeStatus.archived.rawValue {
+                    // Symmetric to ParentResolver's create-time check: moving a
+                    // worktree under an archived parent would produce an
+                    // invisible row until reconcile clears the pointer.
+                    throw WorktreeMoveError.parentIsArchived
+                }
+                // Cycle check: walk up from parent; if we ever hit `worktreeID`, cycle.
+                // The `visited` set defends against a pre-existing cycle in the DB
+                // (manual edit or future regression) by treating any revisit as a
+                // cycle too — otherwise the loop would spin forever inside the
+                // write transaction and block the database.
+                var cursor: String? = parent.parentWorktreeID
+                var visited: Set<String> = [pid.uuidString]
+                while let curID = cursor {
+                    if curID == worktreeID.uuidString {
+                        throw WorktreeMoveError.cycle
+                    }
+                    if !visited.insert(curID).inserted {
+                        throw WorktreeMoveError.cycle
+                    }
+                    cursor = try WorktreeRecord.fetchOne(db, key: curID)?.parentWorktreeID
+                }
+            }
+
+            // Renumber destination siblings: shift sortOrder of siblings >= newSortOrder by +1,
+            // then set moving to newSortOrder.
+            let parentArg = newParentID?.uuidString
+            if let p = parentArg {
+                try db.execute(
+                    sql: "UPDATE worktree SET sortOrder = sortOrder + 1 WHERE parentWorktreeID = ? AND sortOrder >= ? AND id != ?",
+                    arguments: [p, newSortOrder, worktreeID.uuidString]
+                )
+            } else {
+                // Top-level siblings = same repo, parent null, NOT main. The UI
+                // renders main via a status-filtered path (so an updated sortOrder
+                // on a main row is invisible), but excluding it here keeps the
+                // sibling group consistent with how the UI orders top-level rows.
+                try db.execute(
+                    sql: "UPDATE worktree SET sortOrder = sortOrder + 1 WHERE repoID = ? AND parentWorktreeID IS NULL AND status != 'main' AND sortOrder >= ? AND id != ?",
+                    arguments: [movingRecord.repoID, newSortOrder, worktreeID.uuidString]
+                )
+            }
+
+            try db.execute(
+                sql: "UPDATE worktree SET parentWorktreeID = ?, sortOrder = ? WHERE id = ?",
+                arguments: [parentArg, newSortOrder, worktreeID.uuidString]
+            )
+        }
+    }
+
     /// Reorder worktrees within a repo. The worktreeIDs array defines the new order.
-    /// Worktrees not in the array are pushed to sortOrder values after the provided list.
+    /// Only affects worktrees in the provided list (typically top-level). Any other
+    /// top-level worktrees not in the list are pushed to sortOrder values after the
+    /// reordered ones. Nested children (parentWorktreeID IS NOT NULL) are left alone
+    /// — their sortOrder is scoped to their parent group.
     public func reorder(repoID: UUID, worktreeIDs: [UUID]) async throws {
         try await writer.write { db in
             for (index, wtID) in worktreeIDs.enumerated() {
@@ -324,14 +542,18 @@ public struct WorktreeStore: Sendable {
                     arguments: [index, wtID.uuidString, repoID.uuidString]
                 )
             }
-            // Push any worktrees not in the provided list to after the reordered ones
+            // Push any TOP-LEVEL worktrees not in the provided list to after the
+            // reordered ones. Children are scoped per parent and untouched.
             let idStrings = worktreeIDs.map(\.uuidString)
             let placeholders = idStrings.map { _ in "?" }.joined(separator: ",")
             let args: [any DatabaseValueConvertible] = [worktreeIDs.count, repoID.uuidString] + idStrings
             try db.execute(
                 sql: """
                     UPDATE worktree SET sortOrder = ? + rowid
-                    WHERE repoID = ? AND status IN ('active', 'creating') AND id NOT IN (\(placeholders))
+                    WHERE repoID = ?
+                      AND status IN ('active', 'creating')
+                      AND parentWorktreeID IS NULL
+                      AND id NOT IN (\(placeholders))
                     """,
                 arguments: StatementArguments(args)
             )

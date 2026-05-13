@@ -4,8 +4,11 @@ import TBDShared
 struct WorktreeRowView: View {
     let worktree: Worktree
     var isMain: Bool = false
+    var indentLevel: Int = 0
+    var sectionRepoID: UUID? = nil
     @EnvironmentObject var appState: AppState
     @State private var isEditing = false
+    @State private var isRowHovered: Bool = false
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -105,7 +108,6 @@ struct WorktreeRowView: View {
     var body: some View {
         HStack(spacing: 6) {
             rowIcons()
-                .allowsHitTesting(false)
             RenameableLabel(
                 text: worktree.displayName,
                 isEditing: $isEditing,
@@ -135,29 +137,57 @@ struct WorktreeRowView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .allowsHitTesting(false)
+            }
+            if let sectionRepoID, sectionRepoID != worktree.repoID,
+               let homeRepo = appState.repoName(for: worktree.repoID) {
+                Text("(\(homeRepo))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if NSEvent.modifierFlags.contains(.command) {
-                if appState.selectedWorktreeIDs.contains(worktree.id) {
-                    appState.selectedWorktreeIDs.remove(worktree.id)
-                } else {
-                    appState.selectedWorktreeIDs.insert(worktree.id)
-                }
-            } else if !isMain && appState.selectedWorktreeIDs == [worktree.id] && !isEditing {
-                startRename()
-            } else {
-                appState.selectedWorktreeIDs = [worktree.id]
-            }
-        }
+        .padding(.leading, CGFloat(indentLevel) * 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: 28)
         .help(isEditing ? "" : worktree.displayName)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
         )
+        // Hierarchy guide lines: one 1pt vertical at each ancestor depth.
+        // Each line sits at `depth * 16 + 8` from the row's leading edge so
+        // segments butt up against neighboring nested rows into a continuous
+        // thread down the parent's gutter.
+        .overlay(alignment: .leading) {
+            if indentLevel > 0 {
+                ZStack(alignment: .leading) {
+                    ForEach(0..<indentLevel, id: \.self) { depth in
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.25))
+                            .frame(width: 1)
+                            .offset(x: CGFloat(depth) * 16 + 8)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if isRowHovered && !isMain {
+                Button(action: {
+                    let parentID = worktree.id
+                    let repoID = worktree.repoID
+                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
+                }) {
+                    Image(systemName: "plus")
+                        .font(.caption)
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(HoverPressButtonStyle())
+                .help("New nested worktree")
+                .padding(.trailing, 4)
+            }
+        }
+        .onHover { isRowHovered = $0 }
         .contextMenu {
             SidebarContextMenu(worktree: worktree, onRename: startRename)
         }

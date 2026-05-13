@@ -11,7 +11,9 @@ extension AppState {
     /// Create a new worktree in a repo.
     /// Shows an optimistic placeholder immediately, then replaces it with the
     /// real worktree once the daemon responds.
-    func createWorktree(repoID: UUID) {
+    /// When `parentWorktreeID` is non-nil, the new worktree is created as a
+    /// nested child of that worktree (must be in the same repo).
+    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil) {
         // Optimistic placeholder so the row appears instantly
         let placeholderName = NameGenerator.generate()
         let placeholder = Worktree(
@@ -21,7 +23,8 @@ extension AppState {
             branch: "tbd/\(placeholderName)",
             path: "",
             status: .creating,
-            tmuxServer: ""
+            tmuxServer: "",
+            parentWorktreeID: parentWorktreeID
         )
         pendingWorktreeIDs.insert(placeholder.id)
         worktrees[repoID, default: []].append(placeholder)
@@ -32,7 +35,10 @@ extension AppState {
             defer { pendingWorktreeIDs.remove(placeholder.id) }
             do {
                 let size = mainAreaTerminalSize()
-                let wt = try await daemonClient.createWorktree(repoID: repoID, cols: size.cols, rows: size.rows)
+                let wt = try await daemonClient.createWorktree(
+                    repoID: repoID, cols: size.cols, rows: size.rows,
+                    parentWorktreeID: parentWorktreeID
+                )
                 // Replace the placeholder with the real worktree
                 if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholder.id }) {
                     worktrees[repoID]?[idx] = wt
@@ -239,40 +245,139 @@ extension AppState {
         }
     }
 
-    // MARK: - Reorder
+    // MARK: - Reorder top-level
 
-    /// Reorder worktrees within a repo. Updates locally first (optimistic), then persists via RPC.
-    /// Rolls back local state if the RPC call fails.
-    func reorderWorktrees(repoID: UUID, fromOffsets source: IndexSet, toOffset destination: Int) {
-        let previousWorktrees = worktrees[repoID]
-        guard var repoWorktrees = worktrees[repoID]?.filter({ $0.status == .active || $0.status == .creating }) else { return }
-        repoWorktrees.move(fromOffsets: source, toOffset: destination)
-        for i in repoWorktrees.indices {
-            repoWorktrees[i].sortOrder = i
+    /// Reorder ONLY the top-level worktrees of a repo (parentWorktreeID == nil),
+    /// triggered by SwiftUI `.onMove` whose indices index the top-level ForEach.
+    /// Nested children stay attached to their parents — only top-level sortOrders change.
+    /// Updates locally first (optimistic), then persists via RPC; rolls back on error.
+    func reorderTopLevelWorktrees(repoID: UUID, fromOffsets source: IndexSet, toOffset destination: Int) {
+        let previous = worktrees[repoID]
+        var rows = (worktrees[repoID] ?? [])
+        // Snapshot the top-level order BEFORE the move (matches the ForEach).
+        var topLevel = rows
+            .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        logger.debug("reorderTopLevel BEFORE: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public)")
+        // Apply the swap to derive the new top-level order.
+        topLevel.move(fromOffsets: source, toOffset: destination)
+        logger.debug("reorderTopLevel AFTER: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public)")
+
+        // Optimistic local update: reassign sortOrders for the new top-level order.
+        for (i, wt) in topLevel.enumerated() {
+            if let idx = rows.firstIndex(where: { $0.id == wt.id }) {
+                rows[idx].sortOrder = i
+            }
         }
+        worktrees[repoID] = rows
 
-        // Rebuild the full array: keep main/other statuses in place, replace active/creating with reordered
-        let others = (worktrees[repoID] ?? []).filter { $0.status != .active && $0.status != .creating }
-        worktrees[repoID] = others + repoWorktrees
-
-        // Persist via RPC
-        let worktreeIDs = repoWorktrees.map(\.id)
+        // Persist via the bulk reorder RPC. Daemon renumbers all listed worktrees
+        // to contiguous sortOrders matching the new top-level order, avoiding
+        // gappy/non-contiguous values from prior individual moves.
+        let orderedIDs = topLevel.map(\.id)
         Task {
             do {
-                try await daemonClient.reorderWorktrees(repoID: repoID, worktreeIDs: worktreeIDs)
+                logger.debug("RPC worktree.reorder ids=\(orderedIDs.map { $0.uuidString.prefix(8) }.joined(separator: ","), privacy: .public)")
+                try await daemonClient.reorderWorktrees(repoID: repoID, worktreeIDs: orderedIDs)
             } catch {
-                logger.error("Failed to reorder worktrees: \(error)")
-                worktrees[repoID] = previousWorktrees
+                logger.error("reorderTopLevelWorktrees RPC failed: \(error.localizedDescription, privacy: .public)")
+                await MainActor.run { self.worktrees[repoID] = previous }
             }
         }
     }
 
+    // MARK: - Move (nested worktrees)
+
+    /// Move a worktree to a new parent (or top-level) and sortOrder.
+    /// Optimistic local update; rolls back on RPC error.
+    func moveWorktree(id: UUID, newParentID: UUID?, newSortOrder: Int) {
+        let snapshot = worktrees
+        if let repoID = repoIDForWorktree(id), var rows = worktrees[repoID] {
+            if let idx = rows.firstIndex(where: { $0.id == id }) {
+                rows[idx].parentWorktreeID = newParentID
+                rows[idx].sortOrder = newSortOrder
+                worktrees[repoID] = rows
+            }
+        }
+        Task {
+            do {
+                try await daemonClient.moveWorktree(
+                    worktreeID: id, newParentID: newParentID, newSortOrder: newSortOrder
+                )
+            } catch {
+                logger.error("moveWorktree failed: \(error.localizedDescription)")
+                await MainActor.run { self.worktrees = snapshot }
+            }
+        }
+    }
+
+    /// All worktrees whose parentWorktreeID == parentID, across all repos, in sortOrder.
+    /// Only active or creating worktrees are returned.
+    func children(of parentID: UUID) -> [Worktree] {
+        worktrees.values
+            .flatMap { $0 }
+            .filter { $0.parentWorktreeID == parentID && ($0.status == .active || $0.status == .creating) }
+            .sorted { $0.sortOrder < $1.sortOrder }
+    }
+
+    /// Find a worktree by id across all repos.
+    func findWorktree(id: UUID) -> Worktree? {
+        for (_, rows) in worktrees {
+            if let wt = rows.first(where: { $0.id == id }) { return wt }
+        }
+        return nil
+    }
+
+    /// Repo ID of the repo containing the given worktree, if any.
+    private func repoIDForWorktree(_ id: UUID) -> UUID? {
+        for (rid, rows) in worktrees where rows.contains(where: { $0.id == id }) {
+            return rid
+        }
+        return nil
+    }
+
     // MARK: - Keyboard Shortcut Actions
 
-    /// All worktrees in sidebar order (sorted by repo, then by sortOrder).
+    /// All worktrees in **visual sidebar order**: each repo's main row (if any),
+    /// then a depth-first walk of top-level worktrees followed by their
+    /// descendants. Matches what the user sees in the sidebar so cmd+N keyboard
+    /// shortcuts (via `selectWorktreeByIndex`) land on the right row.
+    ///
+    /// `sortOrder` is scoped per sibling group (top-level OR children-of-X), so
+    /// a flat repo-wide sort by `sortOrder` would collapse two namespaces
+    /// together and put nested children with `sortOrder: 0` ahead of top-level
+    /// rows with `sortOrder: 1+`.
     var allWorktreesOrdered: [Worktree] {
-        repos.flatMap { repo in
-            (worktrees[repo.id] ?? []).sorted { $0.sortOrder < $1.sortOrder }
+        var result: [Worktree] = []
+        for repo in repos {
+            let inRepo = worktrees[repo.id] ?? []
+            // Main row first (if present in this repo).
+            if let main = inRepo.first(where: { $0.status == .main }) {
+                result.append(main)
+            }
+            // Top-level active/creating worktrees in this repo, sorted by sortOrder.
+            let topLevel = inRepo
+                .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
+                .sorted { $0.sortOrder < $1.sortOrder }
+            for wt in topLevel {
+                appendSubtree(wt, depth: 0, into: &result)
+            }
+        }
+        return result
+    }
+
+    /// Depth-first append: the worktree itself, then its children (across all
+    /// repos, since a child can have a different `repoID` from its parent),
+    /// recursively. Used by `allWorktreesOrdered` to match sidebar order.
+    /// Caps recursion at 50 to mirror `WorktreeSubtreeView.kMaxSubtreeDepth`
+    /// in case a cyclic parent chain ever makes it into the in-memory state
+    /// (DB-side cycle guards make this unlikely, but the keyboard-nav path
+    /// shouldn't blow the stack while the renderer gracefully degrades).
+    private func appendSubtree(_ wt: Worktree, depth: Int, into result: inout [Worktree]) {
+        result.append(wt)
+        guard depth < 50 else { return }
+        for child in children(of: wt.id) {
+            appendSubtree(child, depth: depth + 1, into: &result)
         }
     }
 

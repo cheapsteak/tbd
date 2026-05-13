@@ -22,6 +22,7 @@ public enum StateDelta: Codable, Sendable {
     case modelProfileUsageUpdated(ModelProfileUsage)
     case modelProfilesChanged
     case terminalSessionUpdated(TerminalSessionDelta)
+    case worktreeMoved(WorktreeMovedDelta)
 }
 
 /// Delta payload for Claude session ID/transcript path rollover, fired when
@@ -154,5 +155,17 @@ public struct TerminalPinDelta: Codable, Sendable {
     public let pinnedAt: Date?
     public init(terminalID: UUID, pinnedAt: Date?) {
         self.terminalID = terminalID; self.pinnedAt = pinnedAt
+    }
+}
+
+public struct WorktreeMovedDelta: Codable, Sendable {
+    public let worktreeID: UUID
+    public let newParentID: UUID?
+    public let newSortOrder: Int
+
+    public init(worktreeID: UUID, newParentID: UUID?, newSortOrder: Int) {
+        self.worktreeID = worktreeID
+        self.newParentID = newParentID
+        self.newSortOrder = newSortOrder
     }
 }

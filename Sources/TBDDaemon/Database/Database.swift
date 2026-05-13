@@ -391,6 +391,13 @@ public final class TBDDatabase: Sendable {
             try db.execute(sql: "UPDATE terminal SET kind = 'shell' WHERE kind IS NULL")
         }
 
+        migrator.registerMigration("v23_worktree_parent") { db in
+            try db.alter(table: "worktree") { t in
+                t.add(column: "parentWorktreeID", .text)
+                    .references("worktree", onDelete: .setNull)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

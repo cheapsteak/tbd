@@ -99,6 +99,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// not enriched (active worktrees, or archived worktrees whose Claude
     /// project dir could not be resolved).
     public var liveClaudeSessionCount: Int?
+    public var parentWorktreeID: UUID?
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
@@ -106,7 +107,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String,
                 archivedClaudeSessions: [String]? = nil, sortOrder: Int = 0,
                 archivedHeadSHA: String? = nil,
-                liveClaudeSessionCount: Int? = nil) {
+                liveClaudeSessionCount: Int? = nil,
+                parentWorktreeID: UUID? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -122,6 +124,14 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.sortOrder = sortOrder
         self.archivedHeadSHA = archivedHeadSHA
         self.liveClaudeSessionCount = liveClaudeSessionCount
+        self.parentWorktreeID = parentWorktreeID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, repoID, name, displayName, branch, path, status
+        case hasConflicts, createdAt, archivedAt, tmuxServer
+        case archivedClaudeSessions, sortOrder, archivedHeadSHA
+        case liveClaudeSessionCount, parentWorktreeID
     }
 
     public init(from decoder: Decoder) throws {
@@ -141,6 +151,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
         archivedHeadSHA = try c.decodeIfPresent(String.self, forKey: .archivedHeadSHA)
         liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
+        parentWorktreeID = try c.decodeIfPresent(UUID.self, forKey: .parentWorktreeID)
     }
 }
 

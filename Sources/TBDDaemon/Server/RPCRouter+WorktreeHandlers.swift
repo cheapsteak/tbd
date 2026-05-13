@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeHandlers")
 
 extension RPCRouter {
 
@@ -9,7 +12,16 @@ extension RPCRouter {
         let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
 
         // Phase 1: Fast — insert DB row with status = .creating, return immediately
-        let pending = try await lifecycle.beginCreateWorktree(repoID: params.repoID, folder: params.folder, branch: params.branch, displayName: params.displayName)
+        let pending = try await lifecycle.beginCreateWorktree(
+            repoID: params.repoID,
+            folder: params.folder,
+            branch: params.branch,
+            displayName: params.displayName,
+            parentWorktreeID: params.parentWorktreeID,
+            siblingOfWorktreeID: params.siblingOfWorktreeID,
+            callerWorktreeID: params.callerWorktreeID,
+            suppressAutoParent: params.suppressAutoParent ?? false
+        )
 
         // Phase 2: Fire-and-forget — git operations + tmux setup in background
         let lifecycle = self.lifecycle
@@ -33,7 +45,7 @@ extension RPCRouter {
                 subs.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
                     worktreeID: pending.id
                 )))
-                print("[RPCRouter] Background worktree creation failed for \(pending.id): \(error)")
+                logger.error("background worktreeCreate failed for \(pending.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
 
@@ -121,6 +133,23 @@ extension RPCRouter {
 
         subscriptions.broadcast(delta: .worktreeReordered(RepoIDDelta(
             repoID: params.repoID
+        )))
+
+        return .ok()
+    }
+
+    func handleWorktreeMove(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeMoveParams.self, from: paramsData)
+        try await db.worktrees.move(
+            worktreeID: params.worktreeID,
+            newParentID: params.newParentID,
+            newSortOrder: params.newSortOrder
+        )
+
+        subscriptions.broadcast(delta: .worktreeMoved(WorktreeMovedDelta(
+            worktreeID: params.worktreeID,
+            newParentID: params.newParentID,
+            newSortOrder: params.newSortOrder
         )))
 
         return .ok()

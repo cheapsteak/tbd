@@ -2,6 +2,8 @@ import Foundation
 import TBDShared
 import os
 
+private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")
+
 /// Top-level daemon orchestrator.
 ///
 /// Coordinates all subsystems: database, managers, servers, and subscriptions.
@@ -172,6 +174,14 @@ public final class Daemon: Sendable {
 
         // 11. Reconcile worktrees for all known repos
         await rpcRouter.suspendResumeCoordinator.reconcileOnStartup()
+        // Break any cyclic parent pointers in the worktree tree (manual sqlite
+        // edits, future regressions). Once at startup only — the cycle guard
+        // in WorktreeStore.move prevents new cycles via normal operations.
+        do {
+            try await database.worktrees.breakCyclicParents()
+        } catch {
+            daemonLogger.warning("breakCyclicParents failed at startup: \(error.localizedDescription, privacy: .public)")
+        }
         do {
             let repos = try await database.repos.list()
             for repo in repos {

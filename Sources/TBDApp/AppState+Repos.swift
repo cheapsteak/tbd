@@ -5,6 +5,13 @@ import os
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+Repos")
 
 extension AppState {
+    // MARK: - Repo Lookups
+
+    /// Display name of a repo by ID, if known.
+    func repoName(for repoID: UUID) -> String? {
+        repos.first(where: { $0.id == repoID })?.displayName
+    }
+
     // MARK: - Repo Actions
 
     /// Add a repository by path.

@@ -33,6 +33,7 @@ struct SidebarContextMenu: View {
                 let hasSuspendedClaude = terminals.contains {
                     $0.claudeSessionID != nil && $0.suspendedAt != nil
                 }
+                let hasActiveChildren = !appState.children(of: worktree.id).isEmpty
 
                 if hasUnsuspendedClaude {
                     Button("Suspend Claude") {
@@ -80,12 +81,20 @@ struct SidebarContextMenu: View {
                     }
                 }
 
+                Button("Create Nested Worktree") {
+                    let parentID = worktree.id
+                    let repoID = worktree.repoID
+                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
+                }
+
                 Button("Archive", role: .destructive) {
                     let wtID = worktree.id
                     Task {
                         await appState.archiveWorktree(id: wtID)
                     }
                 }
+                .disabled(hasActiveChildren)
+                .help(hasActiveChildren ? "Archive nested worktrees first" : "")
 
                 Divider()
 

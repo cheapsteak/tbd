@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-private struct HoverPressButtonStyle: ButtonStyle {
+struct HoverPressButtonStyle: ButtonStyle {
     @State private var isHovering = false
 
     func makeBody(configuration: Configuration) -> some View {
@@ -55,9 +55,9 @@ struct RepoSectionView: View {
             .first { $0.status == .main }
     }
 
-    var worktrees: [Worktree] {
+    var topLevelWorktrees: [Worktree] {
         (appState.worktrees[repo.id] ?? [])
-            .filter { $0.status == .active || $0.status == .creating }
+            .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
             .sorted { $0.sortOrder < $1.sortOrder }
     }
 
@@ -201,19 +201,17 @@ struct RepoSectionView: View {
                     .listRowBackground(Color.clear)
                     .tag(main.id)
             }
-            ForEach(worktrees) { worktree in
-                WorktreeRowView(worktree: worktree)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.white.opacity(0.0001))
+            ForEach(topLevelWorktrees) { wt in
+                WorktreeSubtreeView(worktree: wt, depth: 0, sectionRepoID: repo.id)
                     .opacity(isChevronHovered ? 0.7 : 1.0)
                     .onHover { onSectionHoverChange($0) }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                    .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
-                    .tag(worktree.id)
             }
             .onMove { source, destination in
-                appState.reorderWorktrees(repoID: repo.id, fromOffsets: source, toOffset: destination)
+                appState.reorderTopLevelWorktrees(
+                    repoID: repo.id,
+                    fromOffsets: source,
+                    toOffset: destination
+                )
             }
         }
     }
