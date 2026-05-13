@@ -73,6 +73,12 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     }
 }
 
+/// Errors raised when validating a worktree's parent relationship. Named
+/// `WorktreeMoveError` for historical reasons (introduced with `move()`) but
+/// also raised by `ParentResolver` during worktree *creation* — the parent
+/// validation rules (`parentNotFound`, `parentIsMain`, `parentIsArchived`)
+/// apply identically at both call sites. The `selfReference` and `cycle`
+/// cases are move-only by construction (a brand-new row has no descendants).
 public enum WorktreeMoveError: Error, CustomStringConvertible {
     case selfReference
     case cycle

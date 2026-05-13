@@ -67,9 +67,11 @@ extension WorktreeLifecycle {
     /// - Worktrees in db but missing from git: marked as archived
     /// - Worktrees in git but missing from db: added with default names
     public func reconcile(repoID: UUID) async throws {
-        // Null out parent pointers that reference rows no longer in the table
-        // (e.g. parent deleted out-of-band). Archived parents are left alone so
-        // they can still be revived. Cheap single UPDATE — safe to run per repo.
+        // Null out parent pointers whose target is missing OR archived. Either
+        // case would leave the child unreachable in the sidebar — missing rows
+        // can't render, and archived parents are filtered out of the subtree
+        // walk. Promoting to top-level is the only sensible recovery. Cheap
+        // single UPDATE — safe to run per repo.
         try await db.worktrees.nullOrphanedParents()
 
         guard let repo = try await db.repos.get(id: repoID) else {
