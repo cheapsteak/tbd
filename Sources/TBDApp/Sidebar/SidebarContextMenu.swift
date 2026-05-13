@@ -81,6 +81,12 @@ struct SidebarContextMenu: View {
                     }
                 }
 
+                Button("Create Nested Worktree") {
+                    let parentID = worktree.id
+                    let repoID = worktree.repoID
+                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
+                }
+
                 Button("Archive", role: .destructive) {
                     let wtID = worktree.id
                     Task {

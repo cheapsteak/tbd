@@ -11,7 +11,9 @@ extension AppState {
     /// Create a new worktree in a repo.
     /// Shows an optimistic placeholder immediately, then replaces it with the
     /// real worktree once the daemon responds.
-    func createWorktree(repoID: UUID) {
+    /// When `parentWorktreeID` is non-nil, the new worktree is created as a
+    /// nested child of that worktree (must be in the same repo).
+    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil) {
         // Optimistic placeholder so the row appears instantly
         let placeholderName = NameGenerator.generate()
         let placeholder = Worktree(
@@ -21,7 +23,8 @@ extension AppState {
             branch: "tbd/\(placeholderName)",
             path: "",
             status: .creating,
-            tmuxServer: ""
+            tmuxServer: "",
+            parentWorktreeID: parentWorktreeID
         )
         pendingWorktreeIDs.insert(placeholder.id)
         worktrees[repoID, default: []].append(placeholder)
@@ -32,7 +35,10 @@ extension AppState {
             defer { pendingWorktreeIDs.remove(placeholder.id) }
             do {
                 let size = mainAreaTerminalSize()
-                let wt = try await daemonClient.createWorktree(repoID: repoID, cols: size.cols, rows: size.rows)
+                let wt = try await daemonClient.createWorktree(
+                    repoID: repoID, cols: size.cols, rows: size.rows,
+                    parentWorktreeID: parentWorktreeID
+                )
                 // Replace the placeholder with the real worktree
                 if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholder.id }) {
                     worktrees[repoID]?[idx] = wt

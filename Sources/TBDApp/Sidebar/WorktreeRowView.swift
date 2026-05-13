@@ -8,6 +8,7 @@ struct WorktreeRowView: View {
     var sectionRepoID: UUID? = nil
     @EnvironmentObject var appState: AppState
     @State private var isEditing = false
+    @State private var isRowHovered: Bool = false
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -185,6 +186,23 @@ struct WorktreeRowView: View {
                 .allowsHitTesting(false)
             }
         }
+        .overlay(alignment: .trailing) {
+            if isRowHovered && !isMain {
+                Button(action: {
+                    let parentID = worktree.id
+                    let repoID = worktree.repoID
+                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
+                }) {
+                    Image(systemName: "plus")
+                        .font(.caption)
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(HoverPressButtonStyle())
+                .help("New nested worktree")
+                .padding(.trailing, 4)
+            }
+        }
+        .onHover { isRowHovered = $0 }
         .contextMenu {
             SidebarContextMenu(worktree: worktree, onRename: startRename)
         }

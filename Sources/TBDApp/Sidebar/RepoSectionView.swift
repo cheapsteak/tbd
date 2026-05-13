@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-private struct HoverPressButtonStyle: ButtonStyle {
+struct HoverPressButtonStyle: ButtonStyle {
     @State private var isHovering = false
 
     func makeBody(configuration: Configuration) -> some View {
