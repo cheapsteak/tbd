@@ -447,7 +447,10 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Reorder worktrees within a repo. The worktreeIDs array defines the new order.
-    /// Worktrees not in the array are pushed to sortOrder values after the provided list.
+    /// Only affects worktrees in the provided list (typically top-level). Any other
+    /// top-level worktrees not in the list are pushed to sortOrder values after the
+    /// reordered ones. Nested children (parentWorktreeID IS NOT NULL) are left alone
+    /// — their sortOrder is scoped to their parent group.
     public func reorder(repoID: UUID, worktreeIDs: [UUID]) async throws {
         try await writer.write { db in
             for (index, wtID) in worktreeIDs.enumerated() {
@@ -456,14 +459,18 @@ public struct WorktreeStore: Sendable {
                     arguments: [index, wtID.uuidString, repoID.uuidString]
                 )
             }
-            // Push any worktrees not in the provided list to after the reordered ones
+            // Push any TOP-LEVEL worktrees not in the provided list to after the
+            // reordered ones. Children are scoped per parent and untouched.
             let idStrings = worktreeIDs.map(\.uuidString)
             let placeholders = idStrings.map { _ in "?" }.joined(separator: ",")
             let args: [any DatabaseValueConvertible] = [worktreeIDs.count, repoID.uuidString] + idStrings
             try db.execute(
                 sql: """
                     UPDATE worktree SET sortOrder = ? + rowid
-                    WHERE repoID = ? AND status IN ('active', 'creating') AND id NOT IN (\(placeholders))
+                    WHERE repoID = ?
+                      AND status IN ('active', 'creating')
+                      AND parentWorktreeID IS NULL
+                      AND id NOT IN (\(placeholders))
                     """,
                 arguments: StatementArguments(args)
             )

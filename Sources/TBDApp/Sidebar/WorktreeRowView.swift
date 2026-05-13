@@ -147,7 +147,7 @@ struct WorktreeRowView: View {
                     .lineLimit(1)
             }
         }
-        .padding(.leading, CGFloat(indentLevel) * 12)
+        .padding(.leading, CGFloat(indentLevel) * 16)
         .contentShape(Rectangle())
         .onTapGesture {
             if NSEvent.modifierFlags.contains(.command) {
@@ -168,6 +168,23 @@ struct WorktreeRowView: View {
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
         )
+        // Hierarchy guide lines: one 1pt vertical at each ancestor depth.
+        // Each line sits at `depth * 16 + 8` from the row's leading edge so
+        // segments butt up against neighboring nested rows into a continuous
+        // thread down the parent's gutter.
+        .overlay(alignment: .leading) {
+            if indentLevel > 0 {
+                ZStack(alignment: .leading) {
+                    ForEach(0..<indentLevel, id: \.self) { depth in
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.25))
+                            .frame(width: 1)
+                            .offset(x: CGFloat(depth) * 16 + 8)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+        }
         .contextMenu {
             SidebarContextMenu(worktree: worktree, onRename: startRename)
         }

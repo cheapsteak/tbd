@@ -206,7 +206,13 @@ struct RepoSectionView: View {
                     .opacity(isChevronHovered ? 0.7 : 1.0)
                     .onHover { onSectionHoverChange($0) }
             }
-            // Drag-and-drop is reimplemented in a later task.
+            .onMove { source, destination in
+                appState.reorderTopLevelWorktrees(
+                    repoID: repo.id,
+                    fromOffsets: source,
+                    toOffset: destination
+                )
+            }
         }
     }
 

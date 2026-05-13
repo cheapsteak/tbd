@@ -267,6 +267,50 @@ extension AppState {
         }
     }
 
+    // MARK: - Reorder top-level
+
+    /// Reorder ONLY the top-level worktrees of a repo (parentWorktreeID == nil),
+    /// triggered by SwiftUI `.onMove` whose indices index the top-level ForEach.
+    /// Nested children stay attached to their parents — only top-level sortOrders change.
+    /// Updates locally first (optimistic), then persists via RPC; rolls back on error.
+    func reorderTopLevelWorktrees(repoID: UUID, fromOffsets source: IndexSet, toOffset destination: Int) {
+        let previous = worktrees[repoID]
+        var rows = (worktrees[repoID] ?? [])
+        // Snapshot the top-level order BEFORE the move (matches the ForEach).
+        var topLevel = rows
+            .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
+            .sorted { $0.sortOrder < $1.sortOrder }
+        logger.notice("reorderTopLevel BEFORE: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public)")
+        // Items the user is moving (typically one).
+        let movedIDs = source.map { topLevel[$0].id }
+        // Apply the swap to derive the new top-level order.
+        topLevel.move(fromOffsets: source, toOffset: destination)
+        logger.notice("reorderTopLevel AFTER: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public)")
+
+        // Optimistic local update: reassign sortOrders for the new top-level order.
+        for (i, wt) in topLevel.enumerated() {
+            if let idx = rows.firstIndex(where: { $0.id == wt.id }) {
+                rows[idx].sortOrder = i
+            }
+        }
+        worktrees[repoID] = rows
+
+        // Persist via the bulk reorder RPC. Daemon renumbers all listed worktrees
+        // to contiguous sortOrders matching the new top-level order, avoiding
+        // gappy/non-contiguous values from prior individual moves.
+        let orderedIDs = topLevel.map(\.id)
+        _ = movedIDs  // suppress unused warning; kept for log readability earlier
+        Task {
+            do {
+                logger.notice("RPC worktree.reorder ids=\(orderedIDs.map { $0.uuidString.prefix(8) }.joined(separator: ","), privacy: .public)")
+                try await daemonClient.reorderWorktrees(repoID: repoID, worktreeIDs: orderedIDs)
+            } catch {
+                logger.error("reorderTopLevelWorktrees RPC failed: \(error.localizedDescription, privacy: .public)")
+                await MainActor.run { self.worktrees[repoID] = previous }
+            }
+        }
+    }
+
     // MARK: - Move (nested worktrees)
 
     /// Move a worktree to a new parent (or top-level) and sortOrder.
