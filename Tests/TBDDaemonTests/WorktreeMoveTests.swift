@@ -97,6 +97,21 @@ import TBDShared
         try await db.worktrees.move(worktreeID: c.id, newParentID: b.id, newSortOrder: 0)
         #expect(try await db.worktrees.get(id: c.id)?.parentWorktreeID == b.id)
     }
+
+    @Test func movingUnderArchivedParentIsRejected() async throws {
+        // Symmetric to ParentResolver's create-time check. Drag-to-nest (#142)
+        // calls worktree.move; dropping onto an archived row would produce an
+        // invisible child until reconcile clears the pointer.
+        let db = try makeDB()
+        let repo = try await makeRepo(db)
+        let a = try await makeWT(db, repo: repo, name: "a")
+        let b = try await makeWT(db, repo: repo, name: "b")
+        try await db.worktrees.updateStatus(id: a.id, status: .archived)
+
+        await #expect(throws: WorktreeMoveError.parentIsArchived) {
+            try await db.worktrees.move(worktreeID: b.id, newParentID: a.id, newSortOrder: 0)
+        }
+    }
 }
 
 @Suite struct WorktreeCreateWithParentTests {

@@ -317,8 +317,17 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Throws `WorktreeArchiveError.hasActiveChildren` if the worktree has any
-    /// direct children with status `.active` or `.creating`. Used as a precheck
+    /// **direct** children with status `.active` or `.creating`. Used as a precheck
     /// by the archive RPC handler so app and CLI surface the same error.
+    ///
+    /// Note: only depth-1 children are checked here. A tree shape like
+    /// `A → B(archived) → C(active)` would let `A` be archived because its
+    /// only direct child `B` is already archived; `C` then briefly points at
+    /// an archived ancestor. That window is closed by `nullOrphanedParents`
+    /// on the next reconcile (which now treats archived parents the same as
+    /// missing ones), so `C` self-promotes to top-level rather than going
+    /// invisible. Deepening the check to "any active descendant" would block
+    /// legitimate archive cascades, so the current depth-1 scope is intentional.
     public func assertArchivable(id: UUID) async throws {
         try await writer.read { db in
             let activeRaw = WorktreeStatus.active.rawValue
@@ -463,6 +472,12 @@ public struct WorktreeStore: Sendable {
                 }
                 if parent.status == WorktreeStatus.main.rawValue {
                     throw WorktreeMoveError.parentIsMain
+                }
+                if parent.status == WorktreeStatus.archived.rawValue {
+                    // Symmetric to ParentResolver's create-time check: moving a
+                    // worktree under an archived parent would produce an
+                    // invisible row until reconcile clears the pointer.
+                    throw WorktreeMoveError.parentIsArchived
                 }
                 // Cycle check: walk up from parent; if we ever hit `worktreeID`, cycle.
                 // The `visited` set defends against a pre-existing cycle in the DB
