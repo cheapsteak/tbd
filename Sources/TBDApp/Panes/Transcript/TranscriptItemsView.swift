@@ -39,17 +39,7 @@ struct TranscriptItemsView: View {
     /// need the signal.
     var atBottom: Binding<Bool>? = nil
 
-    // Hover-driven `hoveredItemID` state removed as a falsification test for
-    // issue #129 (post-PR-#137 hangs). `freeze.2.log` sample 1 entered via
-    // `EventBindingManager.enqueueHoverUpdateIfNeeded → HoverEventDispatcher
-    // → HostingScrollView.PlatformGroupContainer.hitTest` before the layout
-    // storm; the hypothesis under test is that per-row `.onHover` mutating
-    // an environment value broadcast across every row is a trigger for the
-    // `StackLayout ↔ _FlexFrameLayout` recursion. While this is in place,
-    // `transcriptTextSelection` is forced `false`, so `.textSelection
-    // (.enabled)` does not materialize on tool-call cards. `ChatBubbleView`
-    // overrides the env to `true` inside its own subtree, so user/assistant
-    // bubble text remains selectable.
+    // `transcriptTextSelection` forced `false` as a #129 falsification test — revert this PR to restore the hover-latch.
 
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
