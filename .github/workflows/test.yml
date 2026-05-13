@@ -51,6 +51,9 @@ jobs:
           restore-keys: |
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
 
+      - name: SwiftLint (strict)
+        run: swift package plugin --allow-writing-to-package-directory swiftlint --strict
+
       - name: Test
         run: swift test --parallel
 
