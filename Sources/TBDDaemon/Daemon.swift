@@ -2,6 +2,8 @@ import Foundation
 import TBDShared
 import os
 
+private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")
+
 /// Top-level daemon orchestrator.
 ///
 /// Coordinates all subsystems: database, managers, servers, and subscriptions.
@@ -178,7 +180,7 @@ public final class Daemon: Sendable {
         do {
             try await database.worktrees.breakCyclicParents()
         } catch {
-            print("[Daemon] Warning: breakCyclicParents failed at startup: \(error)")
+            daemonLogger.warning("breakCyclicParents failed at startup: \(error.localizedDescription, privacy: .public)")
         }
         do {
             let repos = try await database.repos.list()
