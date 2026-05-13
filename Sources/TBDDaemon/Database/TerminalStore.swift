@@ -213,6 +213,7 @@ public struct TerminalStore: Sendable {
             record.suspendedAt = nil
             record.suspendedSnapshot = nil
             record.label = "shell"
+            record.kind = TerminalKind.shell.rawValue
             try record.update(db)
         }
     }
