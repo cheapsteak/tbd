@@ -62,6 +62,7 @@ struct ContentView: View {
                     }
                 }
             }
+            .toolbar(removing: .sidebarToggle)
             .toolbar {
                 ToolbarItemGroup(placement: .navigation) {
                     Button {
