@@ -440,9 +440,12 @@ public struct WorktreeStore: Sendable {
                     arguments: [p, newSortOrder, worktreeID.uuidString]
                 )
             } else {
-                // Top-level siblings = same repo, parent null. Exclude main from sibling group (it has its own status).
+                // Top-level siblings = same repo, parent null, NOT main. The UI
+                // renders main via a status-filtered path (so an updated sortOrder
+                // on a main row is invisible), but excluding it here keeps the
+                // sibling group consistent with how the UI orders top-level rows.
                 try db.execute(
-                    sql: "UPDATE worktree SET sortOrder = sortOrder + 1 WHERE repoID = ? AND parentWorktreeID IS NULL AND sortOrder >= ? AND id != ?",
+                    sql: "UPDATE worktree SET sortOrder = sortOrder + 1 WHERE repoID = ? AND parentWorktreeID IS NULL AND status != 'main' AND sortOrder >= ? AND id != ?",
                     arguments: [movingRecord.repoID, newSortOrder, worktreeID.uuidString]
                 )
             }
