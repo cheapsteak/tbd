@@ -39,17 +39,17 @@ struct TranscriptItemsView: View {
     /// need the signal.
     var atBottom: Binding<Bool>? = nil
 
-    /// Tracks the most recently hovered row. The latched row is the only
-    /// one that materializes `.textSelection(.enabled)` (via
-    /// `transcriptSelectableText` + `EnvironmentValues.transcriptTextSelection`)
-    /// — every other visible row renders plain `Text` to avoid the per-row
-    /// `NSTextField` tax that caused ~17 s layout hangs (see
-    /// `TranscriptSelectableText.swift`). The latch is intentional: we do NOT
-    /// clear on hover-exit so that drag-select still works when the cursor
-    /// briefly leaves the row geometry. Typed as `String?` because
-    /// `TranscriptRenderNode.id` is a `String` (matching
-    /// `TranscriptItem.ID`'s underlying type).
-    @State private var hoveredItemID: String? = nil
+    // Hover-driven `hoveredItemID` state removed as a falsification test for
+    // issue #129 (post-PR-#137 hangs). `freeze.2.log` sample 1 entered via
+    // `EventBindingManager.enqueueHoverUpdateIfNeeded → HoverEventDispatcher
+    // → HostingScrollView.PlatformGroupContainer.hitTest` before the layout
+    // storm; the hypothesis under test is that per-row `.onHover` mutating
+    // an environment value broadcast across every row is a trigger for the
+    // `StackLayout ↔ _FlexFrameLayout` recursion. While this is in place,
+    // `transcriptTextSelection` is forced `false`, so `.textSelection
+    // (.enabled)` does not materialize on tool-call cards. `ChatBubbleView`
+    // overrides the env to `true` inside its own subtree, so user/assistant
+    // bubble text remains selectable.
 
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
@@ -83,13 +83,7 @@ struct TranscriptItemsView: View {
         LazyVStack(alignment: .leading, spacing: 4) {
             ForEach(nodes) { node in
                 TranscriptRow(node: node, terminalID: terminalID)
-                    .environment(\.transcriptTextSelection, hoveredItemID == node.id)
-                    .onHover { hovering in
-                        // Latch on enter; intentionally do NOT clear on
-                        // exit so drag-select keeps working when the
-                        // cursor briefly leaves the row.
-                        if hovering { hoveredItemID = node.id }
-                    }
+                    .environment(\.transcriptTextSelection, false)
             }
             // 1pt sentinel that drives `atBottom`. Replaced the prior
             // `.onScrollGeometryChange(for: AtBottomGeometry.self)` reader that
