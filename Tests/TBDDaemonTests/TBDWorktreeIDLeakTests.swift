@@ -254,6 +254,83 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
             "handleTerminalRecreateWindow must export TBD_WORKTREE_ID; got bodies: \(bodies)")
 }
 
+// MARK: - Fix 3: setupTerminals injects TBD_TERMINAL_ID + TBD_WORKTREE_ID on the setup tab
+
+/// Regression test for the bug where the auto-created "setup" tab that gets
+/// born alongside the Claude tab during `createWorktree` was missing
+/// `TBD_WORKTREE_ID` and `TBD_TERMINAL_ID` env vars (the `env:` parameter was
+/// defaulting to `[:]`), so the setup hook couldn't identify its owning
+/// worktree/terminal.
+@Test("createWorktree — setup tab exports TBD_WORKTREE_ID and TBD_TERMINAL_ID")
+func testCreateWorktreeSetupTabExportsTBDIDs() async throws {
+    // Build a real git repo so completeCreateWorktree can run `git worktree add`.
+    let tempDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tbd-test-\(UUID().uuidString)")
+    let repoDir = tempDir.appendingPathComponent("repo")
+    try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let initProcess = Process()
+    initProcess.executableURL = URL(fileURLWithPath: "/bin/bash")
+    initProcess.arguments = ["-c", "git init -b main && git commit --allow-empty -m init"]
+    initProcess.currentDirectoryURL = repoDir
+    initProcess.environment = [
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
+        "HOME": NSHomeDirectory(),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@test.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@test.com",
+    ]
+    let initPipe = Pipe()
+    initProcess.standardOutput = initPipe
+    initProcess.standardError = initPipe
+    try initProcess.run()
+    initProcess.waitUntilExit()
+    #expect(initProcess.terminationStatus == 0, "git init failed")
+
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = RecordedCommands()
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: tmux,
+        hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+    let override = tempDir.appendingPathComponent(".tbd/worktrees").path
+    try await db.repos.updateWorktreeRoot(id: repo.id, path: override)
+    let resolvedRepo = try await db.repos.get(id: repo.id)!
+
+    // skipClaude: true puts a plain shell in window1 but window2 is still the
+    // setup tab — the very thing we're testing here.
+    let wt = try await lifecycle.createWorktree(repoID: resolvedRepo.id, skipClaude: true)
+
+    // Two terminals expected: shell + setup
+    let terminals = try await db.terminals.list(worktreeID: wt.id)
+    #expect(terminals.count == 2, "expected 2 terminals (shell + setup)")
+    guard let setup = terminals.first(where: { $0.label == "setup" }) else {
+        Issue.record("setup terminal not found; got: \(terminals.map { $0.label ?? "nil" })")
+        return
+    }
+
+    let bodies = newWindowBodies(recorded.snapshot())
+    let expectedWorktree = "export TBD_WORKTREE_ID='\(wt.id.uuidString)';"
+    let expectedTerminal = "export TBD_TERMINAL_ID='\(setup.id.uuidString)';"
+    #expect(
+        bodies.contains { $0.contains(expectedWorktree) && $0.contains(expectedTerminal) },
+        "setup tab must export both TBD_WORKTREE_ID and TBD_TERMINAL_ID matching its DB row; got bodies: \(bodies)"
+    )
+}
+
 // MARK: - Regression: handleTerminalCreate still sets TBD_WORKTREE_ID
 
 @Test("handleTerminalCreate (regression) still exports the correct TBD_WORKTREE_ID")

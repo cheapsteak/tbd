@@ -306,21 +306,30 @@ extension WorktreeLifecycle {
         )
 
         // Create terminal 2: setup hook
+        let plannedTerminalID2 = UUID()
         let setupHookPath = hooks.resolve(
             event: .setup,
             repoPath: worktreePath,
             appHookPath: TBDConstants.hookPath(repoID: worktree.repoID, eventName: HookEvent.setup.rawValue)
         )
         let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
+        // Inject TBD_TERMINAL_ID + TBD_WORKTREE_ID so setup hooks and any
+        // tooling they run can identify their owning terminal.
+        let setupEnv: [String: String] = [
+            "TBD_WORKTREE_ID": worktreeID.uuidString,
+            "TBD_TERMINAL_ID": plannedTerminalID2.uuidString,
+        ]
         let window2 = try await tmux.createWindow(
             server: tmuxServer,
             session: "main",
             cwd: worktreePath,
             shellCommand: setupCommand,
+            env: setupEnv,
             cols: resolvedCols,
             rows: resolvedRows
         )
         _ = try await db.terminals.create(
+            id: plannedTerminalID2,
             worktreeID: worktreeID,
             tmuxWindowID: window2.windowID,
             tmuxPaneID: window2.paneID,
