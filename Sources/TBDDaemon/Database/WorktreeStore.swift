@@ -78,6 +78,7 @@ public enum WorktreeMoveError: Error, CustomStringConvertible {
     case cycle
     case parentNotFound
     case parentIsMain
+    case parentIsArchived
     case worktreeNotFound
 
     public var description: String {
@@ -86,6 +87,7 @@ public enum WorktreeMoveError: Error, CustomStringConvertible {
         case .cycle: return "This move would create a cycle in the worktree tree."
         case .parentNotFound: return "Parent worktree not found."
         case .parentIsMain: return "Cannot nest under the main worktree."
+        case .parentIsArchived: return "Cannot nest under an archived worktree."
         case .worktreeNotFound: return "Worktree not found."
         }
     }
