@@ -307,14 +307,28 @@ extension WorktreeLifecycle {
             )
         }
 
-        let window = try await tmux.createWindow(
-            server: worktree.tmuxServer,
-            session: "main",
-            cwd: worktree.path,
-            shellCommand: spawn.command,
-            env: env,
-            sensitiveEnv: spawn.sensitiveEnv
-        )
+        let window: (windowID: String, paneID: String)
+        do {
+            window = try await tmux.createWindow(
+                server: worktree.tmuxServer,
+                session: "main",
+                cwd: worktree.path,
+                shellCommand: spawn.command,
+                env: env,
+                sensitiveEnv: spawn.sensitiveEnv
+            )
+        } catch {
+            // If we just bootstrapped the server and createWindow failed, the
+            // server is alive with only the placeholder window. On the next
+            // reconcile, `serverAlive=true` + `windowExists("@stale")=false`
+            // would route this terminal to the dead-window-delete path and
+            // lose the record. Kill the server so the next reconcile takes
+            // the serverExists=false branch and retries recovery here.
+            if bootstrapWindowID != nil {
+                try? await tmux.killServer(server: worktree.tmuxServer)
+            }
+            throw error
+        }
         // Now that a real window exists, it's safe to kill the bootstrap.
         // The session retains the freshly-created window, so it stays alive
         // and the server keeps running. Best-effort: a failure here just

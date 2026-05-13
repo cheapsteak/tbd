@@ -750,11 +750,7 @@ private func createTestRepoResolvingSymlinks() async throws -> (tempDir: URL, re
     // Use the same temp-repo machinery as other lifecycle tests so the worktree
     // path actually exists on disk (tmux refuses to set cwd to a missing dir).
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
-    defer {
-        // Always tear down the tmux server, even on test failure.
-        Task { try? await realTmux.killServer(server: socketName) }
-        try? FileManager.default.removeItem(at: tempDir)
-    }
+    defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
@@ -786,7 +782,13 @@ private func createTestRepoResolvingSymlinks() async throws -> (tempDir: URL, re
 
     // Drive the recovery path. Must not throw — with the buggy ordering this
     // throws `TmuxError.commandFailed` with output "no server running on …".
-    try await lifecycle.recreateAfterReboot(terminal: terminal, worktree: wt)
+    do {
+        try await lifecycle.recreateAfterReboot(terminal: terminal, worktree: wt)
+    } catch {
+        // Make sure we tear down even when the assertion below fails.
+        try? await realTmux.killServer(server: socketName)
+        throw error
+    }
 
     // The terminal's IDs must have been updated to point at the freshly
     // created tmux window/pane.
@@ -807,6 +809,10 @@ private func createTestRepoResolvingSymlinks() async throws -> (tempDir: URL, re
     let windows = try await realTmux.listWindows(server: socketName, session: "main")
     #expect(windows.count == 1,
             "session should contain exactly the freshly-created window after bootstrap kill; got \(windows)")
+
+    // Explicit cleanup: ensure the test server is gone before we leave.
+    // (defer can't `await`, so we tear down inline.)
+    try? await realTmux.killServer(server: socketName)
 }
 
 // MARK: - Helpers
