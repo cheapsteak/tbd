@@ -108,7 +108,6 @@ struct WorktreeRowView: View {
     var body: some View {
         HStack(spacing: 6) {
             rowIcons()
-                .allowsHitTesting(false)
             RenameableLabel(
                 text: worktree.displayName,
                 isEditing: $isEditing,
@@ -138,7 +137,6 @@ struct WorktreeRowView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .allowsHitTesting(false)
             }
             if let sectionRepoID, sectionRepoID != worktree.repoID,
                let homeRepo = appState.repoName(for: worktree.repoID) {
@@ -149,20 +147,7 @@ struct WorktreeRowView: View {
             }
         }
         .padding(.leading, CGFloat(indentLevel) * 16)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if NSEvent.modifierFlags.contains(.command) {
-                if appState.selectedWorktreeIDs.contains(worktree.id) {
-                    appState.selectedWorktreeIDs.remove(worktree.id)
-                } else {
-                    appState.selectedWorktreeIDs.insert(worktree.id)
-                }
-            } else if !isMain && appState.selectedWorktreeIDs == [worktree.id] && !isEditing {
-                startRename()
-            } else {
-                appState.selectedWorktreeIDs = [worktree.id]
-            }
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: 28)
         .help(isEditing ? "" : worktree.displayName)
         .background(
