@@ -3,6 +3,7 @@ import TBDShared
 import os
 
 private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")
+private let reconcileLogger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 
 /// Top-level daemon orchestrator.
 ///
@@ -61,7 +62,7 @@ public final class Daemon: Sendable {
         if let existingPID = pidFile.read() {
             // Process is alive (kill(pid, 0) == 0 means it exists)
             if kill(existingPID, 0) == 0 {
-                print("[Daemon] Another daemon is already running (PID \(existingPID)). Exiting.")
+                daemonLogger.error("Another daemon is already running (PID \(existingPID, privacy: .public)). Exiting.")
                 Foundation.exit(1)
             }
         }
@@ -109,7 +110,7 @@ public final class Daemon: Sendable {
         let sshResolver = SSHAgentResolver()
         if await sshResolver.resolve() {
             setenv("SSH_AUTH_SOCK", sshResolver.symlinkPath, 1)
-            print("[Daemon] SSH agent symlink resolved: \(sshResolver.symlinkPath)")
+            daemonLogger.info("SSH agent symlink resolved: \(sshResolver.symlinkPath, privacy: .public)")
         }
 
         // 4c. Start periodic SSH agent refresh (every 60s)
@@ -118,7 +119,7 @@ public final class Daemon: Sendable {
                 try? await Task.sleep(for: .seconds(60))
                 if !(await sshResolver.isValid()) {
                     if await sshResolver.resolve() {
-                        print("[Daemon] SSH agent symlink refreshed")
+                        daemonLogger.info("SSH agent symlink refreshed")
                     }
                 }
             }
@@ -190,11 +191,11 @@ public final class Daemon: Sendable {
                 do {
                     try await lifecycle.reconcile(repoID: repo.id)
                 } catch {
-                    print("[Daemon] Warning: Failed to reconcile repo \(repo.displayName): \(error)")
+                    reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
             }
         } catch {
-            print("[Daemon] Warning: Failed to list repos for reconciliation: \(error)")
+            reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
         }
 
         // 11a. Backfill archived worktrees whose branch is missing — repairs
@@ -221,7 +222,7 @@ public final class Daemon: Sendable {
                     do {
                         try await git.fetch(repoPath: repo.path, branch: repo.defaultBranch)
                     } catch {
-                        print("[Daemon] Background fetch failed for \(repo.displayName): \(error)")
+                        reconcileLogger.warning("Background fetch failed for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     }
                 }
             }
@@ -240,7 +241,7 @@ public final class Daemon: Sendable {
         rpcRouter.claudeUsagePoller = poller
         await poller.start()
 
-        print("[Daemon] Started successfully (PID \(ProcessInfo.processInfo.processIdentifier))")
+        daemonLogger.info("Started successfully (PID \(ProcessInfo.processInfo.processIdentifier, privacy: .public))")
 
         // 13. Periodic git status refresh (branch sync, conflict detection)
         self.gitStatusTask = Task {
@@ -260,7 +261,7 @@ public final class Daemon: Sendable {
 
     /// Stop the daemon: shut down servers, remove PID and socket files.
     public func stop() async {
-        print("[Daemon] Shutting down...")
+        daemonLogger.info("Shutting down...")
 
         // Stop Claude usage poller before other background tasks.
         if let poller = claudeUsagePoller {
@@ -286,7 +287,7 @@ public final class Daemon: Sendable {
         // Remove port file
         try? FileManager.default.removeItem(atPath: TBDConstants.portFilePath)
 
-        print("[Daemon] Stopped.")
+        daemonLogger.info("Stopped.")
         Foundation.exit(0)
     }
 }

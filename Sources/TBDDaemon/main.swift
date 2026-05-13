@@ -1,9 +1,12 @@
 import Foundation
 import Dispatch
+import os
 import TBDDaemonLib
 import TBDShared
 
-print("tbdd v\(TBDConstants.version) starting...")
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "startup")
+
+logger.info("tbdd v\(TBDConstants.version, privacy: .public) starting...")
 
 let daemon = Daemon()
 
@@ -33,7 +36,7 @@ Task {
     do {
         try await daemon.start()
     } catch {
-        print("[tbdd] Fatal: \(error)")
+        logger.error("Fatal: \(error.localizedDescription, privacy: .public)")
         Foundation.exit(1)
     }
 }

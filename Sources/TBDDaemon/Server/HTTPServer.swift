@@ -3,6 +3,9 @@ import NIOCore
 import NIOPosix
 import NIOHTTP1
 import TBDShared
+import os
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "http")
 
 /// An HTTP server bound to localhost with auto-assigned port.
 ///
@@ -53,7 +56,7 @@ public final class HTTPServer: Sendable {
         // Write port to file for discovery
         try "\(self.port)".write(toFile: portFilePath, atomically: true, encoding: .utf8)
 
-        print("[HTTPServer] Listening on http://127.0.0.1:\(self.port)")
+        logger.info("Listening on http://127.0.0.1:\(self.port, privacy: .public)")
     }
 
     /// Stop the server and clean up.
@@ -175,7 +178,7 @@ private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        print("[HTTPServer] Error: \(error)")
+        logger.error("Error: \(error.localizedDescription, privacy: .public)")
         context.close(promise: nil)
     }
 }
