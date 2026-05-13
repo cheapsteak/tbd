@@ -427,10 +427,10 @@ public struct WorktreeCreateParams: Codable, Sendable {
     public let cols: Int?
     public let rows: Int?
     // Nested-worktree support. All optional, defaulted for backward compat.
-    public var parentWorktreeID: UUID?     // --parent
-    public var siblingOfWorktreeID: UUID?  // --sibling (caller worktree id)
-    public var callerWorktreeID: UUID?     // TBD_WORKTREE_ID env
-    public var suppressAutoParent: Bool?   // --no-parent
+    public let parentWorktreeID: UUID?     // --parent
+    public let siblingOfWorktreeID: UUID?  // --sibling (caller worktree id)
+    public let callerWorktreeID: UUID?     // TBD_WORKTREE_ID env
+    public let suppressAutoParent: Bool?   // --no-parent
     public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
