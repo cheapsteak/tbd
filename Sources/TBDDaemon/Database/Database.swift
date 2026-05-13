@@ -85,7 +85,7 @@ public final class TBDDatabase: Sendable {
     /// Best-effort pre-migration snapshot. Failures are logged, not thrown —
     /// the migration must still be allowed to proceed even if e.g. the disk
     /// is full or the parent directory isn't writable.
-    private static func takePreMigrationSnapshot(pool: DatabasePool, path: String) {
+    internal static func takePreMigrationSnapshot(pool: DatabasePool, path: String) {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
         formatter.timeZone = TimeZone(identifier: "UTC")
@@ -93,7 +93,12 @@ public final class TBDDatabase: Sendable {
         let stamp = formatter.string(from: Date())
         let snapshotPath = "\(path).pre-migration.\(stamp)"
         do {
-            try pool.write { db in
+            // VACUUM INTO requires autocommit mode — it cannot run inside a
+            // transaction. `pool.write` wraps the closure in a deferred
+            // transaction, which silently turns the snapshot into a no-op
+            // (catch-and-log path below was hiding the failure). Use
+            // writeWithoutTransaction so SQLite stays in autocommit.
+            try pool.writeWithoutTransaction { db in
                 try db.execute(sql: "VACUUM INTO ?", arguments: [snapshotPath])
             }
             logger.info("Pre-migration snapshot written to \(snapshotPath, privacy: .public)")
