@@ -233,9 +233,17 @@ extension WorktreeLifecycle {
     /// this path directly. The reconcile dispatcher only enters this branch when
     /// `serverExists → false`, which `TmuxManager(dryRun: true)` cannot simulate.
     internal func recreateAfterReboot(terminal: Terminal, worktree: Worktree) async throws {
-        if let bootstrapWindowID = try await tmux.ensureServer(server: worktree.tmuxServer, session: "main", cwd: worktree.path) {
-            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: bootstrapWindowID)
-        }
+        // tmux invariant: killing the ONLY window in a session destroys the
+        // session, and a server with no sessions exits. `ensureServer` here
+        // bootstraps a brand-new server via `new-session -d -s main`, leaving
+        // exactly one window. If we kill that bootstrap window now, the
+        // session collapses, the server exits, and the `createWindow` call
+        // below fails with `no server running on …`. Defer the kill until
+        // after the real window exists so the session always has at least
+        // one window during the transition.
+        let bootstrapWindowID = try await tmux.ensureServer(
+            server: worktree.tmuxServer, session: "main", cwd: worktree.path
+        )
 
         let spawn: ClaudeSpawnCommandBuilder.Result
         var env: [String: String] = [:]
@@ -307,6 +315,14 @@ extension WorktreeLifecycle {
             env: env,
             sensitiveEnv: spawn.sensitiveEnv
         )
+        // Now that a real window exists, it's safe to kill the bootstrap.
+        // The session retains the freshly-created window, so it stays alive
+        // and the server keeps running. Best-effort: a failure here just
+        // leaves an empty placeholder window behind, which the orphan-window
+        // cleanup pass in reconcile() will remove next time.
+        if let bootstrapWindowID {
+            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: bootstrapWindowID)
+        }
         try await db.terminals.updateTmuxIDs(id: terminal.id, windowID: window.windowID, paneID: window.paneID)
     }
 }

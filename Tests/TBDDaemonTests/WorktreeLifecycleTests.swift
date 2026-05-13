@@ -726,6 +726,89 @@ private func createTestRepoResolvingSymlinks() async throws -> (tempDir: URL, re
     // mock IDs when the server is gone.
 }
 
+/// Regression test for the bug where `recreateAfterReboot` killed the bootstrap
+/// window before any real window existed in the session. tmux's rule: killing
+/// the only window destroys the session, and a server with no sessions exits.
+/// The buggy code would therefore lose the server between `ensureServer` and
+/// `createWindow`, causing the latter to fail with "no server running on …".
+///
+/// Drives the path with a REAL `TmuxManager` (not dry-run) against a unique
+/// socket name so we can observe actual tmux behavior. The test:
+///   1. Verifies the socket does not exist before the call.
+///   2. Calls `recreateAfterReboot` and asserts it does not throw.
+///   3. Asserts the terminal's window/pane IDs were updated in the DB.
+///   4. Tears down by killing the test tmux server.
+@Test func testRecreateAfterRebootBootstrapKillOrdering() async throws {
+    let socketName = "tbd-test-\(UUID().uuidString.prefix(8))"
+    let realTmux = TmuxManager()
+    // Make sure no stray server is alive on this socket (it shouldn't be, but
+    // be defensive — and verify it isn't before we call into the recovery path).
+    try? await realTmux.killServer(server: socketName)
+    let aliveBefore = await realTmux.serverExists(server: socketName)
+    #expect(!aliveBefore, "Test precondition: socket \(socketName) must not have a live server")
+
+    // Use the same temp-repo machinery as other lifecycle tests so the worktree
+    // path actually exists on disk (tmux refuses to set cwd to a missing dir).
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer {
+        // Always tear down the tmux server, even on test failure.
+        Task { try? await realTmux.killServer(server: socketName) }
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: realTmux,
+        hooks: HookResolver()
+    )
+
+    // Insert a worktree + terminal record pointing at the test socket. We do
+    // NOT go through `createWorktree` — that would spawn windows. Instead we
+    // simulate a freshly-rebooted state where DB rows exist but the tmux
+    // server is gone.
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt",
+        branch: "main",
+        path: repoDir.path,
+        tmuxServer: socketName
+    )
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@stale-1",
+        tmuxPaneID: "%stale-1"
+    )
+
+    // Drive the recovery path. Must not throw — with the buggy ordering this
+    // throws `TmuxError.commandFailed` with output "no server running on …".
+    try await lifecycle.recreateAfterReboot(terminal: terminal, worktree: wt)
+
+    // The terminal's IDs must have been updated to point at the freshly
+    // created tmux window/pane.
+    let updated = try await db.terminals.get(id: terminal.id)
+    #expect(updated != nil)
+    #expect(updated?.tmuxWindowID != "@stale-1",
+            "tmuxWindowID must be replaced with a freshly-allocated tmux window ID")
+    #expect(updated?.tmuxPaneID != "%stale-1",
+            "tmuxPaneID must be replaced with a freshly-allocated tmux pane ID")
+    // Real tmux window IDs look like "@<digits>" and pane IDs like "%<digits>".
+    #expect(updated?.tmuxWindowID.hasPrefix("@") == true)
+    #expect(updated?.tmuxPaneID.hasPrefix("%") == true)
+
+    // Server should still be alive — and after the bootstrap kill, the session
+    // should contain exactly one window (the one we just created).
+    let aliveAfter = await realTmux.serverExists(server: socketName)
+    #expect(aliveAfter, "tmux server must still be running after recreateAfterReboot")
+    let windows = try await realTmux.listWindows(server: socketName, session: "main")
+    #expect(windows.count == 1,
+            "session should contain exactly the freshly-created window after bootstrap kill; got \(windows)")
+}
+
 // MARK: - Helpers
 
 /// Thread-safe collector for TmuxManager dryRun recorded args.
