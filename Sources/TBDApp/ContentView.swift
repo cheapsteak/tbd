@@ -21,6 +21,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             NavigationSplitView {
                 SidebarView()
+                    .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)
             } detail: {
                 if !appState.isConnected {
                     disconnectedView
