@@ -547,10 +547,21 @@ actor DaemonClient {
         )
     }
 
-    /// List unread notifications grouped by worktree (highest severity per worktree).
-    func listNotifications() async throws -> [UUID: NotificationType] {
-        let result = try await callNoParamsAsync(method: RPCMethod.notificationsList, resultType: NotificationsListResult.self)
-        return result.notifications
+    /// Unread summaries grouped by worktree (highest-severity type + most-recent
+    /// unread timestamp). Falls back to a synthesized summary with
+    /// `Date.distantPast` if the daemon is an older build that only returns
+    /// the legacy `notifications` field.
+    func listNotifications() async throws -> [UUID: UnreadSummary] {
+        let result = try await callNoParamsAsync(
+            method: RPCMethod.notificationsList,
+            resultType: NotificationsListResult.self
+        )
+        if let summaries = result.summaries {
+            return summaries
+        }
+        return result.notifications.mapValues {
+            UnreadSummary(type: $0, mostRecentAt: .distantPast)
+        }
     }
 
     /// Mark notifications as read for a worktree.

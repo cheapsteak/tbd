@@ -770,8 +770,12 @@ extension RPCRouter {
     // MARK: - Notifications List
 
     func handleNotificationsList() async throws -> RPCResponse {
-        let notifications = try await db.notifications.allUnreadByWorktree()
-        return try RPCResponse(result: NotificationsListResult(notifications: notifications))
+        let summaries = try await db.notifications.unreadSummaryByWorktree()
+        let legacyTypes = summaries.mapValues { $0.type }
+        return try RPCResponse(result: NotificationsListResult(
+            notifications: legacyTypes,
+            summaries: summaries
+        ))
     }
 
     // MARK: - Notifications Mark Read

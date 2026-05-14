@@ -347,8 +347,24 @@ public struct ModelProfileHealthCheckResult: Codable, Sendable {
 }
 
 public struct NotificationsListResult: Codable, Sendable {
+    /// Legacy field — highest-severity unread type per worktree. Retained
+    /// for backwards compatibility during rollout. Newer clients should
+    /// prefer `summaries`. Always populated by the daemon.
     public let notifications: [UUID: NotificationType]
-    public init(notifications: [UUID: NotificationType]) { self.notifications = notifications }
+
+    /// New field (v0.1.1+) — full unread summary including timestamps.
+    /// Optional for backwards compatibility: an older daemon will omit it
+    /// and a newer app should reconstruct `notifications` from this when
+    /// present.
+    public let summaries: [UUID: UnreadSummary]?
+
+    public init(
+        notifications: [UUID: NotificationType],
+        summaries: [UUID: UnreadSummary]? = nil
+    ) {
+        self.notifications = notifications
+        self.summaries = summaries
+    }
 }
 
 public struct NotificationsMarkReadParams: Codable, Sendable {
