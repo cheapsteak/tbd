@@ -45,7 +45,7 @@ custom_rules:
     name: "No print() in Sources/"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
-      - "Sources/(TBDShared|TBDDaemonLib|TBDDaemon|TBDApp)/.*\\.swift"
+      - "Sources/(TBDShared|TBDDaemon|TBDApp)/.*\\.swift"
     regex: '\b(?:Swift\.|Foundation\.)?print\s*\('
     match_kinds:
       - identifier

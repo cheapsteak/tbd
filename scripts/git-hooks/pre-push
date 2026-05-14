@@ -14,7 +14,7 @@ base="$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)"
 files=()
 while IFS= read -r file; do
   files+=("$file")
-done < <(git diff --name-only --diff-filter=ACM "$base"...HEAD -- '*.swift')
+done < <(git diff --name-only --diff-filter=ACM "$base" HEAD -- '*.swift')
 
 if [ ${#files[@]} -eq 0 ]; then
   exit 0

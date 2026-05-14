@@ -54,8 +54,7 @@ jobs:
           # set (same Package.resolved hash) — without this scoping, restore
           # could pull a cache from before a dep was added, leaving stale
           # `.build/checkouts/` that breaks SPM resolution of binary targets
-          # like SwiftLintBinary (a build-tool plugin's prebuild command then
-          # fails with "executable target 'swiftlint' built from source").
+          # (e.g. SwiftLintBinary).
           key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
