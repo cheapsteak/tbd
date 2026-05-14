@@ -14,7 +14,7 @@ struct MainThreadSamplerTests {
 
         // Sample should not crash and should return non-empty frames with symbols.
         let frames = MainThreadSampler.sample()
-        #expect(frames.count > 0, "Sample should return at least one frame")
+        #expect(frames.count >= 2, "Sample should return multiple frames from frame pointer walk (loop executed)")
 
         // At least one frame should have a symbol (not all unresolved).
         let hasSymbol = frames.contains { $0.symbol != nil }
@@ -29,9 +29,9 @@ struct MainThreadSamplerTests {
         let frames2 = MainThreadSampler.sample()
         let frames3 = MainThreadSampler.sample()
 
-        #expect(frames1.count > 0, "First sample should return frames")
-        #expect(frames2.count > 0, "Second sample should return frames")
-        #expect(frames3.count > 0, "Third sample should return frames")
+        #expect(frames1.count >= 2, "First sample should return multiple frames from frame pointer walk")
+        #expect(frames2.count >= 2, "Second sample should return multiple frames from frame pointer walk")
+        #expect(frames3.count >= 2, "Third sample should return multiple frames from frame pointer walk")
 
         // All samples should contain resolved symbols.
         let allHaveSymbols = [frames1, frames2, frames3].allSatisfy { frames in

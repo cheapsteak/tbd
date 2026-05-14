@@ -164,7 +164,7 @@ final class HangStackWriter: @unchecked Sendable {
             }
 
             let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withColonSeparatorInTime]
+            formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withColonSeparatorInTime, .withTimeZone]
             let timestamp = formatter.string(from: Date())
 
             let content = "\n=== Hang file superseded by new hang at \(timestamp) ===\n"

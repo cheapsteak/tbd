@@ -171,9 +171,9 @@ enum MainThreadSampler {
         while pcs.count < maxFrames && fp != 0 && (fp & 0x7) == 0 {
             // Sanity checks:
             // 1. FP must be strictly increasing (prevent loops)
-            // 2. FP must be reasonable distance from previous (prevent huge jumps)
+            // 2. FP must be reasonable distance from previous (prevent huge jumps, skip on first iteration)
             // 3. FP should not be in extreme ranges (kernel space)
-            guard fp > prevFP && (fp - prevFP) < 65536 && fp < (1 << 50) else {
+            guard fp > prevFP && (prevFP == 0 || (fp - prevFP) < 65536) && fp < (1 << 50) else {
                 break
             }
 
