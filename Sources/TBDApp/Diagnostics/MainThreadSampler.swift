@@ -37,6 +37,7 @@ enum MainThreadSampler {
 
     /// Captured port for the main thread. Stored as a `nonisolated` static to avoid
     /// needing @MainActor everywhere (the lock handles synchronization).
+    /// The send right is intentionally held for process lifetime; not deallocated.
     nonisolated(unsafe) private static var mainThreadPort: OSAllocatedUnfairLock<mach_port_t> =
         OSAllocatedUnfairLock(initialState: 0)
 
@@ -62,17 +63,14 @@ enum MainThreadSampler {
         }
 
         // Get the thread's register state.
-        // Allocate the state structure separately to ensure proper alignment.
-        var stateCount = UInt32(ARM_THREAD_STATE64_COUNT)
-        var state = [natural_t](repeating: 0, count: Int(stateCount))
+        // Use the typed arm_thread_state64_t struct directly for correct size and field access.
+        var state = arm_thread_state64_t()
+        var count = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<natural_t>.size)
 
-        let krStatus = state.withUnsafeMutableBufferPointer { buffer in
-            thread_get_state(
-                port,
-                ARM_THREAD_STATE64,
-                buffer.baseAddress!,
-                &stateCount
-            )
+        let krStatus = withUnsafeMutablePointer(to: &state) { ptr -> kern_return_t in
+            ptr.withMemoryRebound(to: natural_t.self, capacity: Int(count)) { buf in
+                thread_get_state(port, ARM_THREAD_STATE64, buf, &count)
+            }
         }
 
         guard krStatus == KERN_SUCCESS else {
@@ -80,18 +78,10 @@ enum MainThreadSampler {
             return []
         }
 
-        // Extract FP and LR from the thread state.
-        // In arm_thread_state64_t, __fp is at offset 0 and __lr is at offset 8.
-        // We've read the state as natural_t array; convert back carefully.
-        guard state.count >= 2 else {
-            return []
-        }
-
-        // Reconstruct FP and LR from the state array.
-        // FP is x29, LR is x30 in the ARM64 ABI.
-        // In the state array, they're at fixed offsets.
-        let initialFP = UInt(state[29])  // x29 is frame pointer
-        let initialPC = UInt(state[30])  // x30 is link register
+        // Extract FP and LR from the thread state struct.
+        // The arm_thread_state64_t struct has __fp (x29) and __lr (x30) fields.
+        let initialFP = UInt(state.__fp)
+        let initialPC = UInt(state.__lr)
 
         // Walk the frame pointer chain and collect frames.
         let pcs = walkFramePointers(initialFP: initialFP, initialPC: initialPC)
@@ -123,13 +113,45 @@ enum MainThreadSampler {
                 offsetPart = ""
             }
 
-            return String(format: "%2d  0x%016x  %s%s", index, frame.address, symbolPart, offsetPart)
+            return String(format: "%2d  0x%016x  %@%@", index, frame.address, symbolPart as NSString, offsetPart as NSString)
         }
 
         return lines.joined(separator: "\n")
     }
 
     // MARK: - Private helpers
+
+    // Cache the swift_demangle function to avoid repeated dlopen/dlsym on every symbol.
+    private typealias SwiftDemangleFunc = @convention(c) (
+        UnsafePointer<CChar>?, Int,
+        UnsafeMutablePointer<CChar>?, UnsafeMutablePointer<Int>?,
+        UInt32
+    ) -> UnsafeMutablePointer<CChar>?
+
+    nonisolated(unsafe) private static var demangleFn: SwiftDemangleFunc?
+    private static let demangleLock = OSAllocatedUnfairLock<()>(initialState: ())
+
+    /// Load swift_demangle function (lazily, on first call).
+    private static func getDemangleFn() -> SwiftDemangleFunc? {
+        demangleLock.withLock {
+            // Return cached value if already loaded.
+            if demangleFn != nil {
+                return demangleFn
+            }
+
+            guard let h = dlopen("/usr/lib/swift/libswiftDemangle.dylib", RTLD_LAZY) else {
+                return nil
+            }
+            guard let sym = dlsym(h, "swift_demangle") else {
+                return nil
+            }
+            // Cast the symbol address to the function type.
+            // Note: We intentionally do NOT dlclose(h) — keep the handle open for process lifetime.
+            let fn = unsafeBitCast(sym, to: SwiftDemangleFunc.self)
+            demangleFn = fn
+            return fn
+        }
+    }
 
     /// Walk the frame pointer chain starting from the given FP and PC.
     /// On ARM64, each frame is [FP, LR] at [FP+0, FP+8].
@@ -216,43 +238,19 @@ enum MainThreadSampler {
     /// Demangle a Swift symbol name. Returns the original name if demangling fails
     /// or if libswiftDemangle is unavailable.
     private static func demangle(_ symbol: String) -> String? {
-        // Try to dlopen libswiftDemangle and call swift_demangle.
-        guard let handle = dlopen("/usr/lib/swift/libswiftDemangle.dylib", RTLD_LAZY) else {
-            return nil
+        guard let fn = getDemangleFn() else { return nil }
+
+        // Call swift_demangle with the C string pointer valid only inside the closure.
+        // The demangled result is allocated by the C function and must be freed.
+        return symbol.withCString { cStr -> String? in
+            guard let result = fn(cStr, symbol.utf8.count, nil, nil, 0) else { return nil }
+            defer { free(result) }
+            return String(cString: result)
         }
-        defer { dlclose(handle) }
-
-        // Look up swift_demangle function.
-        // Signature: char *swift_demangle(const char *mangledName, size_t mangledNameLength,
-        //                                   char *outputBuffer, size_t *outputBufferSize,
-        //                                   uint32_t options);
-        typealias SwiftDemangleFunc = @convention(c) (
-            UnsafePointer<CChar>,         // mangled name
-            Int,                          // length
-            UnsafeMutablePointer<CChar>?, // output buffer
-            UnsafeMutablePointer<Int>?,   // output buffer size
-            UInt32                        // options
-        ) -> UnsafeMutablePointer<CChar>?
-
-        guard let symAddr = dlsym(handle, "swift_demangle") else {
-            return nil
-        }
-
-        let demangleFn = unsafeBitCast(symAddr, to: SwiftDemangleFunc.self)
-
-        // Call swift_demangle with no output buffer (it allocates).
-        let mangledCStr = symbol.withCString { $0 }
-        guard let demangled = demangleFn(mangledCStr, symbol.count, nil, nil, 0) else {
-            return nil
-        }
-
-        defer { free(demangled) }
-        return String(cString: demangled)
     }
 }
 
 #if arch(arm64)
-// ARM64 thread state type and count.
+// ARM64 thread state type.
 private let ARM_THREAD_STATE64: thread_state_flavor_t = 6
-private let ARM_THREAD_STATE64_COUNT: UInt32 = 34
 #endif

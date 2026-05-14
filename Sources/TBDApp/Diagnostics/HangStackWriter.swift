@@ -38,8 +38,8 @@ final class HangStackWriter: @unchecked Sendable {
     /// Begin a new hang file with the initial sample.
     /// Returns the URL written, or nil on failure.
     func recordHangStart(stallMs: UInt64, snapshot: HangWatchdogSnapshot, frames: [MainThreadSampler.Frame]) -> URL? {
-        // Close any previous hang file.
-        recordHangRecovery(totalStallMs: 0)
+        // Close any previous hang file with a superseded marker.
+        recordHangSuperseded()
 
         // Create the hang-stacks directory if needed.
         do {
@@ -147,6 +147,41 @@ final class HangStackWriter: @unchecked Sendable {
                 try fileHandle.close()
             } catch {
                 Self.logger.error("Failed to close hang file: \(error.localizedDescription, privacy: .public)")
+            }
+
+            currentFileHandle = nil
+            currentHangFileURL = nil
+        }
+    }
+
+    /// Close the current hang file with a superseded marker. Used when a new hang is detected
+    /// while a previous hang file is still open. Idempotent.
+    private func recordHangSuperseded() {
+        lock.withLock {
+            guard let fileHandle = currentFileHandle,
+                  currentHangFileURL != nil else {
+                return
+            }
+
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withColonSeparatorInTime]
+            let timestamp = formatter.string(from: Date())
+
+            let content = "\n=== Hang file superseded by new hang at \(timestamp) ===\n"
+
+            if let data = content.data(using: .utf8) {
+                do {
+                    try fileHandle.seekToEnd()
+                    try fileHandle.write(contentsOf: data)
+                } catch {
+                    Self.logger.error("Failed to write superseded marker: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+
+            do {
+                try fileHandle.close()
+            } catch {
+                Self.logger.error("Failed to close superseded hang file: \(error.localizedDescription, privacy: .public)")
             }
 
             currentFileHandle = nil
