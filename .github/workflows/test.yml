@@ -34,14 +34,10 @@ jobs:
         # drives TmuxManager against a real tmux server on a unique socket.
         run: brew install tmux
 
-      # macos-15 runner defaults to Xcode 16.4 (Swift 6.1.2), which has a
-      # SILGen/Sema crasher exercised by combinations of `try? await` on
-      # Void-async-throws and @Sendable analysis. The crash is deterministic
-      # (`error: fatalError` while compiling TmuxManager.swift). Swift 6.2.1
-      # (Xcode 26.1.1) still has it; the local Swift 6.2.4 toolchain works.
-      # Xcode 26.3 ships Swift 6.2.x with the latest fixes available on the
-      # macos-15 runner image.
-      - name: Select Xcode 26.3 (latest available Swift 6.2.x) to avoid the compiler crash
+      # macos-15 runner defaults to Xcode 16.4 (Swift 6.1.2). Pinning to
+      # 26.3 (Swift 6.2.4) matches the local toolchain — keeps CI and local
+      # behavior consistent.
+      - name: Select Xcode 26.3 (Swift 6.2.4)
         run: sudo xcode-select -s /Applications/Xcode_26.3.app
 
       - name: Capture Swift toolchain version
@@ -67,8 +63,14 @@ jobs:
       - name: SwiftLint (strict)
         run: swift package plugin --allow-writing-to-package-directory swiftlint --strict
 
+      # `-j 2` caps parallel swift-frontend processes. The macos-15 runner
+      # has limited RAM (~7-14 GB) and Swift 6.2.4 frontends each consume
+      # 1-2 GB on heavy SwiftUI / NIO code. With the default parallelism,
+      # the build OOMs late (~file 1260+/1356) and emits a bare
+      # `error: fatalError` with no diagnostic — different file every run.
+      # Capping parallelism trades wall-clock for stability.
       - name: Test
-        run: swift test --parallel
+        run: swift test --parallel -j 2
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
-        run: swift build
+        run: swift build -j 2
