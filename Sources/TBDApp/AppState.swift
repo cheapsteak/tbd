@@ -301,11 +301,25 @@ final class AppState: ObservableObject {
         }
         startMemoryPressureMonitor()
         registerFocusObservers()
-        Task {
-            await connectAndLoadInitialState()
-            startPolling()
+        // Under `swift test`, the per-test `AppState()` instances would each
+        // spawn a subscription Task that blocks indefinitely in `recv()` on
+        // the daemon socket. With enough tests the Swift cooperative thread
+        // pool saturates and the test runner deadlocks. Production is
+        // unbundled (no .xctest in args), so this guard is a no-op there.
+        if !Self.isRunningUnderTests {
+            Task {
+                await connectAndLoadInitialState()
+                startPolling()
+            }
         }
     }
+
+    /// True when this process is a SwiftPM / XCTest test harness. Detected by
+    /// looking for a `.xctest` bundle path in the process arguments, which
+    /// both XCTest and Swift Testing (via `swiftpm-testing-helper`) pass.
+    private static let isRunningUnderTests: Bool = {
+        ProcessInfo.processInfo.arguments.contains { $0.contains(".xctest") }
+    }()
 
     // Note: AppState is singleton-lifetime in this app, so we deliberately
     // omit a deinit that removes the focus observers — Swift 6 concurrency
