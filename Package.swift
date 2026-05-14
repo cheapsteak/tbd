@@ -19,8 +19,7 @@ let package = Package(
     targets: [
         .target(
             name: "TBDShared",
-            path: "Sources/TBDShared",
-            plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")]
+            path: "Sources/TBDShared"
         ),
         .target(
             name: "TBDDaemonLib",
@@ -32,8 +31,7 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Sources/TBDDaemon",
-            exclude: ["main.swift"],
-            plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")]
+            exclude: ["main.swift"]
         ),
         .executableTarget(
             name: "TBDDaemon",
@@ -42,8 +40,7 @@ let package = Package(
             ],
             path: "Sources/TBDDaemon",
             exclude: ["Database", "Git", "Hooks", "Tmux", "Lifecycle", "Server", "SSH", "PR", "Keychain", "Claude", "ModelProfile", "AskUserQuestion", "Daemon.swift", "PIDFile.swift"],
-            sources: ["main.swift"],
-            plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")]
+            sources: ["main.swift"]
         ),
         .executableTarget(
             name: "TBDCLI",
@@ -67,8 +64,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
             path: "Sources/TBDApp",
-            resources: [.copy("Resources/Icons")],
-            plugins: [.plugin(name: "SwiftLintBuildToolPlugin", package: "SwiftLintPlugins")]
+            resources: [.copy("Resources/Icons")]
         ),
         .testTarget(
             name: "TBDSharedTests",
