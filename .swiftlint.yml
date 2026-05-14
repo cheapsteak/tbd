@@ -8,6 +8,8 @@ excluded:
 
 # Default rules disabled for PR1 minimum-scope adoption. Each rule fired on
 # existing code; rather than reformat now, we silence and revisit per-rule.
+# Rules below the blank line are warning-severity defaults that surface only
+# under `--strict` (used in CI and the pre-push hook).
 disabled_rules:
   - cyclomatic_complexity            # large RPC routers exceed default 10
   - file_length                      # several legitimate >400-line files
@@ -25,6 +27,17 @@ disabled_rules:
   - unneeded_synthesized_initializer # stylistic
   - unused_optional_binding          # stylistic
   - vertical_whitespace              # stylistic
+
+  - todo                                    # we use TODO: deliberately (per CLAUDE.md)
+  - multiple_closures_with_trailing_closure # SwiftUI APIs frequently take label+content closures
+  - trailing_newline                        # several files missing newline; not worth reformatting now
+  - non_optional_string_data_conversion     # one site uses Data(string.utf8); revisit
+  - comma                                   # stylistic; revisit when touching the file
+  - prefer_type_checking                    # one `as? X != nil` site; intentional readability
+  - redundant_discardable_let               # several `let _ = foo()` sites; intentional discarding
+  - opening_brace                           # one violation; intentional inline brace
+  - orphaned_doc_comment                    # one file-level doc comment without an attached decl
+  - unused_closure_parameter                # one site; intentional named param for documentation
 
 custom_rules:
   no_print_in_sources:
