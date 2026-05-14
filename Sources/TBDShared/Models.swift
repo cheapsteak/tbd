@@ -411,6 +411,20 @@ public struct TBDNotification: Codable, Sendable, Identifiable {
     }
 }
 
+/// Per-worktree summary of unread notifications. Returned by
+/// `NotificationStore.unreadSummaryByWorktree()` and surfaced through the
+/// `listNotifications` RPC so the app can render severity badges AND sort
+/// the cmd-K jump menu by most-recent-notification time.
+public struct UnreadSummary: Codable, Sendable, Equatable {
+    public let type: NotificationType
+    public let mostRecentAt: Date
+
+    public init(type: NotificationType, mostRecentAt: Date) {
+        self.type = type
+        self.mostRecentAt = mostRecentAt
+    }
+}
+
 public enum PRMergeableState: String, Codable, Sendable {
     case open               // PR exists, no review decision yet
     case changesRequested   // reviewer requested changes

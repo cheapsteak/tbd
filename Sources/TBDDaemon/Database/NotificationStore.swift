@@ -110,4 +110,34 @@ public struct NotificationStore: Sendable {
         }
         return result
     }
+
+    /// One row per worktree with at least one unread notification: the highest
+    /// severity unread type and the timestamp of the most-recent unread row.
+    /// Used by the cmd-K jump menu to sort worktrees by attention-recency.
+    public func unreadSummaryByWorktree() async throws -> [UUID: UnreadSummary] {
+        let records = try await writer.read { db in
+            try NotificationRecord
+                .filter(Column("read") == false)
+                .fetchAll(db)
+        }
+        var result: [UUID: UnreadSummary] = [:]
+        for record in records {
+            let model = record.toModel()
+            if let existing = result[model.worktreeID] {
+                let newType = model.type.severity > existing.type.severity
+                    ? model.type
+                    : existing.type
+                let newAt = model.createdAt > existing.mostRecentAt
+                    ? model.createdAt
+                    : existing.mostRecentAt
+                result[model.worktreeID] = UnreadSummary(type: newType, mostRecentAt: newAt)
+            } else {
+                result[model.worktreeID] = UnreadSummary(
+                    type: model.type,
+                    mostRecentAt: model.createdAt
+                )
+            }
+        }
+        return result
+    }
 }
