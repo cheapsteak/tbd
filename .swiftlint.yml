@@ -38,6 +38,7 @@ disabled_rules:
   - opening_brace                           # one violation; intentional inline brace
   - orphaned_doc_comment                    # one file-level doc comment without an attached decl
   - unused_closure_parameter                # one site; intentional named param for documentation
+  - duplicate_imports                       # false-positives on `import os` after `import Foundation` (Foundation transitively exports os) — fires only on CI, not local. Re-enable if SwiftLint fixes the false positive.
 
 custom_rules:
   no_print_in_sources:
