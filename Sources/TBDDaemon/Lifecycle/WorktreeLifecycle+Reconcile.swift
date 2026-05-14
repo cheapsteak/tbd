@@ -296,7 +296,7 @@ extension WorktreeLifecycle {
                 appendSystemPrompt: nil,
                 initialPrompt: nil,
                 profileSecret: nil,
-                cmd: "codex --full-auto",
+                cmd: CodexSpawnCommandBuilder.command,
                 shellFallback: defaultShell
             )
         } else {

@@ -120,7 +120,7 @@ extension RPCRouter {
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
-                shellCommand: "codex --full-auto",
+                shellCommand: CodexSpawnCommandBuilder.command,
                 env: codexEnv,
                 cols: resolvedCols,
                 rows: resolvedRows
@@ -321,7 +321,7 @@ extension RPCRouter {
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
-                shellCommand: "codex --full-auto",
+                shellCommand: CodexSpawnCommandBuilder.command,
                 env: codexEnv,
                 cols: resolvedCols,
                 rows: resolvedRows

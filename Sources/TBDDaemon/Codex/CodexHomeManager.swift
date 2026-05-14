@@ -25,3 +25,7 @@ struct CodexHomeManager: Sendable {
         return home
     }
 }
+
+enum CodexSpawnCommandBuilder {
+    static let command = "unset CODEX_CI CODEX_THREAD_ID; codex --dangerously-bypass-approvals-and-sandbox"
+}
