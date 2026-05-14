@@ -3,7 +3,7 @@ import SwiftUI
 
 /// A borderless, non-activating floating panel for instant show/hide
 /// without stealing focus from the parent text field.
-final class FloatingPanel: NSPanel {
+class FloatingPanel: NSPanel {
     private var hostingView: NSHostingView<AnyView>?
 
     init<Content: View>(content: Content) {
