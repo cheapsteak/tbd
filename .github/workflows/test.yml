@@ -44,12 +44,15 @@ jobs:
             .build
             ~/Library/Caches/org.swift.swiftpm
           # Primary key changes per source revision so we always know what we
-          # restored. restore-keys falls back to the most recent matching
-          # cache; llbuild's incremental build then only recompiles what
-          # actually differs.
-          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          # restored. restore-keys falls back to a cache with the same dep
+          # set (same Package.resolved hash) — without this scoping, restore
+          # could pull a cache from before a dep was added, leaving stale
+          # `.build/checkouts/` that breaks SPM resolution of binary targets
+          # like SwiftLintBinary (a build-tool plugin's prebuild command then
+          # fails with "executable target 'swiftlint' built from source").
+          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
-            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
+            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
 
       - name: SwiftLint (strict)
         run: swift package plugin --allow-writing-to-package-directory swiftlint --strict
