@@ -76,7 +76,13 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
             path: "Sources/TBDApp",
-            resources: [.copy("Resources/Icons")]
+            resources: [.copy("Resources/Icons")],
+            // See TBDDaemonLib above. TBDApp is the larger of the two
+            // memory-heavy modules (SwiftUI view bodies + MarkdownUI +
+            // SwiftTerm); same WMO-OOM symptom on the macos-15 runner.
+            swiftSettings: [
+                .unsafeFlags(["-no-whole-module-optimization"], .when(configuration: .debug)),
+            ]
         ),
         .testTarget(
             name: "TBDSharedTests",
