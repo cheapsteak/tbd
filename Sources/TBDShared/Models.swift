@@ -73,7 +73,7 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
 }
 
 public enum WorktreeStatus: String, Codable, Sendable {
-    case active, archived, main, creating, conductor, failed
+    case active, archived, main, creating, failed
 }
 
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {

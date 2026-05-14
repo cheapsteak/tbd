@@ -112,14 +112,6 @@ public enum RPCMethod {
     public static let noteDelete = "note.delete"
     public static let noteList = "note.list"
     public static let terminalOutput = "terminal.output"
-    public static let conductorSetup = "conductor.setup"
-    public static let conductorStart = "conductor.start"
-    public static let conductorStop = "conductor.stop"
-    public static let conductorTeardown = "conductor.teardown"
-    public static let conductorList = "conductor.list"
-    public static let conductorStatus = "conductor.status"
-    public static let conductorSuggest = "conductor.suggest"
-    public static let conductorClearSuggestion = "conductor.clearSuggestion"
     public static let terminalConversation = "terminal.conversation"
     public static let terminalTranscript = "terminal.transcript"
     public static let terminalTranscriptItemFullBody = "terminal.transcriptItemFullBody"
@@ -705,50 +697,6 @@ public struct TerminalOutputParams: Codable, Sendable {
 public struct TerminalOutputResult: Codable, Sendable {
     public let output: String
     public init(output: String) { self.output = output }
-}
-
-// MARK: - Conductor
-
-public struct ConductorSetupParams: Codable, Sendable {
-    public let name: String
-    public let repos: [String]?
-    public let worktrees: [String]?
-    public let terminalLabels: [String]?
-    public let heartbeatIntervalMinutes: Int?
-    public init(name: String, repos: [String]? = nil, worktrees: [String]? = nil,
-                terminalLabels: [String]? = nil,
-                heartbeatIntervalMinutes: Int? = nil) {
-        self.name = name; self.repos = repos; self.worktrees = worktrees
-        self.terminalLabels = terminalLabels
-        self.heartbeatIntervalMinutes = heartbeatIntervalMinutes
-    }
-}
-
-public struct ConductorNameParams: Codable, Sendable {
-    public let name: String
-    public init(name: String) { self.name = name }
-}
-
-public struct ConductorListResult: Codable, Sendable {
-    public let conductors: [Conductor]
-    public init(conductors: [Conductor]) { self.conductors = conductors }
-}
-
-public struct ConductorStatusResult: Codable, Sendable {
-    public let conductor: Conductor
-    public let isRunning: Bool
-    public init(conductor: Conductor, isRunning: Bool) {
-        self.conductor = conductor; self.isRunning = isRunning
-    }
-}
-
-public struct ConductorSuggestParams: Codable, Sendable {
-    public let name: String
-    public let worktreeID: UUID
-    public let label: String?
-    public init(name: String, worktreeID: UUID, label: String? = nil) {
-        self.name = name; self.worktreeID = worktreeID; self.label = label
-    }
 }
 
 // MARK: - Terminal Conversation

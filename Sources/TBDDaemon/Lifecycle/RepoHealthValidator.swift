@@ -17,12 +17,8 @@ public struct RepoHealthValidator: Sendable {
 
     /// Returns the status the repo *should* have based on filesystem reality.
     /// Does not write to the database — caller is responsible for persisting
-    /// any change. The conductors pseudo-repo is hard-coded to `.ok` because
-    /// it isn't a real git repo.
+    /// any change.
     public func validate(repo: Repo) async -> RepoStatus {
-        if repo.id == TBDConstants.conductorsRepoID {
-            return .ok
-        }
         var isDir: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: repo.path, isDirectory: &isDir)
         if !exists || !isDir.boolValue {

@@ -54,18 +54,6 @@ public final class StateSubscriptionManager: @unchecked Sendable {
     /// Encodes the delta as JSON and sends it to each subscriber callback.
     /// Failed encodings are silently ignored.
     public func broadcast(delta: StateDelta) {
-        // Suppress deltas for conductor worktrees/terminals — app doesn't display them
-        switch delta {
-        case .worktreeCreated(let d), .worktreeRevived(let d):
-            if d.status == .conductor { return }
-        case .terminalCreated(let d):
-            if d.label?.hasPrefix("conductor:") == true { return }
-        case .terminalRemoved:
-            break // Can't cheaply check — terminal already deleted. Low impact.
-        default:
-            break
-        }
-
         guard let data = try? JSONEncoder().encode(delta) else { return }
 
         lock.lock()

@@ -15,7 +15,6 @@ public final class TBDDatabase: Sendable {
     public let terminals: TerminalStore
     public let notifications: NotificationStore
     public let notes: NoteStore
-    public let conductors: ConductorStore
     public let modelProfiles: ModelProfileStore
     public let modelProfileUsage: ModelProfileUsageStore
     public let config: ConfigStore
@@ -44,7 +43,6 @@ public final class TBDDatabase: Sendable {
         self.terminals = TerminalStore(writer: pool)
         self.notifications = NotificationStore(writer: pool)
         self.notes = NoteStore(writer: pool)
-        self.conductors = ConductorStore(writer: pool)
         self.modelProfiles = ModelProfileStore(writer: pool)
         self.modelProfileUsage = ModelProfileUsageStore(writer: pool)
         self.config = ConfigStore(writer: pool)
@@ -73,7 +71,6 @@ public final class TBDDatabase: Sendable {
         self.terminals = TerminalStore(writer: queue)
         self.notifications = NotificationStore(writer: queue)
         self.notes = NoteStore(writer: queue)
-        self.conductors = ConductorStore(writer: queue)
         self.modelProfiles = ModelProfileStore(writer: queue)
         self.modelProfileUsage = ModelProfileUsageStore(writer: queue)
         self.config = ConfigStore(writer: queue)
@@ -230,15 +227,22 @@ public final class TBDDatabase: Sendable {
                 t.column("createdAt", .datetime).notNull()
             }
 
-            // Synthetic "conductors" pseudo-repo
+            // Synthetic "conductors" pseudo-repo. Hard-coded UUID + path —
+            // the symbolic constants this migration used to reference
+            // (`TBDConstants.conductorsRepoID`/`conductorsDir`) were removed
+            // when the Conductor feature was deleted; the literal values are
+            // preserved here so this historical migration still produces an
+            // identical schema for the v24 cleanup step to act on.
             try db.execute(
                 sql: """
                 INSERT OR IGNORE INTO repo (id, path, displayName, defaultBranch, createdAt)
                 VALUES (?, ?, 'Conductors', 'main', ?)
                 """,
                 arguments: [
-                    TBDConstants.conductorsRepoID.uuidString,
-                    TBDConstants.conductorsDir.path,
+                    "00000000-0000-0000-0000-000000000001",
+                    FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent("tbd")
+                        .appendingPathComponent("conductors").path,
                     Date()
                 ]
             )
@@ -441,6 +445,23 @@ public final class TBDDatabase: Sendable {
                 t.add(column: "parentWorktreeID", .text)
                     .references("worktree", onDelete: .setNull)
             }
+        }
+
+        // Drop the conductor feature. Removes:
+        //   * the `conductor` table (added in v10)
+        //   * any worktree rows whose status was 'conductor' (the synthetic
+        //     per-repo conductor worktrees)
+        //   * the synthetic "Conductors" pseudo-repo inserted in v10 with the
+        //     well-known UUID 00000000-0000-0000-0000-000000000001
+        // The Conductor feature was removed in favour of regular terminals + the
+        // `tbd` skill. See `refactor: remove Conductor feature`.
+        migrator.registerMigration("v24_drop_conductor") { db in
+            try db.execute(sql: "DROP TABLE IF EXISTS conductor")
+            try db.execute(sql: "DELETE FROM worktree WHERE status = 'conductor'")
+            try db.execute(
+                sql: "DELETE FROM repo WHERE id = ?",
+                arguments: ["00000000-0000-0000-0000-000000000001"]
+            )
         }
 
         return migrator

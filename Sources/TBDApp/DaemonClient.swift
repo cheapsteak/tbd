@@ -761,56 +761,6 @@ actor DaemonClient {
         )
     }
 
-    // MARK: - Conductors
-
-    /// List all conductors.
-    func listConductors() async throws -> [Conductor] {
-        let result = try await callNoParamsAsync(method: RPCMethod.conductorList, resultType: ConductorListResult.self)
-        return result.conductors
-    }
-
-    /// Set up a new conductor with defaults.
-    func conductorSetup(name: String, repos: [String] = ["*"]) async throws -> Conductor {
-        return try await callAsync(
-            method: RPCMethod.conductorSetup,
-            params: ConductorSetupParams(name: name, repos: repos),
-            resultType: Conductor.self
-        )
-    }
-
-    /// Start a conductor.
-    func conductorStart(name: String) async throws -> Terminal {
-        return try await callAsync(
-            method: RPCMethod.conductorStart,
-            params: ConductorNameParams(name: name),
-            resultType: Terminal.self
-        )
-    }
-
-    /// Stop a conductor.
-    func conductorStop(name: String) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.conductorStop,
-            params: ConductorNameParams(name: name)
-        )
-    }
-
-    /// Teardown (remove) a conductor.
-    func conductorTeardown(name: String) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.conductorTeardown,
-            params: ConductorNameParams(name: name)
-        )
-    }
-
-    /// Clear the navigation suggestion for a conductor.
-    func conductorClearSuggestion(name: String) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.conductorClearSuggestion,
-            params: ConductorNameParams(name: name)
-        )
-    }
-
     // MARK: - Model Profiles
     //
     // IMPORTANT: never log raw secret bytes. The `addModelProfile` wrapper is

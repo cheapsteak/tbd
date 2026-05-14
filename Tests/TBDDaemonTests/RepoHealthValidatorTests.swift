@@ -47,16 +47,6 @@ import Foundation
         #expect(await v.validate(repo: repo) == .missing)
     }
 
-    @Test func conductorPseudoRepoAlwaysOK() async throws {
-        var repo = Repo(
-            id: TBDConstants.conductorsRepoID,
-            path: "/nonexistent/conductors-\(UUID().uuidString)",
-            displayName: "Conductors"
-        )
-        repo.worktreeSlot = "conductors"
-        #expect(await RepoHealthValidator(git: GitManager()).validate(repo: repo) == .ok)
-    }
-
     @Test func validateAllPersistsTransitions() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(
