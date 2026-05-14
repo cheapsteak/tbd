@@ -84,7 +84,7 @@ enum MainThreadSampler {
         let initialPC = UInt(state.__lr)
 
         // Walk the frame pointer chain and collect frames.
-        let pcs = walkFramePointers(initialFP: initialFP, initialPC: initialPC)
+        let pcs = walkLiveStack(initialFP: initialFP, initialPC: initialPC)
         return pcs.map { symbolize($0) }
         #else
         // Non-arm64 architectures: return empty (TBD only runs on arm64).
@@ -153,13 +153,19 @@ enum MainThreadSampler {
         }
     }
 
-    /// Walk the frame pointer chain starting from the given FP and PC.
-    /// On ARM64, each frame is [FP, LR] at [FP+0, FP+8].
+    /// Pure frame-pointer walk logic, testable with synthetic memory.
+    /// Walks the frame pointer chain starting from initialFP and initialPC,
+    /// collecting instruction pointers. The readWord closure provides memory reads.
+    /// On ARM64, each frame is [FP, LR] at [fp+0, fp+8].
     /// Returns a list of instruction pointers (one per frame).
-    private static func walkFramePointers(initialFP: UInt, initialPC: UInt) -> [UInt] {
+    static func walkFramePointers(
+        initialFP: UInt,
+        initialPC: UInt,
+        maxFrames: Int = 200,
+        readWord: (UInt) -> UInt?
+    ) -> [UInt] {
         var pcs: [UInt] = []
         var fp = initialFP
-        let maxFrames = 200
 
         // First PC is the initial LR.
         if initialPC != 0 {
@@ -178,9 +184,9 @@ enum MainThreadSampler {
             }
 
             // Read [FP, LR] from the frame pointer chain.
-            // FP at [FP+0], LR at [FP+8] on ARM64.
-            guard let nextFP = readUInt64(from: fp),
-                  let lr = readUInt64(from: fp + 8) else {
+            // FP at [fp+0], LR at [fp+8] on ARM64.
+            guard let nextFP = readWord(fp),
+                  let lr = readWord(fp + 8) else {
                 break
             }
 
@@ -193,6 +199,14 @@ enum MainThreadSampler {
         }
 
         return pcs
+    }
+
+    /// Production frame-pointer walk using direct memory reads.
+    /// Wraps walkFramePointers with a closure that reads from the live process memory.
+    private static func walkLiveStack(initialFP: UInt, initialPC: UInt) -> [UInt] {
+        walkFramePointers(initialFP: initialFP, initialPC: initialPC, maxFrames: 200) { address in
+            readUInt64(from: address)
+        }
     }
 
     /// Read a 64-bit unsigned integer from the given address.
