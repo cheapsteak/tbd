@@ -75,6 +75,15 @@ struct TBDCommands: Commands {
 
         // Worktree selection by index (Cmd-1 through Cmd-9)
         CommandMenu("Go") {
+            Button("Jump to Worktree…") {
+                Task { @MainActor in
+                    JumpMenuController.shared.toggle()
+                }
+            }
+            .keyboardShortcut("k", modifiers: .command)
+
+            Divider()
+
             ForEach(1...9, id: \.self) { index in
                 Button("Worktree \(index)") {
                     Task { @MainActor in
