@@ -34,6 +34,14 @@ jobs:
         # drives TmuxManager against a real tmux server on a unique socket.
         run: brew install tmux
 
+      # macos-15 runner defaults to Xcode 16.4 (Swift 6.1.2), which has a
+      # SILGen/Sema crasher exercised by combinations of `try? await` on
+      # Void-async-throws and @Sendable analysis. The crash is deterministic
+      # (`error: fatalError` while compiling TmuxManager.swift) and was fixed
+      # in the Swift 6.2 release cycle. Select Xcode 26.1.1 (Swift 6.2.1).
+      - name: Select Xcode 26.1.1 (Swift 6.2.x) to avoid 6.1.2 compiler crash
+        run: sudo xcode-select -s /Applications/Xcode_26.1.1.app
+
       - name: Capture Swift toolchain version
         run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> $GITHUB_ENV
 
