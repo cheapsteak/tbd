@@ -43,7 +43,7 @@ private func newWindowBodies(_ recorded: [[String]]) -> [String] {
 
 // MARK: - Fix 1: Daemon scrubInheritedTBDEnv
 
-@Test("Daemon.scrubInheritedTBDEnv clears all four TBD_* vars")
+@Test("Daemon.scrubInheritedTBDEnv clears inherited routing vars")
 func testScrubInheritedTBDEnv() {
     // setenv/unsetenv mutate the shared process environ. Guarantee cleanup
     // even if #expect failures or future edits cause us to skip the scrub
@@ -54,12 +54,16 @@ func testScrubInheritedTBDEnv() {
         unsetenv("TBD_PROMPT_CONTEXT")
         unsetenv("TBD_PROMPT_INSTRUCTIONS")
         unsetenv("TBD_PROMPT_RENAME")
+        unsetenv("CODEX_CI")
+        unsetenv("CODEX_THREAD_ID")
     }
 
     setenv("TBD_WORKTREE_ID", "leaked-worktree-id", 1)
     setenv("TBD_PROMPT_CONTEXT", "leaked-context", 1)
     setenv("TBD_PROMPT_INSTRUCTIONS", "leaked-instructions", 1)
     setenv("TBD_PROMPT_RENAME", "leaked-rename", 1)
+    setenv("CODEX_CI", "1", 1)
+    setenv("CODEX_THREAD_ID", "leaked-thread-id", 1)
 
     // Sanity: setenv worked.
     #expect(ProcessInfo.processInfo.environment["TBD_WORKTREE_ID"] == "leaked-worktree-id")
@@ -70,6 +74,8 @@ func testScrubInheritedTBDEnv() {
     #expect(ProcessInfo.processInfo.environment["TBD_PROMPT_CONTEXT"] == nil)
     #expect(ProcessInfo.processInfo.environment["TBD_PROMPT_INSTRUCTIONS"] == nil)
     #expect(ProcessInfo.processInfo.environment["TBD_PROMPT_RENAME"] == nil)
+    #expect(ProcessInfo.processInfo.environment["CODEX_CI"] == nil)
+    #expect(ProcessInfo.processInfo.environment["CODEX_THREAD_ID"] == nil)
 }
 
 // MARK: - Fix 2a: recreateAfterReboot sets TBD_WORKTREE_ID on every branch
@@ -161,6 +167,10 @@ func testRecreateAfterRebootCodexBranchSetsWorktreeID() async throws {
     // CODEX_HOME should still be exported alongside (regression guard).
     #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
             "codex-branch must still export CODEX_HOME; got bodies: \(bodies)")
+    #expect(bodies.contains { $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --dangerously-bypass-approvals-and-sandbox") },
+            "codex-branch must launch current interactive codex without inherited session env; got bodies: \(bodies)")
+    #expect(!bodies.contains { $0.contains("codex --full-auto") },
+            "codex-branch must not use removed --full-auto flag; got bodies: \(bodies)")
 }
 
 @Test("recreateAfterReboot — shell branch sets TBD_WORKTREE_ID")
@@ -252,6 +262,56 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
     let expected = "export TBD_WORKTREE_ID='\(wt.id.uuidString)';"
     #expect(bodies.contains { $0.contains(expected) },
             "handleTerminalRecreateWindow must export TBD_WORKTREE_ID; got bodies: \(bodies)")
+}
+
+@Test("handleTerminalRecreateWindow uses current Codex launch command")
+func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = RecordedCommands()
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: tmux,
+            hooks: HookResolver()
+        ),
+        tmux: tmux
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-recreate-codex", displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-recreate-codex",
+        branch: "tbd/wt-recreate-codex",
+        path: "/tmp/fake-repo-recreate-codex/wt-recreate-codex",
+        tmuxServer: "tbd-c0de1234"
+    )
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@old-codex",
+        tmuxPaneID: "%old-codex",
+        label: "Codex",
+        kind: .codex
+    )
+
+    let request = try RPCRequest(
+        method: RPCMethod.terminalRecreateWindow,
+        params: TerminalRecreateWindowParams(terminalID: terminal.id)
+    )
+    let response = await router.handle(request)
+    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+    let bodies = newWindowBodies(recorded.snapshot())
+    #expect(bodies.contains { $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --dangerously-bypass-approvals-and-sandbox") },
+            "recreated codex tab must launch current interactive codex without inherited session env; got bodies: \(bodies)")
+    #expect(!bodies.contains { $0.contains("codex --full-auto") },
+            "recreated codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
 }
 
 // MARK: - Fix 3: setupTerminals injects TBD_TERMINAL_ID + TBD_WORKTREE_ID on the setup tab
@@ -374,4 +434,53 @@ func testHandleTerminalCreateRegressionWorktreeID() async throws {
     let expected = "export TBD_WORKTREE_ID='\(wt.id.uuidString)';"
     #expect(bodies.contains { $0.contains(expected) },
             "handleTerminalCreate must export TBD_WORKTREE_ID matching params.worktreeID; got bodies: \(bodies)")
+}
+
+@Test("handleTerminalCreate uses current Codex launch command")
+func testHandleTerminalCreateCodexLaunchCommand() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = RecordedCommands()
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: tmux,
+            hooks: HookResolver()
+        ),
+        tmux: tmux
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-create-codex", displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-create-codex",
+        branch: "tbd/wt-create-codex",
+        path: "/tmp/fake-repo-create-codex/wt-create-codex",
+        tmuxServer: "tbd-c0de5678"
+    )
+
+    let request = try RPCRequest(
+        method: RPCMethod.terminalCreate,
+        params: TerminalCreateParams(worktreeID: wt.id, type: .codex)
+    )
+    let response = await router.handle(request)
+    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+    let terminal = try response.decodeResult(Terminal.self)
+    #expect(terminal.kind == .codex)
+    #expect(terminal.label == "Codex")
+
+    let bodies = newWindowBodies(recorded.snapshot())
+    #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
+            "created codex tab must export CODEX_HOME; got bodies: \(bodies)")
+    #expect(bodies.contains { $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --dangerously-bypass-approvals-and-sandbox") },
+            "created codex tab must launch current interactive codex without inherited session env; got bodies: \(bodies)")
+    #expect(!bodies.contains { $0.contains("codex --full-auto") },
+            "created codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
 }

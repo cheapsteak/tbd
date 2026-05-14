@@ -26,20 +26,22 @@ public final class Daemon: Sendable {
         self.startTime = Date()
     }
 
-    /// Remove inherited TBD_* environment variables from the daemon's own
-    /// process environment. Called at startup before any tmux server is spawned.
+    /// Remove inherited agent-routing environment variables from the daemon's
+    /// own process environment. Called at startup before any tmux server is spawned.
     ///
     /// Rationale: tmux servers persist the env they were spawned with as their
     /// global environment, and that env is then injected into every new window
     /// (including reboot-recovery recreations). If the daemon inherits e.g.
-    /// `TBD_WORKTREE_ID=<main-uuid>` from a TBD-spawned launcher shell, every
-    /// recreated pane in every sub-worktree would report itself as the main
-    /// worktree, causing notifications to be misattributed.
+    /// `TBD_WORKTREE_ID=<main-uuid>` or `CODEX_CI=1` from a managed launcher
+    /// shell, every recreated pane would inherit stale routing/noninteractive
+    /// state.
     public static func scrubInheritedTBDEnv() {
         unsetenv("TBD_WORKTREE_ID")
         unsetenv("TBD_PROMPT_CONTEXT")
         unsetenv("TBD_PROMPT_INSTRUCTIONS")
         unsetenv("TBD_PROMPT_RENAME")
+        unsetenv("CODEX_CI")
+        unsetenv("CODEX_THREAD_ID")
     }
 
     /// Start the daemon: create config directory, clean up stale state,
