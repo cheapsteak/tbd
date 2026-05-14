@@ -31,7 +31,19 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Sources/TBDDaemon",
-            exclude: ["main.swift"]
+            exclude: ["main.swift"],
+            // Disable whole-module optimization in debug builds. WMO compiles
+            // all files in the module as a single swift-frontend process,
+            // which on this module reaches 6-9 GB RSS during Swift 6.2's
+            // Sendable region analysis (NIO + GRDB + many @Sendable closure
+            // captures of ChannelHandlerContext). The macos-15 GHA runner
+            // caps at ~7 GB; jetsam SIGKILLs the frontend and SPM reports
+            // a bare `error: fatalError` (Diagnostics.fatalError sentinel —
+            // see swiftlang/swift-package-manager#7086). Per-file compilation
+            // keeps each frontend at ~150-300 MB. Release builds keep WMO.
+            swiftSettings: [
+                .unsafeFlags(["-no-whole-module-optimization"], .when(configuration: .debug)),
+            ]
         ),
         .executableTarget(
             name: "TBDDaemon",
