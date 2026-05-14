@@ -249,19 +249,7 @@ final class AppState: ObservableObject {
     /// sidebar selection moves elsewhere.
     @Published var revivingArchived: [UUID: ReviveState] = [:]
 
-    /// Conductor for each repo (wildcard conductors expanded across all repos).
-    @Published var conductorsByRepo: [UUID: Conductor] = [:]
-    /// The conductor's terminal record, keyed by repo ID.
-    @Published var conductorTerminalsByRepo: [UUID: Terminal] = [:]
-    /// Current navigation suggestion from any conductor.
-    @Published var conductorSuggestion: ConductorSuggestion? = nil
-    /// Whether the conductor overlay is visible.
-    @Published var showConductor: Bool = false
-    /// Conductor overlay height — persisted. 0 means "use default (50% of parent)".
-    @Published var conductorHeight: CGFloat = 0 {
-        didSet { UserDefaults.standard.set(Double(conductorHeight), forKey: Self.conductorHeightKey) }
-    }
-/// Terminal IDs currently being recreated — prevents duplicate RPC calls.
+    /// Terminal IDs currently being recreated — prevents duplicate RPC calls.
     var recreatingTerminalIDs: Set<UUID> = []
 
     // Alert state for user feedback
@@ -280,7 +268,6 @@ final class AppState: ObservableObject {
 
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
-    private static let conductorHeightKey = "com.tbd.app.conductorHeight"
 
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var focusObservers: [NSObjectProtocol] = []
@@ -295,9 +282,6 @@ final class AppState: ObservableObject {
         restoreLayouts()
         if let saved = UserDefaults.standard.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
-        }
-        if let savedHeight = UserDefaults.standard.object(forKey: Self.conductorHeightKey) as? Double {
-            conductorHeight = max(100, min(800, CGFloat(savedHeight)))
         }
         startMemoryPressureMonitor()
         registerFocusObservers()
@@ -653,7 +637,6 @@ final class AppState: ObservableObject {
         await refreshRepos()
         await refreshWorktrees()
         await refreshNotifications()
-        await refreshConductors()
     }
 
     /// Refresh the repo list. Only updates if data changed.
@@ -881,87 +864,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    // MARK: - Conductors
-
-    /// Refresh conductor state from the daemon.
-    func refreshConductors() async {
-        do {
-            let conductors = try await daemonClient.listConductors()
-
-            // Fetch all terminals to find conductor terminals (conductor worktrees
-            // are excluded from worktree.list, so self.terminals doesn't contain them)
-            let allTerminals = try await daemonClient.listTerminals()
-            let terminalsById = Dictionary(allTerminals.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-
-            // Build conductorsByRepo: expand ["*"] conductors across all repo IDs
-            var byRepo: [UUID: Conductor] = [:]
-            var termByRepo: [UUID: Terminal] = [:]
-            let repoIDs = repos.map(\.id)
-
-            for conductor in conductors {
-                let matchingRepoIDs: [UUID]
-                if conductor.repos.contains("*") {
-                    matchingRepoIDs = repoIDs
-                } else {
-                    matchingRepoIDs = conductor.repos.compactMap { UUID(uuidString: $0) }
-                }
-                for repoID in matchingRepoIDs {
-                    if byRepo[repoID] == nil {  // first match wins
-                        byRepo[repoID] = conductor
-                        if let termID = conductor.terminalID,
-                           let term = terminalsById[termID] {
-                            termByRepo[repoID] = term
-                        }
-                    }
-                }
-            }
-
-            if byRepo != conductorsByRepo { conductorsByRepo = byRepo }
-            if termByRepo != conductorTerminalsByRepo { conductorTerminalsByRepo = termByRepo }
-
-            // Update suggestion from the conductor matching the current selection
-            let newSuggestion: ConductorSuggestion? = {
-                guard let selectedWt = selectedWorktree,
-                      let conductor = byRepo[selectedWt.repoID] else { return nil }
-                return conductor.suggestion
-            }()
-            if newSuggestion != conductorSuggestion { conductorSuggestion = newSuggestion }
-        } catch {
-            if !(error is DaemonClientError) {
-                logger.error("Failed to refresh conductors: \(error)")
-            }
-        }
-    }
-
-    /// The conductor for the repo of the currently selected worktree.
-    var currentConductor: Conductor? {
-        guard let selectedWt = selectedWorktree else { return nil }
-        return conductorsByRepo[selectedWt.repoID]
-    }
-
-    /// Whether a conductor is active (exists and has a terminal) for the current repo.
-    var conductorActive: Bool {
-        guard let conductor = currentConductor else { return false }
-        return conductor.terminalID != nil
-    }
-
-    /// The conductor's terminal for the currently selected repo.
-    var currentConductorTerminal: Terminal? {
-        guard let selectedWt = selectedWorktree else { return nil }
-        return conductorTerminalsByRepo[selectedWt.repoID]
-    }
-
-    /// Derive a conductor name from a repo's display name.
-    /// Lowercases, replaces non-alphanumeric chars with hyphens, trims leading/trailing hyphens.
-    static func conductorName(from repoName: String) -> String {
-        let cleaned = repoName
-            .lowercased()
-            .replacing(/[^a-z0-9]+/, with: "-")
-        let truncated = String(cleaned.prefix(64))
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return truncated.isEmpty ? "conductor" : truncated
-    }
-
     /// UserDefaults key for the WIP terminal-auto-resize feature. Off by
     /// default — the feature broadcasts main-area pixel size to the daemon
     /// and resizes every tracked tmux window on app resize / terminal
@@ -1034,31 +936,4 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// One-click conductor: setup (if needed) + start + show overlay.
-    func ensureConductorRunning() async {
-        guard let selectedWt = selectedWorktree else { return }
-        let repoID = selectedWt.repoID
-
-        do {
-            if let existing = conductorsByRepo[repoID] {
-                // Conductor exists — start it if not running
-                if existing.terminalID == nil {
-                    _ = try await daemonClient.conductorStart(name: existing.name)
-                }
-            } else {
-                // No conductor — setup + start
-                guard let repo = repos.first(where: { $0.id == repoID }) else { return }
-                let name = Self.conductorName(from: repo.displayName)
-                _ = try await daemonClient.conductorSetup(name: name, repos: [repoID.uuidString])
-                _ = try await daemonClient.conductorStart(name: name)
-            }
-            // Refresh worktrees first so terminals dict is populated,
-            // then refresh conductors to find the new terminal
-            await refreshWorktrees()
-            await refreshConductors()
-            showConductor = true
-        } catch {
-            showAlert("Conductor error: \(error.localizedDescription)", isError: true)
-        }
-    }
 }

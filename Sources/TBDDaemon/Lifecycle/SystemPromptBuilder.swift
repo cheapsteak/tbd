@@ -59,17 +59,4 @@ enum SystemPromptBuilder {
 
         return parts.isEmpty ? nil : parts.joined(separator: "\n\n---\n\n")
     }
-
-    /// Build the system prompt for a conductor session.
-    /// Always includes TBD context; adds custom instructions for single-repo conductors.
-    static func buildForConductor(repo: Repo?) -> String {
-        var parts = [builtInTBDContext]
-
-        if let instructions = repo?.customInstructions?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !instructions.isEmpty {
-            parts.append(instructions)
-        }
-
-        return parts.joined(separator: "\n\n---\n\n")
-    }
 }

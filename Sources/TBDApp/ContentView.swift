@@ -7,10 +7,7 @@ struct ContentView: View {
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspendClaude: Bool = true
-    @State private var conductorHotkeyMonitor = ConductorHotkeyMonitor()
     @State private var contentAreaHeight: CGFloat = 600
-    /// Saved first responder to restore when conductor hides.
-    @State private var previousFirstResponder: NSResponder?
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
@@ -49,17 +46,6 @@ struct ContentView: View {
                         Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
                     })
                     .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
-                    .overlay(alignment: .top) {
-                        if let terminal = appState.currentConductorTerminal {
-                            ConductorOverlayView(
-                                terminal: terminal,
-                                tmuxServer: TBDConstants.conductorsTmuxServer,
-                                parentHeight: contentAreaHeight
-                            )
-                            .opacity(appState.showConductor ? 1 : 0)
-                            .allowsHitTesting(appState.showConductor)
-                        }
-                    }
                 }
             }
             .toolbar(removing: .sidebarToggle)
@@ -95,37 +81,6 @@ struct ContentView: View {
                     .help(autoSuspendClaude
                         ? "Auto-suspend is on — idle Claude instances are suspended when switching worktrees"
                         : "Auto-suspend is off — Claude instances stay running when switching worktrees")
-
-                    // Conductor toggle
-                    Button {
-                        toggleConductor()
-                    } label: {
-                        Image(systemName: appState.conductorActive
-                            ? (appState.showConductor ? "wand.and.stars" : "wand.and.stars.inverse")
-                            : "wand.and.stars.inverse")
-                            .foregroundStyle(appState.showConductor ? .primary : .secondary)
-                    }
-                    .help(appState.conductorActive
-                        ? (appState.showConductor ? "Hide conductor (\u{2325}')" : "Show conductor (\u{2325}')")
-                        : "Start conductor (\u{2325}')")
-                    .contextMenu {
-                        if appState.conductorActive, let conductor = appState.currentConductor {
-                            Button("Stop Conductor") {
-                                Task {
-                                    try? await appState.daemonClient.conductorStop(name: conductor.name)
-                                    appState.showConductor = false
-                                    await appState.refreshConductors()
-                                }
-                            }
-                            Button("Remove Conductor", role: .destructive) {
-                                Task {
-                                    try? await appState.daemonClient.conductorTeardown(name: conductor.name)
-                                    appState.showConductor = false
-                                    await appState.refreshConductors()
-                                }
-                            }
-                        }
-                    }
 
                     Picker("Filter", selection: $appState.repoFilter) {
                         Text("All Repos").tag(UUID?.none)
@@ -214,36 +169,11 @@ struct ContentView: View {
             Text(appState.alertMessage ?? "")
         }
         .onAppear {
-            conductorHotkeyMonitor.install { [weak appState] in
-                guard appState != nil else { return }
-                toggleConductor()
-            }
             // Keep-alive: seed recentlyVisitedWorktreeIDs with the initially-restored
             // selection so the ZStack renders the right SingleWorktreeView on first frame.
             if appState.selectedWorktreeIDs.count == 1, let id = appState.selectedWorktreeIDs.first {
                 appState.touchVisitedWorktree(id)
             }
-        }
-    }
-
-    // MARK: - Conductor
-
-    private func toggleConductor() {
-        if appState.conductorActive {
-            if appState.showConductor {
-                // Hiding — restore previous focus
-                appState.showConductor = false
-                if let prev = previousFirstResponder {
-                    NSApp.keyWindow?.makeFirstResponder(prev)
-                    previousFirstResponder = nil
-                }
-            } else {
-                // Showing — save current focus
-                previousFirstResponder = NSApp.keyWindow?.firstResponder
-                appState.showConductor = true
-            }
-        } else {
-            Task { await appState.ensureConductorRunning() }
         }
     }
 

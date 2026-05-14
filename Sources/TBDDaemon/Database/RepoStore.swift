@@ -108,11 +108,10 @@ public struct RepoStore: Sendable {
         }
     }
 
-    /// List all repos, excluding the synthetic conductors pseudo-repo.
+    /// List all repos.
     public func list() async throws -> [Repo] {
         try await writer.read { db in
             try RepoRecord
-                .filter(Column("id") != TBDConstants.conductorsRepoID.uuidString)
                 .fetchAll(db)
                 .map { $0.toModel() }
         }

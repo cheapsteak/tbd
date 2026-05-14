@@ -15,7 +15,6 @@ public final class RPCRouter: Sendable {
     public let subscriptions: StateSubscriptionManager
     public let prManager: PRStatusManager
     public let suspendResumeCoordinator: SuspendResumeCoordinator
-    public let conductorManager: ConductorManager
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
@@ -32,7 +31,6 @@ public final class RPCRouter: Sendable {
         startTime: Date = Date(),
         subscriptions: StateSubscriptionManager = StateSubscriptionManager(),
         prManager: PRStatusManager = PRStatusManager(),
-        conductorManager: ConductorManager? = nil,
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
         modelProfileResolver: ModelProfileResolver? = nil,
         pendingQuestions: PendingQuestionStore = PendingQuestionStore()
@@ -52,9 +50,6 @@ public final class RPCRouter: Sendable {
         self.modelProfileResolver = resolvedModelProfileResolver
         self.suspendResumeCoordinator = SuspendResumeCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver
-        )
-        self.conductorManager = conductorManager ?? ConductorManager(
-            db: db, tmux: tmux, pendingQuestions: pendingQuestions
         )
         self.usageFetcher = usageFetcher
         self.pendingQuestions = pendingQuestions
@@ -169,22 +164,6 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalAskUserQuestionPending(request.paramsData)
             case RPCMethod.terminalAskUserQuestionCleared:
                 return try await handleTerminalAskUserQuestionCleared(request.paramsData)
-            case RPCMethod.conductorSetup:
-                return try await handleConductorSetup(request.paramsData)
-            case RPCMethod.conductorStart:
-                return try await handleConductorStart(request.paramsData)
-            case RPCMethod.conductorStop:
-                return try await handleConductorStop(request.paramsData)
-            case RPCMethod.conductorTeardown:
-                return try await handleConductorTeardown(request.paramsData)
-            case RPCMethod.conductorList:
-                return try await handleConductorList()
-            case RPCMethod.conductorStatus:
-                return try await handleConductorStatus(request.paramsData)
-            case RPCMethod.conductorSuggest:
-                return try await handleConductorSuggest(request.paramsData)
-            case RPCMethod.conductorClearSuggestion:
-                return try await handleConductorClearSuggestion(request.paramsData)
             case RPCMethod.modelProfileList:
                 return try await handleModelProfileList()
             case RPCMethod.modelProfileAdd:
