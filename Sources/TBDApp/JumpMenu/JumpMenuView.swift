@@ -1,7 +1,4 @@
 import SwiftUI
-import os
-
-private let logger = Logger(subsystem: "com.tbd.app", category: "JumpMenu")
 
 struct JumpMenuView: View {
     @ObservedObject var viewModel: JumpMenuViewModel
