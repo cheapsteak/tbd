@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let hooksLogger = Logger(subsystem: "com.tbd.daemon", category: "hooks")
 
 public enum HookEvent: String, Sendable {
     case setup
@@ -37,24 +40,35 @@ public struct HookResolver: Sendable {
     }
 
     /// Resolves which hook script to run. First match wins, no chaining.
-    /// Priority: appHookPath > conductor.json > .dmux-hooks > global default
+    /// Priority: appHookPath > .worktree-hooks > conductor.json > .dmux-hooks > global default
     public func resolve(event: HookEvent, repoPath: String, appHookPath: String?) -> String? {
         // 1. App per-repo config
         if let path = appHookPath, FileManager.default.fileExists(atPath: path) {
             return path
         }
 
-        // 2. conductor.json
+        // 2. .worktree-hooks (canonical in-repo location)
+        if let path = resolveWorktreeHooks(event: event, repoPath: repoPath) {
+            return path
+        }
+
+        // 3. conductor.json (deprecated)
         if let path = resolveConductor(event: event, repoPath: repoPath) {
+            hooksLogger.warning(
+                "conductor.json hook resolved for \(event.rawValue, privacy: .public); consider migrating to .worktree-hooks/"
+            )
             return path
         }
 
-        // 3. .dmux-hooks
+        // 4. .dmux-hooks (deprecated)
         if let path = resolveDmux(event: event, repoPath: repoPath) {
+            hooksLogger.warning(
+                ".dmux-hooks/ hook resolved for \(event.rawValue, privacy: .public); consider migrating to .worktree-hooks/"
+            )
             return path
         }
 
-        // 4. Global default
+        // 5. Global default
         let globalPath = (globalHooksDir as NSString).appendingPathComponent(event.rawValue)
         if FileManager.default.isExecutableFile(atPath: globalPath) {
             return globalPath
@@ -128,6 +142,12 @@ public struct HookResolver: Sendable {
     }
 
     // MARK: - Private
+
+    private func resolveWorktreeHooks(event: HookEvent, repoPath: String) -> String? {
+        let hookPath = (repoPath as NSString)
+            .appendingPathComponent(".worktree-hooks/\(event.rawValue)")
+        return FileManager.default.isExecutableFile(atPath: hookPath) ? hookPath : nil
+    }
 
     private func resolveConductor(event: HookEvent, repoPath: String) -> String? {
         let conductorPath = (repoPath as NSString).appendingPathComponent("conductor.json")
