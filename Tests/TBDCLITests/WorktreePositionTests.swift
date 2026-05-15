@@ -76,4 +76,38 @@ struct WorktreePositionTests {
         #expect(WorktreePosition(argument: "parent") == nil)
         #expect(WorktreePosition(argument: "") == nil)
     }
+
+    // MARK: - unmetIntentWarning
+
+    @Test func childWithCallerHasNoWarning() {
+        #expect(WorktreePosition.child.unmetIntentWarning(callerEnvID: Self.callerID) == nil)
+    }
+
+    @Test func childWithoutCallerHasNoWarning() {
+        // Degrading to top-level is the documented graceful fallback for child.
+        #expect(WorktreePosition.child.unmetIntentWarning(callerEnvID: nil) == nil)
+    }
+
+    @Test func siblingWithCallerHasNoWarning() {
+        #expect(WorktreePosition.sibling.unmetIntentWarning(callerEnvID: Self.callerID) == nil)
+    }
+
+    @Test func siblingWithoutCallerWarns() {
+        // The whole point of the warning: sibling intent silently degrades to
+        // a top-level worktree when there's no caller to anchor on.
+        let warning = WorktreePosition.sibling.unmetIntentWarning(callerEnvID: nil)
+        #expect(warning != nil)
+        // Keep the message greppable on substring, not exact wording.
+        #expect(warning?.contains("sibling") == true)
+        #expect(warning?.contains("TBD_WORKTREE_ID") == true)
+    }
+
+    @Test func rootWithCallerHasNoWarning() {
+        #expect(WorktreePosition.root.unmetIntentWarning(callerEnvID: Self.callerID) == nil)
+    }
+
+    @Test func rootWithoutCallerHasNoWarning() {
+        // Top-level is exactly what root requested; nothing to warn about.
+        #expect(WorktreePosition.root.unmetIntentWarning(callerEnvID: nil) == nil)
+    }
 }

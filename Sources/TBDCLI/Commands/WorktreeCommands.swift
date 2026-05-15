@@ -98,6 +98,9 @@ struct WorktreeCreate: AsyncParsableCommand {
 
         let callerEnvID = ProcessInfo.processInfo.environment["TBD_WORKTREE_ID"]
             .flatMap { UUID(uuidString: $0) }
+        if let warning = position.unmetIntentWarning(callerEnvID: callerEnvID) {
+            FileHandle.standardError.write(Data("\(warning)\n".utf8))
+        }
         let parentingFields = position.rpcFields(callerEnvID: callerEnvID)
 
         let pending: Worktree = try client.call(

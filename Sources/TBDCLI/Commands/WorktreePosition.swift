@@ -65,4 +65,22 @@ public enum WorktreePosition: String, CaseIterable, ExpressibleByArgument {
             )
         }
     }
+
+    /// Returns a stderr warning string when the requested position cannot be
+    /// fulfilled because the caller environment is missing, otherwise nil.
+    ///
+    /// Only `.sibling` warns: a sibling has no reference point without a
+    /// caller and silently degrades to a top-level worktree, which is exactly
+    /// the silent-misbehavior pattern this flag exists to prevent.
+    ///
+    /// `.child` and `.root` both treat "no caller" as their documented
+    /// graceful fallback (top-level), so neither warns.
+    public func unmetIntentWarning(callerEnvID: UUID?) -> String? {
+        switch self {
+        case .sibling where callerEnvID == nil:
+            return "warning: --position=sibling has no caller (TBD_WORKTREE_ID unset); creating top-level worktree"
+        case .child, .sibling, .root:
+            return nil
+        }
+    }
 }
