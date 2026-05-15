@@ -74,8 +74,7 @@ struct JumpMenuView: View {
                             sectionHeaderIfNeeded(rows: rows, index: idx)
                             JumpMenuRowView(
                                 row: row,
-                                isSelected: idx == viewModel.selectedIndex,
-                                showTimestamp: viewModel.query.trimmingCharacters(in: .whitespaces).isEmpty
+                                isSelected: idx == viewModel.selectedIndex
                             )
                             .id(row.id)
                             .contentShape(Rectangle())

@@ -14,7 +14,6 @@ struct JumpMenuRow: Identifiable, Equatable {
     let displayName: String       // includes leading emoji if any
     let repoName: String
     let severity: NotificationType?   // nil for recent / match-without-unread
-    let timestamp: Date?              // unread → most-recent-notification, recent → last-visit
     let section: Section
 }
 
@@ -41,23 +40,9 @@ private struct SeverityDot: View {
     }
 }
 
-/// Compact "2m" / "3h" / "5d" formatter for the trailing time-ago column.
-/// Suppressed by the parent view when the user is typing (section == .match).
-private func relativeTimeString(from date: Date, now: Date = Date()) -> String {
-    let seconds = Int(now.timeIntervalSince(date))
-    if seconds < 60 { return "\(max(seconds, 0))s" }
-    let minutes = seconds / 60
-    if minutes < 60 { return "\(minutes)m" }
-    let hours = minutes / 60
-    if hours < 24 { return "\(hours)h" }
-    let days = hours / 24
-    return "\(days)d"
-}
-
 struct JumpMenuRowView: View {
     let row: JumpMenuRow
     let isSelected: Bool
-    let showTimestamp: Bool
 
     var body: some View {
         HStack(spacing: 8) {
@@ -71,12 +56,6 @@ struct JumpMenuRowView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer()
-            if showTimestamp, let ts = row.timestamp {
-                Text(relativeTimeString(from: ts))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)

@@ -22,20 +22,17 @@ final class JumpMenuViewModel: ObservableObject {
     private let allWorktrees: [JumpMenuWorktreeSnapshot]
     private let unread: [UUID: UnreadSummary]
     private let recentIDs: [UUID]
-    private let now: Date
 
     static let rowCap = 20
 
     init(
         worktrees: [JumpMenuWorktreeSnapshot],
         unread: [UUID: UnreadSummary],
-        recentIDs: [UUID],
-        now: Date = Date()
+        recentIDs: [UUID]
     ) {
         self.allWorktrees = worktrees
         self.unread = unread
         self.recentIDs = recentIDs
-        self.now = now
     }
 
     /// Currently-displayed rows, recomputed when `query` changes.
@@ -93,18 +90,13 @@ final class JumpMenuViewModel: ObservableObject {
                     displayName: snap.displayName,
                     repoName: snap.repoName,
                     severity: summary.type,
-                    timestamp: summary.mostRecentAt,
                     section: .unread
                 )
             }
 
-        // Recents minus anything already in unread, minus deletions. The LRU
-        // doesn't carry a timestamp — we approximate the "time since last
-        // visit" by index-based deltas from `now`, one minute per position,
-        // so the first recent gets "now" and older ones get progressively
-        // dimmer relative labels. The spec says time-ago is hidden while
-        // typing anyway; for default-state display this is an honest "most
-        // recent" indicator without needing wall-clock visit timestamps.
+        // Recents minus anything already in unread, minus deletions. LRU
+        // position is preserved by iterating `recentIDs` in order; no
+        // timestamp is needed since rows no longer display time-ago.
         let unreadIDs = Set(unread.keys)
         let recentRows: [JumpMenuRow] = recentIDs
             .filter { !unreadIDs.contains($0) }
@@ -112,14 +104,12 @@ final class JumpMenuViewModel: ObservableObject {
                 guard let snap = snapshotByID[id] else { return nil }   // filters deletions
                 return (id, snap)
             }
-            .enumerated()
-            .map { (offset, pair) in
+            .map { pair in
                 JumpMenuRow(
                     id: pair.0,
                     displayName: pair.1.displayName,
                     repoName: pair.1.repoName,
                     severity: nil,
-                    timestamp: now.addingTimeInterval(-Double(offset) * 60),
                     section: .recent
                 )
             }
@@ -143,7 +133,6 @@ final class JumpMenuViewModel: ObservableObject {
                     displayName: snap.displayName,
                     repoName: snap.repoName,
                     severity: unread[snap.id]?.type,
-                    timestamp: unread[snap.id]?.mostRecentAt,
                     section: .match
                 )
             }
