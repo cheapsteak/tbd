@@ -203,3 +203,20 @@ private func makeTempDir() throws -> URL {
     #expect(success)
     #expect(output.contains("test_value"))
 }
+
+@Test func worktreeHooksSetup() throws {
+    let tempDir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let resolver = HookResolver(globalHooksDir: tempDir.appendingPathComponent("global-hooks").path)
+
+    let hooksDir = tempDir.appendingPathComponent(".worktree-hooks")
+    try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    let hookPath = hooksDir.appendingPathComponent("setup").path
+    try "#!/bin/bash\necho generic-setup".write(toFile: hookPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookPath)
+
+    let hook = resolver.resolve(event: .setup, repoPath: tempDir.path, appHookPath: nil)
+    #expect(hook != nil)
+    #expect(hook!.contains(".worktree-hooks/setup"))
+}
