@@ -100,6 +100,7 @@ struct WorktreePositionTests {
         // Keep the message greppable on substring, not exact wording.
         #expect(warning?.contains("sibling") == true)
         #expect(warning?.contains("TBD_WORKTREE_ID") == true)
+        #expect(warning?.contains("not a valid UUID") == true)
     }
 
     @Test func rootWithCallerHasNoWarning() {

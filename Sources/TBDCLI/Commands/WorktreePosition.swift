@@ -32,7 +32,7 @@ public enum WorktreePosition: String, CaseIterable, ExpressibleByArgument {
     /// Translate `(position, TBD_WORKTREE_ID)` into the four parenting fields
     /// the daemon's `ParentResolver` consumes.
     ///
-    /// `child` and `sibling` are caller-relative; when the caller is unset
+    /// `child` and `sibling` are caller-relative; when the caller is unresolved
     /// they degrade gracefully:
     /// - `child` with no caller: passes nil for every field, so the daemon
     ///   creates a top-level worktree (same fallback as the old default).
@@ -78,7 +78,7 @@ public enum WorktreePosition: String, CaseIterable, ExpressibleByArgument {
     public func unmetIntentWarning(callerEnvID: UUID?) -> String? {
         switch self {
         case .sibling where callerEnvID == nil:
-            return "warning: --position=sibling has no caller (TBD_WORKTREE_ID unset); creating top-level worktree"
+            return "warning: --position=sibling has no caller (TBD_WORKTREE_ID not set or not a valid UUID); creating top-level worktree"
         case .child, .sibling, .root:
             return nil
         }
