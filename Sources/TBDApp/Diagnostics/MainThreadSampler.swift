@@ -88,14 +88,11 @@ enum MainThreadSampler {
         let pc = UInt(state.__pc)          // actual stuck instruction
         let lr = UInt(state.__lr)          // return address in caller
 
-        // Seed with both PCs; walkFramePointers will start with lr and the natural
-        // frame chain walk may naturally deduplicate the pc-lr pair on the first step.
+        // Start with the stuck instruction (pc). The frame pointer chain walk starting
+        // from lr will prepend it as the first frame, so no manual append needed.
         var pcs: [UInt] = []
         if pc != 0 {
             pcs.append(pc)
-        }
-        if lr != 0 && lr != pc {
-            pcs.append(lr)
         }
 
         // Continue with the frame pointer chain walk starting from lr.
