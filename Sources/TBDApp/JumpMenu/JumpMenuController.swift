@@ -105,9 +105,10 @@ final class JumpMenuController {
     /// horizontally centered. If there is no key window (e.g. all windows
     /// are minimized) fall back to the main screen.
     private func positionPanel(_ panel: NSPanel) {
-        let panelSize = panel.frame.size == .zero
-            ? CGSize(width: 440, height: 360)
-            : panel.frame.size
+        // Search field ~36pt + divider + list maxHeight 420pt + a little padding = ~480.
+        // The panel is freshly created each open, so its frame is .zero here —
+        // we drive sizing from this single constant.
+        let panelSize = CGSize(width: 440, height: 480)
 
         let anchorRect: NSRect = {
             if let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) {
