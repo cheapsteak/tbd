@@ -43,9 +43,10 @@ enum MainThreadSampler {
 
     // MARK: - Public API
 
-    /// Capture the main thread port. Must be called exactly once on the main thread,
+    /// Capture the main thread port. Must be called on the main thread,
     /// ideally during application startup (from `applicationWillFinishLaunching`).
-    /// Safe to call multiple times — only the first call does anything.
+    /// Safe to call multiple times — subsequent calls are idempotent because
+    /// `mach_thread_self()` returns the same value.
     @MainActor
     static func captureMainThread() {
         let port = mach_thread_self()
@@ -54,7 +55,9 @@ enum MainThreadSampler {
     }
 
     /// Sample the main thread's call stack. Safe to call from any thread.
-    /// Returns an empty array if the main thread port was never captured or on non-arm64 architectures.
+    /// Captures state.__pc (actual stuck instruction) as the first frame, followed by
+    /// the frame pointer chain. Returns an empty array if the main thread port was never
+    /// captured or on non-arm64 architectures.
     static func sample() -> [Frame] {
         #if arch(arm64)
         let port = mainThreadPort.withLock { $0 }
@@ -78,13 +81,27 @@ enum MainThreadSampler {
             return []
         }
 
-        // Extract FP and LR from the thread state struct.
-        // The arm_thread_state64_t struct has __fp (x29) and __lr (x30) fields.
+        // Extract registers from the thread state struct.
+        // The arm_thread_state64_t struct has __pc (program counter), __lr (link register),
+        // and __fp (frame pointer, x29) fields.
         let initialFP = UInt(state.__fp)
-        let initialPC = UInt(state.__lr)
+        let pc = UInt(state.__pc)          // actual stuck instruction
+        let lr = UInt(state.__lr)          // return address in caller
 
-        // Walk the frame pointer chain and collect frames.
-        let pcs = walkLiveStack(initialFP: initialFP, initialPC: initialPC)
+        // Seed with both PCs; walkFramePointers will start with lr and the natural
+        // frame chain walk may naturally deduplicate the pc-lr pair on the first step.
+        var pcs: [UInt] = []
+        if pc != 0 {
+            pcs.append(pc)
+        }
+        if lr != 0 && lr != pc {
+            pcs.append(lr)
+        }
+
+        // Continue with the frame pointer chain walk starting from lr.
+        let chainPCs = walkLiveStack(initialFP: initialFP, initialPC: lr)
+        pcs.append(contentsOf: chainPCs)
+
         return pcs.map { symbolize($0) }
         #else
         // Non-arm64 architectures: return empty (TBD only runs on arm64).
