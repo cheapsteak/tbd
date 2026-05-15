@@ -220,3 +220,91 @@ private func makeTempDir() throws -> URL {
     #expect(hook != nil)
     #expect(hook!.contains(".worktree-hooks/setup"))
 }
+
+@Test func worktreeHooksArchive() throws {
+    let tempDir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let resolver = HookResolver(globalHooksDir: tempDir.appendingPathComponent("global-hooks").path)
+
+    let hooksDir = tempDir.appendingPathComponent(".worktree-hooks")
+    try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    let hookPath = hooksDir.appendingPathComponent("archive").path
+    try "#!/bin/bash\necho generic-archive".write(toFile: hookPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookPath)
+
+    let hook = resolver.resolve(event: .archive, repoPath: tempDir.path, appHookPath: nil)
+    #expect(hook != nil)
+    #expect(hook!.contains(".worktree-hooks/archive"))
+}
+
+@Test func worktreeHooksBeatsConductor() throws {
+    let tempDir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let resolver = HookResolver(globalHooksDir: tempDir.appendingPathComponent("global-hooks").path)
+
+    let conductorJSON = """
+    {"scripts":{"setup":"scripts/setup.sh"}}
+    """
+    try conductorJSON.write(
+        toFile: tempDir.appendingPathComponent("conductor.json").path,
+        atomically: true, encoding: .utf8
+    )
+    let scriptsDir = tempDir.appendingPathComponent("scripts")
+    try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
+    try "#!/bin/bash\necho conductor".write(
+        toFile: scriptsDir.appendingPathComponent("setup.sh").path,
+        atomically: true, encoding: .utf8
+    )
+
+    let hooksDir = tempDir.appendingPathComponent(".worktree-hooks")
+    try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    let genericPath = hooksDir.appendingPathComponent("setup").path
+    try "#!/bin/bash\necho generic".write(toFile: genericPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: genericPath)
+
+    let hook = resolver.resolve(event: .setup, repoPath: tempDir.path, appHookPath: nil)
+    #expect(hook == genericPath)
+}
+
+@Test func worktreeHooksBeatsDmux() throws {
+    let tempDir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let resolver = HookResolver(globalHooksDir: tempDir.appendingPathComponent("global-hooks").path)
+
+    let dmuxDir = tempDir.appendingPathComponent(".dmux-hooks")
+    try FileManager.default.createDirectory(at: dmuxDir, withIntermediateDirectories: true)
+    let dmuxPath = dmuxDir.appendingPathComponent("worktree_created").path
+    try "#!/bin/bash\necho dmux".write(toFile: dmuxPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dmuxPath)
+
+    let hooksDir = tempDir.appendingPathComponent(".worktree-hooks")
+    try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    let genericPath = hooksDir.appendingPathComponent("setup").path
+    try "#!/bin/bash\necho generic".write(toFile: genericPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: genericPath)
+
+    let hook = resolver.resolve(event: .setup, repoPath: tempDir.path, appHookPath: nil)
+    #expect(hook == genericPath)
+}
+
+@Test func appConfigBeatsWorktreeHooks() throws {
+    let tempDir = try makeTempDir()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let resolver = HookResolver(globalHooksDir: tempDir.appendingPathComponent("global-hooks").path)
+
+    let hooksDir = tempDir.appendingPathComponent(".worktree-hooks")
+    try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+    let genericPath = hooksDir.appendingPathComponent("setup").path
+    try "#!/bin/bash\necho generic".write(toFile: genericPath, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: genericPath)
+
+    let appHookPath = tempDir.appendingPathComponent("app-hook.sh").path
+    try "#!/bin/bash\necho app".write(toFile: appHookPath, atomically: true, encoding: .utf8)
+
+    let hook = resolver.resolve(event: .setup, repoPath: tempDir.path, appHookPath: appHookPath)
+    #expect(hook == appHookPath)
+}
