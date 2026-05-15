@@ -40,9 +40,9 @@ import GRDB
         }
     }
 
-    /// Regression test for the v24 FK-violation crash: if a `terminal` row
-    /// still references a conductor worktree at the moment v24 runs, the
-    /// migration must clean up the dependent terminal before deleting the
+    /// Regression test for the v24 FK-violation crash: if any child-table rows
+    /// (terminal, notification, or note) still reference a conductor worktree
+    /// when v24 runs, the migration must clean them up before deleting the
     /// worktree. Previously v24 deleted the worktree first, which caused a
     /// FOREIGN KEY constraint violation at transaction commit (SQLite error
     /// 19 from `PRAGMA foreign_key_check`), rolling back the migration and
@@ -54,12 +54,14 @@ import GRDB
         // 1. Migrate up to v23 — the state immediately before the buggy v24.
         try migrator.migrate(queue, upTo: "v23_worktree_parent")
 
-        // 2. Insert a repo, a worktree with status='conductor', and a
-        //    terminal row pointing at that worktree — mirroring the live
-        //    production state that originally hit this bug.
+        // 2. Insert a repo, a worktree with status='conductor', and child rows
+        //    for all three FK-referencing tables (terminal, notification, note)
+        //    — mirroring the live production state that originally hit this bug.
         let repoID = "11111111-1111-1111-1111-111111111111"
         let worktreeID = "AD1CBCD0-0000-0000-0000-000000000000"
         let terminalID = "B8BD7929-0000-0000-0000-000000000000"
+        let notificationID = "C0000000-0000-0000-0000-000000000000"
+        let noteID = "D0000000-0000-0000-0000-000000000000"
         try queue.write { db in
             try db.execute(
                 sql: """
@@ -85,13 +87,30 @@ import GRDB
                 """,
                 arguments: [terminalID, worktreeID, Date()]
             )
+            try db.execute(
+                sql: """
+                INSERT INTO notification
+                  (id, worktreeID, type, message, read, createdAt)
+                VALUES (?, ?, 'taskComplete', 'Conductor finished', 0, ?)
+                """,
+                arguments: [notificationID, worktreeID, Date()]
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO note
+                  (id, worktreeID, title, content, createdAt, updatedAt)
+                VALUES (?, ?, 'conductor note', '', ?, ?)
+                """,
+                arguments: [noteID, worktreeID, Date(), Date()]
+            )
         }
 
         // 3. Run the remaining migrations (i.e. v24). This must NOT throw.
         try migrator.migrate(queue)
 
-        // 4. Verify: conductor worktree gone, conductor table dropped, and
-        //    no terminal still references a now-deleted worktree.
+        // 4. Verify: conductor worktree gone, conductor table dropped, and no
+        //    child rows in terminal, notification, or note still reference the
+        //    now-deleted worktree.
         try queue.read { db in
             let worktreeCount = try Int.fetchOne(
                 db,
@@ -112,6 +131,20 @@ import GRDB
                 arguments: [terminalID]
             ) ?? -1
             #expect(orphanTerminalCount == 0, "orphan conductor terminal should be deleted")
+
+            let orphanNotificationCount = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM notification WHERE id = ?",
+                arguments: [notificationID]
+            ) ?? -1
+            #expect(orphanNotificationCount == 0, "orphan conductor notification should be deleted")
+
+            let orphanNoteCount = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM note WHERE id = ?",
+                arguments: [noteID]
+            ) ?? -1
+            #expect(orphanNoteCount == 0, "orphan conductor note should be deleted")
         }
     }
 }

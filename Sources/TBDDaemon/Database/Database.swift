@@ -473,11 +473,20 @@ public final class TBDDatabase: Sendable {
         // unaffected users (no conductor rows left) the added DELETE is a
         // no-op.
         migrator.registerMigration("v24_drop_conductor") { db in
-            // Remove dependent terminals first: terminal.worktreeID has a
-            // FK to worktree.id, so deleting the worktree while a terminal
-            // still points at it triggers a FK-violation rollback at commit.
+            // Remove all child-table rows that FK-reference conductor worktrees
+            // before deleting the worktrees themselves. terminal, notification,
+            // and note all have onDelete: .cascade FKs to worktree.id; with
+            // GRDB's deferred FK checking (PRAGMA foreign_key_check at commit),
+            // any surviving child row rolls back the transaction with SQLite
+            // error 19 and crashes the daemon on every subsequent restart.
             try db.execute(
                 sql: "DELETE FROM terminal WHERE worktreeID IN (SELECT id FROM worktree WHERE status = 'conductor')"
+            )
+            try db.execute(
+                sql: "DELETE FROM notification WHERE worktreeID IN (SELECT id FROM worktree WHERE status = 'conductor')"
+            )
+            try db.execute(
+                sql: "DELETE FROM note WHERE worktreeID IN (SELECT id FROM worktree WHERE status = 'conductor')"
             )
             try db.execute(sql: "DROP TABLE IF EXISTS conductor")
             try db.execute(sql: "DELETE FROM worktree WHERE status = 'conductor'")
