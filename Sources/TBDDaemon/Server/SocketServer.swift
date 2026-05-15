@@ -2,6 +2,9 @@ import Foundation
 import NIOCore
 import NIOPosix
 import TBDShared
+import os
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "socket")
 
 /// A Unix domain socket server that accepts newline-delimited JSON RPC requests.
 ///
@@ -54,7 +57,7 @@ public final class SocketServer: Sendable {
         chmod(socketPath, 0o700)
 
         self.channel = ch
-        print("[SocketServer] Listening on \(socketPath)")
+        logger.info("Listening on \(self.socketPath, privacy: .public)")
     }
 
     /// Stop the server and clean up.
@@ -235,7 +238,7 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        print("[SocketServer] Error: \(error)")
+        logger.error("Error: \(error.localizedDescription, privacy: .public)")
         context.close(promise: nil)
     }
 }

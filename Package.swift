@@ -14,6 +14,7 @@ let package = Package(
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
+        .package(url: "https://github.com/SimplyDanny/SwiftLintPlugins", from: "0.63.2"),
     ],
     targets: [
         .target(
@@ -30,7 +31,19 @@ let package = Package(
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             path: "Sources/TBDDaemon",
-            exclude: ["main.swift"]
+            exclude: ["main.swift"],
+            // Disable whole-module optimization in debug builds. WMO compiles
+            // all files in the module as a single swift-frontend process,
+            // which on this module reaches 6-9 GB RSS during Swift 6.2's
+            // Sendable region analysis (NIO + GRDB + many @Sendable closure
+            // captures of ChannelHandlerContext). The macos-15 GHA runner
+            // caps at ~7 GB; jetsam SIGKILLs the frontend and SPM reports
+            // a bare `error: fatalError` (Diagnostics.fatalError sentinel —
+            // see swiftlang/swift-package-manager#7086). Per-file compilation
+            // keeps each frontend at ~150-300 MB. Release builds keep WMO.
+            swiftSettings: [
+                .unsafeFlags(["-no-whole-module-optimization"], .when(configuration: .debug)),
+            ]
         ),
         .executableTarget(
             name: "TBDDaemon",
@@ -63,7 +76,13 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
             path: "Sources/TBDApp",
-            resources: [.copy("Resources/Icons")]
+            resources: [.copy("Resources/Icons")],
+            // See TBDDaemonLib above. TBDApp is the larger of the two
+            // memory-heavy modules (SwiftUI view bodies + MarkdownUI +
+            // SwiftTerm); same WMO-OOM symptom on the macos-15 runner.
+            swiftSettings: [
+                .unsafeFlags(["-no-whole-module-optimization"], .when(configuration: .debug)),
+            ]
         ),
         .testTarget(
             name: "TBDSharedTests",

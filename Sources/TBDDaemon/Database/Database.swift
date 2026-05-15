@@ -33,7 +33,7 @@ public final class TBDDatabase: Sendable {
         var config = Configuration()
         #if DEBUG
         config.prepareDatabase { db in
-            db.trace { print($0) }
+            db.trace { Self.logger.debug("\($0, privacy: .public)") }
         }
         #endif
         let pool = try DatabasePool(path: path, configuration: config)

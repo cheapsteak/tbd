@@ -57,13 +57,18 @@ Guard these with `Bundle.main.bundleIdentifier != nil` checks.
 All `ChannelHandlerContext` property access (`context.channel`, `context.pipeline`) must happen on the channel's event loop. Accessing from any other thread triggers a precondition crash. Always wrap in `context.eventLoop.execute { ... }` — never use `context.channel.isActive` as a pre-check outside the event loop.
 
 ### No `print()` in `Sources/`
+Applies to `TBDShared`, `TBDDaemonLib`, `TBDDaemon`, and `TBDApp`. **`TBDCLI` is intentionally excluded** — its `print()` calls are user-facing CLI output (stdout for human consumption + scripting), not diagnostic logging.
+
 Use `os.Logger` (`import os`) with one of the established subsystems (`com.tbd.app`, `com.tbd.daemon`) and a feature-shaped category. `.debug` is the right level for traces you'd previously have used `print()` for — they're silent by default and activated with `log stream --level debug`. Always pass an explicit `privacy:` argument on dynamic interpolations (default `.public` for this dev tool, `.private`/`.sensitive` for secrets). Full rationale and category taxonomy: [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md).
+
+This rule is enforced mechanically by SwiftLint (custom rule `no_print_in_sources`) in CI (`swift package plugin swiftlint --strict`) and in the pre-push git hook. Run `swift package plugin --allow-writing-to-package-directory swiftlint --strict` locally to lint manually. See `.swiftlint.yml`.
 
 ## Quick Reference
 
 - **Build**: `swift build`
 - **Test**: `swift test`
 - **Restart**: `scripts/restart.sh`
+- **Install git hooks** (one-time setup after cloning): `scripts/install-hooks.sh`
 - **Diagnostics**: see [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md). Quick recipes:
   - Stream one feature area live: `log stream --level debug --predicate 'subsystem BEGINSWITH "com.tbd" AND category == "markdown"'`
   - Replay the last 5 minutes after reproducing a bug: `log show --last 5m --level debug --predicate 'subsystem BEGINSWITH "com.tbd"'` (requires `sudo log config --subsystem com.tbd.app --mode "level:debug,persist:debug"` once per subsystem to capture `.debug` rows)

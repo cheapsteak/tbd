@@ -34,6 +34,12 @@ jobs:
         # drives TmuxManager against a real tmux server on a unique socket.
         run: brew install tmux
 
+      # macos-15 runner defaults to Xcode 16.4 (Swift 6.1.2). Pinning to
+      # 26.3 (Swift 6.2.4) matches the local toolchain — keeps CI and local
+      # behavior consistent.
+      - name: Select Xcode 26.3 (Swift 6.2.4)
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+
       - name: Capture Swift toolchain version
         run: echo "SWIFT_VERSION=$(xcrun swift --version | head -1)" >> $GITHUB_ENV
 
@@ -44,15 +50,26 @@ jobs:
             .build
             ~/Library/Caches/org.swift.swiftpm
           # Primary key changes per source revision so we always know what we
-          # restored. restore-keys falls back to the most recent matching
-          # cache; llbuild's incremental build then only recompiles what
-          # actually differs.
-          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          # restored. restore-keys falls back to a cache with the same dep
+          # set (same Package.resolved hash) — without this scoping, restore
+          # could pull a cache from before a dep was added, leaving stale
+          # `.build/checkouts/` that breaks SPM resolution of binary targets
+          # (e.g. SwiftLintBinary).
+          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
-            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-
+            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
 
+      - name: SwiftLint (strict)
+        run: swift package plugin --allow-writing-to-package-directory swiftlint --strict
+
+      # `-j 2` caps parallel swift-frontend processes. The macos-15 runner
+      # has limited RAM (~7-14 GB) and Swift 6.2.4 frontends each consume
+      # 1-2 GB on heavy SwiftUI / NIO code. With the default parallelism,
+      # the build OOMs late (~file 1260+/1356) and emits a bare
+      # `error: fatalError` with no diagnostic — different file every run.
+      # Capping parallelism trades wall-clock for stability.
       - name: Test
-        run: swift test --parallel
+        run: swift test --parallel -j 2
 
       - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
-        run: swift build
+        run: swift build -j 2
