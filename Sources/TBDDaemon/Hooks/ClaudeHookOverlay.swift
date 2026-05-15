@@ -44,6 +44,13 @@ public enum ClaudeHookOverlay {
     static let stopCommand =
         #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
 
+    /// Second Stop hook: prompt the agent to rename its worktree/branch at
+    /// end-of-turn while the work is fresh and context is highest. Reads
+    /// the Stop payload from stdin and may emit a `{"decision":"block",...}`
+    /// JSON response. Silent failure so we never wedge the agent.
+    static let stopRenameCheckCommand =
+        #"tbd hooks stop-rename-check 2>/dev/null || true"#
+
     /// Bridges the `PreToolUse:AskUserQuestion` hook into TBD. Captures the
     /// tool input and tool_use_id so the transcript pane can render the
     /// question before Claude flushes the assistant message to the JSONL.
@@ -72,6 +79,11 @@ public enum ClaudeHookOverlay {
                     [
                         "hooks": [
                             ["type": "command", "command": stopCommand]
+                        ]
+                    ],
+                    [
+                        "hooks": [
+                            ["type": "command", "command": stopRenameCheckCommand]
                         ]
                     ]
                 ],

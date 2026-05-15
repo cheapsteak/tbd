@@ -8,7 +8,7 @@ struct HooksCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "hooks",
         abstract: "Inspect and manage TBD's Claude Code hook integration",
-        subcommands: [HooksStatusCommand.self],
+        subcommands: [HooksStatusCommand.self, StopRenameCheckCommand.self],
         defaultSubcommand: HooksStatusCommand.self
     )
 }
