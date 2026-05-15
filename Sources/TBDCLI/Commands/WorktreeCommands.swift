@@ -42,14 +42,18 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Read initial prompt from a file (use - for stdin)")
     var promptFile: String?
 
-    @Option(name: .customLong("parent"), help: "Nest the new worktree under this parent (worktree ID or display name).")
-    var parent: String?
-
-    @Flag(name: .customLong("sibling"), help: "Spawn as a sibling of the caller (same parent as TBD_WORKTREE_ID).")
-    var asSibling: Bool = false
-
-    @Flag(name: .customLong("no-parent"), help: "Force the new worktree to be top-level (ignore TBD_WORKTREE_ID).")
-    var noParent: Bool = false
+    @Option(
+        name: .customLong("position"),
+        help: ArgumentHelp(
+            "Position of the new worktree in the tree, relative to the caller (TBD_WORKTREE_ID).",
+            discussion: """
+                child   (default) New worktree is a child of the caller.
+                sibling          New worktree is a peer of the caller (same parent).
+                root             New worktree has no parent (top-level).
+                """
+        )
+    )
+    var position: WorktreePosition = .child
 
     @Flag(name: .long, help: "Return immediately without waiting for the worktree to become active")
     var noWait = false
@@ -92,39 +96,12 @@ struct WorktreeCreate: AsyncParsableCommand {
 
         let resolvedPrompt = try resolvePrompt(inline: prompt, file: promptFile)
 
-        // Mutually exclusive parenting flags
-        let flagsSet = (parent != nil ? 1 : 0) + (asSibling ? 1 : 0) + (noParent ? 1 : 0)
-        if flagsSet > 1 {
-            throw ValidationError("Pass at most one of --parent, --sibling, --no-parent.")
-        }
-
-        // Resolve --parent (UUID or display name / folder name)
-        var explicitParentID: UUID?
-        if let p = parent {
-            if let uuid = UUID(uuidString: p) {
-                explicitParentID = uuid
-            } else {
-                let worktrees: [Worktree] = try client.call(
-                    method: RPCMethod.worktreeList,
-                    params: WorktreeListParams(),
-                    resultType: [Worktree].self
-                )
-                let matches = worktrees.filter { $0.displayName == p || $0.name == p }
-                if matches.isEmpty {
-                    throw ValidationError("No worktree matches --parent '\(p)'.")
-                }
-                if matches.count > 1 {
-                    throw ValidationError("Multiple worktrees match --parent '\(p)' — pass the UUID instead.")
-                }
-                explicitParentID = matches[0].id
-            }
-        }
-
         let callerEnvID = ProcessInfo.processInfo.environment["TBD_WORKTREE_ID"]
             .flatMap { UUID(uuidString: $0) }
-        let siblingOfID: UUID? = asSibling ? callerEnvID : nil
-        let passCaller = explicitParentID == nil && !asSibling && !noParent
-        let callerWorktreeID: UUID? = passCaller ? callerEnvID : nil
+        if let warning = position.unmetIntentWarning(callerEnvID: callerEnvID) {
+            FileHandle.standardError.write(Data("\(warning)\n".utf8))
+        }
+        let parentingFields = position.rpcFields(callerEnvID: callerEnvID)
 
         let pending: Worktree = try client.call(
             method: RPCMethod.worktreeCreate,
@@ -134,10 +111,10 @@ struct WorktreeCreate: AsyncParsableCommand {
                 branch: branch,
                 displayName: name,
                 prompt: resolvedPrompt,
-                parentWorktreeID: explicitParentID,
-                siblingOfWorktreeID: siblingOfID,
-                callerWorktreeID: callerWorktreeID,
-                suppressAutoParent: noParent ? true : nil
+                parentWorktreeID: parentingFields.parentWorktreeID,
+                siblingOfWorktreeID: parentingFields.siblingOfWorktreeID,
+                callerWorktreeID: parentingFields.callerWorktreeID,
+                suppressAutoParent: parentingFields.suppressAutoParent
             ),
             resultType: Worktree.self
         )
