@@ -12,7 +12,6 @@ struct WorktreePositionTests {
     @Test func childPassesCallerToDaemon() {
         let fields = WorktreePosition.child.rpcFields(callerEnvID: Self.callerID)
         #expect(fields.callerWorktreeID == Self.callerID)
-        #expect(fields.parentWorktreeID == nil)
         #expect(fields.siblingOfWorktreeID == nil)
         #expect(fields.suppressAutoParent == nil)
     }
@@ -22,7 +21,6 @@ struct WorktreePositionTests {
         // top-level create (same fallback as the old un-flagged default).
         let fields = WorktreePosition.child.rpcFields(callerEnvID: nil)
         #expect(fields.callerWorktreeID == nil)
-        #expect(fields.parentWorktreeID == nil)
         #expect(fields.siblingOfWorktreeID == nil)
         #expect(fields.suppressAutoParent == nil)
     }
@@ -33,7 +31,6 @@ struct WorktreePositionTests {
         let fields = WorktreePosition.sibling.rpcFields(callerEnvID: Self.callerID)
         #expect(fields.siblingOfWorktreeID == Self.callerID)
         #expect(fields.callerWorktreeID == nil)
-        #expect(fields.parentWorktreeID == nil)
         #expect(fields.suppressAutoParent == nil)
     }
 
@@ -43,7 +40,6 @@ struct WorktreePositionTests {
         let fields = WorktreePosition.sibling.rpcFields(callerEnvID: nil)
         #expect(fields.siblingOfWorktreeID == nil)
         #expect(fields.callerWorktreeID == nil)
-        #expect(fields.parentWorktreeID == nil)
         #expect(fields.suppressAutoParent == nil)
     }
 
@@ -54,7 +50,6 @@ struct WorktreePositionTests {
         #expect(fields.suppressAutoParent == true)
         #expect(fields.callerWorktreeID == nil)
         #expect(fields.siblingOfWorktreeID == nil)
-        #expect(fields.parentWorktreeID == nil)
     }
 
     @Test func rootIgnoresCaller() {

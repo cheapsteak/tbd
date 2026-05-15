@@ -23,7 +23,6 @@ public enum WorktreePosition: String, CaseIterable, ExpressibleByArgument {
 
     /// Resolved RPC fields for `WorktreeCreateParams`.
     public struct RPCFields: Equatable {
-        public let parentWorktreeID: UUID?
         public let siblingOfWorktreeID: UUID?
         public let callerWorktreeID: UUID?
         public let suppressAutoParent: Bool?
@@ -44,21 +43,18 @@ public enum WorktreePosition: String, CaseIterable, ExpressibleByArgument {
         switch self {
         case .child:
             return RPCFields(
-                parentWorktreeID: nil,
                 siblingOfWorktreeID: nil,
                 callerWorktreeID: callerEnvID,
                 suppressAutoParent: nil
             )
         case .sibling:
             return RPCFields(
-                parentWorktreeID: nil,
                 siblingOfWorktreeID: callerEnvID,
                 callerWorktreeID: nil,
                 suppressAutoParent: nil
             )
         case .root:
             return RPCFields(
-                parentWorktreeID: nil,
                 siblingOfWorktreeID: nil,
                 callerWorktreeID: nil,
                 suppressAutoParent: true
