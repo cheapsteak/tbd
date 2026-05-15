@@ -106,6 +106,13 @@ public final class TBDDatabase: Sendable {
         }
     }
 
+    /// Test-only accessor: allows migration tests to run migrations up to a
+    /// specific identifier and inspect/insert state between steps. Production
+    /// code paths must continue to call this through `init(...)` only.
+    internal static func buildMigratorForTests() -> DatabaseMigrator {
+        buildMigrator()
+    }
+
     private static func buildMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
 
@@ -455,7 +462,32 @@ public final class TBDDatabase: Sendable {
         //     well-known UUID 00000000-0000-0000-0000-000000000001
         // The Conductor feature was removed in favour of regular terminals + the
         // `tbd` skill. See `refactor: remove Conductor feature`.
+        //
+        // NOTE: v24 was previously buggy — it deleted conductor worktrees
+        // without first cleaning up `terminal` rows that referenced them,
+        // which made the migration roll back with a foreign-key violation at
+        // commit (SQLite error 19 from PRAGMA foreign_key_check) and crashed
+        // the daemon on every restart for any user with an orphan conductor
+        // terminal. The repair is in-place because for affected users the
+        // migration never recorded success in `grdb_migrations`, and for
+        // unaffected users (no conductor rows left) the added DELETE is a
+        // no-op.
         migrator.registerMigration("v24_drop_conductor") { db in
+            // Remove all child-table rows that FK-reference conductor worktrees
+            // before deleting the worktrees themselves. terminal, notification,
+            // and note all have onDelete: .cascade FKs to worktree.id; with
+            // GRDB's deferred FK checking (PRAGMA foreign_key_check at commit),
+            // any surviving child row rolls back the transaction with SQLite
+            // error 19 and crashes the daemon on every subsequent restart.
+            try db.execute(
+                sql: "DELETE FROM terminal WHERE worktreeID IN (SELECT id FROM worktree WHERE status = 'conductor')"
+            )
+            try db.execute(
+                sql: "DELETE FROM notification WHERE worktreeID IN (SELECT id FROM worktree WHERE status = 'conductor')"
+            )
+            try db.execute(
+                sql: "DELETE FROM note WHERE worktreeID IN (SELECT id FROM worktree WHERE status = 'conductor')"
+            )
             try db.execute(sql: "DROP TABLE IF EXISTS conductor")
             try db.execute(sql: "DELETE FROM worktree WHERE status = 'conductor'")
             try db.execute(
