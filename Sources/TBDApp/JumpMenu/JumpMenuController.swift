@@ -67,8 +67,12 @@ final class JumpMenuController {
             }
         )
 
-        let panel = self.panel ?? JumpMenuPanel(content: view)
-        panel.updateContent(view)
+        // Always recreate the panel on each open so SwiftUI mounts a fresh
+        // view tree and `JumpMenuView.onAppear { searchFocused = true }`
+        // fires every time. Reusing the panel and swapping content via
+        // `updateContent` skips onAppear after the first open, leaving the
+        // search field unfocused on subsequent cmd-K presses.
+        let panel = JumpMenuPanel(content: view)
         positionPanel(panel)
         panel.orderFrontRegardless()
         panel.makeKey()
@@ -79,6 +83,7 @@ final class JumpMenuController {
 
     private func close() {
         panel?.dismiss()
+        panel = nil
         viewModel = nil
     }
 
