@@ -68,6 +68,17 @@ want to spawn workers under yourself.
 
 Use `--position=root` to force the new worktree to be top-level.
 
+### Reparent a worktree
+
+Move an existing worktree under a different orchestrator, or promote a child
+to top-level. `--index` is optional and defaults to the end of the destination
+sibling group.
+
+```bash
+tbd worktree reparent <worktree> --parent <name-or-id> [--index N]
+tbd worktree reparent <worktree> --root [--index N]
+```
+
 ### Send input to an existing terminal / read its output
 
 ```bash
