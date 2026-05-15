@@ -111,6 +111,10 @@ final class HangWatchdog: @unchecked Sendable {
     /// stall duration on recovery.
     private var hangStartedAtMach: UInt64 = 0
 
+    /// Mach timestamp of the last resample during a sustained hang.
+    /// Used to throttle resampling to every ~5 seconds.
+    private var lastResampleAtMach: UInt64 = 0
+
     private let thresholdMs: UInt64
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "com.tbd.app.hang-watchdog", qos: .utility)
@@ -162,6 +166,7 @@ final class HangWatchdog: @unchecked Sendable {
             // match the .toHealthy edge in evaluate()).
             wasHung = false
             hangStartedAtMach = 0
+            lastResampleAtMach = 0
         }
     }
 
@@ -203,20 +208,43 @@ final class HangWatchdog: @unchecked Sendable {
 
         switch action {
         case .noop:
-            break
+            // During a sustained hang, resample every ~5 seconds.
+            if wasHung {
+                let resampleIntervalNs: UInt64 = 5_000_000_000  // 5 seconds
+                let timeSinceLastResampleNs = Self.machDeltaToNanos(now: now, then: lastResampleAtMach)
+                if timeSinceLastResampleNs >= resampleIntervalNs {
+                    lastResampleAtMach = now
+                    let frames = MainThreadSampler.sample()
+                    let elapsedNs = Self.machDeltaToNanos(now: now, then: hangStartedAtMach)
+                    let elapsedMs = elapsedNs / 1_000_000
+                    HangStackWriter.shared.recordResample(elapsedMs: elapsedMs, frames: frames)
+                }
+            }
         case .log(.toHung):
             wasHung = true
             hangStartedAtMach = lastTick
+            lastResampleAtMach = lastTick
             let stallMs = stallNs / 1_000_000
             let snap = snapshotLock.withLock { $0 }
-            Self.logger.warning(
-                "hang detected stallMs=\(stallMs, privacy: .public) terminalID=\(snap.focusedTerminalIDShort ?? "-", privacy: .public) itemCount=\(snap.transcriptItemCount ?? -1, privacy: .public) pane=\(snap.paneLabel ?? "-", privacy: .public)"
-            )
+
+            // Sample the main thread stack and write to disk.
+            let frames = MainThreadSampler.sample()
+            if let fileURL = HangStackWriter.shared.recordHangStart(stallMs: stallMs, snapshot: snap, frames: frames) {
+                Self.logger.warning(
+                    "hang detected stallMs=\(stallMs, privacy: .public) terminalID=\(snap.focusedTerminalIDShort ?? "-", privacy: .public) itemCount=\(snap.transcriptItemCount ?? -1, privacy: .public) pane=\(snap.paneLabel ?? "-", privacy: .public) stackFile=\(fileURL.lastPathComponent, privacy: .public)"
+                )
+            } else {
+                Self.logger.warning(
+                    "hang detected stallMs=\(stallMs, privacy: .public) terminalID=\(snap.focusedTerminalIDShort ?? "-", privacy: .public) itemCount=\(snap.transcriptItemCount ?? -1, privacy: .public) pane=\(snap.paneLabel ?? "-", privacy: .public)"
+                )
+            }
         case .log(.toHealthy):
             let totalStallNs = Self.machDeltaToNanos(now: now, then: hangStartedAtMach)
             let totalStallMs = totalStallNs / 1_000_000
             wasHung = false
             hangStartedAtMach = 0
+            lastResampleAtMach = 0
+            HangStackWriter.shared.recordHangRecovery(totalStallMs: totalStallMs)
             Self.logger.info("hang recovered after stallMs=\(totalStallMs, privacy: .public)")
         }
 

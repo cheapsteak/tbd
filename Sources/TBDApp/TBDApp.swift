@@ -197,6 +197,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             lifecycleLogger.info("Crash forensics writing to \(dir.path, privacy: .public)")
         }
+
+        // Capture the main thread port for hang stack sampling.
+        // Must be done on the main thread before any background activity.
+        MainThreadSampler.captureMainThread()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
