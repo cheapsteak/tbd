@@ -111,7 +111,7 @@ struct WorktreeCreate: AsyncParsableCommand {
                 branch: branch,
                 displayName: name,
                 prompt: resolvedPrompt,
-                parentWorktreeID: parentingFields.parentWorktreeID,
+                parentWorktreeID: nil,
                 siblingOfWorktreeID: parentingFields.siblingOfWorktreeID,
                 callerWorktreeID: parentingFields.callerWorktreeID,
                 suppressAutoParent: parentingFields.suppressAutoParent
