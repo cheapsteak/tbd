@@ -367,7 +367,10 @@ struct WorktreeReparent: AsyncParsableCommand {
             newParentID = nil
         }
 
-        // Fetch the moving worktree so we know which repo we're operating in.
+        if let newParentID, newParentID == worktreeID {
+            throw CLIError.invalidArgument("A worktree cannot be its own parent.")
+        }
+
         let allWorktrees: [Worktree] = try client.call(
             method: RPCMethod.worktreeList,
             params: WorktreeListParams(),
@@ -377,18 +380,13 @@ struct WorktreeReparent: AsyncParsableCommand {
             throw CLIError.invalidArgument("Worktree not found: \(nameOrID)")
         }
 
-        let siblings: [Worktree] = try client.call(
-            method: RPCMethod.worktreeList,
-            params: WorktreeListParams(repoID: moving.repoID),
-            resultType: [Worktree].self
-        )
-
         let newSortOrder: Int
         if let idx = index {
             newSortOrder = idx
         } else {
-            newSortOrder = siblings.filter { wt in
-                wt.id != worktreeID
+            newSortOrder = allWorktrees.filter { wt in
+                wt.repoID == moving.repoID
+                    && wt.id != worktreeID
                     && wt.parentWorktreeID == newParentID
                     && (wt.status == .active || wt.status == .creating)
             }.count
