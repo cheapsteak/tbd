@@ -50,6 +50,24 @@ briefing here
 EOF
 ```
 
+### Spawn worker worktrees from an orchestrator (most common fan-out)
+
+The default `--position=child` nests the new worktree under the caller. This
+is what you want when an orchestrator is fanning out a batch of workers —
+they'll all be siblings of each other and children of the orchestrator.
+
+```bash
+tbd worktree create --branch tbd/<task> --name "<task>" --prompt-file - <<'EOF'
+briefing here
+EOF
+```
+
+Use `--position=sibling` when you (the caller) are *already* a worker under
+some parent and you want to spawn a peer alongside yourself — not when you
+want to spawn workers under yourself.
+
+Use `--position=root` to force the new worktree to be top-level.
+
 ### Send input to an existing terminal / read its output
 
 ```bash
