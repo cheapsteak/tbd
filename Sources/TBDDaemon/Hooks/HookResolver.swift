@@ -1,5 +1,8 @@
 import Foundation
+import os
 import TBDShared
+
+private let hooksLogger = Logger(subsystem: "com.tbd.daemon", category: "hooks")
 
 public enum HookEvent: String, Sendable {
     case setup
@@ -51,11 +54,17 @@ public struct HookResolver: Sendable {
 
         // 3. conductor.json (deprecated)
         if let path = resolveConductor(event: event, repoPath: repoPath) {
+            hooksLogger.warning(
+                "conductor.json hook resolved for \(event.rawValue, privacy: .public); consider migrating to .worktree-hooks/"
+            )
             return path
         }
 
         // 4. .dmux-hooks (deprecated)
         if let path = resolveDmux(event: event, repoPath: repoPath) {
+            hooksLogger.warning(
+                ".dmux-hooks/ hook resolved for \(event.rawValue, privacy: .public); consider migrating to .worktree-hooks/"
+            )
             return path
         }
 
