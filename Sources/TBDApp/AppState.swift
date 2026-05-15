@@ -142,7 +142,7 @@ final class AppState: ObservableObject {
     }
 
     @Published var dockRatio: CGFloat = 0.3 {
-        didSet { UserDefaults.standard.set(Double(dockRatio), forKey: Self.dockRatioKey) }
+        didSet { userDefaults.set(Double(dockRatio), forKey: Self.dockRatioKey) }
     }
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
@@ -258,8 +258,8 @@ final class AppState: ObservableObject {
 
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
-    lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient)
-    lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient)
+    lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
+    lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     private var pollTimer: Timer?
     private var pollCycle = 0
     private var subscriptionTask: Task<Void, Never>?
@@ -280,7 +280,7 @@ final class AppState: ObservableObject {
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         restoreLayouts()
-        if let saved = UserDefaults.standard.object(forKey: Self.dockRatioKey) as? Double {
+        if let saved = userDefaults.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
         startMemoryPressureMonitor()
@@ -378,11 +378,11 @@ final class AppState: ObservableObject {
 
     private func persistLayouts() {
         guard let data = try? JSONEncoder().encode(layouts) else { return }
-        UserDefaults.standard.set(data, forKey: Self.layoutsKey)
+        userDefaults.set(data, forKey: Self.layoutsKey)
     }
 
     private func restoreLayouts() {
-        guard let data = UserDefaults.standard.data(forKey: Self.layoutsKey),
+        guard let data = userDefaults.data(forKey: Self.layoutsKey),
               let restored = try? JSONDecoder().decode([UUID: LayoutNode].self, from: data) else { return }
         layouts = restored
     }

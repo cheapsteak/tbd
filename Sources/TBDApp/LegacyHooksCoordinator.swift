@@ -22,17 +22,19 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "legacy-hooks")
 @MainActor
 final class LegacyHooksCoordinator {
     private let daemonClient: DaemonClient
+    private let userDefaults: UserDefaults
 
     private var hasCheckedThisSession = false
 
     private static let dismissedKey = "com.tbd.app.legacyHooks.dismissed"
     private var dismissed: Bool {
-        get { UserDefaults.standard.bool(forKey: Self.dismissedKey) }
-        set { UserDefaults.standard.set(newValue, forKey: Self.dismissedKey) }
+        get { userDefaults.bool(forKey: Self.dismissedKey) }
+        set { userDefaults.set(newValue, forKey: Self.dismissedKey) }
     }
 
-    init(daemonClient: DaemonClient) {
+    init(daemonClient: DaemonClient, userDefaults: UserDefaults = .standard) {
         self.daemonClient = daemonClient
+        self.userDefaults = userDefaults
     }
 
     /// One-time launch check. Skips on subsequent invocations within the

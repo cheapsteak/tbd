@@ -8,6 +8,7 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "cli-installer")
 @MainActor
 final class CLIInstallerCoordinator {
     private let daemonClient: DaemonClient
+    private let userDefaults: UserDefaults
     private let installer = CLIInstaller()
 
     /// Set after `checkOnLaunch` runs, so daemon reconnects within the same
@@ -20,12 +21,13 @@ final class CLIInstallerCoordinator {
     /// re-install via the menu re-arms the prompt for future deletions).
     private static let dismissedKey = "com.tbd.app.cliInstaller.notInstalledDismissed"
     private var notInstalledDismissed: Bool {
-        get { UserDefaults.standard.bool(forKey: Self.dismissedKey) }
-        set { UserDefaults.standard.set(newValue, forKey: Self.dismissedKey) }
+        get { userDefaults.bool(forKey: Self.dismissedKey) }
+        set { userDefaults.set(newValue, forKey: Self.dismissedKey) }
     }
 
-    init(daemonClient: DaemonClient) {
+    init(daemonClient: DaemonClient, userDefaults: UserDefaults = .standard) {
         self.daemonClient = daemonClient
+        self.userDefaults = userDefaults
     }
 
     /// Called once at end of `connectAndLoadInitialState`. Surfaces a one-click
