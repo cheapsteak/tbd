@@ -12,6 +12,7 @@ struct WorktreeCommand: ParsableCommand {
             WorktreeArchive.self,
             WorktreeRevive.self,
             WorktreeRename.self,
+            WorktreeReparent.self,
         ]
     )
 }
@@ -320,6 +321,120 @@ struct WorktreeRename: AsyncParsableCommand {
         )
 
         print("Worktree renamed to: \(newName)")
+    }
+}
+
+// MARK: - worktree reparent
+
+struct WorktreeReparent: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "reparent",
+        abstract: "Move a worktree under a new parent (or promote to top-level)"
+    )
+
+    @Argument(help: "Worktree name or ID")
+    var nameOrID: String
+
+    @Option(name: .long, help: "New parent worktree (name or ID). Mutually exclusive with --root.")
+    var parent: String?
+
+    @Flag(name: .long, help: "Promote the worktree to top-level (no parent). Mutually exclusive with --parent.")
+    var root = false
+
+    @Option(name: .long, help: "Sort order within the new sibling group (default: append to end).")
+    var index: Int?
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func validate() throws {
+        if parent == nil && !root {
+            throw ValidationError("Specify either --parent <name-or-id> or --root.")
+        }
+        if parent != nil && root {
+            throw ValidationError("--parent and --root are mutually exclusive.")
+        }
+    }
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        let worktreeID = try resolveWorktreeNameOrID(nameOrID, client: client)
+
+        let newParentID: UUID?
+        if let parent = parent {
+            newParentID = try resolveWorktreeNameOrID(parent, client: client)
+        } else {
+            newParentID = nil
+        }
+
+        if let newParentID, newParentID == worktreeID {
+            throw CLIError.invalidArgument("A worktree cannot be its own parent.")
+        }
+
+        let allWorktrees: [Worktree] = try client.call(
+            method: RPCMethod.worktreeList,
+            params: WorktreeListParams(),
+            resultType: [Worktree].self
+        )
+        guard let moving = allWorktrees.first(where: { $0.id == worktreeID }) else {
+            throw CLIError.invalidArgument("Worktree not found: \(nameOrID)")
+        }
+
+        let newSortOrder: Int
+        if let idx = index {
+            newSortOrder = idx
+        } else {
+            newSortOrder = allWorktrees.filter { wt in
+                wt.repoID == moving.repoID
+                    && wt.id != worktreeID
+                    && wt.parentWorktreeID == newParentID
+                    && (wt.status == .active || wt.status == .creating)
+            }.count
+        }
+
+        try client.callVoid(
+            method: RPCMethod.worktreeMove,
+            params: WorktreeMoveParams(
+                worktreeID: worktreeID,
+                newParentID: newParentID,
+                newSortOrder: newSortOrder
+            )
+        )
+
+        if json {
+            // Custom Encodable so `newParentID` serializes as explicit `null`
+            // (rather than being omitted) when the worktree is promoted to root.
+            struct ReparentJSON: Encodable {
+                let worktreeID: String
+                let newParentID: String?
+                let newSortOrder: Int
+
+                enum CodingKeys: String, CodingKey {
+                    case worktreeID, newParentID, newSortOrder
+                }
+
+                func encode(to encoder: Encoder) throws {
+                    var c = encoder.container(keyedBy: CodingKeys.self)
+                    try c.encode(worktreeID, forKey: .worktreeID)
+                    try c.encode(newSortOrder, forKey: .newSortOrder)
+                    if let newParentID {
+                        try c.encode(newParentID, forKey: .newParentID)
+                    } else {
+                        try c.encodeNil(forKey: .newParentID)
+                    }
+                }
+            }
+            printJSON(ReparentJSON(
+                worktreeID: worktreeID.uuidString,
+                newParentID: newParentID?.uuidString,
+                newSortOrder: newSortOrder
+            ))
+        } else if let pid = newParentID {
+            let parentName = allWorktrees.first(where: { $0.id == pid })?.displayName ?? pid.uuidString
+            print("Reparented \(moving.displayName) under \(parentName)")
+        } else {
+            print("Reparented \(moving.displayName) to top level")
+        }
     }
 }
 
