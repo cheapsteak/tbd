@@ -156,7 +156,14 @@ enum StopRenameCheckCore {
             return nil
         }
 
-        // 3d. Counter check. Bump first; if the new value exceeds the cap,
+        // 3d. Folder for the `tbd worktree rename` example. Fetched before
+        // the counter bump so the "fire count = times directive was shown"
+        // invariant holds even if folder resolution silently fails.
+        guard let folder = dependencies.fetchFolder(cwd) else {
+            return nil
+        }
+
+        // 3e. Counter check. Bump first; if the new value exceeds the cap,
         // give up so we don't trap the agent in a stop loop.
         let counterPath = dependencies.counterPath(sessionID)
         let newCount = bumpCounter(at: counterPath)
@@ -164,12 +171,7 @@ enum StopRenameCheckCore {
             return nil
         }
 
-        // 4. Folder for the `tbd worktree rename` example.
-        guard let folder = dependencies.fetchFolder(cwd) else {
-            return nil
-        }
-
-        // 5. Build the directive and encode it as a Stop-hook block response.
+        // 4. Build the directive and encode it as a Stop-hook block response.
         let reason = buildDirective(branch: branch, folder: folder)
         return encodeBlock(reason: reason)
     }
@@ -213,18 +215,18 @@ enum StopRenameCheckCore {
     }
 
     /// Serialize `{"decision":"block","reason":"..."}` using JSONEncoder so
-    /// quoting/escaping is correct.
-    static func encodeBlock(reason: String) -> String? {
+    /// quoting/escaping is correct. Both failure paths are unreachable
+    /// (encoding two `String` fields can't fail and JSONEncoder always
+    /// produces valid UTF-8), so the return type is non-optional.
+    static func encodeBlock(reason: String) -> String {
         struct StopBlock: Encodable {
             let decision: String
             let reason: String
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(StopBlock(decision: "block", reason: reason)) else {
-            return nil
-        }
-        return String(data: data, encoding: .utf8)
+        let data = try! encoder.encode(StopBlock(decision: "block", reason: reason))
+        return String(data: data, encoding: .utf8)!
     }
 }
 
