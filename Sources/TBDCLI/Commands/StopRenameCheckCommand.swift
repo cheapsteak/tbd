@@ -96,7 +96,10 @@ enum StopRenameCheckCore {
                     return (topLevel as NSString).lastPathComponent
                 },
                 counterPath: { sessionID in
-                    "/tmp/tbd-stop-rename-\(sessionID)"
+                    // Sanitize against forward slashes so the cap guarantee doesn't rely on
+                    // Claude Code's session-id format (UUIDs today, but an external contract).
+                    let safe = sessionID.replacingOccurrences(of: "/", with: "-")
+                    return "/tmp/tbd-stop-rename-\(safe)"
                 }
             )
         }
@@ -125,10 +128,9 @@ enum StopRenameCheckCore {
 
         let sessionID = (payload["session_id"] as? String) ?? ""
         let cwd = (payload["cwd"] as? String) ?? ""
-        // `stop_hook_active` is read for completeness; we use the on-disk
-        // counter rather than relying on the flag because the flag also
-        // fires when other hooks block.
-        _ = (payload["stop_hook_active"] as? Bool) ?? false
+        // `stop_hook_active` is intentionally ignored: it also flips when *other*
+        // Stop hooks block, so it's not a reliable "this hook is re-entering"
+        // signal. We use the on-disk counter for loop protection instead.
 
         guard !sessionID.isEmpty, !cwd.isEmpty else {
             return nil
