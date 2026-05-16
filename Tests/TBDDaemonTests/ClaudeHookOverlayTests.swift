@@ -17,11 +17,18 @@ import Testing
         let cmd0 = inner?.first?["command"] as? String
         #expect(cmd0?.contains("tbd session-event") == true)
 
-        // Stop entry registers `tbd notify`.
+        // Stop entry registers `tbd notify` as the first matcher and
+        // `tbd hooks stop-rename-check` as a sibling matcher.
         let stop = hooks?["Stop"] as? [[String: Any]]
+        #expect(stop?.count == 2)
         let stopHooks = stop?.first?["hooks"] as? [[String: Any]]
         let stopCmd = stopHooks?.first?["command"] as? String
         #expect(stopCmd?.contains("tbd notify") == true)
+        let allStopCommands: [String] = (stop ?? []).flatMap { entry -> [String] in
+            let inner = entry["hooks"] as? [[String: Any]] ?? []
+            return inner.compactMap { $0["command"] as? String }
+        }
+        #expect(allStopCommands.contains(where: { $0.contains("stop-rename-check") }))
     }
 
     @Test func roundtripsAsValidJSON() throws {

@@ -12,12 +12,19 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 /// its own overlay file pinned at spawn time without touching the user's
 /// settings.json at all.
 ///
-/// The overlay registers two hooks:
+/// The overlay registers four event types:
 /// - `SessionStart` (matcher `*`): calls `tbd session-event`, which
 ///   relays the new session ID + transcript path to the daemon. This is
 ///   what fixes the post-`/clear`/`/compact` transcript freeze.
-/// - `Stop`: calls `tbd notify` for response-complete notifications,
-///   matching the legacy globally-installed hook.
+/// - `Stop` (two entries):
+///   - `tbd notify` for response-complete notifications, matching the
+///     legacy globally-installed hook.
+///   - `tbd hooks stop-rename-check`, which prompts the agent to rename
+///     a still-default worktree/branch at end-of-turn.
+/// - `PreToolUse:AskUserQuestion` / `PostToolUse:AskUserQuestion`:
+///   bridge tool input and `tool_use_id` so the transcript pane can
+///   render the question before Claude flushes the assistant message
+///   to the JSONL.
 ///
 /// The overlay is regenerated on every daemon startup so changes to the
 /// shape (new hooks, new commands) take effect on the next worktree open.
@@ -43,6 +50,13 @@ public enum ClaudeHookOverlay {
     /// regressing notification behavior.
     static let stopCommand =
         #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
+
+    /// Second Stop hook: prompt the agent to rename its worktree/branch at
+    /// end-of-turn while the work is fresh and context is highest. Reads
+    /// the Stop payload from stdin and may emit a `{"decision":"block",...}`
+    /// JSON response. Silent failure so we never wedge the agent.
+    static let stopRenameCheckCommand =
+        #"tbd hooks stop-rename-check 2>/dev/null || true"#
 
     /// Bridges the `PreToolUse:AskUserQuestion` hook into TBD. Captures the
     /// tool input and tool_use_id so the transcript pane can render the
@@ -72,6 +86,11 @@ public enum ClaudeHookOverlay {
                     [
                         "hooks": [
                             ["type": "command", "command": stopCommand]
+                        ]
+                    ],
+                    [
+                        "hooks": [
+                            ["type": "command", "command": stopRenameCheckCommand]
                         ]
                     ]
                 ],
