@@ -21,9 +21,10 @@ public final class HTTPServer: Sendable {
     /// The port the server is bound to, available after start().
     public nonisolated(unsafe) var port: Int = 0
 
-    public init(router: RPCRouter, portFilePath: String = TBDConstants.portFilePath) {
+    public init(router: RPCRouter, portFilePath: String? = nil) {
         self.router = router
-        self.portFilePath = portFilePath
+        // See HookResolver — resolve here, not at the caller's site.
+        self.portFilePath = portFilePath ?? TBDConstants.portFilePath
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
     }
 

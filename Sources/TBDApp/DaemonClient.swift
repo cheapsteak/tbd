@@ -45,8 +45,9 @@ actor DaemonClient {
     private let socketPath: String
     private(set) var connected: Bool = false
 
-    init(socketPath: String = TBDConstants.socketPath) {
-        self.socketPath = socketPath
+    init(socketPath: String? = nil) {
+        // See HookResolver — resolve here, not at the caller's site.
+        self.socketPath = socketPath ?? TBDConstants.socketPath
     }
 
     // MARK: - Connection

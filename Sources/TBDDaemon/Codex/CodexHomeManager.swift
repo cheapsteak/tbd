@@ -8,10 +8,12 @@ import TBDShared
 struct CodexHomeManager: Sendable {
     let baseDirectory: URL
 
-    init(
-        baseDirectory: URL = TBDConstants.configDir.appendingPathComponent("agents/codex", isDirectory: true)
-    ) {
+    init(baseDirectory: URL? = nil) {
+        // See HookResolver — keep cross-module `TBDConstants.configDir` access
+        // inside this module to avoid Xcode 26.3 unsafeMutableAddressor link
+        // failures in test targets that call this initializer with defaults.
         self.baseDirectory = baseDirectory
+            ?? TBDConstants.configDir.appendingPathComponent("agents/codex", isDirectory: true)
     }
 
     func homeDirectory(forRepoID repoID: UUID) -> URL {

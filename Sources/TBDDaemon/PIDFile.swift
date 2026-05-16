@@ -4,8 +4,10 @@ import TBDShared
 public struct PIDFile: Sendable {
     let path: String
 
-    public init(path: String = TBDConstants.pidFilePath) {
-        self.path = path
+    public init(path: String? = nil) {
+        // See HookResolver — keep cross-module `TBDConstants` access inside
+        // this module to avoid Xcode 26.3 unsafeMutableAddressor link failures.
+        self.path = path ?? TBDConstants.pidFilePath
     }
 
     public func write() throws {
