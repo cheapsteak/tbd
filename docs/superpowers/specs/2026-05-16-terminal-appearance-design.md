@@ -134,7 +134,7 @@ Cell dimensions change when the font changes; the tmux pane must resize to match
 | `tomorrow-night` | Tomorrow Night | Chris Kempson palette |
 | `dracula` | Dracula | High-contrast classic |
 | `nord` | Nord | Cool low-saturation |
-| `oneDark` | One Dark | Atom / VS Code default dark |
+| `one-dark` | One Dark | Atom / VS Code default dark |
 | `gruvbox-dark` | Gruvbox Dark | Warm retro |
 
 Specific RGB values for non-Tango schemes will be transcribed from each scheme's canonical published palette during implementation.
