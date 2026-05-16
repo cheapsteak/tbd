@@ -296,3 +296,93 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
     #expect(after?.branch == beforeBranch)
     #expect(after?.archivedHeadSHA == beforeSHA)
 }
+
+// MARK: - Revive must --resume archived Claude sessions
+
+/// Captures the argv tmux would have been invoked with so we can assert the
+/// shell command body. Mirrors the recorder pattern in ModelProfileSpawnTests.
+private final class TmuxArgvRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _calls: [[String]] = []
+    var calls: [[String]] {
+        lock.lock(); defer { lock.unlock() }
+        return _calls
+    }
+    func record(_ args: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        _calls.append(args)
+    }
+    /// Last argv element of each call — the shell command body for new-window.
+    var shellBodies: [String] { calls.compactMap { $0.last } }
+}
+
+@Test func testReviveSpawnsClaudeWithResumeFlag() async throws {
+    let (tempDir, repoDir) = try await makeRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let recorder = TmuxArgvRecorder()
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()
+    )
+    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    // Create + archive with skipClaude so create-side doesn't spawn anything.
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+
+    // Seed an archived Claude session ID so the revive path believes there's
+    // a conversation to resume.
+    let sessionID = "AAAAAAAA-1111-2222-3333-444444444444"
+    try await db.worktrees.setArchivedClaudeSessions(id: wt.id, sessions: [sessionID])
+
+    // Revive with skipClaude=false so setupTerminals actually spawns claude.
+    _ = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)
+
+    // Find the new-window invocation whose shell body launches claude.
+    let claudeBodies = recorder.shellBodies.filter { $0.contains("claude ") }
+    #expect(!claudeBodies.isEmpty, "expected at least one claude spawn during revive; recorded: \(recorder.shellBodies)")
+
+    let body = claudeBodies.first ?? ""
+    #expect(body.contains("--resume \(sessionID)"),
+            "revive should spawn claude with --resume <archivedSession>, got: \(body)")
+    #expect(!body.contains("--session-id \(sessionID)"),
+            "revive must NOT spawn claude with --session-id <archivedSession> (that's the bug — it starts a fresh session and loses the conversation), got: \(body)")
+}
+
+@Test func testReviveResumesEveryArchivedSession() async throws {
+    let (tempDir, repoDir) = try await makeRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let recorder = TmuxArgvRecorder()
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()
+    )
+    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+
+    let sessionA = "AAAAAAAA-1111-2222-3333-444444444444"
+    let sessionB = "BBBBBBBB-1111-2222-3333-444444444444"
+    let sessionC = "CCCCCCCC-1111-2222-3333-444444444444"
+    try await db.worktrees.setArchivedClaudeSessions(
+        id: wt.id, sessions: [sessionA, sessionB, sessionC]
+    )
+
+    _ = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)
+
+    let claudeBodies = recorder.shellBodies.filter { $0.contains("claude ") }
+    // One per archived session — first via primary terminal, rest via dropFirst loop.
+    #expect(claudeBodies.count == 3,
+            "expected 3 claude spawns (one per archived session), got \(claudeBodies.count): \(claudeBodies)")
+    for sid in [sessionA, sessionB, sessionC] {
+        #expect(claudeBodies.contains { $0.contains("--resume \(sid)") },
+                "missing --resume \(sid) in any claude spawn body; got: \(claudeBodies)")
+        #expect(!claudeBodies.contains { $0.contains("--session-id \(sid)") },
+                "should not spawn --session-id \(sid) on revive; got: \(claudeBodies)")
+    }
+}

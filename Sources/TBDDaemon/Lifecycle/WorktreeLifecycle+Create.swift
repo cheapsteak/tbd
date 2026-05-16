@@ -266,13 +266,20 @@ extension WorktreeLifecycle {
             claudeSessionID = nil
             pinnedProfileID = nil
         } else {
-            let sessionUUID = archivedClaudeSessions?.first ?? UUID().uuidString
+            let archivedSession = archivedClaudeSessions?.first
+            let sessionUUID = archivedSession ?? UUID().uuidString
             claudeSessionID = sessionUUID
-            let isResume = archivedClaudeSessions?.first != nil
-            let appendPrompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: isResume)
+            let isResume = archivedSession != nil
+            // `--resume` is what actually restores the prior conversation;
+            // `--session-id` is for starting a NEW session with a pre-chosen
+            // UUID (used on fresh create). Reviving with `--session-id` on an
+            // already-existing session file would lose the transcript.
+            let appendPrompt = isResume
+                ? nil
+                : SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false)
             let spawn = ClaudeSpawnCommandBuilder.build(
-                resumeID: nil,
-                freshSessionID: sessionUUID,
+                resumeID: isResume ? sessionUUID : nil,
+                freshSessionID: isResume ? nil : sessionUUID,
                 appendSystemPrompt: appendPrompt,
                 initialPrompt: isResume ? nil : initialPrompt,
                 profileSecret: resolvedProfile?.secret,
@@ -353,8 +360,8 @@ extension WorktreeLifecycle {
             for sessionID in sessions.dropFirst() {
                 let plannedID = UUID()
                 let spawn = ClaudeSpawnCommandBuilder.build(
-                    resumeID: nil,
-                    freshSessionID: sessionID,
+                    resumeID: sessionID,
+                    freshSessionID: nil,
                     appendSystemPrompt: nil,
                     initialPrompt: nil,
                     profileSecret: resolvedProfile?.secret,
