@@ -23,9 +23,10 @@ public final class SocketServer: Sendable {
         _connectedClients.load(ordering: .relaxed)
     }
 
-    public init(router: RPCRouter, socketPath: String = TBDConstants.socketPath) {
+    public init(router: RPCRouter, socketPath: String? = nil) {
         self.router = router
-        self.socketPath = socketPath
+        // See HookResolver — resolve here, not at the caller's site.
+        self.socketPath = socketPath ?? TBDConstants.socketPath
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
     }
 

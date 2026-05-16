@@ -32,11 +32,15 @@ public enum HookEvent: String, Sendable {
 public struct HookResolver: Sendable {
     public let globalHooksDir: String
 
-    public init(
-        globalHooksDir: String = TBDConstants.configDir
-            .appendingPathComponent("hooks/default").path
-    ) {
+    public init(globalHooksDir: String? = nil) {
+        // Resolve in this module's compilation context. Cross-module default
+        // expressions that reference `TBDConstants.configDir` get re-emitted
+        // at the caller's site, and under Swift 6 / Xcode 26.3 that re-emission
+        // generates a reference to the property's `unsafeMutableAddressor`
+        // symbol — which doesn't exist for a computed `static var`, breaking
+        // the link step in test targets. See PR #153 CI failure for context.
         self.globalHooksDir = globalHooksDir
+            ?? TBDConstants.configDir.appendingPathComponent("hooks/default").path
     }
 
     /// Resolves which hook script to run. First match wins, no chaining.

@@ -35,8 +35,10 @@ enum SocketClientError: Error, CustomStringConvertible {
 struct SocketClient: Sendable {
     let socketPath: String
 
-    init(socketPath: String = TBDConstants.socketPath) {
-        self.socketPath = socketPath
+    init(socketPath: String? = nil) {
+        // See HookResolver in TBDDaemon — resolve here, not at the caller's
+        // site, to avoid cross-module addressor link failures.
+        self.socketPath = socketPath ?? TBDConstants.socketPath
     }
 
     /// Check if the daemon socket exists (quick check before connecting).

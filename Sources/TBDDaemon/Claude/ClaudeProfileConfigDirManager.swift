@@ -22,10 +22,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeProfil
 struct ClaudeProfileConfigDirManager: Sendable {
     let baseDirectory: URL
 
-    init(
-        baseDirectory: URL = TBDConstants.configDir.appendingPathComponent("profiles", isDirectory: true)
-    ) {
+    init(baseDirectory: URL? = nil) {
+        // Resolve inside the init to keep the `TBDConstants.configDir` access
+        // out of the caller's compilation context — see HookResolver for the
+        // Xcode 26.3 unsafeMutableAddressor link-failure rationale.
         self.baseDirectory = baseDirectory
+            ?? TBDConstants.configDir.appendingPathComponent("profiles", isDirectory: true)
     }
 
     func configDirectory(forProfileID profileID: UUID) -> URL {
