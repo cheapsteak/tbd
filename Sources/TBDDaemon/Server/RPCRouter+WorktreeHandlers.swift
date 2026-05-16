@@ -116,6 +116,22 @@ extension RPCRouter {
         return try RPCResponse(result: worktree)
     }
 
+    func handleWorktreeAdopt(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeAdoptParams.self, from: paramsData)
+        let worktree = try await lifecycle.adoptWorktree(
+            repoID: params.repoID,
+            path: params.path,
+            displayName: params.displayName
+        )
+
+        subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
+            worktreeID: worktree.id, repoID: worktree.repoID,
+            name: worktree.name, path: worktree.path
+        )))
+
+        return try RPCResponse(result: worktree)
+    }
+
     func handleWorktreeRename(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeRenameParams.self, from: paramsData)
         try await db.worktrees.rename(id: params.worktreeID, displayName: params.displayName)
