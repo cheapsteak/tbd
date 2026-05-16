@@ -7,11 +7,18 @@
 
 Let users migrate their existing [Conductor](https://conductor.build) worktrees into TBD with a single script. Migration is non-destructive and supports dual-use: Conductor keeps working alongside TBD, and the same worktree directory is now managed by both apps.
 
+## What's inherited for free
+
+In-place adoption gives us two big wins with zero migration code:
+
+- **Claude session transcripts.** TBD discovers Claude Code transcripts at `~/.claude/projects/<encoded-cwd>/` keyed by the worktree's directory path (`Sources/TBDDaemon/Claude/ClaudeSessionScanner.swift`). Because the worktree directory doesn't move, the encoded cwd is unchanged, and TBD picks up whatever transcripts already exist for that path.
+- **Setup / archive / run hooks.** TBD's `HookResolver.resolve()` reads `conductor.json` from the repo root as a deprecation-warned fallback (`Sources/TBDDaemon/Hooks/HookResolver.swift:63-69`). Conductor users typically have a `conductor.json` checked into the repo describing their setup/archive/run scripts; adopted worktrees execute those identically to how Conductor did. The user gets a `consider migrating to .worktree-hooks/` warning, but everything works.
+
 ## Non-goals
 
-- Migrating Conductor's session/chat history.
-- Migrating Conductor's setup/archive scripts or custom prompts.
+- Migrating Conductor's own `session_messages` table (its custom chat UI rendering). TBD has no equivalent feature — it lives off Claude Code's transcript files, which are already in the right place.
 - Migrating linked or secondary Conductor workspaces (only the primary `workspace_path`).
+- Migrating Conductor-DB-only metadata like `custom_prompt_*`, `agent_personality`, `model`, `permission_mode` per workspace. TBD doesn't have direct equivalents for most of these.
 - Writing to Conductor's database. The migration never modifies Conductor state; users can manually archive in Conductor's UI if they want.
 - Moving files. Worktree directories stay where Conductor put them (`~/conductor/workspaces/<repo>/<name>/`).
 
@@ -198,6 +205,8 @@ Flags:
 - `--dry-run` — print the plan, don't write anything.
 
 Idempotent — safe to re-run as you create new Conductor worktrees.
+
+Existing Claude session transcripts and `conductor.json` hooks are picked up automatically — nothing extra to migrate.
 ````
 
 ## Edge cases & error handling
