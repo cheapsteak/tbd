@@ -121,6 +121,34 @@ struct JumpMenuViewModelTests {
         #expect(vm.rows.first?.id == a)
     }
 
+    @Test func fuzzyMatch_sortedByUnreadPriority() {
+        // Multiple worktrees match the query; the one with the highest
+        // unread severity should land at index 0, regardless of dict
+        // iteration order.
+        let plain = UUID()
+        let info = UUID()
+        let urgent = UUID()
+        let now = Date()
+        let vm = JumpMenuViewModel(
+            worktrees: [
+                snap(plain, name: "match-plain"),
+                snap(info, name: "match-info"),
+                snap(urgent, name: "match-urgent"),
+            ],
+            unread: [
+                info: UnreadSummary(type: .taskComplete, mostRecentAt: now),
+                urgent: UnreadSummary(type: .error, mostRecentAt: now),
+            ],
+            recentIDs: []
+        )
+        vm.query = "match"
+        let rows = vm.rows
+        #expect(rows.count == 3)
+        #expect(rows[0].id == urgent)   // .error severity 4
+        #expect(rows[1].id == info)     // .taskComplete severity 2
+        #expect(rows[2].id == plain)    // no unread
+    }
+
     @Test func fuzzyMatch_noMatch() {
         let a = UUID()
         let vm = JumpMenuViewModel(

@@ -136,6 +136,22 @@ final class JumpMenuViewModel: ObservableObject {
                     section: .match
                 )
             }
+            // Order: rows with an unread severity first (severity desc), then
+            // rows without. Within each group, sort by displayName asc, with
+            // a UUID lexicographic tiebreak for determinism. Dict iteration
+            // order of `allWorktrees` is otherwise arbitrary.
+            .sorted { lhs, rhs in
+                let lhsSev = lhs.severity?.severity ?? -1
+                let rhsSev = rhs.severity?.severity ?? -1
+                let lhsHas = lhs.severity != nil
+                let rhsHas = rhs.severity != nil
+                if lhsHas != rhsHas { return lhsHas && !rhsHas }
+                if lhsSev != rhsSev { return lhsSev > rhsSev }
+                if lhs.displayName != rhs.displayName {
+                    return lhs.displayName < rhs.displayName
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
             .prefix(Self.rowCap)
             .map { $0 }
     }
