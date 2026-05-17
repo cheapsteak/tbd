@@ -80,6 +80,15 @@ struct AppearanceSettingsTests {
         }
     }
 
+    @Test("unknown scheme id is normalized to the default at init")
+    func normalizeSchemeID() {
+        withIsolatedDefaults { defaults in
+            defaults.set("bogus-scheme", forKey: "terminal.scheme.id")
+            let settings = AppearanceSettings(defaults: defaults)
+            #expect(settings.schemeID == "tango")
+        }
+    }
+
     @Test("computed font falls back to system mono when fontName is bogus")
     func fallbackFontResolution() {
         withIsolatedDefaults { defaults in

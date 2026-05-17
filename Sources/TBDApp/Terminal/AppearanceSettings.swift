@@ -55,8 +55,11 @@ final class AppearanceSettings: ObservableObject {
         let storedSize = defaults.double(forKey: Keys.fontSize)
         self.fontSize = storedSize > 0 ? CGFloat(storedSize) : Defaults.fontSize
 
-        // Scheme ID — accept any string (lookup itself falls back if unknown).
-        self.schemeID = defaults.string(forKey: Keys.schemeID) ?? Defaults.schemeID
+        // Scheme ID — normalize unknown ids to the default so the Settings Picker
+        // always has a matching tag selected (otherwise it renders empty).
+        let storedScheme = defaults.string(forKey: Keys.schemeID) ?? Defaults.schemeID
+        self.schemeID = ColorSchemes.bundled.contains(where: { $0.id == storedScheme })
+            ? storedScheme : Defaults.schemeID
 
         // Cursor — round-trip via rawString; fall back on unknown.
         let storedCursor = defaults.string(forKey: Keys.cursorStyle) ?? ""
