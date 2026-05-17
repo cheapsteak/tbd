@@ -4,6 +4,10 @@ import SwiftUI
 /// root content — both must match.
 let jumpMenuPanelWidth: CGFloat = 440
 
+/// Maximum height of the scrolling list inside the panel.
+/// The controller derives the panel's total height from this + chrome.
+let jumpMenuListMaxHeight: CGFloat = 420
+
 struct JumpMenuView: View {
     @ObservedObject var viewModel: JumpMenuViewModel
     let onSubmit: (JumpMenuRow) -> Void
@@ -89,7 +93,7 @@ struct JumpMenuView: View {
                     }
                     .padding(.vertical, 4)
                 }
-                .frame(maxHeight: 420)
+                .frame(maxHeight: jumpMenuListMaxHeight)
                 .onChange(of: viewModel.selectedIndex) { _, newIndex in
                     guard newIndex < rows.count else { return }
                     withAnimation(.easeOut(duration: 0.1)) {

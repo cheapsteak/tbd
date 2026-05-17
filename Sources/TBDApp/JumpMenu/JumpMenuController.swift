@@ -9,6 +9,9 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "JumpMenu")
 final class JumpMenuController {
     static let shared = JumpMenuController()
 
+    // Chrome around the list: search field (~36) + divider (1) + padding (~23).
+    private static let jumpMenuPanelChromeHeight: CGFloat = 60
+
     private weak var appState: AppState?
     private var panel: FloatingPanel?
     private var viewModel: JumpMenuViewModel?
@@ -105,10 +108,12 @@ final class JumpMenuController {
     /// horizontally centered. If there is no key window (e.g. all windows
     /// are minimized) fall back to the main screen.
     private func positionPanel(_ panel: NSPanel) {
-        // Search field ~36pt + divider + list maxHeight 420pt + a little padding = ~480.
         // The panel is freshly created each open, so its frame is .zero here —
-        // we drive sizing from this single constant.
-        let panelSize = CGSize(width: jumpMenuPanelWidth, height: 480)
+        // we drive sizing from the shared list-max-height + chrome constants.
+        let panelSize = CGSize(
+            width: jumpMenuPanelWidth,
+            height: jumpMenuListMaxHeight + Self.jumpMenuPanelChromeHeight
+        )
 
         let anchorRect: NSRect = {
             if let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) {
