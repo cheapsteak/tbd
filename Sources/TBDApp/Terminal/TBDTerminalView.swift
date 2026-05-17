@@ -107,6 +107,13 @@ class TBDTerminalView: TerminalView {
         self.layer?.backgroundColor = bg.cgColor
         self.caretColor = Self.nsColor(from: scheme.cursor)
         self.selectedTextBackgroundColor = Self.nsColor(from: scheme.selection)
+
+        // Force SwiftTerm to repaint every cell. `installColors` updates the
+        // palette but does not invalidate cells already in the buffer; without
+        // this, default-bg cells continue showing the bg color they were drawn
+        // with at first paint (NSColor.textBackgroundColor = system gray).
+        self.getTerminal().updateFullScreen()
+        self.needsDisplay = true
     }
 
     private static func nsColor(from color: SwiftTerm.Color) -> NSColor {
