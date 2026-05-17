@@ -76,8 +76,6 @@ Adopt your existing Claude Code Desktop worktrees into TBD in place. Pass any pa
 ./scripts/import-claude-code-desktop.sh --repo ~/projects/acme-app
 ```
 
-`--repo` is repeatable; `--dry-run` prints the plan without writing.
-
 ## License
 
 Private / All rights reserved.
