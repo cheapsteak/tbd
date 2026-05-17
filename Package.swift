@@ -88,6 +88,14 @@ let package = Package(
                 .unsafeFlags(["-no-whole-module-optimization"], .when(configuration: .debug)),
             ]
         ),
+        .target(
+            name: "TestSupport",
+            dependencies: [
+                "TBDDaemonLib",
+                "TBDShared",
+            ],
+            path: "Tests/TestSupport"
+        ),
         .testTarget(
             name: "TBDSharedTests",
             dependencies: ["TBDShared"]
@@ -97,6 +105,7 @@ let package = Package(
             dependencies: [
                 "TBDDaemonLib",
                 "TBDShared",
+                "TestSupport",
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),

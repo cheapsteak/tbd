@@ -1,62 +1,8 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
-
-/// Helper to run shell commands in tests.
-private func shell(_ command: String, at dir: URL) async throws {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/bash")
-    process.arguments = ["-c", command]
-    process.currentDirectoryURL = dir
-    process.environment = [
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
-        "HOME": NSHomeDirectory(),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_AUTHOR_NAME": "Test",
-        "GIT_AUTHOR_EMAIL": "test@test.com",
-        "GIT_COMMITTER_NAME": "Test",
-        "GIT_COMMITTER_EMAIL": "test@test.com",
-    ]
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        throw NSError(domain: "shell", code: Int(process.terminationStatus),
-                      userInfo: [NSLocalizedDescriptionKey: "Command failed: \(command)\n\(output)"])
-    }
-}
-
-/// Sets up a temp git repo with one worktree at an arbitrary (non-canonical) path.
-/// Returns the canonicalized path (via realpath) to match what git worktree list reports.
-private func makeRepoWithExternalWorktree() async throws -> (tempDir: URL, repoDir: URL, worktreePath: String, worktreeBranch: String) {
-    let tempDir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("tbd-adopt-test-\(UUID().uuidString)")
-    let repoDir = tempDir.appendingPathComponent("repo")
-    let extDir = tempDir.appendingPathComponent("external-worktrees/feature-x")
-    try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
-    try FileManager.default.createDirectory(at: extDir.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try await shell("git init -b main && git commit --allow-empty -m 'init'", at: repoDir)
-    try await shell("git worktree add -b feature-x '\(extDir.path)'", at: repoDir)
-
-    // Get the realpath-canonicalized path (git worktree list returns realpath)
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/realpath")
-    process.arguments = [extDir.path]
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    try process.run()
-    process.waitUntilExit()
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    let canonicalPath = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? extDir.path
-
-    return (tempDir, repoDir, canonicalPath, "feature-x")
-}
 
 @Test func testAdoptInsertsRowForExistingWorktree() async throws {
     let (tempDir, repoDir, worktreePath, branch) = try await makeRepoWithExternalWorktree()
