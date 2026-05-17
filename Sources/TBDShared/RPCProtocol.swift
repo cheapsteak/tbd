@@ -354,8 +354,8 @@ public struct NotificationsListResult: Codable, Sendable {
 
     /// New field (v0.1.1+) — full unread summary including timestamps.
     /// Optional for backwards compatibility: an older daemon will omit it
-    /// and a newer app should reconstruct `notifications` from this when
-    /// present.
+    /// and a newer app should reconstruct summaries from `notifications`
+    /// when `summaries` is absent.
     public let summaries: [UUID: UnreadSummary]?
 
     public init(
