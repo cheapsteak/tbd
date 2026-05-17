@@ -26,7 +26,7 @@ final class AppearanceSettings: ObservableObject {
     enum Defaults {
         static let fontName = "Monaco"
         static let fontSize: CGFloat = 12.0
-        static let schemeID = "tango"
+        static let schemeID = ColorSchemes.defaultScheme.id
         static let cursorStyle: CursorStyle = .blinkBlock
         static let thinStrokes = true   // matches iTerm's typical Retina Dark Only behavior
     }

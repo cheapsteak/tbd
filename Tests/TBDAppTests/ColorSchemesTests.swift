@@ -35,10 +35,10 @@ struct ColorSchemesTests {
         #expect(scheme.id == "tbd-default")
     }
 
-    @Test("scheme(forID:) falls back to tbd-default on unknown id")
+    @Test("scheme(forID:) falls back to defaultScheme on unknown id")
     func lookupFallback() {
         let scheme = ColorSchemes.scheme(forID: "this-does-not-exist")
-        #expect(scheme.id == "tbd-default")
+        #expect(scheme.id == ColorSchemes.defaultScheme.id)
     }
 
     @Test("bundled contains exactly 8 schemes with expected IDs")

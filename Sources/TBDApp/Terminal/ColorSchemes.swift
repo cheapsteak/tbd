@@ -15,8 +15,14 @@ struct TerminalColorScheme {
 }
 
 enum ColorSchemes {
+    /// Single source of truth for the fallback scheme. Both `scheme(forID:)`
+    /// and `AppearanceSettings.Defaults.schemeID` route through this so a
+    /// poisoned id never lands the runtime renderer and the Settings Picker
+    /// on different schemes.
+    static let defaultScheme: TerminalColorScheme = tango
+
     static func scheme(forID id: String) -> TerminalColorScheme {
-        bundled.first { $0.id == id } ?? tbdDefault
+        bundled.first { $0.id == id } ?? defaultScheme
     }
 
     static let bundled: [TerminalColorScheme] = [
