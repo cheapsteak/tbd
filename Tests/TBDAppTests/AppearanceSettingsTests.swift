@@ -23,6 +23,25 @@ struct AppearanceSettingsTests {
             #expect(settings.fontName == "Monaco")
             #expect(settings.fontSize == 12.0)
             #expect(settings.cursorStyle == .blinkBlock)
+            #expect(settings.thinStrokes == true)
+        }
+    }
+
+    @Test("fresh init has thinStrokes enabled by default")
+    func freshInitThinStrokes() {
+        withIsolatedDefaults { defaults in
+            let settings = AppearanceSettings(defaults: defaults)
+            #expect(settings.thinStrokes == true)
+        }
+    }
+
+    @Test("thinStrokes round-trips")
+    func roundTripThinStrokes() {
+        withIsolatedDefaults { defaults in
+            let settings = AppearanceSettings(defaults: defaults)
+            settings.thinStrokes = false
+            let reloaded = AppearanceSettings(defaults: defaults)
+            #expect(reloaded.thinStrokes == false)
         }
     }
 

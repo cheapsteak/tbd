@@ -19,6 +19,7 @@ final class AppearanceSettings: ObservableObject {
         static let fontSize = "terminal.font.size"
         static let schemeID = "terminal.scheme.id"
         static let cursorStyle = "terminal.cursor.style"
+        static let thinStrokes = "terminal.thin-strokes"
     }
 
     @MainActor
@@ -27,6 +28,7 @@ final class AppearanceSettings: ObservableObject {
         static let fontSize: CGFloat = 12.0
         static let schemeID = "tango"
         static let cursorStyle: CursorStyle = .blinkBlock
+        static let thinStrokes = true   // matches iTerm's typical Retina Dark Only behavior
     }
 
     private let defaults: UserDefaults
@@ -35,6 +37,7 @@ final class AppearanceSettings: ObservableObject {
     @Published var fontSize: CGFloat { didSet { defaults.set(Double(fontSize), forKey: Keys.fontSize) } }
     @Published var schemeID: String { didSet { defaults.set(schemeID, forKey: Keys.schemeID) } }
     @Published var cursorStyle: CursorStyle { didSet { defaults.set(cursorStyle.rawString, forKey: Keys.cursorStyle) } }
+    @Published var thinStrokes: Bool { didSet { defaults.set(thinStrokes, forKey: Keys.thinStrokes) } }
 
     /// True if the user's tmux config sets a cell-painting style option that
     /// would override the chosen color scheme's foreground/background. Best-
@@ -58,6 +61,14 @@ final class AppearanceSettings: ObservableObject {
         // Cursor — round-trip via rawString; fall back on unknown.
         let storedCursor = defaults.string(forKey: Keys.cursorStyle) ?? ""
         self.cursorStyle = CursorStyle.from(rawString: storedCursor) ?? Defaults.cursorStyle
+
+        // Thin strokes — UserDefaults.bool(forKey:) returns false for missing keys,
+        // so check existence explicitly to apply the default-on behavior.
+        if defaults.object(forKey: Keys.thinStrokes) != nil {
+            self.thinStrokes = defaults.bool(forKey: Keys.thinStrokes)
+        } else {
+            self.thinStrokes = Defaults.thinStrokes
+        }
 
         self.hasTmuxStyleOverrides = Self.detectTmuxStyleOverrides()
     }

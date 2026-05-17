@@ -30,6 +30,8 @@ struct TerminalSettingsView: View {
                             .monospacedDigit()
                     }
                 }
+                Toggle("Thin strokes", isOn: $appearance.thinStrokes)
+                    .help("Disables font smoothing for thinner text on Retina displays. Matches iTerm's 'Thin Strokes' setting.")
             }
 
             Section {

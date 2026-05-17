@@ -73,6 +73,12 @@ class TBDTerminalView: TerminalView {
         applyFont()
         applyScheme()
         applyCursor()
+        applyFontSmoothing()
+    }
+
+    private func applyFontSmoothing() {
+        self.fontSmoothing = !appearanceSettings.thinStrokes
+        self.needsDisplay = true
     }
 
     private func applyFont() {
