@@ -29,8 +29,8 @@ struct ColorSchemesTests {
         #expect(scheme.id == "tango")
     }
 
-    @Test("scheme(forID:) returns tbd-default when looked up by its id")
-    func lookupDefault() {
+    @Test("scheme(forID:) finds tbd-default by its own id (not the fallback path)")
+    func lookupTBDDefaultByID() {
         let scheme = ColorSchemes.scheme(forID: "tbd-default")
         #expect(scheme.id == "tbd-default")
     }
