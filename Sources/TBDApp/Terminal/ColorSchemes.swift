@@ -268,7 +268,9 @@ enum ColorSchemes {
     )
 
     /// 8-bit-per-channel → SwiftTerm.Color (16-bit per channel).
-    private static func rgb(_ r: Int, _ g: Int, _ b: Int) -> SwiftTerm.Color {
+    /// `UInt8` parameters make the 0–255 constraint self-documenting and
+    /// prevent silent overflow if a future scheme uses an out-of-range literal.
+    private static func rgb(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> SwiftTerm.Color {
         SwiftTerm.Color(
             red: UInt16(r) * 257,
             green: UInt16(g) * 257,
