@@ -80,8 +80,9 @@ struct TerminalSettingsView: View {
     }
 
     private var displayFontName: String {
-        NSFont(name: appearance.fontName, size: appearance.fontSize)?.displayName
-            ?? appearance.fontName
+        // Use the resolved font's display name so a poisoned/missing font name
+        // shows the actual fallback in the Settings label, not the invalid stored value.
+        appearance.font.displayName ?? appearance.fontName
     }
 }
 
