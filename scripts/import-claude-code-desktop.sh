@@ -12,11 +12,12 @@ TBD_BIN="${TBD_BIN:-tbd}"
 
 # ---- Args ----
 DRY_RUN=0
+INCLUDE_AGENTS=0
 REPO_INPUTS=()
 
 usage() {
     cat <<EOF
-Usage: $0 --repo <path> [--repo <path>...] [--dry-run]
+Usage: $0 --repo <path> [--repo <path>...] [--include-agents] [--dry-run]
 
 Adopts Claude Code Desktop worktrees into TBD in place. For each --repo,
 resolves the main repo root via \`git rev-parse --git-common-dir\`, then
@@ -26,16 +27,22 @@ The path passed to --repo may be the repo's main checkout, any of its
 worktrees, or any subdirectory within them — all are normalized to the
 same main repo root.
 
+By default, directories whose name starts with \`agent-\` are skipped — those
+are scratch worktrees created by agent runs, not user-managed sessions. Pass
+\`--include-agents\` to include them.
+
 Options:
-  --repo <path>  Path inside the repo to import worktrees for. Repeatable.
-  --dry-run      Print the plan; don't run any tbd commands.
-  -h, --help     Show this message.
+  --repo <path>      Path inside the repo to import worktrees for. Repeatable.
+  --include-agents   Also adopt directories named \`agent-*\` (skipped by default).
+  --dry-run          Print the plan; don't run any tbd commands.
+  -h, --help         Show this message.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=1; shift ;;
+        --include-agents) INCLUDE_AGENTS=1; shift ;;
         --repo)
             if [[ $# -lt 2 ]]; then
                 echo "Error: --repo requires a path." >&2
@@ -184,17 +191,15 @@ for ((i=0; i<${#REPO_ROOTS[@]}; i++)); do
         if [[ -z "$line" ]]; then
             if [[ -n "$cur_path" && "$cur_path" == "$prefix"* ]]; then
                 wt_name="$(basename "$cur_path")"
+                WT_PATHS+=("$cur_path")
+                WT_BRANCHES+=("$cur_branch")
+                WT_NAMES+=("$wt_name")
+                WT_REPO_INDEXES+=("$i")
                 if [[ ! -d "$cur_path" ]]; then
-                    WT_PATHS+=("$cur_path")
-                    WT_BRANCHES+=("$cur_branch")
-                    WT_NAMES+=("$wt_name")
-                    WT_REPO_INDEXES+=("$i")
                     WT_ACTIONS+=("skip:path missing")
+                elif [[ "$wt_name" == agent-* && $INCLUDE_AGENTS -eq 0 ]]; then
+                    WT_ACTIONS+=("skip:agent worktree (--include-agents to adopt)")
                 else
-                    WT_PATHS+=("$cur_path")
-                    WT_BRANCHES+=("$cur_branch")
-                    WT_NAMES+=("$wt_name")
-                    WT_REPO_INDEXES+=("$i")
                     WT_ACTIONS+=("adopt")
                 fi
                 found_for_repo=$((found_for_repo+1))

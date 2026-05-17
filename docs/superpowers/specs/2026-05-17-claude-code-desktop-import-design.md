@@ -35,11 +35,16 @@ One artifact: **`scripts/import-claude-code-desktop.sh`**, a bash script that re
 ## Invocation
 
 ```
-scripts/import-claude-code-desktop.sh --repo <path> [--repo <path>...] [--dry-run]
+scripts/import-claude-code-desktop.sh --repo <path> [--repo <path>...] [--include-agents] [--dry-run]
 ```
 
 - `--repo <path>` — required, repeatable. Accepts *any* path inside a repo: the main checkout, a Claude Code Desktop worktree, a TBD worktree, or any subdirectory. The script normalizes each to the main repo root before scanning.
+- `--include-agents` — also adopt directories named `agent-*` (skipped by default; see below).
 - `--dry-run` — print the plan, don't call any `tbd` write commands.
+
+### Skipping agent worktrees
+
+Claude Code Desktop creates two kinds of worktrees under `.claude/worktrees/`: user-managed ones (typically named `<adjective>-<surname>[-<hash>]` with a `cw/` branch) and scratch worktrees from individual agent runs (named `agent-<hash>` with arbitrary branch names). Users typically want only the first set in TBD. The importer skips directories matching `agent-*` by default; `--include-agents` opts back in.
 
 ## Flow
 
@@ -56,7 +61,7 @@ scripts/import-claude-code-desktop.sh --repo <path> [--repo <path>...] [--dry-ru
 **4. Enumerate Claude Code Desktop worktrees.** For each root:
 - `git -C <root> worktree list --porcelain`, parse into (path, branch) tuples.
 - Filter to entries whose path starts with `<root>/.claude/worktrees/`.
-- Per-worktree skip checks: `[[ ! -d <path> ]]` → `skip: path missing`; not a git worktree → `skip: not a git worktree`.
+- Per-worktree skip checks: `[[ ! -d <path> ]]` → `skip: path missing`; basename matches `agent-*` and `--include-agents` not set → `skip: agent worktree`.
 - Otherwise → queue `adopt`.
 
 **5. Print the plan.**
@@ -110,6 +115,7 @@ Done: 1 repo added · 2 worktrees adopted · 1 skipped · 0 failed
 | Repo root not registered in TBD | script | queue `tbd repo add <root>` |
 | No `.claude/worktrees/` entries for a repo | script | log `no Claude Code Desktop worktrees in <repo>` |
 | Worktree path in git list but missing on disk | script | skip, log `path missing` |
+| Directory named `agent-*` (and `--include-agents` not set) | script | skip with `agent worktree (--include-agents to adopt)` |
 | Path already in TBD (active) | `adopt` | exit 0, log `already adopted` |
 | Path already in TBD (archived) | `adopt` | revive |
 | `tbd repo add` fails | script | log, skip child worktrees, continue |
