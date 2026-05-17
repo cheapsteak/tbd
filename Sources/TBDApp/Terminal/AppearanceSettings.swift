@@ -41,7 +41,7 @@ final class AppearanceSettings: ObservableObject {
 
     /// True if the user's tmux config sets a cell-painting style option that
     /// would override the chosen color scheme's foreground/background. Best-
-    /// effort detection at init — see `detectTmuxStyleOverrides()`.
+    /// effort detection at init — see `TmuxConfigStyleDetector`.
     @Published private(set) var hasTmuxStyleOverrides: Bool
 
     init(defaults: UserDefaults = .standard) {
@@ -79,50 +79,10 @@ final class AppearanceSettings: ObservableObject {
         self.hasTmuxStyleOverrides = false
         Task { @MainActor [weak self] in
             let detected = await Task.detached {
-                AppearanceSettings.detectTmuxStyleOverrides()
+                TmuxConfigStyleDetector.detectFromUserConfig()
             }.value
             self?.hasTmuxStyleOverrides = detected
         }
-    }
-
-    /// Greps the user's tmux config files for any of the cell-painting style
-    /// options that would override TBD's color scheme. Best-effort: misses
-    /// configs loaded via `source-file` or `if-shell`, but catches the common
-    /// case of a directly-set `window-style` etc.
-    ///
-    /// `nonisolated` because it reads files and has no actor-isolated state —
-    /// safe to call from a detached task.
-    nonisolated private static func detectTmuxStyleOverrides() -> Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidatePaths = ["\(home)/.tmux.conf", "\(home)/.config/tmux/tmux.conf"]
-        // Match lines that set one of the cell-painting options. Skip the
-        // `-u` (unset) form — `set -gu window-style` is exactly the fix our
-        // own tooltip recommends, so it would be wrong to flag it.
-        let pattern = #"^\s*(set|setw)\b(\s+-[a-zA-Z]+)*\s+(window-style|window-active-style|pane-style|default-style)\b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else {
-            return false
-        }
-        for path in candidatePaths {
-            guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
-            let nsContents = contents as NSString
-            let range = NSRange(location: 0, length: nsContents.length)
-            var detected = false
-            regex.enumerateMatches(in: contents, options: [], range: range) { result, _, stop in
-                guard let result else { return }
-                // `result.range(at: 2)` is the captured flag group, e.g. " -g" or " -gu".
-                // It may be absent (NSRange(NSNotFound)) when the line has no flags
-                // at all (e.g. bare `set window-style ...`) — that's still an
-                // override; only the `-u` unset directive should be skipped.
-                if let flagsRange = Range(result.range(at: 2), in: contents),
-                   contents[flagsRange].contains("u") {
-                    return
-                }
-                detected = true
-                stop.pointee = true
-            }
-            if detected { return true }
-        }
-        return false
     }
 
     /// Resolves `fontName` + `fontSize` to an `NSFont`. Falls back to system
