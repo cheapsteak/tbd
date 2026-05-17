@@ -22,12 +22,44 @@ extension RPCRouter {
 
     func handleModelProfileAdd(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileAddParams.self, from: paramsData)
-        let trimmed = params.token.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = params.name.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !name.isEmpty else {
             return RPCResponse(error: "Name cannot be empty")
         }
+
+        if try await db.modelProfiles.getByName(name) != nil {
+            return RPCResponse(error: "A profile named '\(name)' already exists")
+        }
+
+        // ─── Bedrock branch ───────────────────────────────────────────────────
+        if params.kind == .bedrock {
+            let region = (params.awsRegion ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let model = (params.model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let awsProfileRaw = (params.awsProfile ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let awsProfile: String? = awsProfileRaw.isEmpty ? nil : awsProfileRaw
+
+            guard !region.isEmpty else {
+                return RPCResponse(error: "AWS region is required for bedrock profiles")
+            }
+            guard !model.isEmpty else {
+                return RPCResponse(error: "Bedrock model id is required")
+            }
+
+            let row = try await db.modelProfiles.create(
+                name: name,
+                kind: .bedrock,
+                baseURL: nil,
+                model: model,
+                awsRegion: region,
+                awsProfile: awsProfile
+            )
+            subscriptions.broadcast(delta: .modelProfilesChanged)
+            return try RPCResponse(result: ModelProfileAddResult(profile: row, warning: nil))
+        }
+
+        // ─── Claude-direct / proxy branch ────────────────────────────────────
+        let trimmed = (params.token ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Secrets pass through tmux's `-e KEY=VALUE` argv (no shell), so most
         // printables are safe. Reject only chars that would break a single-line
@@ -58,10 +90,6 @@ extension RPCRouter {
             kind = .apiKey
         } else {
             return RPCResponse(error: "Token must start with sk-ant-oat01- or sk-ant-api03-")
-        }
-
-        if try await db.modelProfiles.getByName(name) != nil {
-            return RPCResponse(error: "A profile named '\(name)' already exists")
         }
 
         var warning: String? = nil
@@ -127,7 +155,7 @@ extension RPCRouter {
 
     func handleModelProfileDelete(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileDeleteParams.self, from: paramsData)
-        guard try await db.modelProfiles.get(id: params.id) != nil else {
+        guard let profile = try await db.modelProfiles.get(id: params.id) else {
             return RPCResponse(error: "Profile not found")
         }
 
@@ -148,10 +176,13 @@ extension RPCRouter {
         // DB row deletion is the source of truth — don't fail the RPC if the
         // on-disk secret file delete fails (permission, missing, disk error).
         // Log so an orphan file isn't completely silent.
-        do {
-            try ModelProfileKeychain.delete(id: params.id.uuidString)
-        } catch {
-            logger.warning("Failed to delete secret file for \(params.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        // Bedrock profiles never wrote a Keychain entry, so skip the delete.
+        if profile.kind != .bedrock {
+            do {
+                try ModelProfileKeychain.delete(id: params.id.uuidString)
+            } catch {
+                logger.warning("Failed to delete secret file for \(params.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
 
         subscriptions.broadcast(delta: .modelProfilesChanged)
@@ -178,10 +209,47 @@ extension RPCRouter {
 
     func handleModelProfileUpdateEndpoint(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileUpdateEndpointParams.self, from: paramsData)
-        guard try await db.modelProfiles.get(id: params.id) != nil else {
+        guard let profile = try await db.modelProfiles.get(id: params.id) else {
             return RPCResponse(error: "Profile not found")
         }
+        guard profile.kind != .bedrock else {
+            return RPCResponse(error: "Cannot update endpoint on a bedrock profile")
+        }
         try await db.modelProfiles.updateEndpoint(id: params.id, baseURL: params.baseURL, model: params.model)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    // MARK: - Update Bedrock
+
+    func handleModelProfileUpdateBedrock(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfileUpdateBedrockParams.self, from: paramsData)
+
+        guard let profile = try await db.modelProfiles.get(id: params.id) else {
+            return RPCResponse(error: "Profile not found")
+        }
+        guard profile.kind == .bedrock else {
+            return RPCResponse(error: "Can only update bedrock fields on a bedrock profile")
+        }
+
+        let region = params.awsRegion.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = params.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let awsProfileRaw = (params.awsProfile ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let awsProfile: String? = awsProfileRaw.isEmpty ? nil : awsProfileRaw
+
+        guard !region.isEmpty else {
+            return RPCResponse(error: "AWS region is required for bedrock profiles")
+        }
+        guard !model.isEmpty else {
+            return RPCResponse(error: "Bedrock model id is required")
+        }
+
+        try await db.modelProfiles.updateBedrock(
+            id: params.id,
+            awsRegion: region,
+            awsProfile: awsProfile,
+            model: model
+        )
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
@@ -213,8 +281,8 @@ extension RPCRouter {
             return RPCResponse(error: "Profile not found")
         }
 
-        // Proxy profiles can't be polled against the Claude API usage endpoint.
-        if profile.baseURL != nil {
+        // Proxy and bedrock profiles can't be polled against the Claude API usage endpoint.
+        if profile.baseURL != nil || profile.kind == .bedrock {
             return RPCResponse(error: "Usage tracking is only available for Claude-direct profiles")
         }
 

@@ -229,6 +229,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
 public enum CredentialKind: String, Codable, Sendable {
     case oauth
     case apiKey
+    case bedrock
 }
 
 public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
@@ -240,23 +241,30 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     public var baseURL: String?
     /// Optional model id passed via ANTHROPIC_MODEL. nil = use Claude default.
     public var model: String?
+    /// AWS region for Bedrock profiles (e.g. "us-west-2"). nil for non-Bedrock kinds.
+    public var awsRegion: String?
+    /// Named AWS profile to use for credential lookup. nil = use ambient credentials.
+    public var awsProfile: String?
     public var createdAt: Date
     public var lastUsedAt: Date?
 
     public init(id: UUID = UUID(), name: String, kind: CredentialKind,
                 baseURL: String? = nil, model: String? = nil,
+                awsRegion: String? = nil, awsProfile: String? = nil,
                 createdAt: Date = Date(), lastUsedAt: Date? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
         self.baseURL = baseURL
         self.model = model
+        self.awsRegion = awsRegion
+        self.awsProfile = awsProfile
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, kind, baseURL, model, createdAt, lastUsedAt
+        case id, name, kind, baseURL, model, awsRegion, awsProfile, createdAt, lastUsedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -266,6 +274,8 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         kind = try c.decode(CredentialKind.self, forKey: .kind)
         baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL)
         model = try c.decodeIfPresent(String.self, forKey: .model)
+        awsRegion = try c.decodeIfPresent(String.self, forKey: .awsRegion)
+        awsProfile = try c.decodeIfPresent(String.self, forKey: .awsProfile)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
     }
@@ -567,6 +577,39 @@ public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable 
         default: return nil
         }
     }
+}
+
+// MARK: - ModelProfile display
+
+extension ModelProfile {
+    /// Short capsule label for the kind badge.
+    public var kindLabel: String {
+        switch kind {
+        case .oauth:   return "OAuth"
+        case .apiKey:  return baseURL != nil ? "Proxy" : "API key"
+        case .bedrock: return "Bedrock"
+        }
+    }
+
+    /// Secondary detail line. `nil` when there's nothing useful to show
+    /// beyond the kind badge (plain claude-direct OAuth / api-key).
+    public var detailCaption: String? {
+        switch kind {
+        case .oauth, .apiKey:
+            guard let baseURL else { return nil }
+            if let model, !model.isEmpty { return "via \(baseURL) · \(model)" }
+            return "via \(baseURL)"
+        case .bedrock:
+            let region = awsRegion ?? "?"
+            if let model, !model.isEmpty { return "\(region) · \(model)" }
+            return region
+        }
+    }
+
+    /// What goes in a tab title, menu item, or anywhere we render the profile
+    /// as a single line. Today just `name`; the seam exists for future
+    /// per-kind divergence.
+    public var tabDisplayName: String { name }
 }
 
 // MARK: - Tab Metadata

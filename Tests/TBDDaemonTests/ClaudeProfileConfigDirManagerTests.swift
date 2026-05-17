@@ -102,7 +102,9 @@ struct ClaudeProfileConfigDirManagerTests {
             kind: .oauth,
             baseURL: nil,
             model: nil,
-            secret: "oauth-token"
+            secret: "oauth-token",
+            awsRegion: nil,
+            awsProfile: nil
         )
         #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
     }
@@ -124,7 +126,9 @@ struct ClaudeProfileConfigDirManagerTests {
             kind: .oauth,
             baseURL: "http://127.0.0.1:3456",
             model: nil,
-            secret: "oauth-token"
+            secret: "oauth-token",
+            awsRegion: nil,
+            awsProfile: nil
         )
         #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
     }

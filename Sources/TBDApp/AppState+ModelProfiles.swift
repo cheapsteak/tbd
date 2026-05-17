@@ -32,9 +32,19 @@ extension AppState {
     /// On error sets `alertMessage` and returns nil. The raw token bytes are
     /// not included in any log or alert.
     @discardableResult
-    func addModelProfile(name: String, token: String, baseURL: String? = nil, model: String? = nil) async -> String? {
+    func addModelProfile(name: String,
+                         kind: ModelProfileAddKind? = nil,
+                         token: String? = nil,
+                         baseURL: String? = nil,
+                         model: String? = nil,
+                         awsRegion: String? = nil,
+                         awsProfile: String? = nil) async -> String? {
         do {
-            let result = try await daemonClient.addModelProfile(name: name, token: token, baseURL: baseURL, model: model)
+            let result = try await daemonClient.addModelProfile(
+                name: name, kind: kind, token: token,
+                baseURL: baseURL, model: model,
+                awsRegion: awsRegion, awsProfile: awsProfile
+            )
             await loadModelProfiles()
             return result.warning
         } catch {
@@ -75,6 +85,19 @@ extension AppState {
         } catch {
             logger.error("Failed to update model profile endpoint: \(error, privacy: .public)")
             showAlert("Failed to update endpoint: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Update a bedrock model profile's region, awsProfile, and model in-place.
+    func updateModelProfileBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String) async {
+        do {
+            try await daemonClient.updateModelProfileBedrock(
+                id: id, awsRegion: awsRegion, awsProfile: awsProfile, model: model
+            )
+            await loadModelProfiles()
+        } catch {
+            logger.error("Failed to update bedrock profile: \(error, privacy: .public)")
+            showAlert("Failed to update bedrock profile: \(error.localizedDescription)", isError: true)
         }
     }
 

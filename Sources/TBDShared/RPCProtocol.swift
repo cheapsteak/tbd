@@ -122,6 +122,7 @@ public enum RPCMethod {
     public static let modelProfileDelete = "modelProfile.delete"
     public static let modelProfileRename = "modelProfile.rename"
     public static let modelProfileUpdateEndpoint = "modelProfile.updateEndpoint"
+    public static let modelProfileUpdateBedrock = "modelProfile.updateBedrock"
     public static let modelProfileSetGlobalDefault = "modelProfile.setGlobalDefault"
     public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
@@ -217,16 +218,35 @@ public struct TerminalSwapProfileParams: Codable, Sendable {
 
 // MARK: - Model Profile RPC
 
+public enum ModelProfileAddKind: String, Codable, Sendable, Equatable {
+    case claudeDirect   // existing OAuth / api-key path; uses `token`
+    case proxy          // existing proxy path; uses `token` + `baseURL`
+    case bedrock        // NEW; uses `awsRegion` + optional `awsProfile`; no token
+}
+
 public struct ModelProfileAddParams: Codable, Sendable {
+    public let kind: ModelProfileAddKind?
     public let name: String
-    public let token: String
+    public let token: String?
     public let baseURL: String?
     public let model: String?
-    public init(name: String, token: String, baseURL: String? = nil, model: String? = nil) {
+    public let awsRegion: String?
+    public let awsProfile: String?
+
+    public init(name: String,
+                kind: ModelProfileAddKind? = nil,
+                token: String? = nil,
+                baseURL: String? = nil,
+                model: String? = nil,
+                awsRegion: String? = nil,
+                awsProfile: String? = nil) {
+        self.kind = kind
         self.name = name
         self.token = token
         self.baseURL = baseURL
         self.model = model
+        self.awsRegion = awsRegion
+        self.awsProfile = awsProfile
     }
 }
 
@@ -258,6 +278,19 @@ public struct ModelProfileUpdateEndpointParams: Codable, Sendable {
     public let model: String?
     public init(id: UUID, baseURL: String?, model: String?) {
         self.id = id; self.baseURL = baseURL; self.model = model
+    }
+}
+
+public struct ModelProfileUpdateBedrockParams: Codable, Sendable {
+    public let id: UUID
+    public let awsRegion: String
+    public let awsProfile: String?
+    public let model: String
+    public init(id: UUID, awsRegion: String, awsProfile: String?, model: String) {
+        self.id = id
+        self.awsRegion = awsRegion
+        self.awsProfile = awsProfile
+        self.model = model
     }
 }
 

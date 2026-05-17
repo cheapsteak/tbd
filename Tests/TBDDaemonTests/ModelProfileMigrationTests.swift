@@ -65,6 +65,17 @@ struct ModelProfileMigrationTests {
         }
     }
 
+    @Test("v25 adds aws_region and aws_profile columns")
+    func v25AddsAwsColumns() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.writerForTests.read { conn in
+            let cols = try Row.fetchAll(conn, sql: "PRAGMA table_info(model_profiles)")
+                .map { $0["name"] as String }
+            #expect(cols.contains("aws_region"))
+            #expect(cols.contains("aws_profile"))
+        }
+    }
+
     @Test("ModelProfile round-trips through the store with baseURL/model nil and non-nil")
     func dataPreservationRoundTrip() async throws {
         let db = try TBDDatabase(inMemory: true)

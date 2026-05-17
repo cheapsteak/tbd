@@ -67,6 +67,6 @@ private struct ModelProfileMenuContent: View {
     }
 
     private static func formatRow(entry: ModelProfileWithUsage) -> String {
-        entry.profile.name
+        entry.profile.tabDisplayName
     }
 }

@@ -289,6 +289,23 @@ struct ModelProfileRPCTests {
         #expect(try await db.config.get().defaultProfileID == a.id)
     }
 
+    @Test("delete bedrock: succeeds even with no keychain entry")
+    func deleteBedrockNoKeychain() async throws {
+        let (router, db, _) = makeRouter()
+        let bedrock = try await db.modelProfiles.create(
+            name: "Bedrock",
+            kind: .bedrock,
+            baseURL: nil,
+            model: "anthropic.claude-sonnet-4-5",
+            awsRegion: "us-west-2",
+            awsProfile: nil
+        )
+        let resp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileDelete,
+                                                      params: ModelProfileDeleteParams(id: bedrock.id)))
+        #expect(resp.success)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
     // MARK: - rename
 
     @Test("rename success")
@@ -402,5 +419,234 @@ struct ModelProfileRPCTests {
         #expect(!resp.success)
         #expect(resp.error?.lowercased().contains("invalid") == true)
         try? ModelProfileKeychain.delete(id: tok.id.uuidString)
+    }
+
+    // MARK: - bedrock add
+
+    @Test("add bedrock: persists fields, skips token + keychain + probe")
+    func addBedrockHappyPath() async throws {
+        let stub = StubClaudeUsageFetcher()
+        let (router, db, _) = makeRouter(stub: stub)
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "Bedrock prod",
+                kind: .bedrock,
+                token: nil,
+                baseURL: nil,
+                model: "anthropic.claude-sonnet-4-5",
+                awsRegion: "us-west-2",
+                awsProfile: "acme-prod"
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.warning == nil)
+        #expect(result.profile.kind == .bedrock)
+        #expect(result.profile.awsRegion == "us-west-2")
+        #expect(result.profile.awsProfile == "acme-prod")
+        let stored = try await db.modelProfiles.list()
+        #expect(stored.count == 1)
+        #expect(stored.first?.kind == .bedrock)
+        #expect(stored.first?.awsRegion == "us-west-2")
+        #expect(stored.first?.awsProfile == "acme-prod")
+        // No keychain entry should be written for bedrock profiles
+        #expect(try ModelProfileKeychain.load(id: result.profile.id.uuidString) == nil)
+        // Usage fetcher must not be called
+        #expect(stub.callCount == 0)
+    }
+
+    @Test("add bedrock: rejects missing region")
+    func addBedrockMissingRegion() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "Bedrock",
+                kind: .bedrock,
+                token: nil,
+                baseURL: nil,
+                model: "anthropic.claude-sonnet-4-5",
+                awsRegion: "",
+                awsProfile: nil
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error?.lowercased().contains("region") == true)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("add bedrock: rejects missing model")
+    func addBedrockMissingModel() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "Bedrock",
+                kind: .bedrock,
+                token: nil,
+                baseURL: nil,
+                model: "",
+                awsRegion: "us-west-2",
+                awsProfile: nil
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error?.lowercased().contains("model") == true)
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("add bedrock: whitespace-only awsProfile normalized to nil")
+    func addBedrockEmptyAwsProfileNormalized() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "Bedrock",
+                kind: .bedrock,
+                token: nil,
+                baseURL: nil,
+                model: "anthropic.claude-sonnet-4-5",
+                awsRegion: "us-west-2",
+                awsProfile: "   "
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let stored = try await db.modelProfiles.list()
+        #expect(stored.first?.awsProfile == nil)
+    }
+
+    // MARK: - updateBedrock
+
+    @Test("modelProfile.updateBedrock: persists new region/profile/model")
+    func updateBedrockHappyPath() async throws {
+        let (router, db, _) = makeRouter()
+        let row = try await db.modelProfiles.create(
+            name: "Bedrock",
+            kind: .bedrock,
+            baseURL: nil,
+            model: "old",
+            awsRegion: "us-west-2",
+            awsProfile: "old-profile"
+        )
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileUpdateBedrock,
+            params: ModelProfileUpdateBedrockParams(
+                id: row.id,
+                awsRegion: "us-east-1",
+                awsProfile: "new-profile",
+                model: "new"
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let updated = try await db.modelProfiles.get(id: row.id)
+        #expect(updated?.awsRegion == "us-east-1")
+        #expect(updated?.awsProfile == "new-profile")
+        #expect(updated?.model == "new")
+    }
+
+    @Test("modelProfile.updateBedrock: rejects non-bedrock profile")
+    func updateBedrockWrongKind() async throws {
+        let (router, db, _) = makeRouter()
+        defer { Task { await cleanupKeychain(db) } }
+        let token = freshToken()
+        let addReq = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: "OAuth", token: token)
+        )
+        let addResp = await router.handle(addReq)
+        #expect(addResp.success)
+        let listed = try await db.modelProfiles.list()
+        let oauthProfile = listed.first { $0.kind == .oauth }!
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileUpdateBedrock,
+            params: ModelProfileUpdateBedrockParams(
+                id: oauthProfile.id,
+                awsRegion: "us-west-2",
+                awsProfile: nil,
+                model: "m"
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error?.lowercased().contains("bedrock") == true)
+    }
+
+    @Test("modelProfile.updateBedrock: empty awsProfile normalized to nil")
+    func updateBedrockEmptyAwsProfileNormalized() async throws {
+        let (router, db, _) = makeRouter()
+        let row = try await db.modelProfiles.create(
+            name: "Bedrock",
+            kind: .bedrock,
+            model: "m",
+            awsRegion: "us-west-2",
+            awsProfile: "old"
+        )
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileUpdateBedrock,
+            params: ModelProfileUpdateBedrockParams(
+                id: row.id,
+                awsRegion: "us-west-2",
+                awsProfile: "   ",
+                model: "m"
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let updated = try await db.modelProfiles.get(id: row.id)
+        #expect(updated?.awsProfile == nil)
+    }
+
+    @Test("modelProfile.updateBedrock: rejects empty region")
+    func updateBedrockMissingRegion() async throws {
+        let (router, db, _) = makeRouter()
+        let row = try await db.modelProfiles.create(
+            name: "Bedrock",
+            kind: .bedrock,
+            model: "m",
+            awsRegion: "us-west-2",
+            awsProfile: nil
+        )
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileUpdateBedrock,
+            params: ModelProfileUpdateBedrockParams(
+                id: row.id,
+                awsRegion: "",
+                awsProfile: nil,
+                model: "m"
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error?.lowercased().contains("region") == true)
+    }
+
+    // MARK: - fetchUsage bedrock rejection
+
+    @Test("fetchUsage rejects bedrock profiles")
+    func fetchUsageRejectsBedrock() async throws {
+        let stub = StubClaudeUsageFetcher()
+        let (router, db, _) = makeRouter(stub: stub)
+        let row = try await db.modelProfiles.create(
+            name: "Bedrock",
+            kind: .bedrock,
+            baseURL: nil,
+            model: "anthropic.claude-sonnet-4-5",
+            awsRegion: "us-west-2",
+            awsProfile: nil
+        )
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileFetchUsage,
+            params: ModelProfileFetchUsageParams(id: row.id)
+        ))
+        #expect(!resp.success)
+        #expect(resp.error?.lowercased().contains("claude-direct") == true ||
+                resp.error?.lowercased().contains("only available") == true)
+        #expect(stub.callCount == 0)
     }
 }

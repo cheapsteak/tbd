@@ -10,7 +10,9 @@ public struct ResolvedModelProfile: Sendable, Equatable {
     public let kind: CredentialKind
     public let baseURL: String?
     public let model: String?
-    public let secret: String
+    public let secret: String?
+    public let awsRegion: String?
+    public let awsProfile: String?
 }
 
 public struct ModelProfileResolver: Sendable {
@@ -33,14 +35,23 @@ public struct ModelProfileResolver: Sendable {
 
     /// Load a profile by explicit ID, bypassing the precedence chain.
     /// Used by per-terminal pinning (resume) and mid-conversation swap.
-    /// Returns nil if the row is missing OR the keychain secret is missing/empty.
+    /// Returns nil if the row is missing. For non-bedrock kinds, also returns
+    /// nil if the keychain secret is missing or empty.
     public func loadByID(_ id: UUID) async throws -> ResolvedModelProfile? {
         try await loadResolved(id: id)
     }
 
     private func loadResolved(id: UUID) async throws -> ResolvedModelProfile? {
         guard let row = try await profiles.get(id: id) else { return nil }
-        guard let secret = try keychain(id.uuidString), !secret.isEmpty else { return nil }
+
+        let secret: String?
+        if row.kind == .bedrock {
+            secret = nil
+        } else {
+            guard let s = try keychain(id.uuidString), !s.isEmpty else { return nil }
+            secret = s
+        }
+
         try await profiles.touchLastUsed(id: row.id)
         return ResolvedModelProfile(
             profileID: row.id,
@@ -48,7 +59,9 @@ public struct ModelProfileResolver: Sendable {
             kind: row.kind,
             baseURL: row.baseURL,
             model: row.model,
-            secret: secret
+            secret: secret,
+            awsRegion: row.awsRegion,
+            awsProfile: row.awsProfile
         )
     }
 

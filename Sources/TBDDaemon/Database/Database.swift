@@ -496,6 +496,11 @@ public final class TBDDatabase: Sendable {
             )
         }
 
+        migrator.registerMigration("v25_model_profiles_bedrock") { db in
+            try db.addColumnIfMissing(table: "model_profiles", column: "aws_region",  type: .text)
+            try db.addColumnIfMissing(table: "model_profiles", column: "aws_profile", type: .text)
+        }
+
         return migrator
     }
 }
