@@ -631,6 +631,7 @@ public struct TabState: Codable, Sendable, Equatable, Identifiable {
 }
 
 /// Test-only type added to exercise SPM #7715 trigger pattern.
+/// Second push: tweaked this doc comment so a primed cache must rebuild TBDShared.
 public struct CIFlakeTriggerProbe: Codable, Sendable, Equatable {
     public let nonce: String
     public let createdAt: Date
