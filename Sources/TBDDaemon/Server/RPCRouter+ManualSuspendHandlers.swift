@@ -13,8 +13,6 @@ extension RPCRouter {
             return RPCResponse(error: "Not a Claude terminal")
         case .notFound:
             return RPCResponse(error: "Terminal not found")
-        case .busy:
-            return RPCResponse(error: "Claude is busy, try again later")
         }
     }
 

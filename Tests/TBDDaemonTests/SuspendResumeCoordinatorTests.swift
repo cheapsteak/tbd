@@ -26,8 +26,8 @@ struct SuspendResumeCoordinatorTests {
         return (db, wt.id, terminal.id)
     }
 
-    @Test func resumeSkippedWhenSuspendDisabled() async throws {
-        let (db, worktreeID, terminalID) = try await setupSuspendedTerminal()
+    @Test func manualResumeClearsSuspendedAt() async throws {
+        let (db, _, terminalID) = try await setupSuspendedTerminal()
         let tmux = TmuxManager(dryRun: true)
         let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
 
@@ -36,28 +36,13 @@ struct SuspendResumeCoordinatorTests {
         #expect(before?.suspendedAt != nil)
         #expect(before?.suspendedSnapshot != nil)
 
-        // Simulate arriving at the worktree with suspend disabled
-        await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: false)
-
-        // Brief wait — a hypothetical scheduleResume would fire after a 3s delay,
-        // but since the gate should skip it, we just need enough time to assert nothing happened.
-        try await Task.sleep(for: .milliseconds(1500))
-
-        let after = try await db.terminals.get(id: terminalID)
-        #expect(after?.suspendedAt != nil, "Resume should NOT run when suspendEnabled is false")
-    }
-
-    @Test func resumeRunsWhenSuspendEnabled() async throws {
-        let (db, worktreeID, terminalID) = try await setupSuspendedTerminal()
-        let tmux = TmuxManager(dryRun: true)
-        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
-
-        await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: true)
+        let result = await coordinator.manualResume(terminalID: terminalID)
+        #expect(result == .ok)
 
         let cleared = try await waitUntil {
             try await db.terminals.get(id: terminalID)?.suspendedAt == nil
         }
-        #expect(cleared, "Resume should clear suspendedAt when suspendEnabled is true")
+        #expect(cleared, "manualResume should clear suspendedAt")
     }
 
     @Test func manualSuspendSkipsAlreadySuspended() async throws {
@@ -107,7 +92,11 @@ struct SuspendResumeCoordinatorTests {
         #expect(result == .notSuspended)
     }
 
-    @Test func autoResumeSkipsSuspendedCodexTerminalWithSessionMetadata() async throws {
+    /// A suspended Codex terminal carries session metadata but must never be
+    /// resumed via `claude --resume`. Auto-resume is gone; `manualResume` is
+    /// the remaining resume surface, and its `isClaudeResumable` guard must
+    /// reject Codex terminals and leave them suspended.
+    @Test func manualResumeSkipsSuspendedCodexTerminalWithSessionMetadata() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/test-repo-codex", displayName: "test", defaultBranch: "main")
         let wt = try await db.worktrees.create(
@@ -129,11 +118,20 @@ struct SuspendResumeCoordinatorTests {
         let tmux = TmuxManager(dryRun: true)
         let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
 
-        await coordinator.selectionChanged(to: [wt.id], suspendEnabled: true)
-        try await Task.sleep(for: .milliseconds(250))
+        let result = await coordinator.manualResume(terminalID: terminal.id)
+        #expect(result == .noSessionID)
 
         let after = try await db.terminals.get(id: terminal.id)
         #expect(after?.suspendedAt != nil)
+    }
+
+    @Test func responseCompletedIsCallable() async throws {
+        // responseCompleted is preserved as a no-op entry point for future
+        // notification UI wiring. Exercise it to lock in the call signature.
+        let db = try TBDDatabase(inMemory: true)
+        let tmux = TmuxManager(dryRun: true)
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
+        await coordinator.responseCompleted(worktreeID: UUID())
     }
 
     @Test func resumeInjectsTokenWhenResolverProvided() async throws {
@@ -172,12 +170,13 @@ struct SuspendResumeCoordinatorTests {
         })
         let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, modelProfileResolver: resolver)
 
-        await coordinator.selectionChanged(to: [wt.id], suspendEnabled: true)
+        let result = await coordinator.manualResume(terminalID: terminal.id)
+        #expect(result == .ok)
 
         let cleared = try await waitUntil {
             try await db.terminals.get(id: terminal.id)?.suspendedAt == nil
         }
-        #expect(cleared, "Resume should clear suspendedAt when suspendEnabled is true")
+        #expect(cleared, "manualResume should clear suspendedAt")
 
         // Find the createWindow invocation (it's the only dryRun call recorded here).
         let snap = recorded.snapshot()
@@ -196,7 +195,7 @@ struct SuspendResumeCoordinatorTests {
     }
 
     @Test func resumeOmitsTokenWhenResolverNil() async throws {
-        let (db, worktreeID, terminalID) = try await setupSuspendedTerminal()
+        let (db, _, terminalID) = try await setupSuspendedTerminal()
 
         let recorded = RecordedCommands()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
@@ -205,12 +204,13 @@ struct SuspendResumeCoordinatorTests {
         // No resolver supplied — fallback branch.
         let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux, modelProfileResolver: nil)
 
-        await coordinator.selectionChanged(to: [worktreeID], suspendEnabled: true)
+        let result = await coordinator.manualResume(terminalID: terminalID)
+        #expect(result == .ok)
 
         let cleared = try await waitUntil {
             try await db.terminals.get(id: terminalID)?.suspendedAt == nil
         }
-        #expect(cleared, "Resume should clear suspendedAt when suspendEnabled is true")
+        #expect(cleared, "manualResume should clear suspendedAt")
 
         let joined = recorded.snapshot().map { $0.joined(separator: " ") }
         let resumeArg = joined.first { $0.contains("claude --resume") }
@@ -219,36 +219,6 @@ struct SuspendResumeCoordinatorTests {
                 "fallback branch must not inject CLAUDE_CODE_OAUTH_TOKEN; got: \(resumeArg ?? "nil")")
         #expect(resumeArg?.contains("ANTHROPIC_API_KEY") == false)
         #expect(resumeArg?.contains("claude --resume session-abc") == true)
-    }
-
-    @Test func suspendSkippedWhenDisabled() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let repo = try await db.repos.create(path: "/tmp/test-repo", displayName: "test", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "test-wt",
-            branch: "main", path: "/tmp/test-repo",
-            tmuxServer: "tbd-test"
-        )
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude-1", claudeSessionID: "session-abc"
-        )
-        let tmux = TmuxManager(dryRun: true)
-        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
-
-        // First: arrive at the worktree so it's in lastKnownSelection
-        await coordinator.selectionChanged(to: [wt.id], suspendEnabled: false)
-        // Seed the idle hook so the terminal would be eligible for suspend
-        await coordinator.responseCompleted(worktreeID: wt.id)
-
-        // Now depart with suspend disabled
-        await coordinator.selectionChanged(to: [], suspendEnabled: false)
-
-        // Wait for any async suspend to complete
-        try await Task.sleep(for: .seconds(2))
-
-        let after = try await db.terminals.get(id: terminal.id)
-        #expect(after?.suspendedAt == nil, "Terminal should NOT be suspended when suspendEnabled is false")
     }
 
     /// Regression test for #285: on-demand Resume must bootstrap a dead tmux
