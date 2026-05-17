@@ -1044,3 +1044,8 @@ extension RPCRouter {
         return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: text))
     }
 }
+
+// swiftlint:disable:next identifier_name
+private func _ciFlakeTriggerProbeReference() -> TBDShared.CIFlakeTriggerProbe {
+    TBDShared.CIFlakeTriggerProbe(nonce: "ci-test", createdAt: Date())
+}
