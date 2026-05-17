@@ -8,17 +8,19 @@ import Foundation
 /// - `PluginDirWriter` → `~/Library/Application Support/TBD/plugin/skills/tbd/SKILL.md`
 ///   (loaded into TBD-spawned Claude sessions via `--plugin-dir`, where the
 ///   skill registers as `tbd:tbd`)
+/// - `CodexSkillWriter` → `$CODEX_HOME/skills/tbd/SKILL.md`
+///   (loaded into TBD-spawned Codex sessions through the isolated CODEX_HOME)
 public enum TBDSkillContent {
 
     public static let body: String = """
 ---
 name: tbd
-description: Drive TBD (a macOS worktree + terminal manager). Use when the user asks to create a worktree, spawn a Claude or shell session in another tab, send input to a terminal, read terminal output, link to a worktree, or send a UI notification — or whenever running inside a TBD-managed terminal (TBD_WORKTREE_ID env var is set).
+description: Drive TBD (a macOS worktree + terminal manager). Use when the user asks to create a worktree, spawn a Claude, Codex, or shell session in another tab, send input to a terminal, read terminal output, link to a worktree, or send a UI notification — or whenever running inside a TBD-managed terminal (TBD_WORKTREE_ID env var is set).
 ---
 
 # TBD
 
-TBD is a macOS app that manages git worktrees and terminal tabs (Claude Code or shell). Sessions running inside a TBD-managed terminal have `TBD_WORKTREE_ID` set in env.
+TBD is a macOS app that manages git worktrees and terminal tabs (Claude Code, Codex, or shell). Sessions running inside a TBD-managed terminal have `TBD_WORKTREE_ID` set in env.
 
 ## When to use this skill
 
@@ -31,12 +33,21 @@ Always run `tbd <subcommand> --help` for current flags — flag detail is not du
 
 ## Common workflows
 
-### Spawn a new Claude tab in the current worktree
+### Spawn a new agent tab in the current worktree
 
 New sessions you spawn start with NO conversation history. Brief them like a colleague who just walked into the room.
 
 ```bash
 tbd terminal create "$TBD_WORKTREE_ID" --type claude --prompt-file - <<'EOF'
+Goal, what you've ruled out, file paths/lines, enough surrounding context
+that the new session can make judgment calls rather than follow narrow steps.
+EOF
+```
+
+Use `--type codex` to spawn Codex instead of Claude:
+
+```bash
+tbd terminal create "$TBD_WORKTREE_ID" --type codex --prompt-file - <<'EOF'
 Goal, what you've ruled out, file paths/lines, enough surrounding context
 that the new session can make judgment calls rather than follow narrow steps.
 EOF
@@ -111,7 +122,7 @@ Use `--prompt-file -` with a heredoc to avoid shell escaping issues.
 ## Env vars set in TBD-managed terminals
 
 - `TBD_WORKTREE_ID` — current worktree UUID.
-- `TBD_PROMPT_CONTEXT` — short context hint confirming you're inside a TBD-managed session. The full `tbd` skill is loaded by your harness (Claude Code spawns it via `--plugin-dir`); other harnesses may fall back to reading `~/Library/Application Support/TBD/skill/SKILL.md`.
+- `TBD_PROMPT_CONTEXT` — short context hint confirming you're inside a TBD-managed session. The full `tbd` skill is loaded by your harness when supported; other harnesses may fall back to reading `~/Library/Application Support/TBD/skill/SKILL.md`.
 - `TBD_PROMPT_INSTRUCTIONS` — per-repo custom instructions (if configured).
 
 ## Outside a TBD terminal

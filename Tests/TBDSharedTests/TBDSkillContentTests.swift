@@ -20,6 +20,7 @@ import Foundation
     let body = TBDSkillContent.body
     #expect(body.contains("## Common workflows"))
     #expect(body.contains("tbd terminal create"))
+    #expect(body.contains("--type codex"))
     #expect(body.contains("tbd worktree create"))
     #expect(body.contains("tbd notify"))
     #expect(body.contains("tbd link"))
@@ -32,4 +33,3 @@ import Foundation
     // Versioning-drift mitigation: instruct the model to use --help for current flags.
     #expect(body.contains("--help"))
 }
-

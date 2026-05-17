@@ -2,7 +2,8 @@ import Foundation
 import os
 import TBDShared
 
-private let logger = Logger(subsystem: "com.tbd.daemon", category: "codex-hooks")
+private let hooksLogger = Logger(subsystem: "com.tbd.daemon", category: "codex-hooks")
+private let skillLogger = Logger(subsystem: "com.tbd.daemon", category: "codex-skill")
 
 /// Manages per-repo isolated `CODEX_HOME` directories under
 /// `~/.tbd/agents/codex/<repoID>/`. This keeps TBD-launched codex sessions
@@ -30,11 +31,16 @@ struct CodexHomeManager: Sendable {
         return home
     }
 
+    /// Ensure TBD's Codex integration files exist in the isolated CODEX_HOME.
+    ///
+    /// The method name is retained because existing call sites use it as the
+    /// launch-time setup point, but it now writes both hooks and the TBD skill.
     @discardableResult
     func ensureHomeWithHooks(forRepoID repoID: UUID) throws -> URL {
         let home = try ensureHome(forRepoID: repoID)
-        // Hook setup is best-effort: log failures, but do not block Codex launch.
+        // Integration setup is best-effort: log failures, but do not block Codex launch.
         CodexHookOverlay.writeOverlay(in: home)
+        CodexSkillWriter.writeSkill(in: home)
         return home
     }
 }
@@ -94,10 +100,43 @@ enum CodexHookOverlay {
             let data = try generateBody()
             let path = overlayPath(in: codexHome)
             try data.write(to: path, options: .atomic)
-            logger.info("Wrote Codex hooks at \(path.path, privacy: .public)")
+            hooksLogger.info("Wrote Codex hooks at \(path.path, privacy: .public)")
             return true
         } catch {
-            logger.error("Failed to write Codex hooks: \(error.localizedDescription, privacy: .public)")
+            hooksLogger.error("Failed to write Codex hooks: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+}
+
+/// Writes the TBD skill into the isolated CODEX_HOME for TBD-spawned Codex
+/// sessions. Codex loads local skills from `$CODEX_HOME/skills/<name>/SKILL.md`,
+/// so this mirrors the Claude plugin skill without relying on Codex plugin
+/// hook support.
+enum CodexSkillWriter {
+    static let relativePath = "skills/tbd/SKILL.md"
+
+    static func skillPath(in codexHome: URL) -> URL {
+        codexHome.appendingPathComponent(relativePath, isDirectory: false)
+    }
+
+    @discardableResult
+    static func writeSkill(in codexHome: URL) -> Bool {
+        do {
+            let path = skillPath(in: codexHome)
+            try FileManager.default.createDirectory(
+                at: path.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try TBDSkillContent.body.write(
+                to: path,
+                atomically: true,
+                encoding: .utf8
+            )
+            skillLogger.info("Wrote Codex skill at \(path.path, privacy: .public)")
+            return true
+        } catch {
+            skillLogger.error("Failed to write Codex skill: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }

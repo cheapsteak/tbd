@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TBDShared
 @testable import TBDDaemonLib
 
 @Suite struct CodexHookOverlayTests {
@@ -42,5 +43,31 @@ import Testing
         let hooks = parsed?["hooks"] as? [String: Any]
         #expect(hooks?["SessionStart"] != nil)
         #expect(hooks?["Stop"] != nil)
+    }
+
+    @Test func writeSkillCreatesTBDSkillInCodexHome() throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-skill-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+
+        #expect(CodexSkillWriter.writeSkill(in: codexHome))
+
+        let path = codexHome.appendingPathComponent("skills/tbd/SKILL.md")
+        let written = try String(contentsOf: path, encoding: .utf8)
+        #expect(written == TBDSkillContent.body)
+    }
+
+    @Test func ensureHomeWithHooksCreatesHooksAndSkill() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let repoID = UUID()
+        let home = try CodexHomeManager(baseDirectory: base)
+            .ensureHomeWithHooks(forRepoID: repoID)
+
+        #expect(home == base.appendingPathComponent(repoID.uuidString.lowercased(), isDirectory: true))
+        #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent("hooks.json").path))
+        #expect(FileManager.default.fileExists(atPath: home.appendingPathComponent("skills/tbd/SKILL.md").path))
     }
 }
