@@ -95,16 +95,28 @@ final class AppearanceSettings: ObservableObject {
     nonisolated private static func detectTmuxStyleOverrides() -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidatePaths = ["\(home)/.tmux.conf", "\(home)/.config/tmux/tmux.conf"]
+        // Match lines that set one of the cell-painting options. Skip the
+        // `-u` (unset) form — `set -gu window-style` is exactly the fix our
+        // own tooltip recommends, so it would be wrong to flag it.
         let pattern = #"^\s*(set|setw)\b(\s+-[a-zA-Z]+)*\s+(window-style|window-active-style|pane-style|default-style)\b"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else {
             return false
         }
         for path in candidatePaths {
             guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
-            let range = NSRange(contents.startIndex..., in: contents)
-            if regex.firstMatch(in: contents, options: [], range: range) != nil {
-                return true
+            let nsContents = contents as NSString
+            let range = NSRange(location: 0, length: nsContents.length)
+            var detected = false
+            regex.enumerateMatches(in: contents, options: [], range: range) { result, _, stop in
+                guard let result, let flags = Range(result.range(at: 2), in: contents) else { return }
+                // `result.range(at: 2)` is the captured flag group, e.g. " -g" or " -gu".
+                // If any flag contains `u`, this is an unset directive — skip.
+                if !contents[flags].contains("u") {
+                    detected = true
+                    stop.pointee = true
+                }
             }
+            if detected { return true }
         }
         return false
     }
