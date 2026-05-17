@@ -107,5 +107,6 @@ final class FontPickerCoordinator: NSObject {
         let current = sender.selectedFont ?? NSFont.systemFont(ofSize: 12)
         let newFont = sender.convert(current)
         completion?(newFont)
+        completion = nil
     }
 }
