@@ -73,7 +73,11 @@ private func makeRepoWithExternalWorktree() async throws -> (tempDir: URL, repoD
         path: repoDir.path, displayName: "test", defaultBranch: "main"
     )
 
-    let result = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
+    let outcome = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
+    guard case .inserted(let result) = outcome else {
+        Issue.record("expected .inserted, got \(outcome)")
+        return
+    }
 
     #expect(result.status == .active)
     #expect(result.path == worktreePath)
@@ -95,8 +99,16 @@ private func makeRepoWithExternalWorktree() async throws -> (tempDir: URL, repoD
         path: repoDir.path, displayName: "test", defaultBranch: "main"
     )
 
-    let first = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
-    let second = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
+    let firstOutcome = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
+    guard case .inserted(let first) = firstOutcome else {
+        Issue.record("expected .inserted, got \(firstOutcome)")
+        return
+    }
+    let secondOutcome = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
+    guard case .unchanged(let second) = secondOutcome else {
+        Issue.record("expected .unchanged, got \(secondOutcome)")
+        return
+    }
 
     #expect(first.id == second.id)
     let allActive = try await db.worktrees.list(repoID: repo.id, status: .active)
@@ -116,12 +128,56 @@ private func makeRepoWithExternalWorktree() async throws -> (tempDir: URL, repoD
         path: repoDir.path, displayName: "test", defaultBranch: "main"
     )
 
-    let first = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
+    let firstOutcome = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
+    guard case .inserted(let first) = firstOutcome else {
+        Issue.record("expected .inserted, got \(firstOutcome)")
+        return
+    }
     try await db.worktrees.updateStatus(id: first.id, status: .archived)
 
-    let revived = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
+    let revivedOutcome = try await lifecycle.adoptWorktree(repoID: repo.id, path: worktreePath)
+    guard case .revived(let revived) = revivedOutcome else {
+        Issue.record("expected .revived, got \(revivedOutcome)")
+        return
+    }
     #expect(revived.id == first.id)
     #expect(revived.status == .active)
+}
+
+/// Revival must honor a `displayName` override — without this, a user
+/// re-adopting an archived worktree with `--name "New Label"` would silently
+/// keep the old archived name.
+@Test func testAdoptRevivalAppliesDisplayNameOverride() async throws {
+    let (tempDir, repoDir, worktreePath, _) = try await makeRepoWithExternalWorktree()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(),
+        tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+    )
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+
+    let firstOutcome = try await lifecycle.adoptWorktree(
+        repoID: repo.id, path: worktreePath, displayName: "Original"
+    )
+    guard case .inserted(let first) = firstOutcome else {
+        Issue.record("expected .inserted, got \(firstOutcome)")
+        return
+    }
+    try await db.worktrees.updateStatus(id: first.id, status: .archived)
+
+    let revivedOutcome = try await lifecycle.adoptWorktree(
+        repoID: repo.id, path: worktreePath, displayName: "Renamed"
+    )
+    guard case .revived(let revived) = revivedOutcome else {
+        Issue.record("expected .revived, got \(revivedOutcome)")
+        return
+    }
+    #expect(revived.id == first.id)
+    #expect(revived.displayName == "Renamed")
 }
 
 @Test func testAdoptRejectsPathNotInGitWorktreeList() async throws {
@@ -173,9 +229,10 @@ private func makeRepoWithExternalWorktree() async throws -> (tempDir: URL, repoD
         path: repoDir.path, displayName: "test", defaultBranch: "main"
     )
 
-    let result = try await lifecycle.adoptWorktree(
+    let outcome = try await lifecycle.adoptWorktree(
         repoID: repo.id, path: worktreePath, displayName: "Custom Label"
     )
+    let result = outcome.worktree
     #expect(result.displayName == "Custom Label")
     #expect(result.name == "feature-x")
 }
@@ -214,8 +271,9 @@ private func makeRepoWithExternalWorktree() async throws -> (tempDir: URL, repoD
     guard realpath(extDir.path, &resolvedBuf) != nil else {
         throw NSError(domain: "test", code: 0, userInfo: [NSLocalizedDescriptionKey: "realpath failed for \(extDir.path)"])
     }
-    let canonicalPath = String(cString: resolvedBuf)
-    let result = try await lifecycle.adoptWorktree(repoID: repo.id, path: canonicalPath)
+    let canonicalPath = resolvedBuf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+    let outcome = try await lifecycle.adoptWorktree(repoID: repo.id, path: canonicalPath)
+    let result = outcome.worktree
     #expect(result.status == .active)
     #expect(result.name == "detached")
     #expect(result.branch == "")
