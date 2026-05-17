@@ -179,3 +179,44 @@ private func makeRepoWithExternalWorktree() async throws -> (tempDir: URL, repoD
     #expect(result.displayName == "Custom Label")
     #expect(result.name == "feature-x")
 }
+
+/// Detached-HEAD worktrees are accepted (no crash, no error), but TBD's
+/// `git worktree list --porcelain` parser only extracts the `branch ` line —
+/// detached worktrees emit `HEAD <sha>` + `detached` instead, so the branch
+/// column ends up empty. Documented as a known limitation in the design doc;
+/// real-world Conductor migrations don't hit this because Conductor always
+/// names branches `cw/<name>`. This test pins the behavior so future parser
+/// changes that surface the SHA will deliberately break it.
+@Test func testAdoptDetachedHeadStoresEmptyBranch() async throws {
+    let tempDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tbd-adopt-test-\(UUID().uuidString)")
+    let repoDir = tempDir.appendingPathComponent("repo")
+    let extDir = tempDir.appendingPathComponent("external-worktrees/detached")
+    try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: extDir.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try await shell("git init -b main && git commit --allow-empty -m 'init'", at: repoDir)
+    try await shell("git worktree add --detach '\(extDir.path)' HEAD", at: repoDir)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(),
+        tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+    )
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+
+    // Resolve via realpath so the path matches what git's worktree-list
+    // reports (/var/folders/... canonicalizes to /private/var/folders/...
+    // on macOS, and Foundation's URL APIs don't follow `/var` → `/private/var`).
+    var resolvedBuf = [Int8](repeating: 0, count: Int(PATH_MAX))
+    guard realpath(extDir.path, &resolvedBuf) != nil else {
+        throw NSError(domain: "test", code: 0, userInfo: [NSLocalizedDescriptionKey: "realpath failed for \(extDir.path)"])
+    }
+    let canonicalPath = String(cString: resolvedBuf)
+    let result = try await lifecycle.adoptWorktree(repoID: repo.id, path: canonicalPath)
+    #expect(result.status == .active)
+    #expect(result.name == "detached")
+    #expect(result.branch == "")
+}

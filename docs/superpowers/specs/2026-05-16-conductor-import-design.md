@@ -62,7 +62,7 @@ tbd worktree adopt <path> [--repo <id-or-path>] [--name <name>]
 6. Idempotency:
    - If a TBD `worktrees` row already has this exact path and is active, exit 0 with `already adopted: <name>`.
    - If a row exists but is archived, revive it (reuse existing `WorktreeRevive` flow) rather than inserting a new row.
-7. Read the branch from git (`git -C <path> branch --show-current`); if detached HEAD, store the commit SHA.
+7. Read the branch from git's `worktree list --porcelain` output. For detached worktrees the branch column ends up empty (see Known Issues).
 8. Insert (or revive) the worktree row via a new daemon RPC method:
    - `repoID` = resolved repo
    - `name` = `--name` flag, else last path component of the resolved path
@@ -87,7 +87,7 @@ tbd worktree adopt <path> [--repo <id-or-path>] [--name <name>]
 - Adopting a non-git directory errors with a clear message.
 - Adopting a path whose git common-dir doesn't match any TBD repo errors with "register the repo first."
 - Adopting a path not in `git worktree list` errors with a `git worktree repair` hint.
-- Adopting a detached-HEAD worktree stores the commit SHA in the branch column.
+- Adopting a detached-HEAD worktree stores an empty string as the branch (current behavior; documented as a known limitation).
 
 ## Part 2: `scripts/import-conductor.sh`
 
@@ -221,7 +221,7 @@ Existing Claude session transcripts and `conductor.json` hooks are picked up aut
 | Path is a git worktree but not in `git worktree list` (corrupt git state) | `adopt` | error: "git worktree list does not include this path; run `git worktree repair`" |
 | Path already in TBD as active | `adopt` | exit 0, log `already adopted` |
 | Path already in TBD as archived | `adopt` | revive the row |
-| Detached HEAD | `adopt` | store commit SHA as branch |
+| Detached HEAD | `adopt` | store empty string as branch (see Known Issues — `parseWorktreeList` doesn't surface the SHA) |
 
 **Per Conductor repo (registration):**
 
@@ -283,6 +283,8 @@ These are decisions to make during implementation, not blockers for planning:
 - **`tbd worktree list --json`** — same question, for idempotency reporting (optional polish; the script doesn't strictly need it since `adopt` handles the dedup).
 
 ## Known issues
+
+**Detached-HEAD worktrees adopt with an empty branch column.** TBD's `GitManager.parseWorktreeList` only extracts `branch refs/heads/<name>` lines; detached worktrees emit `HEAD <sha>` + `detached` instead, which the parser drops. The adopt path stores `""` in the branch column. Matches existing TBD behavior for detached worktrees elsewhere. Not hit by real-world Conductor migrations (Conductor always names branches `cw/<name>`). Fix: extend `parseWorktreeList` to read the `HEAD <sha>` line when no `branch ` line follows, and return the SHA as branch. `testAdoptDetachedHeadStoresEmptyBranch` pins the current behavior — a future parser fix will deliberately break it.
 
 **Archive is destructive for adopted worktrees.** TBD's archive flow runs `git worktree remove` in its background phase, which deletes the worktree directory unconditionally — there's no flag distinguishing TBD-created worktrees from adopted ones. For an adopted Conductor worktree, this means `tbd worktree archive <name>` deletes the underlying Conductor directory, breaking the dual-use design intent of this migration.
 
