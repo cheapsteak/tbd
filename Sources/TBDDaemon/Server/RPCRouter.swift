@@ -94,6 +94,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeArchive(request.paramsData)
             case RPCMethod.worktreeRevive:
                 return try await handleWorktreeRevive(request.paramsData)
+            case RPCMethod.worktreeAdopt:
+                return try await handleWorktreeAdopt(request.paramsData)
             case RPCMethod.worktreeRename:
                 return try await handleWorktreeRename(request.paramsData)
             case RPCMethod.worktreeReorder:

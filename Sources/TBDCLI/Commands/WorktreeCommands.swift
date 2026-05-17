@@ -9,6 +9,7 @@ struct WorktreeCommand: ParsableCommand {
         subcommands: [
             WorktreeCreate.self,
             WorktreeList.self,
+            WorktreeAdopt.self,
             WorktreeArchive.self,
             WorktreeRevive.self,
             WorktreeRename.self,
@@ -224,6 +225,118 @@ struct WorktreeList: AsyncParsableCommand {
                 print(line + tag)
             }
         }
+    }
+}
+
+// MARK: - worktree adopt
+
+struct WorktreeAdopt: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "adopt",
+        abstract: "Register an existing git worktree directory into TBD"
+    )
+
+    @Argument(help: "Absolute path to the existing git worktree directory")
+    var path: String
+
+    @Option(name: .long, help: "Repository path or ID (default: auto-detected from the worktree's git common-dir)")
+    var repo: String?
+
+    @Option(name: .long, help: "Display name shown in TBD UI (default: last path component)")
+    var name: String?
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let absolute = try canonicalizePath(path)
+        guard FileManager.default.fileExists(atPath: absolute) else {
+            throw CLIError.invalidArgument("Path does not exist: \(absolute)")
+        }
+
+        let client = SocketClient()
+        let repoID: UUID
+        if let repo = repo {
+            if let id = UUID(uuidString: repo) {
+                repoID = id
+            } else {
+                let resolver = PathResolver(client: client)
+                repoID = try resolver.resolveRepoID(path: repo)
+            }
+        } else {
+            // Auto-detect: run `git rev-parse --git-common-dir` from the worktree
+            // path, then walk to the repo root and resolve via PathResolver.
+            let repoRoot = try detectRepoRoot(forWorktreePath: absolute)
+            let resolver = PathResolver(client: client)
+            repoID = try resolver.resolveRepoID(path: repoRoot)
+        }
+
+        let worktree: Worktree = try client.call(
+            method: RPCMethod.worktreeAdopt,
+            params: WorktreeAdoptParams(repoID: repoID, path: absolute, displayName: name),
+            resultType: Worktree.self
+        )
+
+        if json {
+            printJSON(worktree)
+        } else {
+            print("Adopted worktree: \(worktree.displayName)")
+            print("  ID:     \(worktree.id)")
+            print("  Branch: \(worktree.branch)")
+            print("  Path:   \(worktree.path)")
+        }
+    }
+
+    /// Canonicalizes a user-supplied path: expands `~`, resolves to absolute,
+    /// AND follows symlinks via `realpath(3)`. The symlink-following step is
+    /// required because git's `worktree list --porcelain` always reports
+    /// `realpath()`-canonicalized paths, so a user passing `/tmp/foo` (which
+    /// macOS symlinks to `/private/tmp/foo`) wouldn't match the list entry
+    /// otherwise. Foundation's `URL.resolvingSymlinksInPath()` does NOT
+    /// follow `/var → /private/var` on macOS, so we use C's `realpath`.
+    private func canonicalizePath(_ input: String) throws -> String {
+        let absolute = resolvePath(input)
+        var buf = [Int8](repeating: 0, count: Int(PATH_MAX))
+        guard realpath(absolute, &buf) != nil else {
+            // realpath fails when any component along the path doesn't exist.
+            // Let the caller's fileExists check surface that as a clearer error.
+            return absolute
+        }
+        return buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+    }
+
+    /// Resolves the main-repo root for a given worktree path by shelling out
+    /// to `git rev-parse --git-common-dir` and walking up one level from the
+    /// resulting `.git` directory.
+    private func detectRepoRoot(forWorktreePath path: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", path, "rev-parse", "--git-common-dir"]
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let stderrData = err.fileHandleForReading.readDataToEndOfFile()
+            let msg = String(data: stderrData, encoding: .utf8) ?? "git rev-parse failed"
+            throw CLIError.invalidArgument("Not a git worktree (\(path)): \(msg.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        let rawGitDir = (String(data: data, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // rawGitDir may be relative — resolve against the worktree path.
+        let gitDir: String
+        if rawGitDir.hasPrefix("/") {
+            gitDir = rawGitDir
+        } else {
+            gitDir = (path as NSString).appendingPathComponent(rawGitDir)
+        }
+        // gitDir typically ends in "/.git" — the repo root is its parent.
+        let resolved = URL(fileURLWithPath: gitDir).standardized.path
+        let repoRoot = (resolved as NSString).deletingLastPathComponent
+        return repoRoot
     }
 }
 

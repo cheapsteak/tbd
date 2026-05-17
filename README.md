@@ -49,6 +49,24 @@ scripts/restart.sh --quick  # skip build
 swift test
 ```
 
+## Migrating from Conductor
+
+Adopt your existing [Conductor](https://conductor.build) worktrees into TBD in place — no files moved, branches untouched, Conductor keeps working alongside. By default, only active (`ready`) Conductor workspaces are adopted, and any repos they reference are auto-registered in TBD.
+
+```sh
+./scripts/import-conductor.sh --dry-run    # preview
+./scripts/import-conductor.sh              # run
+```
+
+Flags:
+- `--all` — also adopt archived Conductor workspaces.
+- `--repo <name>` — limit to one Conductor repo (e.g. `--repo longeye-app`).
+- `--dry-run` — print the plan, don't write anything.
+
+Idempotent — safe to re-run as you create new Conductor worktrees.
+
+Existing Claude session transcripts and `conductor.json` hooks are picked up automatically — nothing extra to migrate.
+
 ## License
 
 Private / All rights reserved.

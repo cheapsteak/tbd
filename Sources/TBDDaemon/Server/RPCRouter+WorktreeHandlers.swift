@@ -116,6 +116,37 @@ extension RPCRouter {
         return try RPCResponse(result: worktree)
     }
 
+    func handleWorktreeAdopt(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeAdoptParams.self, from: paramsData)
+        let outcome = try await lifecycle.adoptWorktree(
+            repoID: params.repoID,
+            path: params.path,
+            displayName: params.displayName
+        )
+        let worktree = outcome.worktree
+
+        // Pick the broadcast that matches what actually changed. Idempotent
+        // calls (already-active) emit nothing — clients already know about
+        // this row, and a spurious `.worktreeCreated` could cause duplicate
+        // sidebar entries depending on client-side dedup.
+        switch outcome {
+        case .inserted:
+            subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
+                worktreeID: worktree.id, repoID: worktree.repoID,
+                name: worktree.name, path: worktree.path
+            )))
+        case .revived:
+            subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
+                worktreeID: worktree.id, repoID: worktree.repoID,
+                name: worktree.name, path: worktree.path
+            )))
+        case .unchanged:
+            break
+        }
+
+        return try RPCResponse(result: worktree)
+    }
+
     func handleWorktreeRename(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeRenameParams.self, from: paramsData)
         try await db.worktrees.rename(id: params.worktreeID, displayName: params.displayName)
