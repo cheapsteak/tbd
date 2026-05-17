@@ -147,7 +147,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 600),
-            font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            font: appearance.font,
             appearance: appearance
         )
 
