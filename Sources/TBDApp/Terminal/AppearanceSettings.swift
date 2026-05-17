@@ -42,7 +42,7 @@ final class AppearanceSettings: ObservableObject {
     /// True if the user's tmux config sets a cell-painting style option that
     /// would override the chosen color scheme's foreground/background. Best-
     /// effort detection at init — see `detectTmuxStyleOverrides()`.
-    @Published var hasTmuxStyleOverrides: Bool
+    @Published private(set) var hasTmuxStyleOverrides: Bool
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
