@@ -108,13 +108,17 @@ final class AppearanceSettings: ObservableObject {
             let range = NSRange(location: 0, length: nsContents.length)
             var detected = false
             regex.enumerateMatches(in: contents, options: [], range: range) { result, _, stop in
-                guard let result, let flags = Range(result.range(at: 2), in: contents) else { return }
+                guard let result else { return }
                 // `result.range(at: 2)` is the captured flag group, e.g. " -g" or " -gu".
-                // If any flag contains `u`, this is an unset directive — skip.
-                if !contents[flags].contains("u") {
-                    detected = true
-                    stop.pointee = true
+                // It may be absent (NSRange(NSNotFound)) when the line has no flags
+                // at all (e.g. bare `set window-style ...`) — that's still an
+                // override; only the `-u` unset directive should be skipped.
+                if let flagsRange = Range(result.range(at: 2), in: contents),
+                   contents[flagsRange].contains("u") {
+                    return
                 }
+                detected = true
+                stop.pointee = true
             }
             if detected { return true }
         }
