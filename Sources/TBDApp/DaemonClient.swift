@@ -661,14 +661,6 @@ actor DaemonClient {
         return result.statuses
     }
 
-    /// Notify the daemon which worktrees are currently selected in the app.
-    func worktreeSelectionChanged(selectedWorktreeIDs: Set<UUID>, suspendEnabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.worktreeSelectionChanged,
-            params: WorktreeSelectionChangedParams(selectedWorktreeIDs: Array(selectedWorktreeIDs), suspendEnabled: suspendEnabled)
-        )
-    }
-
     /// Push the user's Claude spawn-env setting overrides to the daemon.
     func setClaudeSpawnPreferences(_ preferences: ClaudeSpawnPreferences) async throws {
         try await callVoidAsync(

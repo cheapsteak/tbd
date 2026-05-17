@@ -103,7 +103,6 @@ public enum RPCMethod {
     public static let prList    = "pr.list"
     public static let prRefresh = "pr.refresh"
     public static let cleanup = "cleanup"
-    public static let worktreeSelectionChanged = "worktree.selectionChanged"
     public static let claudeSetSpawnPreferences = "claude.setSpawnPreferences"
     public static let terminalSuspend = "terminal.suspend"
     public static let terminalResume = "terminal.resume"
@@ -866,17 +865,6 @@ public struct SetProfileEnvOverridesParams: Codable, Sendable, Equatable {
     public init(profileID: UUID, overrides: [String: String]) {
         self.profileID = profileID
         self.overrides = overrides
-    }
-}
-
-public struct WorktreeSelectionChangedParams: Codable, Sendable {
-    public let selectedWorktreeIDs: [UUID]
-    /// Whether to suspend idle terminals on departure. Nil defaults to true
-    /// for backwards compatibility with older clients that omit this field.
-    public let suspendEnabled: Bool?
-    public init(selectedWorktreeIDs: [UUID], suspendEnabled: Bool? = nil) {
-        self.selectedWorktreeIDs = selectedWorktreeIDs
-        self.suspendEnabled = suspendEnabled
     }
 }
 

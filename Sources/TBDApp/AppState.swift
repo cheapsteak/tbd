@@ -734,9 +734,8 @@ final class AppState: ObservableObject {
     /// - the current selection is already non-empty
     /// - there are no valid IDs left after filtering stale ones
     ///
-    /// Call this from `connectAndLoadInitialState()` after `refreshAll()` and
-    /// before the `worktreeSelectionChanged` RPC so the daemon learns the real
-    /// restored selection.
+    /// Call this from `connectAndLoadInitialState()` after `refreshAll()` so
+    /// the UI reflects the real restored selection.
     func restoreSavedSelection(validWorktreeIDs: [UUID]) {
         guard selectedWorktreeIDs.isEmpty, pendingDeepLinkID == nil else { return }
         guard let data = userDefaults.data(forKey: Self.selectionOrderKey),
@@ -1070,13 +1069,6 @@ final class AppState: ObservableObject {
             await loadModelProfiles()
             startSubscription()
             await refreshPRStatuses()
-            let suspendEnabled = AppState.autoSuspendClaudeEnabled(defaults: userDefaults)
-            Task { [selectedWorktreeIDs] in
-                try? await daemonClient.worktreeSelectionChanged(
-                    selectedWorktreeIDs: selectedWorktreeIDs,
-                    suspendEnabled: suspendEnabled
-                )
-            }
             pushClaudeSpawnPreferences()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
@@ -1463,8 +1455,8 @@ final class AppState: ObservableObject {
 
     /// UserDefaults key mirroring the `@AppStorage("autoSuspendClaude")`
     /// toggle in the Settings → Experimental section. Read from non-View
-    /// contexts (e.g. the daemon-reconnect path) to avoid sending
-    /// `suspendEnabled=true` when the user has not opted in.
+    /// contexts (the pre-sleep suspend hook) so the gate is honored outside
+    /// the View layer.
     static let autoSuspendClaudeKey = "autoSuspendClaude"
 
     /// Whether auto-suspend is enabled. Fails closed: defaults to false when

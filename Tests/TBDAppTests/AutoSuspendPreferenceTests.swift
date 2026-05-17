@@ -2,11 +2,11 @@ import Foundation
 import Testing
 @testable import TBDApp
 
-/// Tests for the `autoSuspendClaude` UserDefaults helper that the
-/// daemon-reconnect path in `AppState.connectAndLoadInitialState()` reads to
-/// build the `worktree.selectionChanged` RPC params. Regression coverage for
-/// a bug where the reconnect path ignored the toggle and always sent
-/// `suspendEnabled=true`, causing real Claude sessions to receive `/exit`.
+/// Tests for the `autoSuspendClaude` UserDefaults helper that gates the
+/// pre-sleep suspend hook (`AppState.suspendIdleClaudeForSleep`). Regression
+/// coverage for a bug where a non-View read path ignored the toggle and
+/// behaved as if it were always on, causing real Claude sessions to receive
+/// `/exit`.
 ///
 /// Isolation matters: TBDApp ships as an unbundled SPM executable, so its
 /// `UserDefaults.standard` domain is `TBDApp.plist` in the developer's home
