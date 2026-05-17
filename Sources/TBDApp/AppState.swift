@@ -22,6 +22,14 @@ enum ReviveState: Equatable {
 
 @MainActor
 final class AppState: ObservableObject {
+    /// Reference to the global appearance settings, wired by `TBDAppMain`
+    /// after both StateObjects are constructed. Used by
+    /// `mainAreaTerminalSize()` to compute initial tmux pane dimensions
+    /// from the user's current font, before any `TBDTerminalView` exists.
+    /// Plain (non-weak) optional — `AppState` and `AppearanceSettings` share
+    /// the app's lifetime, so this reference cannot outlive its target.
+    var appearance: AppearanceSettings?
+
     @Published var repos: [Repo] = []
     @Published var worktrees: [UUID: [Worktree]] = [:]
     @Published var terminals: [UUID: [Terminal]] = [:]
@@ -939,7 +947,12 @@ final class AppState: ObservableObject {
     /// scrollback that #73 introduced these defaults to prevent.
     func mainAreaTerminalSize() -> (cols: Int?, rows: Int?) {
         guard terminalAutoResizeEnabled else { return (nil, nil) }
-        let cell = TBDTerminalView.cellDimensions(for: TBDTerminalView.defaultMonospaceFont)
+        // Use the user's current font so initial pane dimensions match what
+        // the freshly-spawned `TBDTerminalView` will render with. Falls back
+        // to the SwiftTerm default if `appearance` hasn't been wired yet
+        // (only possible during pre-`onAppear` startup ordering).
+        let font = appearance?.font ?? TBDTerminalView.defaultMonospaceFont
+        let cell = TBDTerminalView.cellDimensions(for: font)
         guard cell.width > 0, cell.height > 0 else { return (80, 24) }
         let cols = max(80, Int(mainAreaSize.width / cell.width))
         let rows = max(24, Int(mainAreaSize.height / cell.height))

@@ -76,8 +76,18 @@ class TBDTerminalView: TerminalView {
     }
 
     private func applyFont() {
+        // Setting `self.font` triggers SwiftTerm's `resetFont()`, which
+        // recomputes its internal `cellDimension`, calls `resize(cols:rows:)`,
+        // and that in turn invokes `sizeChanged(source:newCols:newRows:)` on
+        // our `TerminalViewDelegate`. The existing handler in
+        // `TerminalPanelView.Coordinator.sizeChanged(...)` writes the new
+        // dimensions to the PTY via `ioctl(TIOCSWINSZ)`, so tmux gets
+        // SIGWINCH and reflows the pane. No explicit forwarding needed here.
         self.font = appearanceSettings.font
-        // SwiftTerm reflows internally; pane resize handling is Task 6.
+        // Our own cell-dimension cache is keyed off `self.font`, so it must
+        // be invalidated whenever the font changes; otherwise click→grid
+        // mapping in `mouseUp` would keep using stale metrics.
+        cachedCellDimensions = nil
     }
 
     private func applyScheme() {

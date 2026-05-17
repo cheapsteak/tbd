@@ -426,6 +426,13 @@ struct TBDAppMain: App {
                 .onAppear {
                     lifecycleLogger.info("scene main onAppear")
                     JumpMenuController.shared.configure(appState: appState)
+                    // Hand AppState a reference to the appearance settings so
+                    // `mainAreaTerminalSize()` can compute pre-spawn tmux pane
+                    // dimensions using the user's current font. Done in
+                    // `onAppear` rather than `init` because `@StateObject`
+                    // values aren't guaranteed to be initialized when the
+                    // App's `init` runs.
+                    appState.appearance = appearance
                 }
                 .onOpenURL { url in
                     DeepLinkHandler.handle(url, appState: appState)
