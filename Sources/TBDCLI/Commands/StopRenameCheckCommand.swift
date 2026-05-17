@@ -2,9 +2,9 @@ import ArgumentParser
 import Foundation
 import TBDShared
 
-/// `tbd hooks stop-rename-check` — a Claude Code `Stop` hook that prompts
-/// the agent to rename its worktree/branch at end-of-turn, when context is
-/// highest and the work is freshly visible.
+/// `tbd hooks stop-rename-check` — a `Stop` hook that prompts the agent to
+/// rename its worktree/branch at end-of-turn, when context is highest and the
+/// work is freshly visible.
 ///
 /// Behavior (any error path = exit 0 silent so the agent is never wedged):
 /// 1. Read the Stop hook JSON payload from stdin.
@@ -13,8 +13,7 @@ import TBDShared
 ///    branch doesn't start with `tbd/`, or we've already fired > 2 times
 ///    this session.
 /// 4. Otherwise emit `{"decision":"block","reason":"<directive>"}` so
-///    Claude Code keeps the session alive and surfaces the directive
-///    to the agent.
+///    the agent stays in-turn and sees the directive.
 struct StopRenameCheckCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "stop-rename-check",
@@ -97,7 +96,7 @@ enum StopRenameCheckCore {
                 },
                 counterPath: { sessionID in
                     // Sanitize against forward slashes so the cap guarantee doesn't rely on
-                    // Claude Code's session-id format (UUIDs today, but an external contract).
+                    // the agent's session-id format (UUIDs today, but an external contract).
                     let safe = sessionID.replacingOccurrences(of: "/", with: "-")
                     return "/tmp/tbd-stop-rename-\(safe)"
                 }
