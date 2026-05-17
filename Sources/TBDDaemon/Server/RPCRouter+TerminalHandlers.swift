@@ -102,7 +102,7 @@ extension RPCRouter {
 
         // Codex branch: minimal launch with isolated CODEX_HOME. No session
         // tracking, no system prompt injection, no token resolution. Session
-        // resume / state detection / hooks are tracked as follow-up issues.
+        // resume / state detection are tracked as follow-up issues.
         //
         // Build env independently — do NOT inherit the Claude-shaped
         // TBD_PROMPT_CONTEXT / TBD_PROMPT_RENAME / TBD_PROMPT_INSTRUCTIONS
@@ -110,7 +110,7 @@ extension RPCRouter {
         // a Claude-centric host and would be misleading noise inside a
         // Codex pane.
         if params.type == .codex {
-            let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
+            let codexHome = try CodexHomeManager().ensureHomeWithHooks(forRepoID: worktree.repoID)
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
             codexEnv["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
@@ -313,7 +313,7 @@ extension RPCRouter {
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == "Codex" {
             // Recreate as codex — preserve identity
-            let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
+            let codexHome = try CodexHomeManager().ensureHomeWithHooks(forRepoID: worktree.repoID)
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = worktree.id.uuidString
             codexEnv["TBD_TERMINAL_ID"] = terminal.id.uuidString

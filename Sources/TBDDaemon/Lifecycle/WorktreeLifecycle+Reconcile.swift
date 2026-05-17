@@ -290,7 +290,7 @@ extension WorktreeLifecycle {
         } else if terminal.kind == .codex || terminal.label == "Codex" {
             // Codex terminal — detected by kind (primary signal) or legacy label fallback.
             // kind is the primary discriminator; label is checked for backward compatibility.
-            let codexHome = try CodexHomeManager().ensureHome(forRepoID: worktree.repoID)
+            let codexHome = try CodexHomeManager().ensureHomeWithHooks(forRepoID: worktree.repoID)
             env["CODEX_HOME"] = codexHome.path
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,
