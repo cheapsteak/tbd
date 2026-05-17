@@ -35,7 +35,13 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --all) INCLUDE_ARCHIVED=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
-        --repo) REPO_FILTER="${2:-}"; shift 2 ;;
+        --repo)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --repo requires a Conductor repo name." >&2
+                usage >&2
+                exit 2
+            fi
+            REPO_FILTER="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown flag: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -52,6 +58,14 @@ if ! command -v "$TBD_BIN" >/dev/null 2>&1; then
 fi
 if ! command -v sqlite3 >/dev/null 2>&1; then
     echo "Error: sqlite3 not found on PATH (ships with macOS — odd)." >&2
+    exit 2
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    # Used below to parse `tbd repo list --json`. Without python3 we silently
+    # treat every Conductor repo as not-yet-registered, which is functionally
+    # safe (`tbd repo add` for an already-registered repo is a no-op) but
+    # makes the plan-preview lie about which repos will be reused.
+    echo "Error: python3 not found on PATH (ships with macOS Xcode Command Line Tools)." >&2
     exit 2
 fi
 
@@ -244,6 +258,10 @@ echo
 total_steps=$((n_repo_add + n_ws_adopt))
 step=0
 n_failed=0
+# Actual-success counts (the summary needs to reflect what really happened,
+# not what was planned — failures must lower the "added" / "adopted" counts).
+n_repo_actually_added=0
+n_ws_actually_adopted=0
 
 # Phase A: add repos.
 for ((i=0; i<${#COND_REPO_IDS[@]}; i++)); do
@@ -252,6 +270,7 @@ for ((i=0; i<${#COND_REPO_IDS[@]}; i++)); do
     printf "[%d/%d] adding repo %s… " "$step" "$total_steps" "${COND_REPO_NAMES[$i]}"
     if "$TBD_BIN" repo add "${COND_REPO_PATHS[$i]}" >/dev/null 2>&1; then
         echo "ok"
+        n_repo_actually_added=$((n_repo_actually_added+1))
     else
         echo "FAILED"
         COND_REPO_ACTIONS[$i]="skip:repo add failed"
@@ -280,6 +299,7 @@ for ((i=0; i<${#WS_NAMES[@]}; i++)); do
     # Pass the repo's root_path to --repo; the adopt subcommand resolves it via PathResolver.
     if "$TBD_BIN" worktree adopt "${WS_PATHS[$i]}" --repo "${WS_REPO_PATHS[$i]}" >/dev/null 2>&1; then
         echo "ok"
+        n_ws_actually_adopted=$((n_ws_actually_adopted+1))
     else
         echo "FAILED"
         n_failed=$((n_failed+1))
@@ -288,7 +308,7 @@ done
 
 # ---- Summary ----
 echo
-echo "Done: $n_repo_add repo(s) added · $n_ws_adopt worktree(s) adopted · $((n_repo_skip + n_ws_skip)) skipped · $n_failed failed"
+echo "Done: $n_repo_actually_added repo(s) added · $n_ws_actually_adopted worktree(s) adopted · $((n_repo_skip + n_ws_skip)) skipped · $n_failed failed"
 if [[ $n_failed -gt 0 ]]; then
     exit 1
 fi
