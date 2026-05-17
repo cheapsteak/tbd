@@ -99,9 +99,14 @@ extension ClaudeProfileConfigDirManager {
     /// failing to write the pre-approval shouldn't break terminal spawn.
     static func resolveConfigDir(for profile: ResolvedModelProfile?) -> String? {
         guard let profile, profile.baseURL != nil, profile.kind == .apiKey else { return nil }
+        // Bedrock (and any future kind without a Keychain secret) doesn't need
+        // an isolated ANTHROPIC_CONFIG_DIR — we're not setting ANTHROPIC_API_KEY
+        // at all, so the "Auth conflict" warning this isolation defends against
+        // can't fire.
+        guard let apiKey = profile.secret else { return nil }
         do {
             let url = try ClaudeProfileConfigDirManager()
-                .ensureDir(forProfileID: profile.profileID, apiKey: profile.secret)
+                .ensureDir(forProfileID: profile.profileID, apiKey: apiKey)
             return url.path
         } catch {
             logger.warning("failed to ensure claude config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")

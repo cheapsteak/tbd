@@ -11,6 +11,8 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
     var kind: String
     var base_url: String?
     var model: String?
+    var aws_region: String?
+    var aws_profile: String?
     var created_at: Date
     var last_used_at: Date?
 
@@ -21,6 +23,8 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
         self.kind = profile.kind.rawValue
         self.base_url = profile.baseURL
         self.model = profile.model
+        self.aws_region = profile.awsRegion
+        self.aws_profile = profile.awsProfile
         self.created_at = profile.createdAt
         self.last_used_at = profile.lastUsedAt
     }
@@ -32,6 +36,8 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
             kind: CredentialKind(rawValue: kind) ?? .oauth,
             baseURL: base_url,
             model: model,
+            awsRegion: aws_region,
+            awsProfile: aws_profile,
             createdAt: created_at,
             lastUsedAt: last_used_at
         )
@@ -46,8 +52,10 @@ public struct ModelProfileStore: Sendable {
     }
 
     public func create(name: String, kind: CredentialKind,
-                       baseURL: String? = nil, model: String? = nil) async throws -> ModelProfile {
-        let profile = ModelProfile(name: name, kind: kind, baseURL: baseURL, model: model)
+                       baseURL: String? = nil, model: String? = nil,
+                       awsRegion: String? = nil, awsProfile: String? = nil) async throws -> ModelProfile {
+        let profile = ModelProfile(name: name, kind: kind, baseURL: baseURL, model: model,
+                                   awsRegion: awsRegion, awsProfile: awsProfile)
         let record = ModelProfileRecord(from: profile)
         try await writer.write { db in
             try record.insert(db)
@@ -91,6 +99,17 @@ public struct ModelProfileStore: Sendable {
             try db.execute(
                 sql: "UPDATE model_profiles SET base_url = ?, model = ? WHERE id = ?",
                 arguments: [baseURL, model, id.uuidString]
+            )
+        }
+    }
+
+    /// Update the bedrock-specific fields on an existing profile. Pass
+    /// `awsProfile == nil` to clear (use AWS SDK default chain).
+    public func updateBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE model_profiles SET aws_region = ?, aws_profile = ?, model = ? WHERE id = ?",
+                arguments: [awsRegion, awsProfile, model, id.uuidString]
             )
         }
     }

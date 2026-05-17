@@ -164,4 +164,31 @@ struct ModelProfileResolverTests {
         let reloaded = try await db.modelProfiles.get(id: tok.id)
         #expect(reloaded?.lastUsedAt == nil)
     }
+
+    @Test("resolver: bedrock profile returns nil secret and populated AWS fields")
+    func resolverBedrock() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let row = try await db.modelProfiles.create(
+            name: "Bedrock", kind: .bedrock,
+            baseURL: nil,
+            model: "anthropic.claude-sonnet-4-5",
+            awsRegion: "us-west-2", awsProfile: "acme"
+        )
+        let resolver = ModelProfileResolver(
+            profiles: db.modelProfiles,
+            repos: db.repos,
+            config: db.config,
+            keychain: { _ in
+                #expect(Bool(false), "keychain must not be consulted for bedrock")
+                return nil
+            }
+        )
+        let resolved = try await resolver.loadByID(row.id)
+        #expect(resolved != nil)
+        #expect(resolved?.secret == nil)
+        #expect(resolved?.kind == .bedrock)
+        #expect(resolved?.awsRegion == "us-west-2")
+        #expect(resolved?.awsProfile == "acme")
+        #expect(resolved?.model == "anthropic.claude-sonnet-4-5")
+    }
 }

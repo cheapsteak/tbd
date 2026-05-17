@@ -83,4 +83,79 @@ struct ModelProfileStoreTests {
         let updated = try await db.modelProfiles.get(id: tok.id)
         #expect(updated?.lastUsedAt != nil)
     }
+
+    @Test("store: bedrock fields round-trip through create + get")
+    func bedrockRoundTrip() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p = try await db.modelProfiles.create(
+            name: "Bedrock prod",
+            kind: .bedrock,
+            baseURL: nil,
+            model: "anthropic.claude-sonnet-4-5",
+            awsRegion: "us-west-2",
+            awsProfile: "acme-prod"
+        )
+        let fetched = try await db.modelProfiles.get(id: p.id)
+        #expect(fetched?.kind == .bedrock)
+        #expect(fetched?.awsRegion == "us-west-2")
+        #expect(fetched?.awsProfile == "acme-prod")
+        #expect(fetched?.model == "anthropic.claude-sonnet-4-5")
+    }
+
+    @Test("store: bedrock with nil awsProfile stays nil after round-trip")
+    func bedrockNilAwsProfile() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p = try await db.modelProfiles.create(
+            name: "Bedrock minimal",
+            kind: .bedrock,
+            model: "anthropic.claude-sonnet-4-5",
+            awsRegion: "us-east-1",
+            awsProfile: nil
+        )
+        let fetched = try await db.modelProfiles.get(id: p.id)
+        #expect(fetched?.awsProfile == nil)
+    }
+
+    @Test("store: updateBedrock round-trips all fields")
+    func updateBedrockRoundTrip() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p = try await db.modelProfiles.create(
+            name: "Bedrock",
+            kind: .bedrock,
+            baseURL: nil,
+            model: "old-model",
+            awsRegion: "us-west-2",
+            awsProfile: "old-profile"
+        )
+        try await db.modelProfiles.updateBedrock(
+            id: p.id,
+            awsRegion: "us-east-1",
+            awsProfile: "new-profile",
+            model: "new-model"
+        )
+        let fetched = try await db.modelProfiles.get(id: p.id)
+        #expect(fetched?.awsRegion == "us-east-1")
+        #expect(fetched?.awsProfile == "new-profile")
+        #expect(fetched?.model == "new-model")
+    }
+
+    @Test("store: updateBedrock with nil awsProfile clears the field")
+    func updateBedrockClearsAwsProfile() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p = try await db.modelProfiles.create(
+            name: "Bedrock",
+            kind: .bedrock,
+            model: "m",
+            awsRegion: "us-west-2",
+            awsProfile: "acme-prod"
+        )
+        try await db.modelProfiles.updateBedrock(
+            id: p.id,
+            awsRegion: "us-west-2",
+            awsProfile: nil,
+            model: "m"
+        )
+        let fetched = try await db.modelProfiles.get(id: p.id)
+        #expect(fetched?.awsProfile == nil)
+    }
 }

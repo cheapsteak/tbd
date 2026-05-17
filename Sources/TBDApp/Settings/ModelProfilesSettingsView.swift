@@ -72,6 +72,7 @@ struct ModelProfileRow: View {
     @State private var draftName = ""
     @State private var showDeleteConfirm = false
     @State private var showEditEndpoint = false
+    @State private var showEditBedrock = false
 
     private var profile: ModelProfile { entry.profile }
     private var usage: ModelProfileUsage? { entry.usage }
@@ -82,8 +83,12 @@ struct ModelProfileRow: View {
                 nameView
                 kindBadge
                 Spacer()
-                if profile.baseURL != nil {
-                    Button("Edit endpoint") { showEditEndpoint = true }
+                if profile.baseURL != nil && profile.kind != .bedrock {
+                    Button("Edit") { showEditEndpoint = true }
+                        .controlSize(.small)
+                }
+                if profile.kind == .bedrock {
+                    Button("Edit") { showEditBedrock = true }
                         .controlSize(.small)
                 }
                 menuButton
@@ -107,15 +112,13 @@ struct ModelProfileRow: View {
             EditEndpointSheet(profile: profile)
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $showEditBedrock) {
+            EditBedrockSheet(profile: profile)
+                .environmentObject(appState)
+        }
     }
 
-    private var endpointCaption: String? {
-        guard let baseURL = profile.baseURL else { return nil }
-        if let model = profile.model, !model.isEmpty {
-            return "via \(baseURL) · \(model)"
-        }
-        return "via \(baseURL)"
-    }
+    private var endpointCaption: String? { profile.detailCaption }
 
     @ViewBuilder
     private var nameView: some View {
@@ -142,7 +145,7 @@ struct ModelProfileRow: View {
     }
 
     private var kindBadge: some View {
-        Text(profile.kind == .oauth ? "OAuth" : "API key")
+        Text(profile.kindLabel)
             .font(.caption2)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
@@ -187,9 +190,40 @@ struct ModelProfileRow: View {
 
 // MARK: - Add sheet
 
+/// Top-aligned label + field + optional wrapping caption. Used by the
+/// add/edit-profile sheets to keep the layout from getting squeezed by
+/// macOS Form's trailing-label column.
+private struct LabeledField<Field: View>: View {
+    let label: String
+    let caption: String?
+    @ViewBuilder let field: () -> Field
+
+    init(_ label: String, caption: String? = nil, @ViewBuilder field: @escaping () -> Field) {
+        self.label = label
+        self.caption = caption
+        self.field = field
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            field()
+            if let caption {
+                Text(caption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 private enum AddPreset: String, CaseIterable, Identifiable {
-    case claudeDirect = "Claude (direct)"
-    case proxy = "Anthropic-compatible proxy"
+    case claudeDirect = "Claude"
+    case proxy        = "Proxy"
+    case bedrock      = "Bedrock"
     var id: String { rawValue }
 }
 
@@ -207,6 +241,128 @@ func probeWarningMessage(for detail: String?) -> String {
     return "Unreachable — \(detail). Saving anyway."
 }
 
+@ViewBuilder
+private func modelDiscoveryStatus(profile: String, discovery: BedrockModels.DiscoveryResult) -> some View {
+    switch discovery {
+    case .idle:
+        EmptyView()
+
+    case .loading:
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small)
+            Text("Loading models from AWS…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+    case .success(let models) where models.isEmpty:
+        Label("No Claude inference profiles in this region.", systemImage: "info.circle")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+    case .success:
+        EmptyView()  // populated dropdown is its own UI
+
+    case .needsAuth:
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("AWS authentication required.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                let trimmedProfile = profile.trimmingCharacters(in: .whitespaces)
+                if !trimmedProfile.isEmpty {
+                    (Text("Run ")
+                        + Text("aws sso login --profile \(trimmedProfile)")
+                            .font(.system(.caption, design: .monospaced))
+                        + Text(" then click refresh."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    (Text("Run ")
+                        + Text("aws sso login").font(.system(.caption, design: .monospaced))
+                        + Text(" with your profile name in a terminal, then click refresh."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        }
+
+    case .awsCliMissing:
+        Label {
+            (Text("AWS CLI not installed. Install with ")
+                + Text("brew install awscli").font(.system(.caption, design: .monospaced))
+                + Text(" to see Claude inference profiles your account has access to."))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+        }
+
+    case .accessDenied(let detail):
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Your AWS profile can't list Bedrock inference profiles in this region.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Text(detail)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(3)
+            }
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        }
+
+    case .endpointUnavailable(let detail):
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Bedrock is not available in this region.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Text(detail)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(3)
+            }
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        }
+
+    case .timeout:
+        Label("AWS request timed out (5s). Click refresh to retry.", systemImage: "clock.badge.exclamationmark")
+            .font(.caption)
+            .foregroundStyle(.orange)
+
+    case .otherError(let snippet):
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Couldn't load Claude models.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Text(snippet)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(3)
+            }
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        }
+    }
+}
+
 struct AddModelProfileSheet: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -216,6 +372,10 @@ struct AddModelProfileSheet: View {
     @State private var token = ""
     @State private var baseURL = ""
     @State private var model = ""
+    @State private var awsRegion = "us-east-1"
+    @State private var awsProfile = ""
+    @State private var awsProfileSuggestions: [String] = []
+    @State private var modelDiscovery: BedrockModels.DiscoveryResult = .idle
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var probeStatus: ProbeStatus = .idle
@@ -226,29 +386,94 @@ struct AddModelProfileSheet: View {
 
             Picker("", selection: $preset) {
                 ForEach(AddPreset.allCases) { p in
-                    Text(p.rawValue).tag(p)
+                    Text(p.rawValue).tag(p).help({
+                        switch p {
+                        case .claudeDirect: return "Claude (direct) — sk-ant-oat01- or sk-ant-api03- token"
+                        case .proxy:        return "Anthropic-compatible proxy — local LLM router with its own token"
+                        case .bedrock:      return "AWS Bedrock — uses the AWS SDK credential chain"
+                        }
+                    }())
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
 
-            Form {
-                TextField("Name", text: $name)
-                SecureField("Token", text: $token)
-                if preset == .proxy {
-                    TextField("Base URL", text: $baseURL,
-                              prompt: Text("http://127.0.0.1:3456"))
-                    TextField("Model", text: $model,
-                              prompt: Text("e.g. gpt-5-codex"))
-                    Text("Leave blank to pass through whatever model Claude Code selects.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                } else {
+            VStack(alignment: .leading, spacing: 14) {
+                LabeledField("Name") {
+                    TextField("", text: $name).textFieldStyle(.roundedBorder).frame(maxWidth: .infinity)
+                }
+
+                switch preset {
+                case .claudeDirect:
+                    LabeledField("Token") {
+                        SecureField("", text: $token).textFieldStyle(.roundedBorder).frame(maxWidth: .infinity)
+                    }
                     (Text("Run ")
                         + Text("claude setup-token").font(.system(.caption, design: .monospaced))
                         + Text(" in a terminal and paste the resulting sk-ant-oat01-… token."))
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                case .proxy:
+                    LabeledField("Token") {
+                        SecureField("", text: $token).textFieldStyle(.roundedBorder).frame(maxWidth: .infinity)
+                    }
+                    LabeledField("Base URL") {
+                        TextField("", text: $baseURL, prompt: Text("http://127.0.0.1:3456"))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: .infinity)
+                    }
+                    LabeledField(
+                        "Model",
+                        caption: "Leave blank to pass through whatever model Claude Code selects."
+                    ) {
+                        TextField("", text: $model, prompt: Text("e.g. gpt-5-codex"))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: .infinity)
+                    }
+
+                case .bedrock:
+                    LabeledField("Region") {
+                        ComboBoxField(
+                            text: $awsRegion,
+                            suggestions: BedrockRegions.suggestions,
+                            placeholder: "us-east-1"
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 22)
+                    }
+                    LabeledField(
+                        "AWS profile (optional)",
+                        caption: "Leave blank to use the AWS SDK default credential chain — env vars, SSO, instance role."
+                    ) {
+                        ComboBoxField(
+                            text: $awsProfile,
+                            suggestions: awsProfileSuggestions,
+                            placeholder: "default"
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 22)
+                    }
+                    LabeledField("Model") {
+                        HStack(spacing: 6) {
+                            ComboBoxField(
+                                text: $model,
+                                suggestions: modelDiscovery.models,
+                                placeholder: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                            )
+                            .frame(maxWidth: .infinity, minHeight: 22)
+                            Button(action: refreshModels) {
+                                if case .loading = modelDiscovery {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.clockwise")
+                                }
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Refresh model list from AWS")
+                            .disabled({ if case .loading = modelDiscovery { return true } else { return false } }())
+                        }
+                    }
+                    modelDiscoveryStatus(profile: awsProfile, discovery: modelDiscovery)
                 }
             }
 
@@ -275,7 +500,32 @@ struct AddModelProfileSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: 520)
+        .onAppear { awsProfileSuggestions = AWSProfiles.discover() }
+        .task(id: "\(preset)|\(awsRegion)|\(awsProfile)") {
+            guard preset == .bedrock else { return }
+            // Debounce so rapid keystrokes don't spam subprocess calls.
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if Task.isCancelled { return }
+            modelDiscovery = .loading
+            modelDiscovery = await BedrockModels.discover(
+                region: awsRegion,
+                awsProfile: awsProfile.isEmpty ? nil : awsProfile
+            )
+        }
+    }
+
+    private func refreshModels() {
+        modelDiscovery = .loading
+        Task {
+            let result = await BedrockModels.discover(
+                region: awsRegion,
+                awsProfile: awsProfile.isEmpty ? nil : awsProfile
+            )
+            await MainActor.run {
+                modelDiscovery = result
+            }
+        }
     }
 
     @ViewBuilder
@@ -307,14 +557,19 @@ struct AddModelProfileSheet: View {
 
     private var canSave: Bool {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
-        guard !trimmedName.isEmpty, !token.isEmpty, !isSaving else { return false }
+        guard !trimmedName.isEmpty, !isSaving else { return false }
         let duplicate = appState.modelProfiles.contains { $0.profile.name == trimmedName }
         if duplicate { return false }
-        if preset == .proxy {
-            let trimmedBase = baseURL.trimmingCharacters(in: .whitespaces)
-            if trimmedBase.isEmpty { return false }
+        switch preset {
+        case .claudeDirect:
+            return !token.isEmpty
+        case .proxy:
+            return !token.isEmpty &&
+                   !baseURL.trimmingCharacters(in: .whitespaces).isEmpty
+        case .bedrock:
+            return !awsRegion.trimmingCharacters(in: .whitespaces).isEmpty &&
+                   !model.trimmingCharacters(in: .whitespaces).isEmpty
         }
-        return true
     }
 
     private func save() {
@@ -322,11 +577,41 @@ struct AddModelProfileSheet: View {
         let tokenValue = token
         let trimmedBase = baseURL.trimmingCharacters(in: .whitespaces)
         let trimmedModel = model.trimmingCharacters(in: .whitespaces)
-        let useProxy = preset == .proxy
+        let trimmedRegion = awsRegion.trimmingCharacters(in: .whitespaces)
+        let trimmedAwsProfile = awsProfile.trimmingCharacters(in: .whitespaces)
+        let preset = self.preset  // capture for the Task
         isSaving = true
         errorMessage = nil
         Task {
-            if useProxy {
+            if preset == .bedrock {
+                let priorAlert = await MainActor.run { appState.alertMessage }
+                let warning = await appState.addModelProfile(
+                    name: trimmedName,
+                    kind: .bedrock,
+                    token: nil,
+                    baseURL: nil,
+                    model: trimmedModel.isEmpty ? nil : trimmedModel,
+                    awsRegion: trimmedRegion,
+                    awsProfile: trimmedAwsProfile.isEmpty ? nil : trimmedAwsProfile
+                )
+                await MainActor.run {
+                    isSaving = false
+                    let newAlert = appState.alertMessage
+                    if newAlert != priorAlert, let msg = newAlert {
+                        errorMessage = msg
+                        appState.alertMessage = priorAlert
+                        return
+                    }
+                    if let warning {
+                        errorMessage = warning
+                        return
+                    }
+                    dismiss()
+                }
+                return
+            }
+
+            if preset == .proxy {
                 await MainActor.run { probeStatus = .checking }
                 let result = await appState.healthCheckProfile(baseURL: trimmedBase)
                 await MainActor.run {
@@ -342,8 +627,8 @@ struct AddModelProfileSheet: View {
             let warning = await appState.addModelProfile(
                 name: trimmedName,
                 token: tokenValue,
-                baseURL: useProxy ? trimmedBase : nil,
-                model: useProxy ? (trimmedModel.isEmpty ? nil : trimmedModel) : nil
+                baseURL: preset == .proxy ? trimmedBase : nil,
+                model: preset == .proxy ? (trimmedModel.isEmpty ? nil : trimmedModel) : nil
             )
             await MainActor.run {
                 isSaving = false
@@ -374,13 +659,16 @@ struct EditEndpointSheet: View {
     @Environment(\.dismiss) private var dismiss
     let profile: ModelProfile
 
+    @State private var name: String
     @State private var baseURL: String
     @State private var model: String
     @State private var isSaving = false
     @State private var probeStatus: ProbeStatus = .idle
+    @State private var errorMessage: String?
 
     init(profile: ModelProfile) {
         self.profile = profile
+        _name = State(initialValue: profile.name)
         _baseURL = State(initialValue: profile.baseURL ?? "")
         _model = State(initialValue: profile.model ?? "")
     }
@@ -388,16 +676,30 @@ struct EditEndpointSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Edit Endpoint").font(.headline)
-            Form {
-                TextField("Base URL", text: $baseURL,
-                          prompt: Text("http://127.0.0.1:3456"))
-                TextField("Model", text: $model,
-                          prompt: Text("e.g. gpt-5-codex"))
-                Text("Leave blank to pass through whatever model Claude Code selects.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 14) {
+                LabeledField("Name") {
+                    TextField("", text: $name).textFieldStyle(.roundedBorder).frame(maxWidth: .infinity)
+                }
+                LabeledField("Base URL") {
+                    TextField("", text: $baseURL, prompt: Text("http://127.0.0.1:3456"))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: .infinity)
+                }
+                LabeledField(
+                    "Model",
+                    caption: "Leave blank to pass through whatever model Claude Code selects."
+                ) {
+                    TextField("", text: $model, prompt: Text("e.g. gpt-5-codex"))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: .infinity)
+                }
             }
             probeLabel
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
@@ -405,7 +707,7 @@ struct EditEndpointSheet: View {
                     if isSaving { ProgressView().controlSize(.small) } else { Text("Save") }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(baseURL.trimmingCharacters(in: .whitespaces).isEmpty || isSaving)
+                .disabled(!canSave)
             }
         }
         .padding(20)
@@ -430,11 +732,36 @@ struct EditEndpointSheet: View {
         }
     }
 
+    private var canSave: Bool {
+        !name.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !baseURL.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !isSaving
+    }
+
     private func save() {
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
         let trimmedBase = baseURL.trimmingCharacters(in: .whitespaces)
         let trimmedModel = model.trimmingCharacters(in: .whitespaces)
         isSaving = true
+        errorMessage = nil
         Task {
+            let priorAlert = await MainActor.run { appState.alertMessage }
+
+            // Rename first if changed; bail on conflict so we don't update
+            // fields under a stale name.
+            if trimmedName != profile.name {
+                await appState.renameModelProfile(id: profile.id, name: trimmedName)
+                let postRenameAlert = await MainActor.run { appState.alertMessage }
+                if postRenameAlert != priorAlert, let msg = postRenameAlert {
+                    await MainActor.run {
+                        isSaving = false
+                        errorMessage = msg
+                        appState.alertMessage = priorAlert
+                    }
+                    return
+                }
+            }
+
             await MainActor.run { probeStatus = .checking }
             let result = await appState.healthCheckProfile(baseURL: trimmedBase)
             await MainActor.run {
@@ -444,7 +771,7 @@ struct EditEndpointSheet: View {
                     probeStatus = .warn(probeWarningMessage(for: result.detail))
                 }
             }
-            let priorAlert = await MainActor.run { appState.alertMessage }
+            let priorAlert2 = await MainActor.run { appState.alertMessage }
             await appState.updateModelProfileEndpoint(
                 id: profile.id,
                 baseURL: trimmedBase,
@@ -453,10 +780,177 @@ struct EditEndpointSheet: View {
             await MainActor.run {
                 isSaving = false
                 let newAlert = appState.alertMessage
-                if newAlert != priorAlert, let msg = newAlert {
+                if newAlert != priorAlert2, let msg = newAlert {
                     // Surface inline and keep the sheet open so the user can
                     // correct the input without losing what they typed.
                     probeStatus = .warn(msg)
+                    appState.alertMessage = priorAlert2
+                    return
+                }
+                dismiss()
+            }
+        }
+    }
+}
+
+// MARK: - Edit Bedrock sheet
+
+struct EditBedrockSheet: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    let profile: ModelProfile
+
+    @State private var name: String
+    @State private var awsRegion: String
+    @State private var awsProfile: String
+    @State private var model: String
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+    @State private var awsProfileSuggestions: [String] = []
+    @State private var modelDiscovery: BedrockModels.DiscoveryResult = .idle
+
+    init(profile: ModelProfile) {
+        self.profile = profile
+        _name = State(initialValue: profile.name)
+        _awsRegion = State(initialValue: profile.awsRegion ?? "")
+        _awsProfile = State(initialValue: profile.awsProfile ?? "")
+        _model = State(initialValue: profile.model ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Edit Bedrock Profile").font(.headline)
+
+            LabeledField("Name") {
+                TextField("", text: $name).textFieldStyle(.roundedBorder).frame(maxWidth: .infinity)
+            }
+
+            LabeledField("Region") {
+                ComboBoxField(
+                    text: $awsRegion,
+                    suggestions: BedrockRegions.suggestions,
+                    placeholder: "us-east-1"
+                )
+                .frame(maxWidth: .infinity, minHeight: 22)
+            }
+            LabeledField(
+                "AWS profile (optional)",
+                caption: "Leave blank to use the AWS SDK default credential chain — env vars, SSO, instance role."
+            ) {
+                ComboBoxField(
+                    text: $awsProfile,
+                    suggestions: awsProfileSuggestions,
+                    placeholder: "default"
+                )
+                .frame(maxWidth: .infinity, minHeight: 22)
+            }
+            LabeledField("Model") {
+                HStack(spacing: 6) {
+                    ComboBoxField(
+                        text: $model,
+                        suggestions: modelDiscovery.models,
+                        placeholder: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 22)
+                    Button(action: refreshModels) {
+                        if case .loading = modelDiscovery {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Refresh model list from AWS")
+                    .disabled({ if case .loading = modelDiscovery { return true } else { return false } }())
+                }
+            }
+            modelDiscoveryStatus(profile: awsProfile, discovery: modelDiscovery)
+
+            if let errorMessage {
+                Text(errorMessage).font(.caption).foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(action: save) {
+                    if isSaving { ProgressView().controlSize(.small) } else { Text("Save") }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canSave)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+        .onAppear { awsProfileSuggestions = AWSProfiles.discover() }
+        .task(id: "\(awsRegion)|\(awsProfile)") {
+            // Debounce so rapid keystrokes don't spam subprocess calls.
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if Task.isCancelled { return }
+            modelDiscovery = .loading
+            modelDiscovery = await BedrockModels.discover(
+                region: awsRegion,
+                awsProfile: awsProfile.isEmpty ? nil : awsProfile
+            )
+        }
+    }
+
+    private func refreshModels() {
+        modelDiscovery = .loading
+        Task {
+            let result = await BedrockModels.discover(
+                region: awsRegion,
+                awsProfile: awsProfile.isEmpty ? nil : awsProfile
+            )
+            await MainActor.run {
+                modelDiscovery = result
+            }
+        }
+    }
+
+    private var canSave: Bool {
+        !name.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !awsRegion.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !model.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !isSaving
+    }
+
+    private func save() {
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        let trimmedRegion = awsRegion.trimmingCharacters(in: .whitespaces)
+        let trimmedAwsProfile = awsProfile.trimmingCharacters(in: .whitespaces)
+        let trimmedModel = model.trimmingCharacters(in: .whitespaces)
+        isSaving = true
+        errorMessage = nil
+        Task {
+            let priorAlert = await MainActor.run { appState.alertMessage }
+
+            // Rename first if changed; bail on conflict so we don't update
+            // fields under a stale name.
+            if trimmedName != profile.name {
+                await appState.renameModelProfile(id: profile.id, name: trimmedName)
+                let postRenameAlert = await MainActor.run { appState.alertMessage }
+                if postRenameAlert != priorAlert, let msg = postRenameAlert {
+                    await MainActor.run {
+                        isSaving = false
+                        errorMessage = msg
+                        appState.alertMessage = priorAlert
+                    }
+                    return
+                }
+            }
+
+            await appState.updateModelProfileBedrock(
+                id: profile.id,
+                awsRegion: trimmedRegion,
+                awsProfile: trimmedAwsProfile.isEmpty ? nil : trimmedAwsProfile,
+                model: trimmedModel
+            )
+            await MainActor.run {
+                isSaving = false
+                let newAlert = appState.alertMessage
+                if newAlert != priorAlert, let msg = newAlert {
+                    errorMessage = msg
                     appState.alertMessage = priorAlert
                     return
                 }

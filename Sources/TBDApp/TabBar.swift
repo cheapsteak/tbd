@@ -592,7 +592,7 @@ private struct TabBarItem: View {
         case .terminal:
             if isClaudeTerminal, let terminal, let profileID = terminal.profileID,
                let entry = appState.modelProfiles.first(where: { $0.profile.id == profileID }) {
-                let name = entry.profile.name
+                let name = entry.profile.tabDisplayName
                 let worktreeID = terminal.worktreeID
                 let allTabs = appState.tabs[worktreeID] ?? []
                 let allTerminals = appState.terminals[worktreeID] ?? []

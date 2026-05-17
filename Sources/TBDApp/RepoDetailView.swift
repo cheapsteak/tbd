@@ -86,11 +86,10 @@ struct RepoSettingsView: View {
     }
 
     private func profileLabel(entry: ModelProfileWithUsage) -> String {
-        guard let baseURL = entry.profile.baseURL else { return entry.profile.name }
-        if let model = entry.profile.model, !model.isEmpty {
-            return "\(entry.profile.name) — via \(baseURL) · \(model)"
+        if let detail = entry.profile.detailCaption {
+            return "\(entry.profile.name) — \(detail)"
         }
-        return "\(entry.profile.name) — via \(baseURL)"
+        return entry.profile.name
     }
 
     private func profileOverrideCaption(repo: Repo) -> String? {

@@ -505,4 +505,102 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.command == "ls -la")
         #expect(!r.command.contains("--plugin-dir"))
     }
+
+    // MARK: - Bedrock
+
+    @Test("bedrock: full env set with AWS_PROFILE")
+    func bedrockFullEnv() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            profileKind: .bedrock,
+            profileBaseURL: nil,
+            profileModel: "anthropic.claude-sonnet-4-5",
+            profileAwsRegion: "us-west-2",
+            profileAwsProfile: "acme-prod",
+            profileConfigDir: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["CLAUDE_CODE_USE_BEDROCK"] == "1")
+        #expect(r.sensitiveEnv["AWS_REGION"] == "us-west-2")
+        #expect(r.sensitiveEnv["AWS_PROFILE"] == "acme-prod")
+        #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == "anthropic.claude-sonnet-4-5")
+        // Forbidden keys
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == nil)
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
+        #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == nil)
+        #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == nil)
+        // Exactly these 4 keys
+        #expect(r.sensitiveEnv.keys.sorted() == ["ANTHROPIC_MODEL", "AWS_PROFILE", "AWS_REGION", "CLAUDE_CODE_USE_BEDROCK"])
+    }
+
+    @Test("bedrock: AWS_PROFILE omitted when nil")
+    func bedrockNoAwsProfile() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            profileKind: .bedrock,
+            profileBaseURL: nil,
+            profileModel: "anthropic.claude-sonnet-4-5",
+            profileAwsRegion: "us-east-1",
+            profileAwsProfile: nil,
+            profileConfigDir: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["AWS_PROFILE"] == nil)
+        #expect(r.sensitiveEnv["AWS_REGION"] == "us-east-1")
+        #expect(r.sensitiveEnv["CLAUDE_CODE_USE_BEDROCK"] == "1")
+        #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == "anthropic.claude-sonnet-4-5")
+    }
+
+    @Test("bedrock: stray profileSecret is ignored")
+    func bedrockIgnoresStraySecret() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: "stray-secret",
+            profileKind: .bedrock,
+            profileBaseURL: nil,
+            profileModel: "anthropic.claude-sonnet-4-5",
+            profileAwsRegion: "us-west-2",
+            profileAwsProfile: nil,
+            profileConfigDir: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == nil)
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
+    }
+
+    @Test("oauth: unaffected when bedrock params are passed")
+    func oauthUnaffectedByNewParams() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: fakeOauth,
+            profileKind: .oauth,
+            profileBaseURL: nil,
+            profileModel: nil,
+            profileAwsRegion: "us-west-2",   // present but ignored
+            profileAwsProfile: "foo",        // present but ignored
+            profileConfigDir: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == fakeOauth)
+        #expect(r.sensitiveEnv["AWS_REGION"] == nil)
+        #expect(r.sensitiveEnv["CLAUDE_CODE_USE_BEDROCK"] == nil)
+    }
 }

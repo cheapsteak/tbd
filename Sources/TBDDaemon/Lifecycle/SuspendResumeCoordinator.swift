@@ -386,6 +386,8 @@ public actor SuspendResumeCoordinator {
             profileKind: resolvedProfile?.kind,
             profileBaseURL: resolvedProfile?.baseURL,
             profileModel: resolvedProfile?.model,
+            profileAwsRegion: resolvedProfile?.awsRegion,
+            profileAwsProfile: resolvedProfile?.awsProfile,
             profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
             cmd: nil,
             shellFallback: defaultShell,

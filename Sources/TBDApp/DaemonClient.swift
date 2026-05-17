@@ -774,10 +774,16 @@ actor DaemonClient {
     }
 
     /// Add a model profile. The raw secret string MUST NOT be logged.
-    func addModelProfile(name: String, token: String, baseURL: String? = nil, model: String? = nil) async throws -> ModelProfileAddResult {
+    func addModelProfile(name: String,
+                         kind: ModelProfileAddKind? = nil,
+                         token: String? = nil,
+                         baseURL: String? = nil,
+                         model: String? = nil,
+                         awsRegion: String? = nil,
+                         awsProfile: String? = nil) async throws -> ModelProfileAddResult {
         return try await callAsync(
             method: RPCMethod.modelProfileAdd,
-            params: ModelProfileAddParams(name: name, token: token, baseURL: baseURL, model: model),
+            params: ModelProfileAddParams(name: name, kind: kind, token: token, baseURL: baseURL, model: model, awsRegion: awsRegion, awsProfile: awsProfile),
             resultType: ModelProfileAddResult.self
         )
     }
@@ -803,6 +809,14 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.modelProfileUpdateEndpoint,
             params: ModelProfileUpdateEndpointParams(id: id, baseURL: baseURL, model: model)
+        )
+    }
+
+    /// Update a bedrock model profile's region, awsProfile, and model.
+    func updateModelProfileBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileUpdateBedrock,
+            params: ModelProfileUpdateBedrockParams(id: id, awsRegion: awsRegion, awsProfile: awsProfile, model: model)
         )
     }
 
