@@ -125,8 +125,10 @@ class TBDTerminalView: TerminalView {
     }
 
     private static func nsColor(from color: SwiftTerm.Color) -> NSColor {
+        // Bundled scheme values are sRGB hex codes; use sRGB so wide-gamut
+        // displays (Display P3) don't drift from the spec.
         NSColor(
-            deviceRed: CGFloat(color.red) / 65535.0,
+            srgbRed: CGFloat(color.red) / 65535.0,
             green: CGFloat(color.green) / 65535.0,
             blue: CGFloat(color.blue) / 65535.0,
             alpha: 1.0
