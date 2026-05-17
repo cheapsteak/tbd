@@ -23,7 +23,7 @@ final class AppearanceSettings: ObservableObject {
 
     @MainActor
     enum Defaults {
-        static let fontName = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular).fontName
+        static let fontName = "Monaco"
         static let fontSize: CGFloat = 12.0
         static let schemeID = "tango"
         static let cursorStyle: CursorStyle = .blinkBlock

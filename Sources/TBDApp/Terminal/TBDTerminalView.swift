@@ -98,7 +98,13 @@ class TBDTerminalView: TerminalView {
         // inline. `SwiftTerm.Color` channels are UInt16 on a 65535 scale.
         self.installColors(scheme.ansi)
         self.nativeForegroundColor = Self.nsColor(from: scheme.foreground)
-        self.nativeBackgroundColor = Self.nsColor(from: scheme.background)
+        let bg = Self.nsColor(from: scheme.background)
+        self.nativeBackgroundColor = bg
+        // SwiftTerm only paints layer.backgroundColor inside its private
+        // setupOptions(); the nativeBackgroundColor setter just updates the
+        // logical terminal.backgroundColor. Repaint the layer ourselves so live
+        // scheme changes (and the initial apply) actually show through.
+        self.layer?.backgroundColor = bg.cgColor
         self.caretColor = Self.nsColor(from: scheme.cursor)
         self.selectedTextBackgroundColor = Self.nsColor(from: scheme.selection)
     }

@@ -20,6 +20,7 @@ struct AppearanceSettingsTests {
         withIsolatedDefaults { defaults in
             let settings = AppearanceSettings(defaults: defaults)
             #expect(settings.schemeID == "tango")
+            #expect(settings.fontName == "Monaco")
             #expect(settings.fontSize == 12.0)
             #expect(settings.cursorStyle == .blinkBlock)
         }

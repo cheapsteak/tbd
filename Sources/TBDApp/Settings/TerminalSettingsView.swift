@@ -11,7 +11,7 @@ struct TerminalSettingsView: View {
         Form {
             Section("Font") {
                 HStack {
-                    Text("\(displayFontName) \(Int(appearance.fontSize))")
+                    Text(displayFontName)
                         .foregroundStyle(.primary)
                     Spacer()
                     Button("Choose Font…") {
@@ -19,6 +19,15 @@ struct TerminalSettingsView: View {
                             appearance.fontName = newFont.fontName
                             appearance.fontSize = newFont.pointSize
                         }
+                    }
+                }
+                Stepper(value: $appearance.fontSize, in: 8...48, step: 1) {
+                    HStack {
+                        Text("Size")
+                        Spacer()
+                        Text("\(Int(appearance.fontSize)) pt")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
                     }
                 }
             }
