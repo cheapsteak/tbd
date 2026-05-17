@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftTerm
 
 private extension CharacterSet {
@@ -18,10 +19,32 @@ class TBDTerminalView: TerminalView {
     var remoteURL: String?
     var onNotification: ((String, String) -> Void)?
 
+    /// Global appearance settings (font, color scheme, cursor style).
+    /// Stored now so Task 5 can subscribe to `objectWillChange` and reapply
+    /// font/colors/cursor when the user edits Settings → Terminal.
+    ///
+    /// Named `appearanceSettings` (not `appearance`) to avoid collision with
+    /// `NSView.appearance: NSAppearance?` inherited from AppKit.
+    let appearanceSettings: AppearanceSettings
+    /// Holds the `objectWillChange` subscription set up in Task 5.
+    /// Declared here so the property exists before the consumer is wired in.
+    private var appearanceCancellable: AnyCancellable?
+
     /// Called once when the view has been laid out with non-zero bounds.
     /// Used to start the tmux client as soon as the terminal has real dimensions.
     var onReady: (() -> Void)?
     private var didFireReady = false
+
+    init(frame: CGRect, font: NSFont, appearance: AppearanceSettings) {
+        self.appearanceSettings = appearance
+        super.init(frame: frame, font: font)
+        // applyAll() and `appearanceCancellable` subscription are wired in Task 5.
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported — TBDTerminalView requires an AppearanceSettings")
+    }
 
     override func layout() {
         super.layout()

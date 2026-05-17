@@ -411,6 +411,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct TBDAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState()
+    @StateObject private var appearance = AppearanceSettings()
 
     init() {
         lifecycleLogger.info("TBDApp launching pid=\(getpid(), privacy: .public)")
@@ -421,6 +422,7 @@ struct TBDAppMain: App {
         Window("TBD", id: "main") {
             ContentView()
                 .environmentObject(appState)
+                .environmentObject(appearance)
                 .onAppear {
                     lifecycleLogger.info("scene main onAppear")
                     JumpMenuController.shared.configure(appState: appState)
@@ -440,6 +442,7 @@ struct TBDAppMain: App {
         Settings {
             SettingsView()
                 .environmentObject(appState)
+                .environmentObject(appearance)
         }
     }
 }
