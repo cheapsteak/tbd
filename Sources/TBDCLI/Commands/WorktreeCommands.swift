@@ -249,7 +249,7 @@ struct WorktreeAdopt: AsyncParsableCommand {
     var json = false
 
     mutating func run() async throws {
-        let absolute = resolvePath(path)
+        let absolute = try canonicalizePath(path)
         guard FileManager.default.fileExists(atPath: absolute) else {
             throw CLIError.invalidArgument("Path does not exist: \(absolute)")
         }
@@ -285,6 +285,24 @@ struct WorktreeAdopt: AsyncParsableCommand {
             print("  Branch: \(worktree.branch)")
             print("  Path:   \(worktree.path)")
         }
+    }
+
+    /// Canonicalizes a user-supplied path: expands `~`, resolves to absolute,
+    /// AND follows symlinks via `realpath(3)`. The symlink-following step is
+    /// required because git's `worktree list --porcelain` always reports
+    /// `realpath()`-canonicalized paths, so a user passing `/tmp/foo` (which
+    /// macOS symlinks to `/private/tmp/foo`) wouldn't match the list entry
+    /// otherwise. Foundation's `URL.resolvingSymlinksInPath()` does NOT
+    /// follow `/var → /private/var` on macOS, so we use C's `realpath`.
+    private func canonicalizePath(_ input: String) throws -> String {
+        let absolute = resolvePath(input)
+        var buf = [Int8](repeating: 0, count: Int(PATH_MAX))
+        guard realpath(absolute, &buf) != nil else {
+            // realpath fails when any component along the path doesn't exist.
+            // Let the caller's fileExists check surface that as a clearer error.
+            return absolute
+        }
+        return buf.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
     }
 
     /// Resolves the main-repo root for a given worktree path by shelling out
