@@ -411,6 +411,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct TBDAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState()
+    @StateObject private var appearance = AppearanceSettings()
 
     init() {
         lifecycleLogger.info("TBDApp launching pid=\(getpid(), privacy: .public)")
@@ -421,9 +422,17 @@ struct TBDAppMain: App {
         Window("TBD", id: "main") {
             ContentView()
                 .environmentObject(appState)
+                .environmentObject(appearance)
                 .onAppear {
                     lifecycleLogger.info("scene main onAppear")
                     JumpMenuController.shared.configure(appState: appState)
+                    // Hand AppState a reference to the appearance settings so
+                    // `mainAreaTerminalSize()` can compute pre-spawn tmux pane
+                    // dimensions using the user's current font. Done in
+                    // `onAppear` rather than `init` because `@StateObject`
+                    // values aren't guaranteed to be initialized when the
+                    // App's `init` runs.
+                    appState.appearance = appearance
                 }
                 .onOpenURL { url in
                     DeepLinkHandler.handle(url, appState: appState)
@@ -440,6 +449,7 @@ struct TBDAppMain: App {
         Settings {
             SettingsView()
                 .environmentObject(appState)
+                .environmentObject(appearance)
         }
     }
 }

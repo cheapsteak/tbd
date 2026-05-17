@@ -27,6 +27,7 @@ struct TerminalPanelView: View {
     var onFilePathClicked: ((String) -> Void)?
     var onTerminalNotification: ((String, String) -> Void)?
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var appearance: AppearanceSettings
     /// Called when the tmux window is dead and needs recreation. The callback
     /// should ask the daemon to recreate the window and trigger a state refresh.
     var onDeadWindow: (() -> Void)?
@@ -138,6 +139,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
     var onFilePathClicked: ((String) -> Void)?
     var onTerminalNotification: ((String, String) -> Void)?
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var appearance: AppearanceSettings
     var onDeadWindow: (() -> Void)?
     var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
@@ -145,12 +147,9 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
             frame: NSRect(x: 0, y: 0, width: 800, height: 600),
-            font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+            font: appearance.font,
+            appearance: appearance
         )
-
-        // Dark terminal
-        tv.nativeBackgroundColor = NSColor.black
-        tv.nativeForegroundColor = NSColor(white: 0.85, alpha: 1.0)
 
         // Disable mouse reporting so click-drag selects text locally
         // instead of forwarding mouse events to tmux

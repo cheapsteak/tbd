@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftTerm
 
 private extension CharacterSet {
@@ -18,10 +19,43 @@ class TBDTerminalView: TerminalView {
     var remoteURL: String?
     var onNotification: ((String, String) -> Void)?
 
+    /// Global appearance settings (font, color scheme, cursor style). The Combine
+    /// subscription set up in `init` reapplies these whenever the user edits
+    /// Settings → Terminal.
+    ///
+    /// Named `appearanceSettings` (not `appearance`) to avoid collision with
+    /// `NSView.appearance: NSAppearance?` inherited from AppKit.
+    let appearanceSettings: AppearanceSettings
+    /// Holds the Combine subscription that reapplies appearance when settings change.
+    private var appearanceCancellable: AnyCancellable?
+
     /// Called once when the view has been laid out with non-zero bounds.
     /// Used to start the tmux client as soon as the terminal has real dimensions.
     var onReady: (() -> Void)?
     private var didFireReady = false
+
+    init(frame: CGRect, font: NSFont, appearance: AppearanceSettings) {
+        self.appearanceSettings = appearance
+        super.init(frame: frame, font: font)
+
+        // Apply current values once so first render uses user settings.
+        applyAll()
+
+        // Reapply on any AppearanceSettings change. `objectWillChange` fires
+        // *before* the property mutation lands on the published value, so we
+        // dispatch async to main — by the time the sink runs, the new value
+        // has been committed and `appearanceSettings.*` reads the right thing.
+        self.appearanceCancellable = appearance.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.applyAll()
+            }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported — TBDTerminalView requires an AppearanceSettings")
+    }
 
     override func layout() {
         super.layout()
@@ -31,6 +65,78 @@ class TBDTerminalView: TerminalView {
             onReady = nil
             DispatchQueue.main.async { callback?() }
         }
+    }
+
+    // MARK: - Appearance application
+
+    private func applyAll() {
+        applyFont()
+        applyScheme()
+        applyCursor()
+        applyFontSmoothing()
+    }
+
+    private func applyFontSmoothing() {
+        // SwiftTerm's `fontSmoothing = false` is what produces iTerm's
+        // "Thin Strokes" rendering, so we invert the user-facing toggle.
+        self.fontSmoothing = !appearanceSettings.thinStrokes
+        self.needsDisplay = true
+    }
+
+    private func applyFont() {
+        // Setting `self.font` triggers SwiftTerm's `resetFont()`, which
+        // recomputes its internal `cellDimension`, calls `resize(cols:rows:)`,
+        // and that in turn invokes `sizeChanged(source:newCols:newRows:)` on
+        // our `TerminalViewDelegate`. The existing handler in
+        // `TerminalPanelView.Coordinator.sizeChanged(...)` writes the new
+        // dimensions to the PTY via `ioctl(TIOCSWINSZ)`, so tmux gets
+        // SIGWINCH and reflows the pane. No explicit forwarding needed here.
+        self.font = appearanceSettings.font
+        // Our own cell-dimension cache is keyed off `self.font`, so it must
+        // be invalidated whenever the font changes; otherwise click→grid
+        // mapping in `mouseUp` would keep using stale metrics.
+        cachedCellDimensions = nil
+    }
+
+    private func applyScheme() {
+        let scheme = ColorSchemes.scheme(forID: appearanceSettings.schemeID)
+        // SwiftTerm's `installColors` takes `[SwiftTerm.Color]`; the per-view
+        // foreground/background/caret/selection setters take `NSColor`. We can't
+        // use SwiftTerm's internal `NSColor.make(color:)` bridge, so convert
+        // inline. `SwiftTerm.Color` channels are UInt16 on a 65535 scale.
+        self.installColors(scheme.ansi)
+        self.nativeForegroundColor = Self.nsColor(from: scheme.foreground)
+        let bg = Self.nsColor(from: scheme.background)
+        self.nativeBackgroundColor = bg
+        // SwiftTerm only paints layer.backgroundColor inside its private
+        // setupOptions(); the nativeBackgroundColor setter just updates the
+        // logical terminal.backgroundColor. Repaint the layer ourselves so live
+        // scheme changes (and the initial apply) actually show through.
+        self.layer?.backgroundColor = bg.cgColor
+        self.caretColor = Self.nsColor(from: scheme.cursor)
+        self.selectedTextBackgroundColor = Self.nsColor(from: scheme.selection)
+
+        // Force SwiftTerm to repaint every cell. `installColors` updates the
+        // palette but does not invalidate cells already in the buffer; without
+        // this, default-bg cells continue showing the bg color they were drawn
+        // with at first paint (NSColor.textBackgroundColor = system gray).
+        self.getTerminal().updateFullScreen()
+        self.needsDisplay = true
+    }
+
+    private static func nsColor(from color: SwiftTerm.Color) -> NSColor {
+        // Bundled scheme values are sRGB hex codes; use sRGB so wide-gamut
+        // displays (Display P3) don't drift from the spec.
+        NSColor(
+            srgbRed: CGFloat(color.red) / 65535.0,
+            green: CGFloat(color.green) / 65535.0,
+            blue: CGFloat(color.blue) / 65535.0,
+            alpha: 1.0
+        )
+    }
+
+    private func applyCursor() {
+        self.terminal.setCursorStyle(appearanceSettings.cursorStyle)
     }
 
     // MARK: - Cell dimension calculation
