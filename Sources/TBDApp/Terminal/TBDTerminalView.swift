@@ -38,7 +38,18 @@ class TBDTerminalView: TerminalView {
     init(frame: CGRect, font: NSFont, appearance: AppearanceSettings) {
         self.appearanceSettings = appearance
         super.init(frame: frame, font: font)
-        // applyAll() and `appearanceCancellable` subscription are wired in Task 5.
+
+        // Apply current values once so first render uses user settings.
+        applyAll()
+
+        // Reapply on any AppearanceSettings change. Debounce to main-async so
+        // multi-property mutations (e.g. NSFontPanel updating both name + size)
+        // collapse into one apply.
+        self.appearanceCancellable = appearance.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.applyAll()
+            }
     }
 
     @available(*, unavailable)
@@ -54,6 +65,45 @@ class TBDTerminalView: TerminalView {
             onReady = nil
             DispatchQueue.main.async { callback?() }
         }
+    }
+
+    // MARK: - Appearance application
+
+    private func applyAll() {
+        applyFont()
+        applyScheme()
+        applyCursor()
+    }
+
+    private func applyFont() {
+        self.font = appearanceSettings.font
+        // SwiftTerm reflows internally; pane resize handling is Task 6.
+    }
+
+    private func applyScheme() {
+        let scheme = ColorSchemes.scheme(forID: appearanceSettings.schemeID)
+        // SwiftTerm's `installColors` takes `[SwiftTerm.Color]`; the per-view
+        // foreground/background/caret/selection setters take `NSColor`. We can't
+        // use SwiftTerm's internal `NSColor.make(color:)` bridge, so convert
+        // inline. `SwiftTerm.Color` channels are UInt16 on a 65535 scale.
+        self.installColors(scheme.ansi)
+        self.nativeForegroundColor = Self.nsColor(from: scheme.foreground)
+        self.nativeBackgroundColor = Self.nsColor(from: scheme.background)
+        self.caretColor = Self.nsColor(from: scheme.cursor)
+        self.selectedTextBackgroundColor = Self.nsColor(from: scheme.selection)
+    }
+
+    private static func nsColor(from color: SwiftTerm.Color) -> NSColor {
+        NSColor(
+            deviceRed: CGFloat(color.red) / 65535.0,
+            green: CGFloat(color.green) / 65535.0,
+            blue: CGFloat(color.blue) / 65535.0,
+            alpha: 1.0
+        )
+    }
+
+    private func applyCursor() {
+        self.terminal.setCursorStyle(appearanceSettings.cursorStyle)
     }
 
     // MARK: - Cell dimension calculation
