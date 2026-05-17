@@ -1,4 +1,3 @@
-import Foundation
 import Testing
 @testable import TBDApp
 
@@ -28,6 +27,12 @@ struct ColorSchemesTests {
     func lookupFound() {
         let scheme = ColorSchemes.scheme(forID: "tango")
         #expect(scheme.id == "tango")
+    }
+
+    @Test("scheme(forID:) returns tbd-default when looked up by its id")
+    func lookupDefault() {
+        let scheme = ColorSchemes.scheme(forID: "tbd-default")
+        #expect(scheme.id == "tbd-default")
     }
 
     @Test("scheme(forID:) falls back to tbd-default on unknown id")

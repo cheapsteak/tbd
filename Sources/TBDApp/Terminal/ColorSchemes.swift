@@ -1,6 +1,9 @@
 import Foundation
 import SwiftTerm
 
+// SwiftTerm.Color is a class but our usage is read-only post-construction.
+extension SwiftTerm.Color: @retroactive @unchecked Sendable {}
+
 struct TerminalColorScheme {
     let id: String
     let displayName: String
@@ -16,10 +19,7 @@ enum ColorSchemes {
         bundled.first { $0.id == id } ?? tbdDefault
     }
 
-    // `nonisolated(unsafe)` is required because `SwiftTerm.Color` is a
-    // non-final class (not `Sendable`), but these values are immutable
-    // after initialization and only read.
-    nonisolated(unsafe) static let bundled: [TerminalColorScheme] = [
+    static let bundled: [TerminalColorScheme] = [
         tbdDefault,
         tango,
     ]
@@ -27,7 +27,7 @@ enum ColorSchemes {
     // MARK: - tbd-default
     // Mirrors SwiftTerm's stock palette (xterm-compatible defaults). Provided
     // so existing users can revert to today's look.
-    nonisolated(unsafe) static let tbdDefault = TerminalColorScheme(
+    static let tbdDefault = TerminalColorScheme(
         id: "tbd-default",
         displayName: "TBD Default",
         ansi: [
@@ -54,28 +54,29 @@ enum ColorSchemes {
         selection: rgb(80, 80, 80)
     )
 
-    // MARK: - tango (dark variant of user's iTerm profile; Tango palette)
-    // RGB values transcribed from guake.json's dark-mode entries.
-    nonisolated(unsafe) static let tango = TerminalColorScheme(
+    // MARK: - tango
+    /// Dark variant of user's iTerm profile; Tango palette. RGB values
+    /// transcribed from guake.json's dark-mode entries.
+    static let tango = TerminalColorScheme(
         id: "tango",
         displayName: "Tango",
         ansi: [
-            rgb(0, 0, 0),
-            rgb(204, 0, 0),
-            rgb(78, 154, 6),
-            rgb(196, 160, 0),
-            rgb(52, 101, 164),
-            rgb(117, 80, 123),
-            rgb(6, 152, 154),
-            rgb(211, 215, 207),
-            rgb(85, 87, 83),
-            rgb(239, 41, 41),
-            rgb(138, 226, 52),
-            rgb(252, 233, 79),
-            rgb(114, 159, 207),
-            rgb(173, 127, 168),
-            rgb(52, 226, 226),
-            rgb(238, 238, 236),
+            rgb(0, 0, 0),           // 0 black
+            rgb(204, 0, 0),         // 1 red
+            rgb(78, 154, 6),        // 2 green
+            rgb(196, 160, 0),       // 3 yellow
+            rgb(52, 101, 164),      // 4 blue
+            rgb(117, 80, 123),      // 5 magenta
+            rgb(6, 152, 154),       // 6 cyan
+            rgb(211, 215, 207),     // 7 white
+            rgb(85, 87, 83),        // 8 bright black
+            rgb(239, 41, 41),       // 9 bright red
+            rgb(138, 226, 52),      // 10 bright green
+            rgb(252, 233, 79),      // 11 bright yellow
+            rgb(114, 159, 207),     // 12 bright blue
+            rgb(173, 127, 168),     // 13 bright magenta
+            rgb(52, 226, 226),      // 14 bright cyan
+            rgb(238, 238, 236),     // 15 bright white
         ],
         foreground: rgb(255, 255, 255),
         background: rgb(0, 0, 0),
