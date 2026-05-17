@@ -117,8 +117,20 @@ final class JumpMenuController {
             return NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         }()
 
-        let originX = anchorRect.midX - panelSize.width / 2
-        let originY = anchorRect.maxY - panelSize.height - 80
+        // Clamp the panel rect inside the visible frame of whichever screen
+        // contains the anchor (falls back to the main screen, then to the
+        // anchor itself) so it can't land partially off-screen on narrow
+        // displays, multi-monitor setups, or windows hugging an edge.
+        let screenFrame = (NSScreen.screens.first { $0.frame.contains(anchorRect.origin) }
+            ?? NSScreen.main)?.visibleFrame ?? anchorRect
+        let originX = max(
+            screenFrame.minX,
+            min(anchorRect.midX - panelSize.width / 2, screenFrame.maxX - panelSize.width)
+        )
+        let originY = max(
+            screenFrame.minY,
+            min(anchorRect.maxY - panelSize.height - 80, screenFrame.maxY - panelSize.height)
+        )
         panel.setFrame(
             NSRect(origin: NSPoint(x: originX, y: originY), size: panelSize),
             display: true
