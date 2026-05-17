@@ -282,6 +282,16 @@ These are decisions to make during implementation, not blockers for planning:
 - **`tbd repo list --json`** — does this exist today? If not, add it as a small flag during this work. Used by the script to detect already-registered repos by `root_path`.
 - **`tbd worktree list --json`** — same question, for idempotency reporting (optional polish; the script doesn't strictly need it since `adopt` handles the dedup).
 
+## Known issues
+
+**Archive is destructive for adopted worktrees.** TBD's archive flow runs `git worktree remove` in its background phase, which deletes the worktree directory unconditionally — there's no flag distinguishing TBD-created worktrees from adopted ones. For an adopted Conductor worktree, this means `tbd worktree archive <name>` deletes the underlying Conductor directory, breaking the dual-use design intent of this migration.
+
+Revive partially recovers: it re-runs `git worktree add` at the original path (preferring the original branch, falling back to the captured `archivedHeadSHA`), so committed work returns. But uncommitted changes, untracked files (`.envrc`, `.direnv`, `node_modules`, IDE state, build caches) are gone.
+
+**Workaround for now:** don't archive adopted Conductor worktrees in TBD unless you're OK with the directory being deleted. If you want to remove an adopted worktree from TBD's sidebar without touching the files, there's currently no clean way — the next-best option is to hide it via a future "adopted" flag (see Future work).
+
+Likely fix: add a boolean column `worktrees.adopted` (default false), set to true by `adoptWorktree`, and have `WorktreeLifecycle+Archive.swift`'s phase-2 background task skip the `git worktree remove` call when `adopted == true`. Same change should also short-circuit the revive flow's `git worktree add` since the directory is still there.
+
 ## Future work (out of scope)
 
 - A `tbd worktree relocate <name> <new-path>` command for users who later want to move an adopted worktree from `~/conductor/...` into TBD's canonical `~/tbd/worktrees/...` layout. Today they can do this manually with `mv` + `git worktree repair` + `tbd worktree archive` + `tbd worktree adopt`.
