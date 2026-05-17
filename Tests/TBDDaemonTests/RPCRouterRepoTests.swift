@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -12,40 +13,16 @@ extension RPCRouterTests {
 
     @Test("repo.add validates git repo and inserts into db")
     func repoAdd() async throws {
-        // Create a temp git repo
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let (tempDir, repoDir) = try await createTestRepo()
         defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["init"]
-        process.currentDirectoryURL = tempDir
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        process.waitUntilExit()
-
-        // Make an initial commit so HEAD exists
-        let commitProcess = Process()
-        commitProcess.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        commitProcess.arguments = ["commit", "--allow-empty", "-m", "init"]
-        commitProcess.currentDirectoryURL = tempDir
-        commitProcess.standardOutput = Pipe()
-        commitProcess.standardError = Pipe()
-        try commitProcess.run()
-        commitProcess.waitUntilExit()
-
-        let request = try RPCRequest(method: RPCMethod.repoAdd, params: RepoAddParams(path: tempDir.path))
+        let request = try RPCRequest(method: RPCMethod.repoAdd, params: RepoAddParams(path: repoDir.path))
         let response = await router.handle(request)
 
         #expect(response.success)
         #expect(response.error == nil)
 
         let repo = try response.decodeResult(Repo.self)
-        #expect(repo.path == tempDir.path)
+        #expect(repo.path == repoDir.path)
     }
 
     @Test("repo.add rejects non-git directory")
