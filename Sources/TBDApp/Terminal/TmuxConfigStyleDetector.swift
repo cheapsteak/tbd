@@ -10,6 +10,26 @@ import Foundation
 /// form, unusual flag ordering); centralizing the pattern here lets us cover
 /// each with a string-literal test in `TmuxConfigStyleDetectorTests`.
 enum TmuxConfigStyleDetector {
+    /// Anchored to line start. Between the command and the option name we
+    /// allow ONLY whitespace and flag tokens (`-xyz`) — not arbitrary
+    /// content. Otherwise an option name appearing inside a quoted value
+    /// (e.g. `set -g status-left 'window-style is great'`) would match.
+    ///
+    /// We scan the matched substring for any `-…u…` flag rather than trying
+    /// to capture the flag group with `*`, which only retains the last
+    /// iteration and silently misses unset markers in unusual orderings like
+    /// `set -u -g window-style`.
+    private static let stylePattern = try? NSRegularExpression(
+        pattern: #"(?m)^\s*(set|setw|set-option|set-window-option)(\s+-[a-zA-Z]+)*\s+(window-style|window-active-style|pane-style|default-style)\b"#
+    )
+
+    /// Matches an unset flag token (`-u`, `-gu`, `-ug`, etc) anywhere inside
+    /// the line. Compiled once at file-scope to avoid recompiling per outer
+    /// match in `declaresStyleOverride(in:)`.
+    private static let unsetFlagPattern = try? NSRegularExpression(
+        pattern: #"\s-[a-zA-Z]*u[a-zA-Z]*\b"#
+    )
+
     /// Pure function: returns true if the given tmux config text appears to set
     /// any of the cell-painting style options (window-style, window-active-style,
     /// pane-style, default-style). Best-effort regex — does not resolve
@@ -19,26 +39,16 @@ enum TmuxConfigStyleDetector {
     /// later in the file will still report true (acceptable false positive for
     /// an unusual case).
     static func declaresStyleOverride(in content: String) -> Bool {
-        // Anchored to line start. Between the command and the option name we
-        // allow ONLY whitespace and flag tokens (`-xyz`) — not arbitrary
-        // content. Otherwise an option name appearing inside a quoted value
-        // (e.g. `set -g status-left 'window-style is great'`) would match.
-        //
-        // We scan the matched substring for any `-…u…` flag below rather
-        // than trying to capture the flag group with `*`, which only retains
-        // the last iteration and silently misses unset markers in unusual
-        // orderings like `set -u -g window-style`.
-        let pattern = #"(?m)^\s*(set|setw|set-option|set-window-option)(\s+-[a-zA-Z]+)*\s+(window-style|window-active-style|pane-style|default-style)\b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        guard let stylePattern, let unsetFlagPattern else { return false }
         let nsContent = content as NSString
         var found = false
-        regex.enumerateMatches(in: content, range: NSRange(location: 0, length: nsContent.length)) { result, _, stop in
+        stylePattern.enumerateMatches(in: content, range: NSRange(location: 0, length: nsContent.length)) { result, _, stop in
             guard let result else { return }
-            let matchedLine = nsContent.substring(with: result.range)
+            let matchedRange = result.range
             // Skip unset directives. A flag token containing `u` (alone, like
             // `-u`, or grouped with other letters like `-gu` / `-ug`) means
             // unset — exactly what our own tooltip recommends as a fix.
-            if matchedLine.range(of: #"\s-[a-zA-Z]*u[a-zA-Z]*\b"#, options: .regularExpression) != nil {
+            if unsetFlagPattern.firstMatch(in: content, range: matchedRange) != nil {
                 return
             }
             found = true
@@ -52,7 +62,11 @@ enum TmuxConfigStyleDetector {
     /// falling back to `~/.config` per the XDG Base Directory spec.
     static func detectFromUserConfig() -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        // The XDG Base Directory spec says an empty `$XDG_CONFIG_HOME` should
+        // be treated as unset, falling back to `~/.config`. `??` alone only
+        // handles the absent-key case.
         let xdg = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+            .flatMap { $0.isEmpty ? nil : $0 }
             ?? "\(home)/.config"
         let candidatePaths = [
             "\(home)/.tmux.conf",
