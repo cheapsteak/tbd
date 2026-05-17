@@ -1,61 +1,13 @@
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-// Helpers (private to this file to avoid colliding with helpers in
-// WorktreeLifecycleTests, which are file-private over there).
-
-private func sh(_ command: String, at dir: URL) async throws {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/bash")
-    process.arguments = ["-c", command]
-    process.currentDirectoryURL = dir
-    process.environment = [
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
-        "HOME": NSHomeDirectory(),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_AUTHOR_NAME": "Test",
-        "GIT_AUTHOR_EMAIL": "test@test.com",
-        "GIT_COMMITTER_NAME": "Test",
-        "GIT_COMMITTER_EMAIL": "test@test.com",
-    ]
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    try process.run()
-    process.waitUntilExit()
-    if process.terminationStatus != 0 {
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        throw NSError(domain: "shell", code: Int(process.terminationStatus),
-                      userInfo: [NSLocalizedDescriptionKey: "\(command)\n\(output)"])
-    }
-}
-
-private func makeRepo() async throws -> (tempDir: URL, repoDir: URL) {
-    let tempDir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("tbd-test-\(UUID().uuidString)")
-    let repoDir = tempDir.appendingPathComponent("repo")
-    try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
-    try await sh("git init -b main && git commit --allow-empty -m 'init'", at: repoDir)
-    return (tempDir, repoDir)
-}
-
-private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async throws -> Repo {
-    let repo = try await db.repos.create(
-        path: repoDir.path, displayName: "test", defaultBranch: "main"
-    )
-    let override = tempDir.appendingPathComponent(".tbd/worktrees").path
-    try await db.repos.updateWorktreeRoot(id: repo.id, path: override)
-    return try await db.repos.get(id: repo.id)!
-}
-
 // MARK: - Archive captures branch + SHA
 
 @Test func testArchiveCapturesRenamedBranch() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -63,14 +15,14 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
         db: db, git: GitManager(),
         tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
     let originalBranch = wt.branch
 
     // Rename the branch from inside the worktree (simulates user `git branch -m`).
     let newBranch = "renamed-\(UUID().uuidString.prefix(6))"
-    try await sh("git branch -m \(newBranch)", at: URL(fileURLWithPath: wt.path))
+    try await shell("git branch -m \(newBranch)", at: URL(fileURLWithPath: wt.path))
 
     // Archive — should detect the rename and persist the new branch.
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
@@ -81,7 +33,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
 }
 
 @Test func testArchiveCapturesHeadSHA() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -89,7 +41,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
         db: db, git: GitManager(),
         tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
     let expectedSHA = try await GitManager().headSHA(worktreePath: wt.path)
@@ -104,7 +56,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
 // MARK: - Revive happy path / fallback / unrecoverable
 
 @Test func testReviveUsesLiveBranchWhenPresent() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -112,7 +64,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
         db: db, git: GitManager(),
         tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
@@ -122,7 +74,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
 }
 
 @Test func testReviveFallsBackToSHAWhenBranchMissing() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -130,7 +82,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
         db: db, git: GitManager(),
         tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
     // Capture SHA before archive.
@@ -158,7 +110,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
 }
 
 @Test func testReviveThrowsBranchMissingNoFallback() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -166,7 +118,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
         db: db, git: GitManager(),
         tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
@@ -206,7 +158,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
 }
 
 @Test func testBackfillRepairsRenamedBranch() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -214,7 +166,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
     let lifecycle = WorktreeLifecycle(
         db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Build a worktree, rename its branch in git, archive (the archive
     // capture will pick up the rename — so we then simulate the legacy buggy
@@ -222,7 +174,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     let originalBranch = wt.branch
     let renamedBranch = "renamed-\(UUID().uuidString.prefix(6))"
-    try await sh("git branch -m \(renamedBranch)", at: URL(fileURLWithPath: wt.path))
+    try await shell("git branch -m \(renamedBranch)", at: URL(fileURLWithPath: wt.path))
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
     // Roll the DB row back so it has the *old* branch name. This mimics the
@@ -247,7 +199,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
 }
 
 @Test func testBackfillLeavesUnrecoverableRows() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -255,7 +207,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
     let lifecycle = WorktreeLifecycle(
         db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
@@ -274,7 +226,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
 }
 
 @Test func testBackfillNoOpForValidRows() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -282,7 +234,7 @@ private func makeRepoRow(db: TBDDatabase, tempDir: URL, repoDir: URL) async thro
     let lifecycle = WorktreeLifecycle(
         db: db, git: git, tmux: TmuxManager(dryRun: true), hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
 
@@ -317,7 +269,7 @@ private final class TmuxArgvRecorder: @unchecked Sendable {
 }
 
 @Test func testReviveSpawnsClaudeWithResumeFlag() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -326,7 +278,7 @@ private final class TmuxArgvRecorder: @unchecked Sendable {
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     // Create + archive with skipClaude so create-side doesn't spawn anything.
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
@@ -352,7 +304,7 @@ private final class TmuxArgvRecorder: @unchecked Sendable {
 }
 
 @Test func testReviveResumesEveryArchivedSession() async throws {
-    let (tempDir, repoDir) = try await makeRepo()
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
@@ -361,7 +313,7 @@ private final class TmuxArgvRecorder: @unchecked Sendable {
     let lifecycle = WorktreeLifecycle(
         db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()
     )
-    let repo = try await makeRepoRow(db: db, tempDir: tempDir, repoDir: repoDir)
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
     let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
     try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
