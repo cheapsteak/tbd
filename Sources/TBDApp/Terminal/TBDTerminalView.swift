@@ -41,9 +41,10 @@ class TBDTerminalView: TerminalView {
         // Apply current values once so first render uses user settings.
         applyAll()
 
-        // Reapply on any AppearanceSettings change. Debounce to main-async so
-        // multi-property mutations (e.g. NSFontPanel updating both name + size)
-        // collapse into one apply.
+        // Reapply on any AppearanceSettings change. `objectWillChange` fires
+        // *before* the property mutation lands on the published value, so we
+        // dispatch async to main — by the time the sink runs, the new value
+        // has been committed and `appearanceSettings.*` reads the right thing.
         self.appearanceCancellable = appearance.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
