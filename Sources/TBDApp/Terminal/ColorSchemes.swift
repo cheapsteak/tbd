@@ -26,7 +26,9 @@ enum ColorSchemes {
     }
 
     static let bundled: [TerminalColorScheme] = [
-        tbdDefault, tango,
+        // tango sits first because it's the default on fresh install — users
+        // see it at the top of the Picker without having to scroll.
+        tango, tbdDefault,
         solarizedDark, tomorrowNight, dracula,
         nord, oneDark, gruvboxDark,
     ]
