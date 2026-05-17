@@ -70,14 +70,26 @@ final class AppearanceSettings: ObservableObject {
             self.thinStrokes = Defaults.thinStrokes
         }
 
-        self.hasTmuxStyleOverrides = Self.detectTmuxStyleOverrides()
+        // Detection reads tmux config files from disk. Defer to a detached task
+        // so app launch isn't blocked by synchronous I/O; the property updates
+        // asynchronously on the main actor once detection finishes.
+        self.hasTmuxStyleOverrides = false
+        Task { @MainActor [weak self] in
+            let detected = await Task.detached {
+                AppearanceSettings.detectTmuxStyleOverrides()
+            }.value
+            self?.hasTmuxStyleOverrides = detected
+        }
     }
 
     /// Greps the user's tmux config files for any of the cell-painting style
     /// options that would override TBD's color scheme. Best-effort: misses
     /// configs loaded via `source-file` or `if-shell`, but catches the common
     /// case of a directly-set `window-style` etc.
-    private static func detectTmuxStyleOverrides() -> Bool {
+    ///
+    /// `nonisolated` because it reads files and has no actor-isolated state —
+    /// safe to call from a detached task.
+    nonisolated private static func detectTmuxStyleOverrides() -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidatePaths = ["\(home)/.tmux.conf", "\(home)/.config/tmux/tmux.conf"]
         let pattern = #"^\s*(set|setw)\b(\s+-[a-zA-Z]+)*\s+(window-style|window-active-style|pane-style|default-style)\b"#
