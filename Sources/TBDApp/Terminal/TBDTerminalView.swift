@@ -77,6 +77,8 @@ class TBDTerminalView: TerminalView {
     }
 
     private func applyFontSmoothing() {
+        // SwiftTerm's `fontSmoothing = false` is what produces iTerm's
+        // "Thin Strokes" rendering, so we invert the user-facing toggle.
         self.fontSmoothing = !appearanceSettings.thinStrokes
         self.needsDisplay = true
     }
