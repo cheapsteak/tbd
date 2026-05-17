@@ -59,6 +59,29 @@ jobs:
           restore-keys: |
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
 
+      # Workaround for SwiftPM bug swiftlang/swift-package-manager#7715: a
+      # cache-restored `.build/` can have a stale `TBDShared` object archive
+      # alongside a fresh `.swiftmodule`. Downstream files compile against the
+      # new module but the linker can't find the new symbols, producing
+      # "Undefined symbols ... TBDShared.<NewType>.init" link-time flakes.
+      # Wiping just the TBDShared artifacts forces SPM to re-emit them while
+      # keeping the rest of `.build/` warm. Always exits 0: first-run cold
+      # cache won't have these paths and that's expected.
+      - name: Force-rebuild TBDShared (workaround SPM #7715)
+        run: |
+          echo "=== Before wipe ==="
+          ls -la .build/*/debug/TBDShared.build 2>/dev/null || true
+          ls -la .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || true
+          ls -la .build/*/debug/libTBDShared*.a 2>/dev/null || true
+          rm -rf .build/*/debug/TBDShared.build 2>/dev/null || true
+          rm -rf .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || true
+          rm -rf .build/*/debug/libTBDShared*.a 2>/dev/null || true
+          echo "=== After wipe ==="
+          ls -la .build/*/debug/TBDShared.build 2>/dev/null || true
+          ls -la .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || true
+          ls -la .build/*/debug/libTBDShared*.a 2>/dev/null || true
+          exit 0
+
       - name: SwiftLint (strict)
         run: swift package plugin --allow-writing-to-package-directory swiftlint --strict
 

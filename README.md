@@ -2,6 +2,9 @@
 
 A macOS native app for managing git worktrees and terminals, designed for multi-agent Claude Code workflows.
 
+<!-- ci-test: validating SPM #7715 workaround -->
+
+
 TBD gives you a unified interface to spin up isolated worktrees, run Claude Code sessions in embedded terminals, and orchestrate parallel development across branches — all from a single SwiftUI app.
 
 ## Architecture
