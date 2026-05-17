@@ -18,11 +18,16 @@ import TBDShared
         #expect(sessionCommand?.contains("tbd session-event") == true)
 
         let stop = hooks?["Stop"] as? [[String: Any]]
-        #expect(stop?.count == 1)
-        let stopHooks = stop?.first?["hooks"] as? [[String: Any]]
-        let stopCommand = stopHooks?.first?["command"] as? String
-        #expect(stopCommand?.contains("tbd notify --type response_complete") == true)
-        #expect(stopCommand?.contains("last_assistant_message") == true)
+        #expect(stop?.count == 2)
+        let stopCommands: [String] = (stop ?? []).flatMap { entry -> [String] in
+            let inner = entry["hooks"] as? [[String: Any]] ?? []
+            return inner.compactMap { $0["command"] as? String }
+        }
+        #expect(stopCommands.contains {
+            $0.contains("tbd notify --type response_complete")
+                && $0.contains("last_assistant_message")
+        })
+        #expect(stopCommands.contains { $0.contains("stop-rename-check") })
     }
 
     @Test func roundtripsAsValidJSON() throws {

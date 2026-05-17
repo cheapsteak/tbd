@@ -7,7 +7,7 @@ import TBDShared
 @Suite("StopRenameCheckCore")
 struct StopRenameCheckCommandTests {
 
-    /// Build a stdin JSON payload matching Claude Code's Stop hook shape.
+    /// Build a stdin JSON payload matching the common Stop hook shape.
     private static func payload(
         sessionID: String = "test-session",
         cwd: String = "/tmp/worktree",
@@ -19,6 +19,20 @@ struct StopRenameCheckCommandTests {
             "hook_event_name": "Stop",
             "stop_hook_active": stopHookActive,
             "last_assistant_message": "ok"
+        ]
+        return try! JSONSerialization.data(withJSONObject: dict)
+    }
+
+    /// Build a stdin JSON payload matching Codex's documented Stop hook fields.
+    private static func codexPayload(
+        sessionID: String = "codex-session",
+        cwd: String = "/tmp/worktree"
+    ) -> Data {
+        let dict: [String: Any] = [
+            "session_id": sessionID,
+            "cwd": cwd,
+            "hook_event_name": "Stop",
+            "last_assistant_message": "done"
         ]
         return try! JSONSerialization.data(withJSONObject: dict)
     }
@@ -139,6 +153,27 @@ struct StopRenameCheckCommandTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let out = StopRenameCheckCore.decide(
             stdinData: Self.payload(),
+            dependencies: Self.deps(
+                branch: "tbd/20260515-surprised-giraffe",
+                folder: "20260515-surprised-giraffe",
+                counterDirectory: dir
+            )
+        )
+        let raw = try #require(out)
+        let parsed = try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any]
+        #expect(parsed?["decision"] as? String == "block")
+        let reason = try #require(parsed?["reason"] as? String)
+        #expect(reason.contains("tbd/20260515-surprised-giraffe"))
+        #expect(reason.contains("20260515-surprised-giraffe"))
+        #expect(reason.contains("git branch -m"))
+        #expect(reason.contains("tbd worktree rename"))
+    }
+
+    @Test func codexStopPayload_happyPath_emitsBlockWithBranchAndFolder() throws {
+        let dir = Self.tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = StopRenameCheckCore.decide(
+            stdinData: Self.codexPayload(),
             dependencies: Self.deps(
                 branch: "tbd/20260515-surprised-giraffe",
                 folder: "20260515-surprised-giraffe",

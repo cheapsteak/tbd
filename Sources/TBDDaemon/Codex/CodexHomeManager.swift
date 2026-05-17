@@ -59,6 +59,9 @@ enum CodexHookOverlay {
     static let stopCommand =
         #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
 
+    static let stopRenameCheckCommand =
+        #"tbd hooks stop-rename-check 2>/dev/null || true"#
+
     static func overlayPath(in codexHome: URL) -> URL {
         codexHome.appendingPathComponent(fileName, isDirectory: false)
     }
@@ -78,6 +81,11 @@ enum CodexHookOverlay {
                     [
                         "hooks": [
                             ["type": "command", "command": stopCommand]
+                        ]
+                    ],
+                    [
+                        "hooks": [
+                            ["type": "command", "command": stopRenameCheckCommand]
                         ]
                     ]
                 ]
