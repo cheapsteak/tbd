@@ -54,16 +54,17 @@ public func makeRepoWithExternalWorktree(
     try await shell("git init -b main && git commit --allow-empty -m 'init'", at: repoDir)
     try await shell("git worktree add -b \(branch) '\(extDir.path)'", at: repoDir)
 
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/realpath")
-    process.arguments = [extDir.path]
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    try process.run()
-    process.waitUntilExit()
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    let canonicalPath = String(data: data, encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines) ?? extDir.path
+    // Use C realpath() (same approach as createTestRepoResolvingSymlinks) so the
+    // returned path matches what `git worktree list` reports. On macOS,
+    // /var/folders/… is a symlink to /private/var/folders/… that
+    // URL.resolvingSymlinksInPath() does not resolve, but C realpath() does.
+    let canonicalPath: String
+    if let cReal = realpath(extDir.path, nil) {
+        canonicalPath = String(cString: cReal)
+        free(cReal)
+    } else {
+        canonicalPath = extDir.path
+    }
 
     return (tempDir, repoDir, canonicalPath, branch)
 }
