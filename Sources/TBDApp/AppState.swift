@@ -507,11 +507,20 @@ final class AppState: ObservableObject {
 
         // Update local unread summary state. The delta doesn't carry a
         // timestamp so we use "now" — close enough for the jump menu's
-        // recency-based sort.
-        unreadByWorktree[notification.worktreeID] = UnreadSummary(
-            type: notification.type,
-            mostRecentAt: Date()
-        )
+        // recency-based sort. Merge with any existing summary so a lower-
+        // severity arrival (e.g. responseComplete) doesn't downgrade a
+        // higher-severity unread (e.g. error) until the next DB poll.
+        let incoming = UnreadSummary(type: notification.type, mostRecentAt: Date())
+        if let existing = unreadByWorktree[notification.worktreeID] {
+            let winnerType = incoming.type.severity > existing.type.severity
+                ? incoming.type : existing.type
+            unreadByWorktree[notification.worktreeID] = UnreadSummary(
+                type: winnerType,
+                mostRecentAt: incoming.mostRecentAt
+            )
+        } else {
+            unreadByWorktree[notification.worktreeID] = incoming
+        }
 
         // Fire sound + macOS notification
         notificationSoundPlayer.playIfEnabled()
