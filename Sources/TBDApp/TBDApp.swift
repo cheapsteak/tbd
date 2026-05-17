@@ -423,6 +423,7 @@ struct TBDAppMain: App {
                 .environmentObject(appState)
                 .onAppear {
                     lifecycleLogger.info("scene main onAppear")
+                    JumpMenuController.shared.configure(appState: appState)
                 }
                 .onOpenURL { url in
                     DeepLinkHandler.handle(url, appState: appState)

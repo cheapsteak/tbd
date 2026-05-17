@@ -15,7 +15,7 @@ struct WorktreeRowView: View {
     }
 
     private var notification: NotificationType? {
-        appState.notifications[worktree.id] ?? nil
+        appState.unreadByWorktree[worktree.id]?.type
     }
 
     private var hasBoldNotification: Bool {

@@ -21,11 +21,11 @@ extension AppState {
     func markNotificationsRead(worktreeID: UUID) async {
         do {
             try await daemonClient.markNotificationsRead(worktreeID: worktreeID)
-            notifications[worktreeID] = nil
+            unreadByWorktree[worktreeID] = nil
         } catch {
             // Not critical — just clear locally
             logger.warning("Failed to mark notifications read for \(worktreeID): \(error)")
-            notifications[worktreeID] = nil
+            unreadByWorktree[worktreeID] = nil
         }
     }
 

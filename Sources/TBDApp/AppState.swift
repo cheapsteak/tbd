@@ -26,7 +26,12 @@ final class AppState: ObservableObject {
     @Published var worktrees: [UUID: [Worktree]] = [:]
     @Published var terminals: [UUID: [Terminal]] = [:]
     @Published var notes: [UUID: [Note]] = [:]
-    @Published var notifications: [UUID: NotificationType?] = [:]
+    /// Unread notification summaries keyed by worktree ID. The cmd-K jump
+    /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
+    /// severity dot. Worktrees the user is currently viewing are excluded
+    /// from this dictionary because `refreshNotifications` auto-marks them
+    /// read on every poll.
+    @Published var unreadByWorktree: [UUID: UnreadSummary] = [:]
     @Published var selectedWorktreeIDs: Set<UUID> = [] {
         didSet {
             // If the List selected a repo header tag (not a worktree), treat it
@@ -50,6 +55,20 @@ final class AppState: ObservableObject {
                 if let leaving = selectedRepoID { clearRevivingArchived(repoID: leaving) }
                 selectedRepoID = nil
                 recordNavigation(.worktrees(selectionOrder))
+                // Feed the jump menu's Recent section. Insertion-order LRU,
+                // most-recent-first; capped at 32 to bound memory. Only the
+                // most-recently-added worktree ID is recorded per selection
+                // event — multi-select doesn't make sense for "the worktree
+                // I just looked at". Intentionally not gated on
+                // `isNavigating`: cmd+[ / cmd+] are real visits and should
+                // reorder the jump menu Recents (Slack-style).
+                if let id = selectionOrder.last {
+                    recentWorktreeIDs.removeAll { $0 == id }
+                    recentWorktreeIDs.insert(id, at: 0)
+                    if recentWorktreeIDs.count > Self.recentWorktreeCap {
+                        recentWorktreeIDs.removeLast(recentWorktreeIDs.count - Self.recentWorktreeCap)
+                    }
+                }
             }
         }
     }
@@ -204,6 +223,14 @@ final class AppState: ObservableObject {
     /// most-recent-first. Cap: keepAliveLimit. Older worktrees get evicted
     /// (their SingleWorktreeView unmounts) when the cap is exceeded.
     @Published private(set) var recentlyVisitedWorktreeIDs: [UUID] = []
+
+    /// LRU of recently-selected worktrees consumed by the cmd-K jump menu.
+    /// Distinct from `recentlyVisitedWorktreeIDs` (which has a much smaller
+    /// cap and drives the SingleWorktreeView keep-alive cache). In-memory
+    /// only — resets on app relaunch, matching Slack's "Recent" semantics.
+    @Published private(set) var recentWorktreeIDs: [UUID] = []
+
+    private static let recentWorktreeCap = 32
 
     private let keepAliveLimit = 8
 
@@ -479,8 +506,22 @@ final class AppState: ObservableObject {
         let visible = visibleWorktreeIDs
         guard !visible.contains(notification.worktreeID) else { return }
 
-        // Update local notification state
-        notifications[notification.worktreeID] = notification.type
+        // Update local unread summary state. The delta doesn't carry a
+        // timestamp so we use "now" — close enough for the jump menu's
+        // recency-based sort. Merge with any existing summary so a lower-
+        // severity arrival (e.g. responseComplete) doesn't downgrade a
+        // higher-severity unread (e.g. error) until the next DB poll.
+        let incoming = UnreadSummary(type: notification.type, mostRecentAt: Date())
+        if let existing = unreadByWorktree[notification.worktreeID] {
+            let winnerType = incoming.type.severity > existing.type.severity
+                ? incoming.type : existing.type
+            unreadByWorktree[notification.worktreeID] = UnreadSummary(
+                type: winnerType,
+                mostRecentAt: incoming.mostRecentAt
+            )
+        } else {
+            unreadByWorktree[notification.worktreeID] = incoming
+        }
 
         // Fire sound + macOS notification
         notificationSoundPlayer.playIfEnabled()
@@ -851,12 +892,8 @@ final class AppState: ObservableObject {
 
             // Only include notifications for non-visible worktrees in UI state
             let filtered = fetched.filter { !visible.contains($0.key) }
-            if filtered != notifications.compactMapValues({ $0 }) {
-                var updated: [UUID: NotificationType?] = [:]
-                for (id, type) in filtered {
-                    updated[id] = type
-                }
-                notifications = updated
+            if filtered != unreadByWorktree {
+                unreadByWorktree = filtered
             }
         } catch {
             logger.error("Failed to list notifications: \(error)")

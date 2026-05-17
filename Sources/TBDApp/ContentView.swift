@@ -249,7 +249,7 @@ struct ContentView: View {
 
     private func markSelectedWorktreesAsRead(_ selection: Set<UUID>) {
         for worktreeID in selection {
-            appState.notifications[worktreeID] = nil
+            appState.unreadByWorktree[worktreeID] = nil
             Task {
                 await appState.markNotificationsRead(worktreeID: worktreeID)
             }
