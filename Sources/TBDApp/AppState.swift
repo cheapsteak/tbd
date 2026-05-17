@@ -61,7 +61,7 @@ final class AppState: ObservableObject {
                 // sense for "the worktree I just looked at". Intentionally
                 // not gated on `isNavigating`: cmd+[ / cmd+] are real visits
                 // and should reorder the jump menu Recents (Slack-style).
-                if let id = selectedWorktreeIDs.first {
+                if let id = selectionOrder.last {
                     recentWorktreeIDs.removeAll { $0 == id }
                     recentWorktreeIDs.insert(id, at: 0)
                     if recentWorktreeIDs.count > Self.recentWorktreeCap {
