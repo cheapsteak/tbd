@@ -32,13 +32,22 @@ struct TerminalSettingsView: View {
                 }
             }
 
-            Section("Color Scheme") {
-                Picker("Scheme", selection: $appearance.schemeID) {
-                    ForEach(ColorSchemes.bundled, id: \.id) { scheme in
-                        Text(scheme.displayName).tag(scheme.id)
+            Section {
+                HStack {
+                    Picker("Scheme", selection: $appearance.schemeID) {
+                        ForEach(ColorSchemes.bundled, id: \.id) { scheme in
+                            Text(scheme.displayName).tag(scheme.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    if appearance.hasTmuxStyleOverrides {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(.secondary)
+                            .help("Your ~/.tmux.conf sets window-style or a similar option that paints every cell with explicit colors. tmux's paint will override the scheme's foreground/background. To let this scheme drive the appearance, unset those options in your tmux config (e.g. `set -gu window-style`).")
                     }
                 }
-                .pickerStyle(.menu)
+            } header: {
+                Text("Color Scheme")
             }
 
             Section("Cursor") {

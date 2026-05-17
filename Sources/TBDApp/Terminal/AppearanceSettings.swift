@@ -36,6 +36,11 @@ final class AppearanceSettings: ObservableObject {
     @Published var schemeID: String { didSet { defaults.set(schemeID, forKey: Keys.schemeID) } }
     @Published var cursorStyle: CursorStyle { didSet { defaults.set(cursorStyle.rawString, forKey: Keys.cursorStyle) } }
 
+    /// True if the user's tmux config sets a cell-painting style option that
+    /// would override the chosen color scheme's foreground/background. Best-
+    /// effort detection at init — see `detectTmuxStyleOverrides()`.
+    @Published var hasTmuxStyleOverrides: Bool
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
@@ -53,6 +58,29 @@ final class AppearanceSettings: ObservableObject {
         // Cursor — round-trip via rawString; fall back on unknown.
         let storedCursor = defaults.string(forKey: Keys.cursorStyle) ?? ""
         self.cursorStyle = CursorStyle.from(rawString: storedCursor) ?? Defaults.cursorStyle
+
+        self.hasTmuxStyleOverrides = Self.detectTmuxStyleOverrides()
+    }
+
+    /// Greps the user's tmux config files for any of the cell-painting style
+    /// options that would override TBD's color scheme. Best-effort: misses
+    /// configs loaded via `source-file` or `if-shell`, but catches the common
+    /// case of a directly-set `window-style` etc.
+    private static func detectTmuxStyleOverrides() -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidatePaths = ["\(home)/.tmux.conf", "\(home)/.config/tmux/tmux.conf"]
+        let pattern = #"^\s*(set|setw)\b(\s+-[a-zA-Z]+)*\s+(window-style|window-active-style|pane-style|default-style)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else {
+            return false
+        }
+        for path in candidatePaths {
+            guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+            let range = NSRange(contents.startIndex..., in: contents)
+            if regex.firstMatch(in: contents, options: [], range: range) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     /// Resolves `fontName` + `fontSize` to an `NSFont`. Falls back to system
