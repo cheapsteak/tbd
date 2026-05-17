@@ -19,15 +19,14 @@ class TBDTerminalView: TerminalView {
     var remoteURL: String?
     var onNotification: ((String, String) -> Void)?
 
-    /// Global appearance settings (font, color scheme, cursor style).
-    /// Stored now so Task 5 can subscribe to `objectWillChange` and reapply
-    /// font/colors/cursor when the user edits Settings → Terminal.
+    /// Global appearance settings (font, color scheme, cursor style). The Combine
+    /// subscription set up in `init` reapplies these whenever the user edits
+    /// Settings → Terminal.
     ///
     /// Named `appearanceSettings` (not `appearance`) to avoid collision with
     /// `NSView.appearance: NSAppearance?` inherited from AppKit.
     let appearanceSettings: AppearanceSettings
-    /// Holds the `objectWillChange` subscription set up in Task 5.
-    /// Declared here so the property exists before the consumer is wired in.
+    /// Holds the Combine subscription that reapplies appearance when settings change.
     private var appearanceCancellable: AnyCancellable?
 
     /// Called once when the view has been laid out with non-zero bounds.
