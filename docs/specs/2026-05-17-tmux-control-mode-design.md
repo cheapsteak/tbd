@@ -1,7 +1,7 @@
 # tmux control mode integration (v2 design)
 
 **Date:** 2026-05-17
-**Status:** Design complete for the architecturally load-bearing questions. Architecture (A-lite + FD vending), scrollback (α replay + server-side `history-limit`), pipe-deadlock ordering (vend-and-ack handshake), RPC↔pipe ordering (dissolved by 1-pane-per-window), flow control (Policy B: EAGAIN-driven pause + aggressive auto-pause for non-visible panes), and crash recovery (tmux for liveness, SQLite for metadata; mode-specific reconnect flows) are all resolved. Pane lifecycle FSM, input path, notification-signal reconciliation, and `%layout-change` policy are still open but deferrable — none of them invalidate A-lite.
+**Status:** Design complete. Architecture (A-lite + FD vending), scrollback (α replay + server-side `history-limit`), pipe-deadlock ordering (vend-and-ack handshake), RPC↔pipe ordering (dissolved by 1-pane-per-window), flow control (Policy B: EAGAIN-driven pause + aggressive auto-pause for non-visible panes), crash recovery (tmux for liveness, SQLite for metadata; mode-specific reconnect flows), input path (bytes-blob RPC, threshold paste, dedicated keystroke channel), notification signals (Stop hook stays primary; `%output` activity tracker as thin UI affordance; auto-suspend removed as a separate refactor), and `%layout-change` policy (extra tmux panes treated as second-class; original-pane death marks the window dead) are all resolved. Pane lifecycle FSM is the last item — captured below; mostly falls out of the other decisions.
 **Supersedes (in part):** [issue #1](https://github.com/cheapsteak/tbd/issues/1)
 **Reviewed by:** [companion review file](./2026-05-17-tmux-control-mode-design-review.md) (codex) + three in-session subagent reviews (iTerm2 verifier, terminal-ecosystem lens, SwiftTerm API surveyor). Findings folded back in. Replay-mechanism design verified by direct experiment against tmux 3.6a.
 
@@ -379,25 +379,165 @@ The visible↔non-visible transition drops cleanly out of the flow-control state
 - **App-restart while daemon mid-attach** (e.g. app dies during the 4-command capture sequence): daemon cancels the in-flight attach, tears down any partial pipe, waits for the next request. Never partially completes an attach.
 - **"Pane in SQLite but not in tmux"** is not an error — happens whenever a pane's process exited while daemon was down. Surface as `status='dead'` with an "exited" indicator in the UI.
 
-## Open questions (deferred to a follow-up round)
+## Input path
 
-These need design work before implementation but don't change A-lite's architecture:
+The control-mode boundary sits *downstream* of OS-level IME composition: pre-edit lives in the app process between the OS Input Source and SwiftTerm, never reaching the daemon. SwiftTerm emits bytes on commit; UTF-8 commit bytes flow byte-faithfully through `send-keys -H`. So IME, dead-keys, and special-key encoding (DECCKM/DECKPAM-aware arrow/function keys) all "just work" — SwiftTerm is already the terminal emulator that handles them.
 
-### §1 — Pane lifecycle state machine
+### Decisions
 
-`Requested → FDVended → ReaderReady → Streaming → Backpressured → Paused → Draining → Closed`. Define messages, legal transitions, error-path behavior. Will largely fall out of the flow-control state machine plus the attach handshake; this section will mostly be writing it down formally.
+1. **Bytes-blob keystroke RPC.** App sends `sendKeys(paneID, bytes)`; daemon issues `send-keys -H <hex>`. The daemon stays semantics-dumb; SwiftTerm (which already knows its mode state) is the source of truth for what bytes a keystroke should produce.
 
-### §2 — Input path edge cases
+2. **Threshold paste path.**
+   - **≤ 4 KB:** `send-keys -H <hex>`. Single RPC call; fits well under argv limits.
+   - **> 4 KB:** daemon writes content to a temp file, issues `load-buffer -b tbd-paste-<id> <file>`, then `paste-buffer -b tbd-paste-<id> -t %<paneID>`. Cleans up the buffer afterward.
+   - 4 KB threshold is a starting point; tune via telemetry.
 
-IME pre-edit composition, paste of multi-KB buffers, dead-keys, latency budget per keystroke. Today's native PTY handles these for free; `send-keys -H` is byte-correct but the rest is unspecified. Likely needs a "structured keystroke" RPC for IME states, plus a paste path that batches into a single `send-keys -H` to avoid argv blowup.
+3. **App owns bracketing; daemon never wraps.** If the pane process has DECARM 2004 enabled, SwiftTerm wraps pastes with `\e[200~ ... \e[201~` before they leave the app. Daemon's `paste-buffer` call must therefore omit `-p` (no auto-bracketing) — otherwise the pane sees double-wrapped sequences (which Claude Code in particular handles badly).
 
-### §3 — Notification signal reconciliation
+4. **Dedicated keystroke RPC channel.** Separate from `%output` notifications and from attach/lifecycle RPCs so a flood of `%output` events can't queue-block a keystroke. Cheap to design up front.
 
-Does `%output` for non-visible panes *replace* the existing Stop-hook pipeline, *supplement* it, or stay irrelevant? Stop-hook carries `last_assistant_message` and is a structured `response_complete` event; `%output` is raw bytes that need re-derivation via something like `ClaudeStateDetector`. The hook is strictly richer; `%output` is just earlier/more-frequent. Probably "supplement, not replace" — but the specific division of responsibilities is open.
+5. **p99 keystroke latency telemetry day one.** Log RPC-issue-to-tmux-write timestamps. Soft alert at 50 ms (humanly perceptible); hard concern at 200 ms (frustrating). Keystroke coalescing (batch keystrokes within ~5 ms into one `send-keys -H` call) is deferred — add only if telemetry shows real latency.
 
-### §4 — `%layout-change` policy for SwiftUI-split model
+6. **Special-key mode sync** (DECCKM, DECKPAM, mouse modes, DECARM) is handled by the existing `%output` → SwiftTerm path. SwiftTerm maintains its mode state from the byte stream the same way it would for any other terminal; pane-process mode changes propagate via `%output` exactly like everything else. The attach-time mode state is covered by the synthesized mode-set escapes in the α replay sequence. No extra work needed.
 
-TBD does splits in SwiftUI; tmux always sees one pane per window. So `%layout-change` from tmux *should* be rare. But if a user runs `tmux split-window` from inside an attached session (or some tooling does), what happens? Three options: (a) treat additional panes as second-class — show only the first, log a warning; (b) collapse SwiftUI to a single pane and respect tmux's layout; (c) refuse to attach if a tmux-side split exists. (a) is least surprising; (b) is most general; (c) is most defensive.
+### Why bytes-blob, not structured
+
+Re-implementing keystroke-to-bytes translation in the daemon would duplicate logic SwiftTerm already has, and the daemon would need to mirror SwiftTerm's mode state — which is the source of truth on the app side anyway. Bytes-blob keeps the daemon semantics-free for input; the one cost (daemon can't introspect keystrokes for telemetry like "log Ctrl-Cs per pane") is trivially addable later by sending an extra metadata field.
+
+## Notification signals
+
+Today TBD has two signal sources for "Claude finished a response":
+
+- **Stop hook** (primary): `tbd notify --type response_complete --message "$MSG"` invoked by a hook script the daemon installs when spawning Claude. Structured event types (`response_complete`, `task_complete`, `attention_needed`) and carries `last_assistant_message`.
+- **`ClaudeStateDetector` text-pattern fallback**: parses tmux status-bar text (`"esc to interrupt"`, etc.) — was used to confirm idle for auto-suspend.
+
+Auto-suspend itself is being removed as a separate refactor (the text-pattern fallback was its main consumer, and the feature wasn't paying for its product cost). After the refactor, the Stop hook is the sole "Claude state" signal source — fully independent of the `-CC` connection, which dissolves the belt-and-suspenders signal-independence concern raised in adversarial review.
+
+Under control mode, the daemon gains a *new* signal source: `%output` for all panes including non-visible ones. The question was: does this replace, supplement, or stay irrelevant to the Stop hook?
+
+### Decision: supplement, not replace
+
+- **Stop hook stays unchanged.** It's strictly richer than `%output` for Claude state — typed events, message text, hook reliability vs. byte-pattern heuristics. Re-deriving structured signal from unstructured bytes would be worse, not better.
+- **No new Claude-state derivation from `%output`.** Don't write a Claude-output parser; the hook is the right answer for that.
+- **Add a thin per-pane `ActivityTracker` in the daemon** that consumes `%output` byte counts:
+  - Tracks bytes-per-second over a sliding window (e.g. last 5 seconds).
+  - Tracks last-active timestamp.
+  - Emits a rate-limited (≤1 Hz per pane) RPC notification `paneActivity(paneID, bytesPerSecond, lastActiveAt)` to the app.
+- **App uses `paneActivity` for UI affordances only** — activity indicators, recently-active sort orders, tab-bar pulses. *Not* for product-load-bearing decisions.
+- **Generic (non-Claude) value**: `paneActivity` works for any process — `npm install` finishing, builds returning to a prompt — without needing process-specific hooks.
+
+### What stays open here for now
+
+Wiring `responseCompleted` (the hook handler that survives the auto-suspend refactor) into a user-visible notification surface is a separate UI design question, not part of this design.
+
+## `%layout-change` policy
+
+TBD's invariant: one tmux pane per tmux window, splits in SwiftUI. So `%layout-change` should be rare. But it *can* fire if the user runs `tmux split-window` from inside an attached pane, if a program scripts tmux, or if a separate `tmux attach` client manipulates the window from outside.
+
+### Decision: extra panes are second-class
+
+- **Daemon receives `%layout-change`, logs the extra pane IDs, otherwise ignores.**
+- **The "original" pane** (the one TBD created and tracks in `TerminalStore.tmuxPaneID`) remains the only one rendered in SwiftUI. Extra panes run invisibly.
+- **Daemon still decodes `%output` for extra panes** (it's getting them anyway via the shared `-CC` connection) and feeds them through `ActivityTracker` for accounting, but no FD is vended to the app for them.
+- **If the original pane dies (process exits, `kill-pane` from another client) but extras remain:** TBD marks the *window* dead. No promotion of an extra pane to "main." Keeps the 1-pane invariant intact from TBD's perspective; matches how a single-pane window's death is handled.
+
+### Why not the alternatives
+
+- **Collapse SwiftUI to multi-pane** would mean implementing tmux layout-string parsing, split rendering, focus management, mouse routing — ~440 LOC equivalent of iTerm2's `TmuxLayoutParser` plus all its UI. Scope creep into territory we're explicitly not addressing.
+- **Refuse-and-kill** is destructive and surprising — would actively annoy users running `tmux split-window` for legitimate reasons (debugger panes, watch windows).
+
+### Future affordance (post-MVP if it matters)
+
+A subtle UI indicator on the window — e.g. "↗ N extra tmux panes" badge with a tooltip explaining "use `tmux attach -L <server>` to access." Cheap to add if real users hit it.
+
+## Pane lifecycle state machine
+
+This falls out of flow control + crash recovery + the attach handshake. Capturing formally for reference.
+
+### States
+
+```
+   ┌─────────────┐
+   │  Requested  │  app sent attach RPC; daemon hasn't started capture yet
+   └──────┬──────┘
+          │ daemon begins 4-command capture
+          ▼
+   ┌─────────────┐
+   │  Capturing  │  4-command capture in flight; pipe not yet created
+   └──────┬──────┘
+          │ all 4 captures returned
+          ▼
+   ┌─────────────┐
+   │  FDVended   │  pipe created, read FD sent to app via SCM_RIGHTS
+   └──────┬──────┘
+          │ app's attach.ready{paneID} ack arrives
+          ▼
+   ┌─────────────┐
+   │  Replaying  │  daemon writing prelude + history + state + cursor into pipe
+   └──────┬──────┘
+          │ replay bytes finished writing
+          ▼
+   ┌─────────────┐
+   │  Streaming  │  steady state: live %output → pipe; nonblocking writes OK
+   └──┬───────────┘
+      │ write returned EAGAIN
+      ▼
+   ┌──────────────┐
+   │ Backpressured │  daemon queueing locally; retrying writes
+   └──┬────────────┘
+      │ local queue > 128 KB                       │ queue drained < 32 KB
+      ▼                                             ▲
+   ┌─────────┐                                       │
+   │ Paused  │ ─ refresh-client -A '%X:continue' ─► (drain via %extended-output)
+   └─────────┘                                       │
+                                                  ┌──┴──────────┐
+                                                  │  Draining   │
+                                                  └─────────────┘
+
+   ┌──────────┐
+   │  Closed  │  pane process exited (tmux %window-close), or app dropped
+   │          │  the FD without ack, or daemon shutdown, or visibility lost
+   └──────────┘
+```
+
+`Closed` is reachable from any other state.
+
+### Visibility transitions
+
+A pane's `visible` flag is orthogonal to the state machine — it's a property of the *attachment*, not the underlying pane. When `visible` goes false (tab switch, hide):
+
+- Pipe write end is closed by the daemon → app sees EOF on next read.
+- Per-pane `pause-after` is shortened to 250 ms server-side, so tmux auto-pauses the pane shortly after if output continues.
+- Daemon's `ActivityTracker` continues consuming `%output` for non-visible panes (it's getting them via the shared `-CC` connection regardless).
+
+When `visible` goes true again, the daemon runs the full attach sequence (Requested → Capturing → FDVended → Replaying → Streaming) for the new attachment. The previous attachment's pipe is gone; this is structurally a fresh attach from the state-machine perspective.
+
+### Error transitions (any state → Closed)
+
+| Trigger | Effect |
+|---|---|
+| `%window-close %X` from tmux | Pane process exited or window killed. Daemon marks `status='dead'` in SQLite, notifies app, tears down pipe. |
+| RPC disconnect (app died) | Daemon closes all pipe write ends for that app's attachments; transitions to per-pane "no viewer" (effectively non-visible). State preserved in daemon — re-attach on app reconnect is normal flow. |
+| `%exit` from tmux | tmux server died. Daemon marks every pane in the affected repo as dead, notifies app, tears down all pipes. |
+| Daemon shutdown | All pipes closed; on restart, daemon reconciles tmux vs SQLite and exposes liveness to the reconnecting app. |
+| App fails to send `attach.ready` ack within timeout (e.g. 5 s) | Daemon cancels attach: tears down pipe, returns to Requested or aborts. (Avoids leaks if app dies mid-attach.) |
+
+### Messages
+
+| Direction | Name | Payload | Notes |
+|---|---|---|---|
+| app → daemon | `attach.request` | `{paneID, windowID}` | initiate attach |
+| daemon → app | `attach.fd` | RPC frame + `SCM_RIGHTS` FD | vended pipe read end |
+| app → daemon | `attach.ready` | `{paneID}` | reader is running; daemon can write |
+| daemon → app | `pane.activity` | `{paneID, bps, lastActiveAt}` | rate-limited (≤1 Hz) |
+| daemon → app | `pane.died` | `{paneID, reason}` | pane terminated |
+| daemon → app | `pane.paused` / `pane.continued` | `{paneID}` | optional, for UI indicator |
+| app → daemon | `pane.detach` | `{paneID}` | app says "I'm not rendering this anymore" |
+| app → daemon | `keystroke` | `{paneID, bytes}` | dedicated channel |
+| app → daemon | `paste` | `{paneID, bytes}` or `{paneID, tempFilePath}` | depends on size |
+| app → daemon | `resize` | `{windowID, cols, rows}` | daemon arbitrates |
+
+This is a minimum viable RPC surface. Field-level details (encoding, error responses, RPC IDs) get nailed down at implementation time, not in this design.
 
 ## Replay verification (appendix)
 
