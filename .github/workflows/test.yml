@@ -59,6 +59,26 @@ jobs:
           restore-keys: |
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
 
+      # Workaround for swiftlang/swift-package-manager#7715: a cache-restored
+      # `.build/` can hold a stale `TBDShared` object archive next to a fresh
+      # `.swiftmodule`. Downstream files compile happily against the new module
+      # interface but the linker fails to resolve the new symbol, producing
+      # "Undefined symbols ... TBDShared.<NewType>" link-time flakes that
+      # disappear on retry. The bug fires specifically when a PR adds a new
+      # public symbol to TBDShared. Wiping just the TBDShared build artifacts
+      # forces SPM to re-emit them while keeping the rest of `.build/` warm.
+      # Costs ~1-2min per run (TBDShared rebuild + downstream cascade relink)
+      # in exchange for never seeing the link-time flake again.
+      - name: Force-rebuild TBDShared (workaround SPM #7715)
+        run: |
+          echo "=== TBDShared artifacts before wipe ==="
+          ls -la .build/*/debug/TBDShared.build 2>/dev/null || echo "(absent)"
+          ls -la .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || echo "(absent)"
+          rm -rf .build/*/debug/TBDShared.build .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || true
+          echo "=== TBDShared artifacts after wipe ==="
+          ls -la .build/*/debug/TBDShared.build 2>/dev/null || echo "(absent)"
+          ls -la .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || echo "(absent)"
+
       - name: SwiftLint (strict)
         run: swift package plugin --allow-writing-to-package-directory swiftlint --strict
 
