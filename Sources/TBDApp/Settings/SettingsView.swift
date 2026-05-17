@@ -16,6 +16,11 @@ struct SettingsView: View {
                     Label("Repositories", systemImage: "folder")
                 }
 
+            TerminalSettingsView()
+                .tabItem {
+                    Label("Terminal", systemImage: "terminal")
+                }
+
             ModelProfilesSettingsView()
                 .tabItem { Label("Model Profiles", systemImage: "key.fill") }
         }
@@ -32,7 +37,6 @@ struct GeneralSettingsTab: View {
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
-    @AppStorage(AppState.terminalAutoResizeKey) private var enableTerminalAutoResize: Bool = false
 
     private var systemSounds: [String] { NotificationSoundPlayer.systemSoundNames() }
     private let soundPlayer = NotificationSoundPlayer()
@@ -83,17 +87,6 @@ struct GeneralSettingsTab: View {
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
                 Toggle("Auto-suspend idle Claude when switching worktrees", isOn: $autoSuspend)
                     .help("Exit idle Claude instances when you switch away and resume them when you switch back, freeing memory")
-            }
-
-            Section {
-                Toggle("Auto-resize tmux windows to match the app pane (WIP)", isOn: $enableTerminalAutoResize)
-                    .help("When on, TBD broadcasts the live pane size to the daemon and resizes every tmux window on app resize. Currently unstable — can leave panes smaller than the visible area and clip the bottom rows.")
-            } header: {
-                Text("Experimental")
-            } footer: {
-                Text("Off by default — under active development. Known bugs around tmux \"window-size manual\" lock-in can clip the bottom rows of a pane. To bail out, turn it off and restart the app.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

@@ -1,0 +1,90 @@
+import AppKit
+import SwiftTerm
+import SwiftUI
+import TBDShared
+
+struct TerminalSettingsView: View {
+    @EnvironmentObject var appearance: AppearanceSettings
+    @AppStorage(AppState.terminalAutoResizeKey) private var enableTerminalAutoResize: Bool = false
+
+    var body: some View {
+        Form {
+            Section("Font") {
+                HStack {
+                    Text("\(displayFontName) \(Int(appearance.fontSize))")
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Button("Choose Font…") {
+                        FontPickerCoordinator.shared.show(current: appearance.font) { newFont in
+                            appearance.fontName = newFont.fontName
+                            appearance.fontSize = newFont.pointSize
+                        }
+                    }
+                }
+            }
+
+            Section("Color Scheme") {
+                Picker("Scheme", selection: $appearance.schemeID) {
+                    ForEach(ColorSchemes.bundled, id: \.id) { scheme in
+                        Text(scheme.displayName).tag(scheme.id)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+            Section("Cursor") {
+                Picker("Style", selection: $appearance.cursorStyle) {
+                    Text("Block").tag(CursorStyle.steadyBlock)
+                    Text("Block (blinking)").tag(CursorStyle.blinkBlock)
+                    Text("Underline").tag(CursorStyle.steadyUnderline)
+                    Text("Underline (blinking)").tag(CursorStyle.blinkUnderline)
+                    Text("Bar").tag(CursorStyle.steadyBar)
+                    Text("Bar (blinking)").tag(CursorStyle.blinkBar)
+                }
+                .pickerStyle(.menu)
+            }
+
+            Section {
+                Toggle("Auto-resize tmux windows to match the app pane (WIP)", isOn: $enableTerminalAutoResize)
+                    .help("When on, TBD broadcasts the live pane size to the daemon and resizes every tmux window on app resize. Currently unstable — can leave panes smaller than the visible area and clip the bottom rows.")
+            } header: {
+                Text("Experimental")
+            } footer: {
+                Text("Off by default — under active development. Known bugs around tmux \"window-size manual\" lock-in can clip the bottom rows of a pane. To bail out, turn it off and restart the app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+
+    private var displayFontName: String {
+        NSFont(name: appearance.fontName, size: appearance.fontSize)?.displayName
+            ?? appearance.fontName
+    }
+}
+
+/// Bridges NSFontPanel into AppKit. NSFontPanel is a singleton that delivers
+/// font choices via `changeFont(_:)` on the first responder; we route it
+/// through a coordinator so SwiftUI views can opt into the panel.
+@MainActor
+final class FontPickerCoordinator: NSObject {
+    static let shared = FontPickerCoordinator()
+    private var completion: ((NSFont) -> Void)?
+
+    func show(current: NSFont, completion: @escaping (NSFont) -> Void) {
+        self.completion = completion
+        NSFontManager.shared.setSelectedFont(current, isMultiple: false)
+        NSFontManager.shared.target = self
+        let panel = NSFontPanel.shared
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func changeFont(_ sender: NSFontManager?) {
+        guard let sender else { return }
+        let current = sender.selectedFont ?? NSFont.systemFont(ofSize: 12)
+        let newFont = sender.convert(current)
+        completion?(newFont)
+    }
+}
