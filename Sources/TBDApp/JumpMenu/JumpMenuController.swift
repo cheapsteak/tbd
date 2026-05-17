@@ -108,7 +108,7 @@ final class JumpMenuController {
         // Search field ~36pt + divider + list maxHeight 420pt + a little padding = ~480.
         // The panel is freshly created each open, so its frame is .zero here —
         // we drive sizing from this single constant.
-        let panelSize = CGSize(width: 440, height: 480)
+        let panelSize = CGSize(width: jumpMenuPanelWidth, height: 480)
 
         let anchorRect: NSRect = {
             if let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) {

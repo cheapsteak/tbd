@@ -1,5 +1,9 @@
 import SwiftUI
 
+/// Shared panel width. The controller sizes the NSPanel, the view sizes its
+/// root content — both must match.
+let jumpMenuPanelWidth: CGFloat = 440
+
 struct JumpMenuView: View {
     @ObservedObject var viewModel: JumpMenuViewModel
     let onSubmit: (JumpMenuRow) -> Void
@@ -15,7 +19,7 @@ struct JumpMenuView: View {
             Divider()
             list
         }
-        .frame(width: 440)
+        .frame(width: jumpMenuPanelWidth)
         .background(
             VisualEffectView(material: .menu, blendingMode: .behindWindow)
         )
