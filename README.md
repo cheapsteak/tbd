@@ -67,6 +67,15 @@ Idempotent — safe to re-run as you create new Conductor worktrees.
 
 Existing Claude session transcripts and `conductor.json` hooks are picked up automatically — nothing extra to migrate.
 
+## Migrating from Claude Code Desktop
+
+Adopt your existing Claude Code Desktop worktrees into TBD in place. Pass any path inside the repo (the main checkout or any worktree); the script resolves to the main repo root and adopts every worktree under `.claude/worktrees/`. Repos not yet in TBD are auto-registered. Directories named `agent-*` (scratch worktrees from one-shot agent runs) are skipped by default — pass `--include-agents` to adopt them too.
+
+```sh
+./scripts/import-claude-code-desktop.sh --repo ~/projects/acme-app --dry-run
+./scripts/import-claude-code-desktop.sh --repo ~/projects/acme-app
+```
+
 ## License
 
 Private / All rights reserved.
