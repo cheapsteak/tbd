@@ -270,7 +270,8 @@ for ((i=0; i<${#WS_NAMES[@]}; i++)); do
         fi
     done
     if [[ -n "$parent_idx" && "${COND_REPO_ACTIONS[$parent_idx]}" == skip:* ]]; then
-        echo "       skipping ${WS_NAMES[$i]} (parent repo unavailable)"
+        step=$((step+1))
+        echo "[$step/$total_steps] skipping ${WS_NAMES[$i]} (parent repo unavailable)"
         n_failed=$((n_failed+1))
         continue
     fi
