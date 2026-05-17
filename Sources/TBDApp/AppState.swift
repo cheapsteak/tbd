@@ -57,10 +57,11 @@ final class AppState: ObservableObject {
                 recordNavigation(.worktrees(selectionOrder))
                 // Feed the jump menu's Recent section. Insertion-order LRU,
                 // most-recent-first; capped at 32 to bound memory. Only the
-                // first selected ID is recorded — multi-select doesn't make
-                // sense for "the worktree I just looked at". Intentionally
-                // not gated on `isNavigating`: cmd+[ / cmd+] are real visits
-                // and should reorder the jump menu Recents (Slack-style).
+                // most-recently-added worktree ID is recorded per selection
+                // event — multi-select doesn't make sense for "the worktree
+                // I just looked at". Intentionally not gated on
+                // `isNavigating`: cmd+[ / cmd+] are real visits and should
+                // reorder the jump menu Recents (Slack-style).
                 if let id = selectionOrder.last {
                     recentWorktreeIDs.removeAll { $0 == id }
                     recentWorktreeIDs.insert(id, at: 0)
