@@ -210,7 +210,10 @@ Prefer the closure form `signposter.withIntervalSignpost("worktree.create") {
 ... }` (macOS 12+) over manual `beginInterval` / `endInterval` — it auto-
 balances on early return and throw, which manual pairs do not. Dangling
 intervals make Instruments choke. Put payload data on the begin call, not the
-end call.
+end call. `defer { signposter.endInterval(...) }` is an equivalent alternative
+when the call site is a non-throwing computed property (e.g. SwiftUI `body`),
+and is preferred when the closure form would force restructuring the view
+builder.
 
 ### Capturing a transcript-perf trace (issue #129)
 
