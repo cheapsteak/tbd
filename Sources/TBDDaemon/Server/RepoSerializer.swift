@@ -19,14 +19,27 @@ public actor RepoSerializer {
             await work()
         }
         lanes[repoID] = task
+        // Prune the lane once this task finishes — but only if no later submit
+        // has replaced it. Without this, `lanes` would accumulate one entry per
+        // unique repoID ever seen by the daemon.
+        Task { [weak self] in
+            await task.value
+            await self?.removeIfTail(repoID: repoID, task: task)
+        }
         return task
+    }
+
+    private func removeIfTail(repoID: UUID, task: Task<Void, Never>) {
+        if lanes[repoID] == task {
+            lanes[repoID] = nil
+        }
     }
 
     /// Test-only inspection: number of repos currently tracked.
     var trackedRepoCount: Int { lanes.count }
 
     /// Test-only: await completion of the current tail for a given repo.
-    public func waitForRepo(_ repoID: UUID) async {
+    func waitForRepo(_ repoID: UUID) async {
         await lanes[repoID]?.value
     }
 }

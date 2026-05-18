@@ -81,6 +81,28 @@ struct RepoSerializerTests {
         #expect(bSpan.start < aSpan.end)
     }
 
+    @Test("lane entries are pruned after work completes")
+    func lanesArePrunedAfterCompletion() async throws {
+        let serializer = RepoSerializer()
+        let repoA = UUID()
+        let repoB = UUID()
+
+        let t1 = await serializer.submit(repoID: repoA) { }
+        let t2 = await serializer.submit(repoID: repoB) { }
+        await t1.value
+        await t2.value
+
+        // Cleanup tasks chain off the work tasks; give the actor a couple of
+        // hops to drain them before asserting.
+        for _ in 0..<10 {
+            let count = await serializer.trackedRepoCount
+            if count == 0 { break }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let finalCount = await serializer.trackedRepoCount
+        #expect(finalCount == 0)
+    }
+
     @Test("submit returns immediately even if predecessor is long-running")
     func submitReturnsBeforeWorkFinishes() async throws {
         let serializer = RepoSerializer()
