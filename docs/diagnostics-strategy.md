@@ -212,6 +212,30 @@ balances on early return and throw, which manual pairs do not. Dangling
 intervals make Instruments choke. Put payload data on the begin call, not the
 end call.
 
+### Capturing a transcript-perf trace (issue #129)
+
+When the transcript pane hangs (or feels janky) and you want to know *which
+row* the main thread was measuring:
+
+1. Build + launch via `scripts/restart.sh` (signposts are always on — no flag).
+2. Open Instruments → **SwiftUI** template → attach to `TBDApp`.
+3. In the os_signpost lane, filter by subsystem `com.tbd.app` and category
+   `perf-transcript`. The intervals you'll see:
+   - `transcript.row.body` — one per `TranscriptRow.body` evaluation, tagged
+     with `id=`, `kind=` (e.g. `tool:Bash`, `assistantText`), and `len=`.
+   - `transcript.markdown.build` — chat-bubble Markdown view-tree assembly.
+   - `transcript.markdown.segment` — the prose/code split inside `bubbleBody`.
+   - `transcript.items.body`, `transcript.swap`, `transcript.scrollTo`
+     (existing wider-grain intervals).
+4. Reproduce the hang. Look for the `hang.detected` **event** marker on the
+   same lane and the *longest* `transcript.row.body` interval near it — its
+   metadata identifies the offending row's kind, id, and payload size.
+5. Cross-reference with `HangWatchdog`'s structured log:
+   `log show --last 5m --predicate 'subsystem == "com.tbd.app" AND category == "hang-watchdog"'`.
+
+Signposts are zero-cost when no tracer is attached, so this instrumentation
+ships in every build with no behavior or performance impact.
+
 ## Migration path
 
 This is intentionally a slow, no-big-bang migration. The proposal is the

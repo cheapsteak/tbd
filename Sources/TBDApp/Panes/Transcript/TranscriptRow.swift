@@ -11,6 +11,23 @@ struct TranscriptRow: View {
     let terminalID: UUID?
 
     var body: some View {
+        // Per-row signpost so a hang trace identifies which row was being
+        // evaluated when the main thread stalled. Metadata (kind, length, id)
+        // is passed on the begin call — see docs/diagnostics-strategy.md
+        // ("Capturing a transcript-perf trace") and issue #129.
+        let kind = TranscriptSignposts.kindLabel(for: node)
+        let len = TranscriptSignposts.contentLength(for: node)
+        let state = TranscriptSignposts.signposter.beginInterval(
+            "transcript.row.body",
+            id: TranscriptSignposts.signposter.makeSignpostID(),
+            "id=\(node.id, privacy: .public) kind=\(kind, privacy: .public) len=\(len, privacy: .public)"
+        )
+        defer { TranscriptSignposts.signposter.endInterval("transcript.row.body", state) }
+        return rowBody
+    }
+
+    @ViewBuilder
+    private var rowBody: some View {
         VStack(alignment: .leading, spacing: 2) {
             content
             if let usage = node.badgeUsage {
