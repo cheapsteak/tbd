@@ -139,7 +139,9 @@ struct WorktreeCreate: AsyncParsableCommand {
     }
 
     private func waitForActive(pending: Worktree, client: SocketClient) throws -> Worktree {
-        let deadline = Date().addingTimeInterval(60)
+        let start = Date()
+        let deadline = start.addingTimeInterval(180)
+        var nextHeartbeat: TimeInterval = 2
         while Date() < deadline {
             let worktrees: [Worktree] = try client.call(
                 method: RPCMethod.worktreeList,
@@ -152,6 +154,14 @@ struct WorktreeCreate: AsyncParsableCommand {
                 }
             } else {
                 throw CLIError.invalidArgument("Worktree creation failed (see daemon logs)")
+            }
+            let elapsed = Date().timeIntervalSince(start)
+            if elapsed >= nextHeartbeat {
+                let secs = Int(elapsed)
+                // Emit a fresh line each tick — Claude Code's Bash tool captures
+                // stderr line-by-line, so \r overwrites would be invisible to it.
+                FileHandle.standardError.write(Data("waiting for worktree to become active… \(secs)s\n".utf8))
+                nextHeartbeat += 2
             }
             Thread.sleep(forTimeInterval: 0.2)
         }

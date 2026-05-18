@@ -23,7 +23,8 @@ extension RPCRouter {
             suppressAutoParent: params.suppressAutoParent ?? false
         )
 
-        // Phase 2: Fire-and-forget — git operations + tmux setup in background
+        // Phase 2: Fire-and-forget — git operations + tmux setup in background.
+        // Serialize per-repo so concurrent creates don't contend on .git/index.lock.
         let lifecycle = self.lifecycle
         let subs = self.subscriptions
         let initialPrompt = params.prompt
@@ -31,10 +32,9 @@ extension RPCRouter {
         let userSpecifiedBranch = params.branch != nil
         let cols = params.cols
         let rows = params.rows
-        Task.detached {
+        await repoSerializer.submit(repoID: pending.repoID) {
             do {
                 try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows)
-                // Broadcast the completed worktree
                 subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
                     worktreeID: pending.id, repoID: pending.repoID,
                     name: pending.name, path: pending.path
