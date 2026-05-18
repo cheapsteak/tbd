@@ -56,10 +56,20 @@ struct ChatBubbleView: View {
         .padding(.horizontal, 4)
     }
 
-    @ViewBuilder
     private var bubbleBody: some View {
+        // Wrap the whole bubble-body construction (split + Markdown view tree
+        // assembly) so a transcript-perf trace can distinguish "row body slow
+        // because markdown" from "row body slow because outer layout". The
+        // narrower "transcript.markdown.segment" interval inside split() is
+        // still emitted — both will appear in the trace. See issue #129.
+        let state = TranscriptSignposts.signposter.beginInterval(
+            "transcript.markdown.build",
+            id: TranscriptSignposts.signposter.makeSignpostID(),
+            "len=\(text.count, privacy: .public) role=\(isUser ? "user" : "assistant", privacy: .public)"
+        )
+        defer { TranscriptSignposts.signposter.endInterval("transcript.markdown.build", state) }
         let segments = MarkdownSegments.split(text)
-        VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 6) {
             ForEach(segments) { seg in
                 switch seg {
                 case .prose(let p):

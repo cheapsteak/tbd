@@ -227,6 +227,17 @@ final class HangWatchdog: @unchecked Sendable {
             let stallMs = stallNs / 1_000_000
             let snap = snapshotLock.withLock { $0 }
 
+            // Drop a one-shot event signpost on the shared transcript-perf
+            // timeline so a captured Instruments trace shows the hang marker
+            // aligned with the surrounding `transcript.row.body` /
+            // `transcript.markdown.build` intervals. The structured log line
+            // below remains the primary diagnostic; this is purely a marker
+            // for visual correlation in the os_signpost lane.
+            TranscriptSignposts.signposter.emitEvent(
+                "hang.detected",
+                "stallMs=\(stallMs, privacy: .public) terminalID=\(snap.focusedTerminalIDShort ?? "-", privacy: .public) itemCount=\(snap.transcriptItemCount ?? -1, privacy: .public) pane=\(snap.paneLabel ?? "-", privacy: .public)"
+            )
+
             // Sample the main thread stack and write to disk.
             let frames = MainThreadSampler.sample()
             if let fileURL = HangStackWriter.shared.recordHangStart(stallMs: stallMs, snapshot: snap, frames: frames) {
