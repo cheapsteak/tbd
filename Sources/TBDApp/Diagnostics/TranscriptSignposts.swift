@@ -31,7 +31,10 @@ enum TranscriptSignposts {
             switch item {
             case .userPrompt: return "userPrompt"
             case .assistantText: return "assistantText"
-            default: return "chat"
+            case .thinking: return "thinking"
+            case .systemReminder: return "chatSystemReminder"
+            case .slashCommand: return "slashCommand"
+            case .toolCall(_, let name, _, _, _, _, _, _): return "chatTool:\(name)"
             }
         case .systemReminder: return "systemReminder"
         case .skillBody: return "skillBody"

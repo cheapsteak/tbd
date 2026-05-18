@@ -31,6 +31,31 @@ struct TranscriptSignpostsTests {
         #expect(TranscriptSignposts.kindLabel(for: n) == "systemReminder")
     }
 
+    @Test func kindLabel_chatBubble_thinking() {
+        let n = node(.chatBubble(.thinking(id: "th1", text: "musing", timestamp: nil)))
+        #expect(TranscriptSignposts.kindLabel(for: n) == "thinking")
+    }
+
+    @Test func kindLabel_chatBubble_systemReminder() {
+        // Distinct from the node-level `.systemReminder` arm above — this is a
+        // `TranscriptItem.systemReminder` wrapped in a chatBubble render node.
+        let n = node(.chatBubble(.systemReminder(id: "s2", kind: .skillBody, text: "x", timestamp: nil)))
+        #expect(TranscriptSignposts.kindLabel(for: n) == "chatSystemReminder")
+    }
+
+    @Test func kindLabel_chatBubble_slashCommand() {
+        let n = node(.chatBubble(.slashCommand(id: "sl1", name: "compact", args: nil, timestamp: nil)))
+        #expect(TranscriptSignposts.kindLabel(for: n) == "slashCommand")
+    }
+
+    @Test func kindLabel_chatBubble_toolCall_includesName() {
+        let n = node(.chatBubble(.toolCall(
+            id: "t1", name: "Bash", inputJSON: "{}", inputTruncatedTo: nil,
+            result: nil, subagent: nil, timestamp: nil, usage: nil
+        )))
+        #expect(TranscriptSignposts.kindLabel(for: n) == "chatTool:Bash")
+    }
+
     @Test func kindLabel_skillBody() {
         let n = node(.skillBody(id: "k1", text: "body", timestamp: nil))
         #expect(TranscriptSignposts.kindLabel(for: n) == "skillBody")
