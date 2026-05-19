@@ -58,8 +58,20 @@ extension RPCRouter {
             return try RPCResponse(result: ModelProfileAddResult(profile: row, warning: nil))
         }
 
-        // ─── Claude-direct / proxy branch ────────────────────────────────────
+        // ─── Claude-direct / proxy branch ─────────────────────────────────────
         let trimmed = (params.token ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // If no token is provided, treat as OAuth (no token required for OAuth).
+        if trimmed.isEmpty {
+            let profileRow = try await db.modelProfiles.create(
+                name: name,
+                kind: .oauth,
+                baseURL: params.baseURL,
+                model: params.model
+            )
+            subscriptions.broadcast(delta: .modelProfilesChanged)
+            return try RPCResponse(result: ModelProfileAddResult(profile: profileRow, warning: nil))
+        }
 
         // Secrets pass through tmux's `-e KEY=VALUE` argv (no shell), so most
         // printables are safe. Reject only chars that would break a single-line
@@ -68,56 +80,27 @@ extension RPCRouter {
             return RPCResponse(error: "Token contains invalid characters (newlines or NULL bytes are not allowed)")
         }
 
-        // OAuth/api-key tokens get caught by the prefix check below, but proxy
-        // profiles (baseURL set) accept any non-empty string and would happily
-        // store an empty token, then inject `ANTHROPIC_API_KEY=` at spawn.
-        guard !trimmed.isEmpty else {
-            return RPCResponse(error: "Token cannot be empty")
-        }
-
-        // Infer credential kind. Claude-direct profiles must look like a Claude
-        // OAuth token or API key; proxy profiles (baseURL set) accept any
-        // string (the proxy decides what's valid).
+        // Infer credential kind. Claude-direct profiles must look like an API key;
+        // proxy profiles (baseURL set) accept any non-empty string (the proxy decides
+        // what's valid).
         let kind: CredentialKind
         if let _ = params.baseURL {
             // Proxy profile — credential is whatever the proxy expects. Treat
             // the secret as an API-key-shaped credential so it gets injected
             // via ANTHROPIC_API_KEY.
             kind = .apiKey
-        } else if trimmed.hasPrefix("sk-ant-oat01-") {
-            kind = .oauth
         } else if trimmed.hasPrefix("sk-ant-api03-") {
             kind = .apiKey
         } else {
-            return RPCResponse(error: "Token must start with sk-ant-oat01- or sk-ant-api03-")
+            return RPCResponse(error: "Token must start with sk-ant-api03-")
         }
 
         var warning: String? = nil
         var freshUsage: ClaudeUsageResult? = nil
         var freshStatus: String? = nil
 
-        // Only verify Claude-direct OAuth tokens against the Anthropic usage
-        // endpoint. Proxy profiles route to a user-managed endpoint that may
-        // not implement that API.
-        if kind == .oauth && params.baseURL == nil {
-            let status = await usageFetcher.fetchUsage(token: trimmed)
-            switch status {
-            case .ok(let usage):
-                freshUsage = usage
-                freshStatus = "ok"
-            case .http401:
-                return RPCResponse(error: "Token invalid")
-            case .http429:
-                warning = "Could not verify token with Anthropic; saved anyway"
-                freshStatus = "http_429"
-            case .networkError:
-                warning = "Could not verify token with Anthropic; saved anyway"
-                freshStatus = "network_error"
-            case .decodeError:
-                warning = "Could not verify token with Anthropic; saved anyway"
-                freshStatus = "decode_error"
-            }
-        }
+        // API key profiles do not verify against the Anthropic usage endpoint.
+        // (Only OAuth tokens would have, but OAuth profiles no longer have tokens.)
 
         // Create DB row first so we have the canonical UUID; the keychain entry
         // is keyed by that UUID. If the keychain write fails we roll back the row.
