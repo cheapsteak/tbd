@@ -140,10 +140,12 @@ struct WorktreeRowView: View {
             }
             if let sectionRepoID, sectionRepoID != worktree.repoID,
                let homeRepo = appState.repoName(for: worktree.repoID) {
-                Text("(\(homeRepo))")
+                let short = homeRepo.count > 5 ? String(homeRepo.prefix(5)) + "…" : homeRepo
+                Text("(\(short))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .help(homeRepo)
             }
         }
         .padding(.leading, CGFloat(indentLevel) * 16)
