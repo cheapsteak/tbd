@@ -405,12 +405,9 @@ struct AddModelProfileSheet: View {
 
                 switch preset {
                 case .claudeDirect:
-                    LabeledField("Token") {
-                        SecureField("", text: $token).textFieldStyle(.roundedBorder).frame(maxWidth: .infinity)
-                    }
-                    (Text("Run ")
-                        + Text("claude setup-token").font(.system(.caption, design: .monospaced))
-                        + Text(" in a terminal and paste the resulting sk-ant-oat01-… token."))
+                    (Text("After creating this profile, open a session with it and run ")
+                        + Text("/login").font(.system(.caption, design: .monospaced))
+                        + Text(" once. TBD keeps each profile's login isolated in its own config directory."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -562,7 +559,7 @@ struct AddModelProfileSheet: View {
         if duplicate { return false }
         switch preset {
         case .claudeDirect:
-            return !token.isEmpty
+            return true
         case .proxy:
             return !token.isEmpty &&
                    !baseURL.trimmingCharacters(in: .whitespaces).isEmpty
@@ -626,7 +623,7 @@ struct AddModelProfileSheet: View {
             let priorAlert = await MainActor.run { appState.alertMessage }
             let warning = await appState.addModelProfile(
                 name: trimmedName,
-                token: tokenValue,
+                token: preset == .claudeDirect ? nil : tokenValue,
                 baseURL: preset == .proxy ? trimmedBase : nil,
                 model: preset == .proxy ? (trimmedModel.isEmpty ? nil : trimmedModel) : nil
             )
