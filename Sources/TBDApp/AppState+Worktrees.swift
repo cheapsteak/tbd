@@ -259,6 +259,11 @@ extension AppState {
             .filter { ($0.status == .active || $0.status == .creating) && $0.parentWorktreeID == nil }
             .sorted { $0.sortOrder < $1.sortOrder }
         logger.debug("reorderTopLevel BEFORE: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public)")
+        // guard: source/destination can outlive the snapshot they were captured against
+        if topLevel.isEmpty || source.contains(where: { $0 >= topLevel.count }) || destination > topLevel.count {
+            logger.warning("reorderTopLevel skipped: stale indices (topLevel.count=\(topLevel.count, privacy: .public) source=\(Array(source), privacy: .public) destination=\(destination, privacy: .public))")
+            return
+        }
         // Apply the swap to derive the new top-level order.
         topLevel.move(fromOffsets: source, toOffset: destination)
         logger.debug("reorderTopLevel AFTER: \(topLevel.map(\.displayName).joined(separator: " | "), privacy: .public)")
