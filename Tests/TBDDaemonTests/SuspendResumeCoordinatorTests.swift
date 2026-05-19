@@ -115,7 +115,8 @@ struct SuspendResumeCoordinatorTests {
             branch: "main", path: "/tmp/test-repo",
             tmuxServer: "tbd-test"
         )
-        let token = try await db.modelProfiles.create(name: "test-token", kind: .oauth)
+        // api-key profile — oauth profiles no longer inject a token.
+        let token = try await db.modelProfiles.create(name: "test-token", kind: .apiKey)
         let terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
             label: "claude-1", claudeSessionID: "session-abc",
@@ -126,7 +127,7 @@ struct SuspendResumeCoordinatorTests {
         )
 
         // Stub keychain closure returns a known secret only for this token.
-        let secret = "sk-ant-oat01-FAKETOKEN_value"
+        let secret = "sk-ant-api03-FAKETOKEN_value"
         let resolver = ModelProfileResolver(
             profiles: db.modelProfiles,
             repos: db.repos,
@@ -153,13 +154,13 @@ struct SuspendResumeCoordinatorTests {
         let resumeCall = snap.first { $0.joined(separator: " ").contains("claude --resume") }
         #expect(resumeCall != nil, "expected a createWindow call containing claude --resume")
         // Token must be passed via tmux -e flag, NOT inlined in the shell command argv.
-        #expect(resumeCall?.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)") == true,
+        #expect(resumeCall?.contains("ANTHROPIC_API_KEY=\(secret)") == true,
                 "expected token in tmux -e flag; got: \(resumeCall ?? [])")
         // The shell command body (last arg, after -ic) must NOT contain the secret.
         let shellBody = resumeCall?.last ?? ""
         #expect(!shellBody.contains(secret),
                 "secret leaked into shell command body: \(shellBody)")
-        #expect(!shellBody.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+        #expect(!shellBody.contains("ANTHROPIC_API_KEY"),
                 "env var name leaked into shell command body: \(shellBody)")
         #expect(shellBody.contains("claude --resume session-abc"))
     }

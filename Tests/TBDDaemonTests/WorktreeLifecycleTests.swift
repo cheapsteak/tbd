@@ -434,11 +434,12 @@ import Testing
 
     let db = try TBDDatabase(inMemory: true)
 
-    // Seed a token row and set it as the global default.
-    let token = try await db.modelProfiles.create(name: "Test", kind: .oauth)
+    // Seed an api-key profile row and set it as the global default.
+    // (oauth profiles no longer inject a token — they use CLAUDE_CONFIG_DIR.)
+    let token = try await db.modelProfiles.create(name: "Test", kind: .apiKey)
     try await db.config.setDefaultProfileID(token.id)
 
-    let secret = "sk-ant-oat01-FAKETOKEN_value"
+    let secret = "sk-ant-api03-FAKETOKEN_value"
     let resolver = ModelProfileResolver(
         profiles: db.modelProfiles,
         repos: db.repos,
@@ -472,12 +473,12 @@ import Testing
         return body.contains("claude --session-id")
     }
     #expect(claudeCall != nil, "expected a createWindow call spawning claude")
-    #expect(claudeCall?.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)") == true,
+    #expect(claudeCall?.contains("ANTHROPIC_API_KEY=\(secret)") == true,
             "expected token in tmux -e flag; got: \(claudeCall ?? [])")
     let shellBody = claudeCall?.last ?? ""
     #expect(!shellBody.contains(secret),
             "secret leaked into shell command body: \(shellBody)")
-    #expect(!shellBody.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+    #expect(!shellBody.contains("ANTHROPIC_API_KEY"),
             "env var name leaked into shell command body: \(shellBody)")
 
     // (b) Persisted terminal row has profileID set to the known token UUID.
