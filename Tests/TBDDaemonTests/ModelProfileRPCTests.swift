@@ -74,11 +74,30 @@ struct ModelProfileRPCTests {
 
     // MARK: - add
 
-    @Test("add: oauth + .ok stores row, keychain, usage")
-    func addOauthOk() async throws {
-        let stub = StubClaudeUsageFetcher(responses: [.ok(sampleUsage())])
+    @Test("add: oauth without token succeeds, no keychain")
+    func addOauthNoToken() async throws {
+        let (router, db, _) = makeRouter()
+
+        let req = try RPCRequest(method: RPCMethod.modelProfileAdd,
+                                 params: ModelProfileAddParams(name: "Work", token: nil))
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.warning == nil)
+        #expect(result.profile.kind == .oauth)
+        #expect(result.profile.name == "Work")
+
+        let listed = try await db.modelProfiles.list()
+        #expect(listed.count == 1)
+        // Verify no keychain entry was written
+        let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        #expect(kc == nil)
+    }
+
+    @Test("add: oauth with token (backwards compat) ignores token, no keychain")
+    func addOauthWithTokenIgnored() async throws {
+        let stub = StubClaudeUsageFetcher()
         let (router, db, _) = makeRouter(stub: stub)
-        defer { Task { await cleanupKeychain(db) } }
 
         let tokenBytes = freshToken()
         let req = try RPCRequest(method: RPCMethod.modelProfileAdd,
@@ -91,41 +110,14 @@ struct ModelProfileRPCTests {
 
         let listed = try await db.modelProfiles.list()
         #expect(listed.count == 1)
-        let kc = try ModelProfileKeychain.load(id: result.profile.id.uuidString)
-        #expect(kc == tokenBytes)
+        // OAuth token provided but not stored per Phase 3
+        let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        #expect(kc == nil)
+        // No usage fetch for OAuth profiles
         let usage = try await db.modelProfileUsage.get(profileID: result.profile.id)
-        #expect(usage != nil)
-        #expect(usage?.fiveHourPct == 0.42)
-        try? ModelProfileKeychain.delete(id: result.profile.id.uuidString)
-    }
-
-    @Test("add: oauth + .http401 rejects without persisting")
-    func addOauth401() async throws {
-        let stub = StubClaudeUsageFetcher(responses: [.http401])
-        let (router, db, _) = makeRouter(stub: stub)
-        let req = try RPCRequest(method: RPCMethod.modelProfileAdd,
-                                 params: ModelProfileAddParams(name: "Bad", token: freshToken()))
-        let resp = await router.handle(req)
-        #expect(!resp.success)
-        #expect(resp.error == "Token invalid")
-        #expect(try await db.modelProfiles.list().isEmpty)
-    }
-
-    @Test("add: oauth + .networkError saves with warning, no usage row")
-    func addOauthNetworkError() async throws {
-        let stub = StubClaudeUsageFetcher(responses: [.networkError("offline")])
-        let (router, db, _) = makeRouter(stub: stub)
-        defer { Task { await cleanupKeychain(db) } }
-
-        let req = try RPCRequest(method: RPCMethod.modelProfileAdd,
-                                 params: ModelProfileAddParams(name: "Maybe", token: freshToken()))
-        let resp = await router.handle(req)
-        #expect(resp.success)
-        let result = try resp.decodeResult(ModelProfileAddResult.self)
-        #expect(result.warning != nil)
-        #expect(try await db.modelProfiles.list().count == 1)
-        #expect(try await db.modelProfileUsage.get(profileID: result.profile.id) == nil)
-        try? ModelProfileKeychain.delete(id: result.profile.id.uuidString)
+        #expect(usage == nil)
+        // Fetcher should never be called for OAuth
+        #expect(stub.callCount == 0)
     }
 
     @Test("add: api_key prefix skips fetcher")
@@ -196,6 +188,43 @@ struct ModelProfileRPCTests {
             params: ModelProfileAddParams(
                 name: "WhitespaceProxy",
                 token: "   ",
+                baseURL: "http://127.0.0.1:3456",
+                model: nil
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error == "Token cannot be empty")
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("add: empty token with no baseURL treated as oauth (AC5.3 counterpart)")
+    func addEmptyTokenTreatedAsOAuth() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "ImplicitOAuth",
+                token: nil,
+                baseURL: nil,
+                model: nil
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.profile.kind == .oauth)
+        #expect(try await db.modelProfiles.list().count == 1)
+    }
+
+    @Test("add: empty token with baseURL rejected")
+    func addEmptyTokenWithBaseURLRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "ProxyNoToken",
+                token: nil,
                 baseURL: "http://127.0.0.1:3456",
                 model: nil
             )
