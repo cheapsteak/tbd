@@ -41,20 +41,20 @@ struct ModelProfileResolverTests {
 
     @Test func resolve_nilRepo_globalDefault_keychainPresent_returnsResolved() async throws {
         let (db, box, resolver) = try makeHarness()
-        let tok = try await db.modelProfiles.create(name: "Personal", kind: .oauth)
+        let tok = try await db.modelProfiles.create(name: "Personal", kind: .apiKey)
         try await db.config.setDefaultProfileID(tok.id)
         box.map[tok.id.uuidString] = "secret-A"
 
         let result = try await resolver.resolve(repoID: nil)
         #expect(result?.profileID == tok.id)
         #expect(result?.name == "Personal")
-        #expect(result?.kind == .oauth)
+        #expect(result?.kind == .apiKey)
         #expect(result?.secret == "secret-A")
     }
 
     @Test func resolve_nilRepo_globalDefault_keychainMissing_returnsNil() async throws {
         let (db, _, resolver) = try makeHarness()
-        let tok = try await db.modelProfiles.create(name: "Personal", kind: .oauth)
+        let tok = try await db.modelProfiles.create(name: "Personal", kind: .apiKey)
         try await db.config.setDefaultProfileID(tok.id)
 
         let result = try await resolver.resolve(repoID: nil)
@@ -63,7 +63,7 @@ struct ModelProfileResolverTests {
 
     @Test func resolve_repoOverride_keychainPresent_overrideWins() async throws {
         let (db, box, resolver) = try makeHarness()
-        let a = try await db.modelProfiles.create(name: "A", kind: .oauth)
+        let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
         let b = try await db.modelProfiles.create(name: "B", kind: .apiKey)
         try await db.config.setDefaultProfileID(b.id)
         let repo = try await makeRepo(db, override: a.id)
@@ -77,7 +77,7 @@ struct ModelProfileResolverTests {
 
     @Test func resolve_repoOverride_keychainMissing_fallsBackToGlobal() async throws {
         let (db, box, resolver) = try makeHarness()
-        let a = try await db.modelProfiles.create(name: "A", kind: .oauth)
+        let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
         let b = try await db.modelProfiles.create(name: "B", kind: .apiKey)
         try await db.config.setDefaultProfileID(b.id)
         let repo = try await makeRepo(db, override: a.id)
@@ -156,7 +156,7 @@ struct ModelProfileResolverTests {
 
     @Test func resolve_failure_doesNotBumpLastUsedAt() async throws {
         let (db, _, resolver) = try makeHarness()
-        let tok = try await db.modelProfiles.create(name: "T", kind: .oauth)
+        let tok = try await db.modelProfiles.create(name: "T", kind: .apiKey)
         try await db.config.setDefaultProfileID(tok.id)
         // no keychain entry
 
@@ -190,5 +190,42 @@ struct ModelProfileResolverTests {
         #expect(resolved?.awsRegion == "us-west-2")
         #expect(resolved?.awsProfile == "acme")
         #expect(resolved?.model == "anthropic.claude-sonnet-4-5")
+    }
+
+    @Test("AC4.1: oauth profile with missing keychain returns resolved with secret==nil via resolve")
+    func oauthProfile_keychainMissing_returnsResolvedViaResolve() async throws {
+        let (db, _, resolver) = try makeHarness()
+        let oauth = try await db.modelProfiles.create(name: "OAuth", kind: .oauth)
+        try await db.config.setDefaultProfileID(oauth.id)
+        // No keychain entry
+
+        let result = try await resolver.resolve(repoID: nil)
+        #expect(result != nil)
+        #expect(result?.profileID == oauth.id)
+        #expect(result?.kind == .oauth)
+        #expect(result?.secret == nil)
+    }
+
+    @Test("AC4.1: oauth profile with missing keychain returns resolved with secret==nil via loadByID")
+    func oauthProfile_keychainMissing_returnsResolvedViaLoadByID() async throws {
+        let (db, _, resolver) = try makeHarness()
+        let oauth = try await db.modelProfiles.create(name: "OAuth", kind: .oauth)
+        // No keychain entry
+
+        let result = try await resolver.loadByID(oauth.id)
+        #expect(result != nil)
+        #expect(result?.profileID == oauth.id)
+        #expect(result?.kind == .oauth)
+        #expect(result?.secret == nil)
+    }
+
+    @Test("AC4.2: apiKey profile with missing keychain returns nil")
+    func apiKeyProfile_keychainMissing_returnsNil() async throws {
+        let (db, _, resolver) = try makeHarness()
+        let apiKey = try await db.modelProfiles.create(name: "APIKey", kind: .apiKey)
+        // No keychain entry
+
+        let result = try await resolver.loadByID(apiKey.id)
+        #expect(result == nil)
     }
 }
