@@ -89,7 +89,7 @@ extension RPCRouter {
         // non-empty string (the proxy decides what's valid).
         let kind: CredentialKind
         let isOAuth: Bool
-        if let _ = params.baseURL {
+        if params.baseURL != nil {
             // Proxy profile — credential is whatever the proxy expects. Treat
             // the secret as an API-key-shaped credential so it gets injected
             // via ANTHROPIC_API_KEY.
@@ -116,6 +116,7 @@ extension RPCRouter {
         )
 
         // Only store keychain for API key profiles; OAuth profiles don't store secrets.
+        var warning: String? = nil
         if !isOAuth {
             do {
                 try ModelProfileKeychain.store(id: profileRow.id.uuidString, token: trimmed)
@@ -123,10 +124,14 @@ extension RPCRouter {
                 try? await db.modelProfiles.delete(id: profileRow.id)
                 return RPCResponse(error: "Failed to store secret in keychain")
             }
+        } else if !trimmed.isEmpty {
+            // OAuth profile was created with a token supplied, but OAuth profiles
+            // don't store secrets. Warn the user that the token was discarded.
+            warning = "OAuth profiles authenticate per-session via /login. The supplied token was not stored."
         }
 
         subscriptions.broadcast(delta: .modelProfilesChanged)
-        return try RPCResponse(result: ModelProfileAddResult(profile: profileRow, warning: nil))
+        return try RPCResponse(result: ModelProfileAddResult(profile: profileRow, warning: warning))
     }
 
     // MARK: - Delete

@@ -124,8 +124,9 @@ struct ClaudeProfileConfigDirManager: Sendable {
 
 extension ClaudeProfileConfigDirManager {
     /// Ensure the per-profile claude config dir for a resolved profile and
-    /// return its path. Returns nil only for bedrock profiles (which do not
-    /// need config-dir isolation) and nil profile.
+    /// return its path. Returns nil for bedrock profiles (which do not
+    /// need config-dir isolation), nil profile, and apiKey profiles with
+    /// a missing secret.
     ///
     /// For `.oauth` profiles, calls `ensureOAuthDir`.
     /// For `.apiKey` profiles, calls `ensureAPIKeyDir` (needs `profile.secret`;

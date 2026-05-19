@@ -609,7 +609,12 @@ extension ModelProfile {
     /// beyond the kind badge (plain claude-direct OAuth / api-key).
     public var detailCaption: String? {
         switch kind {
-        case .oauth, .apiKey:
+        case .oauth:
+            // OAuth profiles need a one-time /login to establish credentials
+            // in the isolated config dir. Show this hint even for simple OAuth.
+            if let baseURL { return "Run /login once · via \(baseURL)" }
+            return "Run /login once"
+        case .apiKey:
             guard let baseURL else { return nil }
             if let model, !model.isEmpty { return "via \(baseURL) · \(model)" }
             return "via \(baseURL)"

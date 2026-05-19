@@ -94,8 +94,30 @@ struct ModelProfileRPCTests {
         #expect(kc == nil)
     }
 
-    @Test("add: oauth with token (backwards compat) ignores token, no keychain")
-    func addOauthWithTokenIgnored() async throws {
+    @Test("add: oauth without token succeeds, warning nil")
+    func addOauthWithoutTokenNoWarning() async throws {
+        let stub = StubClaudeUsageFetcher()
+        let (router, db, _) = makeRouter(stub: stub)
+
+        let req = try RPCRequest(method: RPCMethod.modelProfileAdd,
+                                 params: ModelProfileAddParams(name: "Personal", token: nil))
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.warning == nil)
+        #expect(result.profile.kind == .oauth)
+
+        let listed = try await db.modelProfiles.list()
+        #expect(listed.count == 1)
+        // No keychain entry
+        let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        #expect(kc == nil)
+        // Fetcher should never be called for OAuth
+        #expect(stub.callCount == 0)
+    }
+
+    @Test("add: oauth with token returns warning, ignores token, no keychain")
+    func addOauthWithTokenReturnsWarning() async throws {
         let stub = StubClaudeUsageFetcher()
         let (router, db, _) = makeRouter(stub: stub)
 
@@ -105,7 +127,9 @@ struct ModelProfileRPCTests {
         let resp = await router.handle(req)
         #expect(resp.success)
         let result = try resp.decodeResult(ModelProfileAddResult.self)
-        #expect(result.warning == nil)
+        #expect(result.warning != nil)
+        #expect(result.warning?.contains("OAuth") == true)
+        #expect(result.warning?.contains("not stored") == true)
         #expect(result.profile.kind == .oauth)
 
         let listed = try await db.modelProfiles.list()
@@ -113,9 +137,6 @@ struct ModelProfileRPCTests {
         // OAuth token provided but not stored per Phase 3
         let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
         #expect(kc == nil)
-        // No usage fetch for OAuth profiles
-        let usage = try await db.modelProfileUsage.get(profileID: result.profile.id)
-        #expect(usage == nil)
         // Fetcher should never be called for OAuth
         #expect(stub.callCount == 0)
     }
