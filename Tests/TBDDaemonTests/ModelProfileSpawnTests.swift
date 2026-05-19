@@ -86,12 +86,13 @@ struct ModelProfileSpawnTests {
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == nil)
         #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(!recorder.joinedAll.contains("CLAUDE_CONFIG_DIR"))
     }
 
     // MARK: - Spawn: global default
 
-    @Test("spawn: global default → env prefix + profileID")
-    func spawnWithGlobalDefault() async throws {
+    @Test("spawn: global default oauth → CLAUDE_CONFIG_DIR + profileID, no token")
+    func spawnWithGlobalDefaultOAuth() async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
@@ -107,10 +108,13 @@ struct ModelProfileSpawnTests {
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == tok.id)
-        // Token must be passed via tmux -e flag, never inlined in shell body.
-        #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secret)"))
-        #expect(!recorder.shellBodies.contains(secret),
-                "secret leaked into shell body")
+        // OAuth profiles inject CLAUDE_CONFIG_DIR, not a token.
+        // Secret is never leaked into the spawn call.
+        #expect(!recorder.joinedAll.contains(secret),
+                "secret leaked into tmux call")
+        #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        // The config dir is a path derived from the profile UUID, injected via tmux -e.
+        #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
         #expect(!recorder.shellBodies.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
@@ -136,10 +140,13 @@ struct ModelProfileSpawnTests {
         #expect(resp.success)
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == b.id)
-        #expect(recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secretB)"))
+        // OAuth profiles inject CLAUDE_CONFIG_DIR, not a token.
         #expect(!recorder.joinedAll.contains(secretA))
+        #expect(!recorder.joinedAll.contains(secretB),
+                "secret leaked into tmux call")
         #expect(!recorder.shellBodies.contains(secretB),
                 "secret leaked into shell body")
+        #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
     }
 
     // MARK: - Spawn: non-claude type ignores token
@@ -212,14 +219,16 @@ struct ModelProfileSpawnTests {
         let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
         #expect(!joined.contains("C-c"))
         #expect(!joined.contains("send-keys"))
-        // The new tab was spawned with B's secret via tmux -e (NOT inlined),
+        // The new tab was spawned with B's CLAUDE_CONFIG_DIR via tmux -e (NOT inlined),
         // and the shell body contains --session-id <newSessionID> (fresh path),
         // never --resume.
-        #expect(joined.contains("CLAUDE_CODE_OAUTH_TOKEN=\(secretB)"))
+        #expect(joined.contains("CLAUDE_CONFIG_DIR="))
+        #expect(!joined.contains(secretB),
+                "secret leaked into tmux call")
         #expect(joined.contains("claude --session-id \(newTerm.claudeSessionID!)"))
         #expect(!joined.contains("claude --resume"))
         #expect(joined.contains("--dangerously-skip-permissions"))
-        // Negative: secret must NOT appear in any shell body of post-swap calls.
+        // Negative: secret must NOT appear in any shell body or tmux call.
         let postBodies = postSwap.compactMap { $0.last }.joined(separator: "\n")
         #expect(!postBodies.contains(secretB),
                 "secret leaked into shell body: \(postBodies)")
@@ -264,6 +273,7 @@ struct ModelProfileSpawnTests {
         #expect(joined.contains("claude --session-id"))
         #expect(!joined.contains("claude --resume"))
         #expect(!joined.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        #expect(!joined.contains("CLAUDE_CONFIG_DIR"))
         #expect(!joined.contains("C-c"))
     }
 
