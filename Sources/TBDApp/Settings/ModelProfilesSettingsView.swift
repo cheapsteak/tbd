@@ -388,7 +388,7 @@ struct AddModelProfileSheet: View {
                 ForEach(AddPreset.allCases) { p in
                     Text(p.rawValue).tag(p).help({
                         switch p {
-                        case .claudeDirect: return "Claude (direct) — sk-ant-oat01- or sk-ant-api03- token"
+                        case .claudeDirect: return "Claude (direct) — authenticate once with /login"
                         case .proxy:        return "Anthropic-compatible proxy — local LLM router with its own token"
                         case .bedrock:      return "AWS Bedrock — uses the AWS SDK credential chain"
                         }

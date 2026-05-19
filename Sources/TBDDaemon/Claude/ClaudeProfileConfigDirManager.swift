@@ -30,9 +30,13 @@ struct ClaudeProfileConfigDirManager: Sendable {
             ?? TBDConstants.configDir.appendingPathComponent("profiles", isDirectory: true)
     }
 
-    func configDirectory(forProfileID profileID: UUID) -> URL {
+    func profileDirectory(forProfileID profileID: UUID) -> URL {
         baseDirectory
             .appendingPathComponent(profileID.uuidString.lowercased(), isDirectory: true)
+    }
+
+    func configDirectory(forProfileID profileID: UUID) -> URL {
+        profileDirectory(forProfileID: profileID)
             .appendingPathComponent("claude", isDirectory: true)
     }
 

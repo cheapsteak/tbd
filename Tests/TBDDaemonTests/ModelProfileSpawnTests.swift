@@ -58,9 +58,8 @@ struct ModelProfileSpawnTests {
         return (repo, wt)
     }
 
-    private func seedToken(_ db: TBDDatabase, name: String, secret: String) async throws -> ModelProfile {
+    private func seedOAuthProfile(_ db: TBDDatabase, name: String) async throws -> ModelProfile {
         let row = try await db.modelProfiles.create(name: name, kind: .oauth)
-        try ModelProfileKeychain.store(id: row.id.uuidString, token: secret)
         return row
     }
 
@@ -96,8 +95,7 @@ struct ModelProfileSpawnTests {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
-        let secret = "sk-ant-oat01-fakeAAAA"
-        let tok = try await seedToken(db, name: "Default", secret: secret)
+        let tok = try await seedOAuthProfile(db, name: "Default")
         try await db.config.setDefaultProfileID(tok.id)
 
         let req = try RPCRequest(
@@ -109,9 +107,6 @@ struct ModelProfileSpawnTests {
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == tok.id)
         // OAuth profiles inject CLAUDE_CONFIG_DIR, not a token.
-        // Secret is never leaked into the spawn call.
-        #expect(!recorder.joinedAll.contains(secret),
-                "secret leaked into tmux call")
         #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
         // The config dir is a path derived from the profile UUID, injected via tmux -e.
         #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
@@ -125,10 +120,8 @@ struct ModelProfileSpawnTests {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (repo, wt) = try await seedRepoAndWorktree(db)
-        let secretA = "sk-ant-oat01-AAAA"
-        let secretB = "sk-ant-oat01-BBBB"
-        let a = try await seedToken(db, name: "A", secret: secretA)
-        let b = try await seedToken(db, name: "B", secret: secretB)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
         try await db.config.setDefaultProfileID(a.id)
         try await db.repos.setProfileOverride(id: repo.id, profileID: b.id)
 
@@ -141,11 +134,7 @@ struct ModelProfileSpawnTests {
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.profileID == b.id)
         // OAuth profiles inject CLAUDE_CONFIG_DIR, not a token.
-        #expect(!recorder.joinedAll.contains(secretA))
-        #expect(!recorder.joinedAll.contains(secretB),
-                "secret leaked into tmux call")
-        #expect(!recorder.shellBodies.contains(secretB),
-                "secret leaked into shell body")
+        #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
         #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
     }
 
@@ -156,8 +145,7 @@ struct ModelProfileSpawnTests {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
-        let secret = "sk-ant-oat01-AAAA"
-        let tok = try await seedToken(db, name: "A", secret: secret)
+        let tok = try await seedOAuthProfile(db, name: "A")
         try await db.config.setDefaultProfileID(tok.id)
 
         let req = try RPCRequest(
@@ -178,10 +166,8 @@ struct ModelProfileSpawnTests {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
-        let secretA = "sk-ant-oat01-AAAA"
-        let secretB = "sk-ant-oat01-BBBB"
-        let a = try await seedToken(db, name: "A", secret: secretA)
-        let b = try await seedToken(db, name: "B", secret: secretB)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
         try await db.config.setDefaultProfileID(a.id)
 
         // Spawn original claude terminal with token A. The session is "blank" —
@@ -223,15 +209,11 @@ struct ModelProfileSpawnTests {
         // and the shell body contains --session-id <newSessionID> (fresh path),
         // never --resume.
         #expect(joined.contains("CLAUDE_CONFIG_DIR="))
-        #expect(!joined.contains(secretB),
-                "secret leaked into tmux call")
         #expect(joined.contains("claude --session-id \(newTerm.claudeSessionID!)"))
         #expect(!joined.contains("claude --resume"))
         #expect(joined.contains("--dangerously-skip-permissions"))
-        // Negative: secret must NOT appear in any shell body or tmux call.
+        // Negative: secrets and tokens must NOT appear in any shell body or tmux call.
         let postBodies = postSwap.compactMap { $0.last }.joined(separator: "\n")
-        #expect(!postBodies.contains(secretB),
-                "secret leaked into shell body: \(postBodies)")
         #expect(!postBodies.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
@@ -242,8 +224,7 @@ struct ModelProfileSpawnTests {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
-        let secretA = "sk-ant-oat01-AAAA"
-        let a = try await seedToken(db, name: "A", secret: secretA)
+        let a = try await seedOAuthProfile(db, name: "A")
         try await db.config.setDefaultProfileID(a.id)
 
         let createResp = await router.handle(try RPCRequest(

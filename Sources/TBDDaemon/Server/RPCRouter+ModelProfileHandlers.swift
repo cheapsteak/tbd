@@ -166,6 +166,16 @@ extension RPCRouter {
             } catch {
                 logger.warning("Failed to delete secret file for \(params.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
+
+            // Remove the per-profile config directory. Non-bedrock profiles have an
+            // isolated config dir at ~/tbd/profiles/<uuid>/; bedrock profiles do not.
+            do {
+                let manager = ClaudeProfileConfigDirManager()
+                let profileDir = manager.profileDirectory(forProfileID: params.id)
+                try FileManager.default.removeItem(at: profileDir)
+            } catch {
+                logger.warning("Failed to delete config directory for \(params.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
         }
 
         subscriptions.broadcast(delta: .modelProfilesChanged)
@@ -264,12 +274,11 @@ extension RPCRouter {
             return RPCResponse(error: "Profile not found")
         }
 
-        // Proxy and bedrock profiles can't be polled against the Claude API usage endpoint.
-        // NOTE: oauth profiles no longer hold a TBD-side token, so usage polling for
-        // them now fails with "Secret missing from keychain" — tracked as a follow-up;
-        // the redesign here is credentials-only and does not touch usage tracking.
-        if profile.baseURL != nil || profile.kind == .bedrock {
-            return RPCResponse(error: "Usage tracking is only available for Claude-direct profiles")
+        // Proxy, bedrock, and oauth profiles can't be polled against the Claude API usage endpoint.
+        // OAuth profiles authenticate per-session and don't store a TBD-side secret.
+        // Proxy and bedrock profiles are not supported by the Claude API usage endpoint.
+        if profile.baseURL != nil || profile.kind == .bedrock || profile.kind == .oauth {
+            return RPCResponse(error: "Usage tracking is not available for \(profile.kind == .oauth ? "OAuth" : profile.baseURL != nil ? "proxy" : "bedrock") profiles")
         }
 
         if let cached = try await db.modelProfileUsage.get(profileID: params.id),
