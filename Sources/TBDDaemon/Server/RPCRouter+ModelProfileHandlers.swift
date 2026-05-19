@@ -260,6 +260,9 @@ extension RPCRouter {
         }
 
         // Proxy and bedrock profiles can't be polled against the Claude API usage endpoint.
+        // NOTE: oauth profiles no longer hold a TBD-side token, so usage polling for
+        // them now fails with "Secret missing from keychain" — tracked as a follow-up;
+        // the redesign here is credentials-only and does not touch usage tracking.
         if profile.baseURL != nil || profile.kind == .bedrock {
             return RPCResponse(error: "Usage tracking is only available for Claude-direct profiles")
         }

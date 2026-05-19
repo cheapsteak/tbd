@@ -589,7 +589,7 @@ struct ClaudeSpawnCommandBuilderTests {
     }
 
     @Test("oauth: ignores bedrock params and doesn't inject token without configDir")
-    func oauthIgnoresBedrocParams() {
+    func oauthIgnoresBedrockParams() {
         let r = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: "sid",

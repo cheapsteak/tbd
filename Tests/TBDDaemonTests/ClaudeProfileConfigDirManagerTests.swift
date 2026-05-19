@@ -154,30 +154,20 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(dir.path.contains(profileID.uuidString.lowercased()))
     }
 
-    @Test("resolveConfigDir returns a path for direct .apiKey profile (baseURL == nil)")
-    func resolveDirectAPIKeyReturnsPath() throws {
+    @Test("ensureAPIKeyDir produces a per-profile path")
+    func ensureAPIKeyDirReturnsPath() throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
-
-        let profile = ResolvedModelProfile(
-            profileID: UUID(),
-            name: "Direct API Key",
-            kind: .apiKey,
-            baseURL: nil,
-            model: nil,
-            secret: "sk-ant-api03-test-key-XXXXX",
-            awsRegion: nil,
-            awsProfile: nil
-        )
-
-        // Verify that a direct call to ensureAPIKeyDir works for direct profiles.
+        // resolveConfigDir is static and uses the default ~/tbd base, so the
+        // api-key branch is exercised here via ensureAPIKeyDir against a temp base.
+        let profileID = UUID()
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
-        let dir = try manager.ensureAPIKeyDir(forProfileID: profile.profileID, apiKey: profile.secret!)
-        #expect(dir.path.contains(profile.profileID.uuidString.lowercased()))
+        let dir = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: "sk-ant-api03-test-key-XXXXX")
+        #expect(dir.path.contains(profileID.uuidString.lowercased()))
     }
 
     @Test("resolveConfigDir returns nil for .bedrock profile")
-    func resolveBedrockeReturnsNil() {
+    func resolveBedrockReturnsNil() {
         let profile = ResolvedModelProfile(
             profileID: UUID(),
             name: "Bedrock",
