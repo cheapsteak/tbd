@@ -606,7 +606,7 @@ extension ModelProfile {
     }
 
     /// Secondary detail line. `nil` when there's nothing useful to show
-    /// beyond the kind badge (plain claude-direct OAuth / api-key).
+    /// beyond the kind badge (a plain direct api-key profile).
     public var detailCaption: String? {
         switch kind {
         case .oauth:
