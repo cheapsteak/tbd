@@ -142,30 +142,16 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: nil) == nil)
     }
 
-    @Test("resolveConfigDir returns a path for .oauth profile")
+    @Test("ensureOAuthDir produces a per-profile path")
     func resolveOAuthProfileReturnsPath() throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
-        // Override the manager's default baseDir so the test doesn't touch ~/tbd
-        ClaudeProfileConfigDirManager(baseDirectory: base)
-
-        let profile = ResolvedModelProfile(
-            profileID: UUID(),
-            name: "OAuth",
-            kind: .oauth,
-            baseURL: nil,
-            model: nil,
-            secret: nil,  // OAuth profiles have no secret in the resolved form
-            awsRegion: nil,
-            awsProfile: nil
-        )
-
-        // For this test, we need to use the temp base via direct instantiation
-        // since resolveConfigDir is static and always uses the default.
-        // Instead, verify that a direct call to ensureOAuthDir works.
+        // resolveConfigDir is static and uses the default ~/tbd base, so the
+        // oauth branch is exercised here via ensureOAuthDir against a temp base.
+        let profileID = UUID()
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
-        let dir = try manager.ensureOAuthDir(forProfileID: profile.profileID)
-        #expect(dir.path.contains(profile.profileID.uuidString.lowercased()))
+        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+        #expect(dir.path.contains(profileID.uuidString.lowercased()))
     }
 
     @Test("resolveConfigDir returns a path for direct .apiKey profile (baseURL == nil)")
