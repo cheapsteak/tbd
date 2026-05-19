@@ -62,11 +62,15 @@ extension RPCRouter {
         let trimmed = (params.token ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
         // If no token is provided, treat as OAuth (no token required for OAuth).
+        // OAuth profiles do not use baseURL (they are Claude-direct).
         if trimmed.isEmpty {
+            guard params.baseURL == nil else {
+                return RPCResponse(error: "Token cannot be empty")
+            }
             let profileRow = try await db.modelProfiles.create(
                 name: name,
                 kind: .oauth,
-                baseURL: params.baseURL,
+                baseURL: nil,
                 model: params.model
             )
             subscriptions.broadcast(delta: .modelProfilesChanged)
@@ -80,27 +84,27 @@ extension RPCRouter {
             return RPCResponse(error: "Token contains invalid characters (newlines or NULL bytes are not allowed)")
         }
 
-        // Infer credential kind. Claude-direct profiles must look like an API key;
-        // proxy profiles (baseURL set) accept any non-empty string (the proxy decides
-        // what's valid).
+        // Infer credential kind. Claude-direct profiles can be OAuth (sk-ant-oat01-)
+        // or API key (sk-ant-api03-); proxy profiles (baseURL set) accept any
+        // non-empty string (the proxy decides what's valid).
         let kind: CredentialKind
+        let isOAuth: Bool
         if let _ = params.baseURL {
             // Proxy profile — credential is whatever the proxy expects. Treat
             // the secret as an API-key-shaped credential so it gets injected
             // via ANTHROPIC_API_KEY.
             kind = .apiKey
+            isOAuth = false
+        } else if trimmed.hasPrefix("sk-ant-oat01-") {
+            // OAuth token (no longer stored in keychain per Phase 3)
+            kind = .oauth
+            isOAuth = true
         } else if trimmed.hasPrefix("sk-ant-api03-") {
             kind = .apiKey
+            isOAuth = false
         } else {
-            return RPCResponse(error: "Token must start with sk-ant-api03-")
+            return RPCResponse(error: "Token must start with sk-ant-oat01- or sk-ant-api03-")
         }
-
-        var warning: String? = nil
-        var freshUsage: ClaudeUsageResult? = nil
-        var freshStatus: String? = nil
-
-        // API key profiles do not verify against the Anthropic usage endpoint.
-        // (Only OAuth tokens would have, but OAuth profiles no longer have tokens.)
 
         // Create DB row first so we have the canonical UUID; the keychain entry
         // is keyed by that UUID. If the keychain write fails we roll back the row.
@@ -110,28 +114,19 @@ extension RPCRouter {
             baseURL: params.baseURL,
             model: params.model
         )
-        do {
-            try ModelProfileKeychain.store(id: profileRow.id.uuidString, token: trimmed)
-        } catch {
-            try? await db.modelProfiles.delete(id: profileRow.id)
-            return RPCResponse(error: "Failed to store secret in keychain")
-        }
 
-        if let usage = freshUsage {
-            let usageRow = ModelProfileUsage(
-                profileID: profileRow.id,
-                fiveHourPct: usage.fiveHourPct,
-                sevenDayPct: usage.sevenDayPct,
-                fiveHourResetsAt: usage.fiveHourResetsAt,
-                sevenDayResetsAt: usage.sevenDayResetsAt,
-                fetchedAt: Date(),
-                lastStatus: freshStatus
-            )
-            try await db.modelProfileUsage.upsert(usageRow)
+        // Only store keychain for API key profiles; OAuth profiles don't store secrets.
+        if !isOAuth {
+            do {
+                try ModelProfileKeychain.store(id: profileRow.id.uuidString, token: trimmed)
+            } catch {
+                try? await db.modelProfiles.delete(id: profileRow.id)
+                return RPCResponse(error: "Failed to store secret in keychain")
+            }
         }
 
         subscriptions.broadcast(delta: .modelProfilesChanged)
-        return try RPCResponse(result: ModelProfileAddResult(profile: profileRow, warning: warning))
+        return try RPCResponse(result: ModelProfileAddResult(profile: profileRow, warning: nil))
     }
 
     // MARK: - Delete
