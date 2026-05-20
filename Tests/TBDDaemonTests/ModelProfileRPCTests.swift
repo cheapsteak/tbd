@@ -424,6 +424,66 @@ struct ModelProfileRPCTests {
         #expect(!FileManager.default.fileExists(atPath: profileDir.path))
     }
 
+    @Test("delete preserves host mirror targets across multiple slots")
+    func deletePreservesHostMirrors() async throws {
+        let tempBaseDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let tempHostDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempBaseDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempHostDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempBaseDir)
+            try? FileManager.default.removeItem(at: tempHostDir)
+        }
+
+        let fm = FileManager.default
+
+        // Pre-create host slots
+        try fm.createDirectory(at: tempHostDir.appendingPathComponent("projects", isDirectory: true), withIntermediateDirectories: true)
+        try fm.createDirectory(at: tempHostDir.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir, hostBaseDirectory: tempHostDir)
+        let (router, db, _) = makeRouter(configDirManager: manager)
+        defer { Task { await cleanupKeychain(db) } }
+
+        // Create an OAuth profile and ensure its config dir with mirror symlinks
+        let oauthProfile = try await db.modelProfiles.create(name: "OAuth", kind: .oauth)
+        _ = try manager.ensureOAuthDir(forProfileID: oauthProfile.id)
+
+        // Write sentinel files in host slots
+        let projectsSentinel = tempHostDir.appendingPathComponent("projects/-Users-test-cwd/sentinel.jsonl")
+        try fm.createDirectory(at: projectsSentinel.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "PROJECTS_SENTINEL".write(to: projectsSentinel, atomically: true, encoding: .utf8)
+
+        let pluginsSentinel = tempHostDir.appendingPathComponent("plugins/sentinel.txt")
+        try "PLUGINS_SENTINEL".write(to: pluginsSentinel, atomically: true, encoding: .utf8)
+
+        let profileDir = manager.profileDirectory(forProfileID: oauthProfile.id)
+
+        // Verify symlinks were created
+        let profileProjects = manager.configDirectory(forProfileID: oauthProfile.id).appendingPathComponent("projects")
+        let profilePlugins = manager.configDirectory(forProfileID: oauthProfile.id).appendingPathComponent("plugins")
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjects.path)) != nil)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profilePlugins.path)) != nil)
+
+        // Delete the profile via RPC
+        let resp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileDelete,
+                                                      params: ModelProfileDeleteParams(id: oauthProfile.id)))
+        #expect(resp.success)
+
+        // Verify the profile directory was deleted
+        #expect(!fm.fileExists(atPath: profileDir.path))
+
+        // Verify host sentinels still exist with original content
+        #expect(fm.fileExists(atPath: projectsSentinel.path))
+        #expect(fm.fileExists(atPath: pluginsSentinel.path))
+
+        let projectsContent = try String(contentsOf: projectsSentinel, encoding: .utf8)
+        #expect(projectsContent == "PROJECTS_SENTINEL")
+
+        let pluginsContent = try String(contentsOf: pluginsSentinel, encoding: .utf8)
+        #expect(pluginsContent == "PLUGINS_SENTINEL")
+    }
+
     // MARK: - rename
 
     @Test("rename success")
