@@ -4,25 +4,25 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeProfileConfigDir")
 
-/// Manages per-profile isolated `ANTHROPIC_CONFIG_DIR` directories under
-/// `~/tbd/profiles/<profile-id>/claude/`. Used only for proxy profiles
-/// (`baseURL` non-nil) so Claude Code's auth-conflict check doesn't see the
-/// user's claude.ai OAuth in `~/.claude/.credentials.json` while we're also
-/// passing `ANTHROPIC_API_KEY`.
+/// Manages per-profile isolated `CLAUDE_CONFIG_DIR` directories under
+/// `~/tbd/profiles/<profile-id>/claude/`. Serves oauth, direct apiKey, and
+/// proxy apiKey profiles with an isolated config directory where they can
+/// maintain independent credentials.
 ///
-/// On dir creation we pre-populate `.claude.json` with:
+/// On dir creation for API-key profiles, `.claude.json` is pre-populated with:
 ///   - `customApiKeyResponses.approved`: the last 20 chars of the profile's
 ///     API key (matches Claude Code's own storage format) so the user isn't
 ///     prompted to approve the key on first invocation.
 ///   - `hasCompletedOnboarding: true` so the spawn doesn't drop into the
 ///     onboarding flow inside an empty config dir.
 ///
-/// Direct-Claude profiles (baseURL == nil) do NOT use this — they keep
-/// reading `~/.claude` so the user's OAuth login flows through normally.
-struct ClaudeProfileConfigDirManager: Sendable {
+/// For OAuth profiles, `.claude.json` is pre-populated with only:
+///   - `hasCompletedOnboarding: true` (no `customApiKeyResponses`, since the
+///     user will `/login` into this isolated config dir).
+public struct ClaudeProfileConfigDirManager: Sendable {
     let baseDirectory: URL
 
-    init(baseDirectory: URL? = nil) {
+    public init(baseDirectory: URL? = nil) {
         // Resolve inside the init to keep the `TBDConstants.configDir` access
         // out of the caller's compilation context — see HookResolver for the
         // Xcode 26.3 unsafeMutableAddressor link-failure rationale.
@@ -30,9 +30,13 @@ struct ClaudeProfileConfigDirManager: Sendable {
             ?? TBDConstants.configDir.appendingPathComponent("profiles", isDirectory: true)
     }
 
-    func configDirectory(forProfileID profileID: UUID) -> URL {
+    public func profileDirectory(forProfileID profileID: UUID) -> URL {
         baseDirectory
             .appendingPathComponent(profileID.uuidString.lowercased(), isDirectory: true)
+    }
+
+    public func configDirectory(forProfileID profileID: UUID) -> URL {
+        profileDirectory(forProfileID: profileID)
             .appendingPathComponent("claude", isDirectory: true)
     }
 
@@ -42,8 +46,9 @@ struct ClaudeProfileConfigDirManager: Sendable {
     /// If the dir already exists but `.claude.json` is missing or doesn't yet
     /// include the approval for this key, the file is rewritten with the
     /// correct content. Existing approvals for other keys are preserved.
+    /// All unknown top-level keys in the existing `.claude.json` are preserved.
     @discardableResult
-    func ensureDir(forProfileID profileID: UUID, apiKey: String) throws -> URL {
+    public func ensureAPIKeyDir(forProfileID profileID: UUID, apiKey: String) throws -> URL {
         let dir = configDirectory(forProfileID: profileID)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -53,6 +58,7 @@ struct ClaudeProfileConfigDirManager: Sendable {
         var approved: [String] = []
         var rejected: [String] = []
         var hasOnboarding = true
+        var unknownKeys: [String: Any] = [:]
 
         if let existing = try? Data(contentsOf: claudeJSONPath),
            let parsed = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] {
@@ -61,19 +67,26 @@ struct ClaudeProfileConfigDirManager: Sendable {
                 rejected = (responses["rejected"] as? [String]) ?? []
             }
             hasOnboarding = (parsed["hasCompletedOnboarding"] as? Bool) ?? true
+
+            // Preserve all unknown top-level keys from the existing file.
+            for (key, value) in parsed {
+                if key != "customApiKeyResponses" && key != "hasCompletedOnboarding" {
+                    unknownKeys[key] = value
+                }
+            }
         }
 
         if !approved.contains(approvalToken) {
             approved.append(approvalToken)
         }
 
-        let payload: [String: Any] = [
-            "customApiKeyResponses": [
-                "approved": approved,
-                "rejected": rejected,
-            ],
-            "hasCompletedOnboarding": hasOnboarding,
+        var payload: [String: Any] = unknownKeys
+        payload["customApiKeyResponses"] = [
+            "approved": approved,
+            "rejected": rejected,
         ]
+        payload["hasCompletedOnboarding"] = hasOnboarding
+
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: claudeJSONPath, options: [.atomic])
 
@@ -81,35 +94,90 @@ struct ClaudeProfileConfigDirManager: Sendable {
         return dir
     }
 
+    /// Ensure the per-profile claude config dir exists for an OAuth profile,
+    /// and write a minimal `.claude.json` with only `hasCompletedOnboarding: true`
+    /// if the file does not already exist. If the file already exists, leave it
+    /// untouched.
+    ///
+    /// OAuth profiles do not need a pre-approved API key, so no
+    /// `customApiKeyResponses` is written. The user will `/login` once into
+    /// this isolated config dir, and the credential persists in the Keychain
+    /// entry derived from the `CLAUDE_CONFIG_DIR` path.
+    @discardableResult
+    public func ensureOAuthDir(forProfileID profileID: UUID) throws -> URL {
+        let dir = configDirectory(forProfileID: profileID)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let claudeJSONPath = dir.appendingPathComponent(".claude.json")
+
+        // If `.claude.json` already exists, leave it untouched.
+        if FileManager.default.fileExists(atPath: claudeJSONPath.path) {
+            logger.debug("claude config dir exists at \(dir.path, privacy: .public) for oauth profile \(profileID, privacy: .public); skipping .claude.json")
+            return dir
+        }
+
+        let payload: [String: Any] = [
+            "hasCompletedOnboarding": true,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: claudeJSONPath, options: [.atomic])
+
+        logger.debug("ensured claude config dir at \(dir.path, privacy: .public) for oauth profile \(profileID, privacy: .public)")
+        return dir
+    }
+
     /// Claude Code stores approved keys as the last 20 chars of the key
     /// (confirmed by inspecting `~/.claude.json#customApiKeyResponses.approved`).
     /// For keys shorter than 20 chars (unusual but possible in tests), use the
     /// full string — matches Claude Code's `.suffix(20)` behavior.
-    static func approvalToken(forAPIKey apiKey: String) -> String {
+    public static func approvalToken(forAPIKey apiKey: String) -> String {
         String(apiKey.suffix(20))
     }
 }
 
 extension ClaudeProfileConfigDirManager {
-    /// Convenience: ensure the per-profile claude config dir for a resolved
-    /// profile and return its path — but ONLY for proxy profiles (baseURL
-    /// non-nil) using an API key. Returns nil for direct-Claude profiles or
-    /// OAuth-secret profiles, signalling the caller to NOT inject
-    /// `ANTHROPIC_CONFIG_DIR`. Filesystem errors are logged and swallowed —
-    /// failing to write the pre-approval shouldn't break terminal spawn.
+    /// Ensure the per-profile claude config dir for a resolved profile and
+    /// return its path. Returns nil for bedrock profiles (which do not
+    /// need config-dir isolation), nil profile, and apiKey profiles with
+    /// a missing secret.
+    ///
+    /// For `.oauth` profiles, calls `ensureOAuthDir`.
+    /// For `.apiKey` profiles, calls `ensureAPIKeyDir` (needs `profile.secret`;
+    /// if the secret is nil, logs a warning and returns nil).
+    /// For `.bedrock` profiles, returns nil.
+    ///
+    /// Filesystem errors are logged and swallowed — failing to write
+    /// the config dir shouldn't break terminal spawn.
     static func resolveConfigDir(for profile: ResolvedModelProfile?) -> String? {
-        guard let profile, profile.baseURL != nil, profile.kind == .apiKey else { return nil }
-        // Bedrock (and any future kind without a Keychain secret) doesn't need
-        // an isolated ANTHROPIC_CONFIG_DIR — we're not setting ANTHROPIC_API_KEY
-        // at all, so the "Auth conflict" warning this isolation defends against
-        // can't fire.
-        guard let apiKey = profile.secret else { return nil }
-        do {
-            let url = try ClaudeProfileConfigDirManager()
-                .ensureDir(forProfileID: profile.profileID, apiKey: apiKey)
-            return url.path
-        } catch {
-            logger.warning("failed to ensure claude config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        guard let profile else { return nil }
+
+        let manager = ClaudeProfileConfigDirManager()
+
+        switch profile.kind {
+        case .oauth:
+            do {
+                let url = try manager.ensureOAuthDir(forProfileID: profile.profileID)
+                return url.path
+            } catch {
+                logger.warning("failed to ensure oauth config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+
+        case .apiKey:
+            guard let apiKey = profile.secret else {
+                logger.warning("api-key profile \(profile.profileID, privacy: .public) has no secret; skipping config dir")
+                return nil
+            }
+            do {
+                let url = try manager.ensureAPIKeyDir(forProfileID: profile.profileID, apiKey: apiKey)
+                return url.path
+            } catch {
+                logger.warning("failed to ensure api-key config dir for profile \(profile.profileID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+
+        case .bedrock:
+            // Bedrock doesn't need config-dir isolation.
             return nil
         }
     }

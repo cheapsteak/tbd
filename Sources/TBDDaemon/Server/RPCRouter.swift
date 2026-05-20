@@ -20,6 +20,7 @@ public final class RPCRouter: Sendable {
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public let pendingQuestions: PendingQuestionStore
     public let repoSerializer: RepoSerializer
+    public let configDirManager: ClaudeProfileConfigDirManager
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -35,7 +36,8 @@ public final class RPCRouter: Sendable {
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
         modelProfileResolver: ModelProfileResolver? = nil,
         pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
-        repoSerializer: RepoSerializer = RepoSerializer()
+        repoSerializer: RepoSerializer = RepoSerializer(),
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager()
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -56,6 +58,7 @@ public final class RPCRouter: Sendable {
         self.usageFetcher = usageFetcher
         self.pendingQuestions = pendingQuestions
         self.repoSerializer = repoSerializer
+        self.configDirManager = configDirManager
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.

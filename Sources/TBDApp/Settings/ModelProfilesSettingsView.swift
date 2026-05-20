@@ -388,7 +388,7 @@ struct AddModelProfileSheet: View {
                 ForEach(AddPreset.allCases) { p in
                     Text(p.rawValue).tag(p).help({
                         switch p {
-                        case .claudeDirect: return "Claude (direct) — sk-ant-oat01- or sk-ant-api03- token"
+                        case .claudeDirect: return "Claude (direct) — authenticate once with /login"
                         case .proxy:        return "Anthropic-compatible proxy — local LLM router with its own token"
                         case .bedrock:      return "AWS Bedrock — uses the AWS SDK credential chain"
                         }
@@ -405,12 +405,9 @@ struct AddModelProfileSheet: View {
 
                 switch preset {
                 case .claudeDirect:
-                    LabeledField("Token") {
-                        SecureField("", text: $token).textFieldStyle(.roundedBorder).frame(maxWidth: .infinity)
-                    }
-                    (Text("Run ")
-                        + Text("claude setup-token").font(.system(.caption, design: .monospaced))
-                        + Text(" in a terminal and paste the resulting sk-ant-oat01-… token."))
+                    (Text("After creating this profile, open a session with it and run ")
+                        + Text("/login").font(.system(.caption, design: .monospaced))
+                        + Text(" once. TBD keeps each profile's login isolated in its own config directory."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -562,7 +559,7 @@ struct AddModelProfileSheet: View {
         if duplicate { return false }
         switch preset {
         case .claudeDirect:
-            return !token.isEmpty
+            return true
         case .proxy:
             return !token.isEmpty &&
                    !baseURL.trimmingCharacters(in: .whitespaces).isEmpty
@@ -626,7 +623,7 @@ struct AddModelProfileSheet: View {
             let priorAlert = await MainActor.run { appState.alertMessage }
             let warning = await appState.addModelProfile(
                 name: trimmedName,
-                token: tokenValue,
+                token: preset == .claudeDirect ? nil : tokenValue,
                 baseURL: preset == .proxy ? trimmedBase : nil,
                 model: preset == .proxy ? (trimmedModel.isEmpty ? nil : trimmedModel) : nil
             )
@@ -638,10 +635,11 @@ struct AddModelProfileSheet: View {
                     appState.alertMessage = priorAlert
                     return
                 }
-                // OAuth-add returned a non-nil verification warning (e.g. 429
-                // or network error from the Anthropic usage endpoint). Show it
-                // inline and keep the sheet open — the user must acknowledge
-                // before deciding whether to keep the unverified profile.
+                // For OAuth profiles with the claudeDirect preset, warning is always nil
+                // (the server doesn't store the token or perform usage checks).
+                // For backward-compat paths with a supplied OAuth token, the warning
+                // indicates the token was not stored. Show it inline and keep the sheet
+                // open so the user can acknowledge before deciding to keep the profile.
                 if let warning {
                     errorMessage = warning
                     return

@@ -17,9 +17,9 @@ import TBDShared
 ///
 /// If we built a claude command (resume or fresh), `sensitiveEnv` carries the
 /// auth + routing env vars for the spawned session:
-/// - oauth: `CLAUDE_CODE_OAUTH_TOKEN=<secret>`
-/// - api key (direct or proxy): `ANTHROPIC_API_KEY=<secret>` (+ `ANTHROPIC_BASE_URL`,
-///   `ANTHROPIC_MODEL`, `ANTHROPIC_CONFIG_DIR` as applicable)
+/// - oauth: `CLAUDE_CONFIG_DIR=<profileDir>` (no auth token; user `/login`s into this dir)
+/// - api key (direct or proxy): `ANTHROPIC_API_KEY=<secret>` + `CLAUDE_CONFIG_DIR=<profileDir>`
+///   (+ `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` for proxy)
 /// - bedrock: `CLAUDE_CODE_USE_BEDROCK=1` + `AWS_REGION` + optional `AWS_PROFILE`
 ///   + `ANTHROPIC_MODEL` (no token; AWS SDK credential chain handles auth)
 ///
@@ -101,27 +101,26 @@ enum ClaudeSpawnCommandBuilder {
             if let r = profileAwsRegion { env["AWS_REGION"] = r }
             if let p = profileAwsProfile { env["AWS_PROFILE"] = p }
             if let m = profileModel { env["ANTHROPIC_MODEL"] = m }
-            // Intentionally no ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN /
-            // ANTHROPIC_BASE_URL / ANTHROPIC_CONFIG_DIR for bedrock.
+            // Intentionally no ANTHROPIC_API_KEY / CLAUDE_CONFIG_DIR /
+            // ANTHROPIC_BASE_URL for bedrock.
         } else {
-            if let secret = profileSecret {
+            // Inject auth token only for apiKey profiles.
+            if let secret = profileSecret, profileKind == .apiKey {
                 // Secrets flow through tmux's `-e KEY=VALUE` (argv, no shell
                 // parsing), so we don't need shell-escape allowlists here.
                 // Storage-time validation rejects newlines / NULL bytes that would
                 // break tmux's single-line arg parsing.
-                let envVar = profileKind == .apiKey ? "ANTHROPIC_API_KEY" : "CLAUDE_CODE_OAUTH_TOKEN"
-                env[envVar] = secret
+                env["ANTHROPIC_API_KEY"] = secret
             }
+            // For oauth profiles, no auth token — they use the isolated
+            // CLAUDE_CONFIG_DIR to maintain an independent /login credential.
             if let baseURL = profileBaseURL { env["ANTHROPIC_BASE_URL"] = baseURL }
             if let model = profileModel { env["ANTHROPIC_MODEL"] = model }
-            // Only inject ANTHROPIC_CONFIG_DIR for proxy profiles. For direct
-            // (claude.ai) profiles, the spawned `claude` should keep reading
-            // `~/.claude` so the user's OAuth login works. For proxy profiles,
-            // isolating the config dir prevents Claude Code's >=2.1.x "Auth
-            // conflict: Both a token (claude.ai) and an API key (ANTHROPIC_API_KEY)
-            // are set" warning from firing.
-            if let configDir = profileConfigDir, profileBaseURL != nil {
-                env["ANTHROPIC_CONFIG_DIR"] = configDir
+            // Inject CLAUDE_CONFIG_DIR for all non-bedrock profiles that have
+            // a config dir. The caller (resolveConfigDir) decides which kinds get
+            // a dir, so if profileConfigDir is non-nil, inject it.
+            if let configDir = profileConfigDir {
+                env["CLAUDE_CONFIG_DIR"] = configDir
             }
         }
         return Result(command: base, sensitiveEnv: env)

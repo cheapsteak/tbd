@@ -27,17 +27,17 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(ClaudeProfileConfigDirManager.approvalToken(forAPIKey: key) == "shortkey")
     }
 
-    // MARK: - ensureDir
+    // MARK: - ensureAPIKeyDir
 
-    @Test("ensureDir creates the directory tree and writes pre-populated .claude.json")
-    func ensureDirCreatesAndPopulates() throws {
+    @Test("ensureAPIKeyDir creates the directory tree and writes pre-populated .claude.json")
+    func ensureAPIKeyDirCreatesAndPopulates() throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
         let profileID = UUID()
         let apiKey = "sk-ant-test-AAAAAAAAAAAAAAAAAAAAAAAAA-LASTTWENTYCHARSXXX1"
 
-        let dir = try manager.ensureDir(forProfileID: profileID, apiKey: apiKey)
+        let dir = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
 
         #expect(FileManager.default.fileExists(atPath: dir.path))
         #expect(dir.path.hasSuffix("/claude"))
@@ -54,16 +54,16 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(json?["hasCompletedOnboarding"] as? Bool == true)
     }
 
-    @Test("ensureDir is idempotent — re-call with same key keeps single approval")
-    func ensureDirIdempotent() throws {
+    @Test("ensureAPIKeyDir is idempotent — re-call with same key keeps single approval")
+    func ensureAPIKeyDirIdempotent() throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
         let profileID = UUID()
         let apiKey = "sk-ant-AAAAAAAAAAAAAAAAAAAAAAA-DUPLICATEKEYTEST123"
 
-        let dir1 = try manager.ensureDir(forProfileID: profileID, apiKey: apiKey)
-        let dir2 = try manager.ensureDir(forProfileID: profileID, apiKey: apiKey)
+        let dir1 = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
+        let dir2 = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
         #expect(dir1 == dir2)
 
         let data = try Data(contentsOf: dir2.appendingPathComponent(".claude.json"))
@@ -73,8 +73,8 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(approved?.first == String(apiKey.suffix(20)))
     }
 
-    @Test("ensureDir appends new approval if api key changed, preserving old ones")
-    func ensureDirAppendsApproval() throws {
+    @Test("ensureAPIKeyDir appends new approval if api key changed, preserving old ones")
+    func ensureAPIKeyDirAppendsApproval() throws {
         let base = tempBase()
         defer { try? FileManager.default.removeItem(at: base) }
         let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
@@ -82,8 +82,8 @@ struct ClaudeProfileConfigDirManagerTests {
         let oldKey = "sk-ant-OLDOLDOLDOLDOLDOLDOLDOLDOLD-OLDLASTTWENTYCHARS12"
         let newKey = "sk-ant-NEWNEWNEWNEWNEWNEWNEWNEW-NEWLASTTWENTYCHARS34"
 
-        _ = try manager.ensureDir(forProfileID: profileID, apiKey: oldKey)
-        let dir = try manager.ensureDir(forProfileID: profileID, apiKey: newKey)
+        _ = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: oldKey)
+        let dir = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: newKey)
 
         let data = try Data(contentsOf: dir.appendingPathComponent(".claude.json"))
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -92,41 +92,146 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(approved?.contains(String(newKey.suffix(20))) == true)
     }
 
-    // MARK: - resolveConfigDir (the proxy-vs-direct gate)
+    @Test("ensureAPIKeyDir preserves unknown top-level keys from existing .claude.json")
+    func ensureAPIKeyDirPreservesUnknownKeys() throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
+        let profileID = UUID()
+        let apiKey = "sk-ant-test-AAAAAAAAAAAAAAAAAAAAAAAAA-LASTTWENTYCHARSXXX1"
 
-    @Test("resolveConfigDir returns nil for direct-Claude profile (no baseURL)")
-    func resolveDirectClaudeReturnsNil() {
-        let profile = ResolvedModelProfile(
-            profileID: UUID(),
-            name: "Direct Claude",
-            kind: .oauth,
-            baseURL: nil,
-            model: nil,
-            secret: "oauth-token",
-            awsRegion: nil,
-            awsProfile: nil
-        )
-        #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
+        // Manually write a .claude.json with an unknown top-level key
+        let dir = manager.configDirectory(forProfileID: profileID)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let initialPayload: [String: Any] = [
+            "customApiKeyResponses": [
+                "approved": [],
+                "rejected": [],
+            ],
+            "hasCompletedOnboarding": true,
+            "someClaudeCodeKey": "value",
+            "anotherCustomKey": 42,
+        ]
+        let initialData = try JSONSerialization.data(withJSONObject: initialPayload, options: [.prettyPrinted, .sortedKeys])
+        try initialData.write(to: dir.appendingPathComponent(".claude.json"), options: [.atomic])
+
+        // Call ensureAPIKeyDir and verify unknown keys survive
+        _ = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
+
+        let claudeJSON = dir.appendingPathComponent(".claude.json")
+        let finalData = try Data(contentsOf: claudeJSON)
+        let finalJson = try JSONSerialization.jsonObject(with: finalData) as? [String: Any]
+
+        // Verify TBD keys are correct
+        let responses = finalJson?["customApiKeyResponses"] as? [String: Any]
+        let approved = responses?["approved"] as? [String]
+        #expect(approved?.contains(String(apiKey.suffix(20))) == true)
+        #expect(finalJson?["hasCompletedOnboarding"] as? Bool == true)
+
+        // Verify unknown keys are preserved
+        #expect(finalJson?["someClaudeCodeKey"] as? String == "value")
+        #expect(finalJson?["anotherCustomKey"] as? Int == 42)
     }
+
+    // MARK: - ensureOAuthDir
+
+    @Test("ensureOAuthDir creates the directory and writes .claude.json with hasCompletedOnboarding only")
+    func ensureOAuthDirCreatesAndPopulates() throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
+        let profileID = UUID()
+
+        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        #expect(FileManager.default.fileExists(atPath: dir.path))
+        #expect(dir.path.hasSuffix("/claude"))
+        #expect(dir.path.contains(profileID.uuidString.lowercased()))
+
+        let claudeJSON = dir.appendingPathComponent(".claude.json")
+        let data = try Data(contentsOf: claudeJSON)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(json?["hasCompletedOnboarding"] as? Bool == true)
+        // OAuth dir should NOT have customApiKeyResponses
+        #expect((json?["customApiKeyResponses"] as? [String: Any]) == nil)
+    }
+
+    @Test("ensureOAuthDir leaves existing .claude.json untouched")
+    func ensureOAuthDirLeavesExisting() throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
+        let profileID = UUID()
+
+        // First call creates the dir and .claude.json
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        let claudeJSON = manager.configDirectory(forProfileID: profileID).appendingPathComponent(".claude.json")
+        let originalData = try Data(contentsOf: claudeJSON)
+
+        // Second call should leave it untouched
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        let secondData = try Data(contentsOf: claudeJSON)
+        #expect(originalData == secondData)
+    }
+
+    // MARK: - resolveConfigDir
 
     @Test("resolveConfigDir returns nil for nil profile")
     func resolveNilProfileReturnsNil() {
         #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: nil) == nil)
     }
 
-    @Test("resolveConfigDir returns nil for OAuth-secret proxy profile (no API key to pre-approve)")
-    func resolveOAuthProxyReturnsNil() {
-        // Edge case: a proxy profile that's configured with an OAuth token
-        // instead of an API key. In that case there's no API key to
-        // pre-approve, AND Claude Code's auth-conflict check fires on
-        // ANTHROPIC_API_KEY only — so the isolation isn't needed.
+    @Test("ensureOAuthDir produces a per-profile path")
+    func resolveOAuthProfileReturnsPath() throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        // resolveConfigDir is static and uses the default ~/tbd base, so the
+        // oauth branch is exercised here via ensureOAuthDir against a temp base.
+        let profileID = UUID()
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
+        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+        #expect(dir.path.contains(profileID.uuidString.lowercased()))
+    }
+
+    @Test("ensureAPIKeyDir produces a per-profile path")
+    func ensureAPIKeyDirReturnsPath() throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        // resolveConfigDir is static and uses the default ~/tbd base, so the
+        // api-key branch is exercised here via ensureAPIKeyDir against a temp base.
+        let profileID = UUID()
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
+        let dir = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: "sk-ant-api03-test-key-XXXXX")
+        #expect(dir.path.contains(profileID.uuidString.lowercased()))
+    }
+
+    @Test("resolveConfigDir returns nil for .bedrock profile")
+    func resolveBedrockReturnsNil() {
         let profile = ResolvedModelProfile(
             profileID: UUID(),
-            name: "OAuth Proxy",
-            kind: .oauth,
-            baseURL: "http://127.0.0.1:3456",
+            name: "Bedrock",
+            kind: .bedrock,
+            baseURL: nil,
+            model: "anthropic.claude-sonnet-4-5",
+            secret: nil,
+            awsRegion: "us-west-2",
+            awsProfile: nil
+        )
+        #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
+    }
+
+    @Test("resolveConfigDir returns nil for .apiKey profile with no secret")
+    func resolveAPIKeyWithoutSecretReturnsNil() {
+        let profile = ResolvedModelProfile(
+            profileID: UUID(),
+            name: "API Key (no secret)",
+            kind: .apiKey,
+            baseURL: nil,
             model: nil,
-            secret: "oauth-token",
+            secret: nil,
             awsRegion: nil,
             awsProfile: nil
         )

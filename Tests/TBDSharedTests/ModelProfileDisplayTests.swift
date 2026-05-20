@@ -29,10 +29,16 @@ struct ModelProfileDisplayTests {
         #expect(p.kindLabel == "Bedrock")
     }
 
-    @Test("detailCaption: oauth → nil")
-    func detailOAuthNil() {
+    @Test("detailCaption: oauth → login hint")
+    func detailOAuthLoginHint() {
         let p = ModelProfile(name: "x", kind: .oauth)
-        #expect(p.detailCaption == nil)
+        #expect(p.detailCaption == "Run /login once")
+    }
+
+    @Test("detailCaption: oauth with baseURL → login hint + url")
+    func detailOAuthWithBaseURLLoginHint() {
+        let p = ModelProfile(name: "x", kind: .oauth, baseURL: "http://h:1")
+        #expect(p.detailCaption == "Run /login once · via http://h:1")
     }
 
     @Test("detailCaption: direct apiKey → nil")

@@ -99,37 +99,40 @@ struct ClaudeSpawnCommandBuilderTests {
 
     // MARK: - Token branches: secret returned via sensitiveEnv, NOT in command
 
-    @Test("resume + token: token in sensitiveEnv, not command")
-    func resumeWithToken() {
+    @Test("resume + oauth secret: token NOT injected (oauth profiles get config dir instead)")
+    func resumeWithOAuthSecret() {
         let r = ClaudeSpawnCommandBuilder.build(
             resumeID: "abc",
             freshSessionID: nil,
             appendSystemPrompt: nil,
             initialPrompt: nil,
             profileSecret: fakeOauth,
+            profileKind: .oauth,
             cmd: nil,
             shellFallback: ""
         )
         #expect(r.command == "claude --resume abc --dangerously-skip-permissions")
         #expect(!r.command.contains(fakeOauth))
         #expect(!r.command.contains("CLAUDE_CODE_OAUTH_TOKEN"))
-        #expect(r.sensitiveEnv == ["CLAUDE_CODE_OAUTH_TOKEN": fakeOauth])
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
     }
 
-    @Test("fresh + token: token in sensitiveEnv, not command")
-    func freshWithToken() {
+    @Test("fresh + api-key secret: uses ANTHROPIC_API_KEY in sensitiveEnv")
+    func freshWithAPIKeySecret() {
         let r = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: "sid",
             appendSystemPrompt: nil,
             initialPrompt: nil,
             profileSecret: fakeOauth,
+            profileKind: .apiKey,
             cmd: nil,
             shellFallback: ""
         )
         #expect(r.command.hasPrefix("claude --session-id sid"))
         #expect(!r.command.contains(fakeOauth))
-        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == fakeOauth)
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == fakeOauth)
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
     }
 
     @Test("api key kind uses ANTHROPIC_API_KEY")
@@ -199,8 +202,8 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == "gpt-5-codex")
     }
 
-    @Test("no base URL or model means env stays auth-only (today's behavior)")
-    func profileWithoutProxyOnlyInjectsAuth() {
+    @Test("oauth profile without configDir → no token, no config dir")
+    func oauthWithoutConfigDirInjectsNothing() {
         let r = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: "abc",
@@ -210,18 +213,41 @@ struct ClaudeSpawnCommandBuilderTests {
             profileKind: .oauth,
             profileBaseURL: nil,
             profileModel: nil,
+            profileConfigDir: nil,
             cmd: nil,
             shellFallback: "/bin/zsh"
         )
-        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == "tok")
+        // OAuth profiles don't inject tokens; they rely on CLAUDE_CONFIG_DIR
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
+        #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == nil)
         #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == nil)
         #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == nil)
     }
 
-    // MARK: - ANTHROPIC_CONFIG_DIR isolation for proxy profiles
+    // MARK: - CLAUDE_CONFIG_DIR for all non-bedrock profiles
 
-    @Test("proxy profile + profileConfigDir → ANTHROPIC_CONFIG_DIR injected")
-    func proxyProfileInjectsConfigDir() {
+    @Test("oauth profile + profileConfigDir → CLAUDE_CONFIG_DIR injected, no token")
+    func oauthProfileInjectsConfigDir() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            profileKind: .oauth,
+            profileBaseURL: nil,
+            profileModel: nil,
+            profileConfigDir: "/Users/me/tbd/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == "/Users/me/tbd/profiles/abc/claude")
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == nil)
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
+    }
+
+    @Test("api-key profile + profileConfigDir → CLAUDE_CONFIG_DIR + ANTHROPIC_API_KEY")
+    func apiKeyProfileInjectsConfigDirAndKey() {
         let r = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: "abc",
@@ -235,38 +261,16 @@ struct ClaudeSpawnCommandBuilderTests {
             cmd: nil,
             shellFallback: "/bin/zsh"
         )
-        #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == "/Users/me/tbd/profiles/abc/claude")
-        #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3456")
+        #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == "/Users/me/tbd/profiles/abc/claude")
         #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == "sk-proxy-key")
-    }
-
-    @Test("direct-Claude profile (no baseURL) → ANTHROPIC_CONFIG_DIR NOT injected")
-    func directClaudeProfileSkipsConfigDir() {
-        // Even if a configDir were somehow supplied, builder must skip it when
-        // baseURL is nil — otherwise we'd isolate the direct-Claude profile
-        // from the user's ~/.claude OAuth login.
-        let r = ClaudeSpawnCommandBuilder.build(
-            resumeID: nil,
-            freshSessionID: "abc",
-            appendSystemPrompt: nil,
-            initialPrompt: nil,
-            profileSecret: "oauth-tok",
-            profileKind: .oauth,
-            profileBaseURL: nil,
-            profileModel: nil,
-            profileConfigDir: "/should/not/be/used",
-            cmd: nil,
-            shellFallback: "/bin/zsh"
-        )
+        #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3456")
         #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == nil)
-        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-tok")
     }
 
-    @Test("proxy profile but no profileConfigDir → ANTHROPIC_CONFIG_DIR NOT injected")
-    func proxyProfileWithoutConfigDirSkipsInjection() {
+    @Test("profile with no configDir → CLAUDE_CONFIG_DIR NOT injected")
+    func profileWithoutConfigDirSkipsInjection() {
         // Builder is pure — if the caller failed to resolve a config dir
-        // (e.g. mkdir errored), we still spawn rather than crash. The user
-        // will see the auth-conflict warning but the terminal works.
+        // (e.g. mkdir errored), we still spawn rather than crash.
         let r = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: "abc",
@@ -280,7 +284,8 @@ struct ClaudeSpawnCommandBuilderTests {
             cmd: nil,
             shellFallback: "/bin/zsh"
         )
-        #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == nil)
+        #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == nil)
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == "sk-proxy")
         #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3456")
     }
 
@@ -533,6 +538,7 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == nil)
         #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
         #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == nil)
+        #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == nil)
         #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == nil)
         // Exactly these 4 keys
         #expect(r.sensitiveEnv.keys.sorted() == ["ANTHROPIC_MODEL", "AWS_PROFILE", "AWS_REGION", "CLAUDE_CODE_USE_BEDROCK"])
@@ -582,8 +588,8 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
     }
 
-    @Test("oauth: unaffected when bedrock params are passed")
-    func oauthUnaffectedByNewParams() {
+    @Test("oauth: ignores bedrock params and doesn't inject token without configDir")
+    func oauthIgnoresBedrockParams() {
         let r = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: "sid",
@@ -599,7 +605,8 @@ struct ClaudeSpawnCommandBuilderTests {
             cmd: nil,
             shellFallback: "/bin/zsh"
         )
-        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == fakeOauth)
+        // OAuth profiles don't inject tokens (they use config dir instead)
+        #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
         #expect(r.sensitiveEnv["AWS_REGION"] == nil)
         #expect(r.sensitiveEnv["CLAUDE_CODE_USE_BEDROCK"] == nil)
     }

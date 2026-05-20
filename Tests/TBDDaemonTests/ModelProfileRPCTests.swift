@@ -37,7 +37,10 @@ struct ModelProfileRPCTests {
         prefix + UUID().uuidString
     }
 
-    private func makeRouter(stub: StubClaudeUsageFetcher = StubClaudeUsageFetcher())
+    private func makeRouter(
+        stub: StubClaudeUsageFetcher = StubClaudeUsageFetcher(),
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager()
+    )
         -> (RPCRouter, TBDDatabase, StubClaudeUsageFetcher)
     {
         let db = try! TBDDatabase(inMemory: true)
@@ -50,7 +53,8 @@ struct ModelProfileRPCTests {
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
-            usageFetcher: stub
+            usageFetcher: stub,
+            configDirManager: configDirManager
         )
         return (router, db, stub)
     }
@@ -74,15 +78,33 @@ struct ModelProfileRPCTests {
 
     // MARK: - add
 
-    @Test("add: oauth + .ok stores row, keychain, usage")
-    func addOauthOk() async throws {
-        let stub = StubClaudeUsageFetcher(responses: [.ok(sampleUsage())])
-        let (router, db, _) = makeRouter(stub: stub)
-        defer { Task { await cleanupKeychain(db) } }
+    @Test("add: oauth without token succeeds, no keychain")
+    func addOauthNoToken() async throws {
+        let (router, db, _) = makeRouter()
 
-        let tokenBytes = freshToken()
         let req = try RPCRequest(method: RPCMethod.modelProfileAdd,
-                                 params: ModelProfileAddParams(name: "Personal", token: tokenBytes))
+                                 params: ModelProfileAddParams(name: "Work", token: nil))
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.warning == nil)
+        #expect(result.profile.kind == .oauth)
+        #expect(result.profile.name == "Work")
+
+        let listed = try await db.modelProfiles.list()
+        #expect(listed.count == 1)
+        // Verify no keychain entry was written
+        let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        #expect(kc == nil)
+    }
+
+    @Test("add: oauth without token succeeds, warning nil")
+    func addOauthWithoutTokenNoWarning() async throws {
+        let stub = StubClaudeUsageFetcher()
+        let (router, db, _) = makeRouter(stub: stub)
+
+        let req = try RPCRequest(method: RPCMethod.modelProfileAdd,
+                                 params: ModelProfileAddParams(name: "Personal", token: nil))
         let resp = await router.handle(req)
         #expect(resp.success)
         let result = try resp.decodeResult(ModelProfileAddResult.self)
@@ -91,41 +113,36 @@ struct ModelProfileRPCTests {
 
         let listed = try await db.modelProfiles.list()
         #expect(listed.count == 1)
-        let kc = try ModelProfileKeychain.load(id: result.profile.id.uuidString)
-        #expect(kc == tokenBytes)
-        let usage = try await db.modelProfileUsage.get(profileID: result.profile.id)
-        #expect(usage != nil)
-        #expect(usage?.fiveHourPct == 0.42)
-        try? ModelProfileKeychain.delete(id: result.profile.id.uuidString)
+        // No keychain entry
+        let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        #expect(kc == nil)
+        // Fetcher should never be called for OAuth
+        #expect(stub.callCount == 0)
     }
 
-    @Test("add: oauth + .http401 rejects without persisting")
-    func addOauth401() async throws {
-        let stub = StubClaudeUsageFetcher(responses: [.http401])
+    @Test("add: oauth with token returns warning, ignores token, no keychain")
+    func addOauthWithTokenReturnsWarning() async throws {
+        let stub = StubClaudeUsageFetcher()
         let (router, db, _) = makeRouter(stub: stub)
-        let req = try RPCRequest(method: RPCMethod.modelProfileAdd,
-                                 params: ModelProfileAddParams(name: "Bad", token: freshToken()))
-        let resp = await router.handle(req)
-        #expect(!resp.success)
-        #expect(resp.error == "Token invalid")
-        #expect(try await db.modelProfiles.list().isEmpty)
-    }
 
-    @Test("add: oauth + .networkError saves with warning, no usage row")
-    func addOauthNetworkError() async throws {
-        let stub = StubClaudeUsageFetcher(responses: [.networkError("offline")])
-        let (router, db, _) = makeRouter(stub: stub)
-        defer { Task { await cleanupKeychain(db) } }
-
+        let tokenBytes = freshToken()
         let req = try RPCRequest(method: RPCMethod.modelProfileAdd,
-                                 params: ModelProfileAddParams(name: "Maybe", token: freshToken()))
+                                 params: ModelProfileAddParams(name: "Personal", token: tokenBytes))
         let resp = await router.handle(req)
         #expect(resp.success)
         let result = try resp.decodeResult(ModelProfileAddResult.self)
         #expect(result.warning != nil)
-        #expect(try await db.modelProfiles.list().count == 1)
-        #expect(try await db.modelProfileUsage.get(profileID: result.profile.id) == nil)
-        try? ModelProfileKeychain.delete(id: result.profile.id.uuidString)
+        #expect(result.warning?.contains("OAuth") == true)
+        #expect(result.warning?.contains("not stored") == true)
+        #expect(result.profile.kind == .oauth)
+
+        let listed = try await db.modelProfiles.list()
+        #expect(listed.count == 1)
+        // OAuth token provided but not stored per Phase 3
+        let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        #expect(kc == nil)
+        // Fetcher should never be called for OAuth
+        #expect(stub.callCount == 0)
     }
 
     @Test("add: api_key prefix skips fetcher")
@@ -206,6 +223,43 @@ struct ModelProfileRPCTests {
         #expect(try await db.modelProfiles.list().isEmpty)
     }
 
+    @Test("add: empty token with no baseURL treated as oauth (AC5.3 counterpart)")
+    func addEmptyTokenTreatedAsOAuth() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "ImplicitOAuth",
+                token: nil,
+                baseURL: nil,
+                model: nil
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.profile.kind == .oauth)
+        #expect(try await db.modelProfiles.list().count == 1)
+    }
+
+    @Test("add: empty token with baseURL rejected")
+    func addEmptyTokenWithBaseURLRejected() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "ProxyNoToken",
+                token: nil,
+                baseURL: "http://127.0.0.1:3456",
+                model: nil
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error == "Token cannot be empty")
+        #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
     @Test("add: duplicate name rejected")
     func addDuplicateName() async throws {
         let stub = StubClaudeUsageFetcher(responses: [.ok(sampleUsage())])
@@ -249,8 +303,12 @@ struct ModelProfileRPCTests {
     @Test("delete clears global default + keychain + usage")
     func deleteClearsDefault() async throws {
         let (router, db, _) = makeRouter()
-        let tok = try await db.modelProfiles.create(name: "Solo", kind: .oauth)
-        try ModelProfileKeychain.store(id: tok.id.uuidString, token: "value")
+        defer { Task { await cleanupKeychain(db) } }
+
+        // Use an API-key profile (the only kind that stores keychain entries)
+        let tok = try await db.modelProfiles.create(name: "Solo", kind: .apiKey)
+        let token = freshToken(Self.apiPrefix)
+        try ModelProfileKeychain.store(id: tok.id.uuidString, token: token)
         try await db.modelProfileUsage.upsert(ModelProfileUsage(profileID: tok.id, fetchedAt: Date()))
         try await db.config.setDefaultProfileID(tok.id)
 
@@ -304,6 +362,66 @@ struct ModelProfileRPCTests {
                                                       params: ModelProfileDeleteParams(id: bedrock.id)))
         #expect(resp.success)
         #expect(try await db.modelProfiles.list().isEmpty)
+    }
+
+    @Test("delete oauth: removes per-profile config directory")
+    func deleteOAuthRemovesConfigDir() async throws {
+        let tempBaseDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempBaseDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBaseDir) }
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir)
+        let (router, db, _) = makeRouter(configDirManager: manager)
+
+        // Create an OAuth profile and ensure its config dir is created with temp base
+        let oauthProfile = try await db.modelProfiles.create(name: "OAuth", kind: .oauth)
+        let _ = try manager.ensureOAuthDir(forProfileID: oauthProfile.id)
+        let profileDir = manager.profileDirectory(forProfileID: oauthProfile.id)
+
+        // Verify dir exists before deletion
+        #expect(FileManager.default.fileExists(atPath: profileDir.path))
+
+        // Delete the profile via RPC; the handler uses the injected manager
+        let resp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileDelete,
+                                                      params: ModelProfileDeleteParams(id: oauthProfile.id)))
+        #expect(resp.success)
+
+        // Verify the profile is removed from the database
+        #expect(try await db.modelProfiles.list().isEmpty)
+        // Verify the config directory was deleted
+        #expect(!FileManager.default.fileExists(atPath: profileDir.path))
+    }
+
+    @Test("delete apiKey: removes per-profile config directory")
+    func deleteAPIKeyRemovesConfigDir() async throws {
+        let tempBaseDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempBaseDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBaseDir) }
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir)
+        let (router, db, _) = makeRouter(configDirManager: manager)
+        defer { Task { await cleanupKeychain(db) } }
+
+        // Create an API key profile and ensure its config dir is created with temp base
+        let apiKeyProfile = try await db.modelProfiles.create(name: "APIKey", kind: .apiKey)
+        let token = freshToken(Self.apiPrefix)
+        try ModelProfileKeychain.store(id: apiKeyProfile.id.uuidString, token: token)
+
+        let _ = try manager.ensureAPIKeyDir(forProfileID: apiKeyProfile.id, apiKey: token)
+        let profileDir = manager.profileDirectory(forProfileID: apiKeyProfile.id)
+
+        // Verify dir exists before deletion
+        #expect(FileManager.default.fileExists(atPath: profileDir.path))
+
+        // Delete the profile via RPC; the handler uses the injected manager
+        let resp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileDelete,
+                                                      params: ModelProfileDeleteParams(id: apiKeyProfile.id)))
+        #expect(resp.success)
+
+        // Verify the profile is removed from the database
+        #expect(try await db.modelProfiles.list().isEmpty)
+        // Verify the config directory was deleted
+        #expect(!FileManager.default.fileExists(atPath: profileDir.path))
     }
 
     // MARK: - rename
@@ -364,7 +482,9 @@ struct ModelProfileRPCTests {
     func fetchUsageDedupes() async throws {
         let stub = StubClaudeUsageFetcher()
         let (router, db, _) = makeRouter(stub: stub)
-        let tok = try await db.modelProfiles.create(name: "A", kind: .oauth)
+        let tok = try await db.modelProfiles.create(name: "A", kind: .apiKey)
+        try ModelProfileKeychain.store(id: tok.id.uuidString, token: freshToken(Self.apiPrefix))
+        defer { try? ModelProfileKeychain.delete(id: tok.id.uuidString) }
         try await db.modelProfileUsage.upsert(ModelProfileUsage(
             profileID: tok.id, fiveHourPct: 0.7, sevenDayPct: 0.2, fetchedAt: Date()
         ))
@@ -388,8 +508,8 @@ struct ModelProfileRPCTests {
         let (router, db, _) = makeRouter(stub: stub)
         defer { Task { await cleanupKeychain(db) } }
 
-        let tok = try await db.modelProfiles.create(name: "A", kind: .oauth)
-        try ModelProfileKeychain.store(id: tok.id.uuidString, token: "secret")
+        let tok = try await db.modelProfiles.create(name: "A", kind: .apiKey)
+        try ModelProfileKeychain.store(id: tok.id.uuidString, token: freshToken(Self.apiPrefix))
         try await db.modelProfileUsage.upsert(ModelProfileUsage(
             profileID: tok.id, fiveHourPct: 0.1, sevenDayPct: 0.0,
             fetchedAt: Date().addingTimeInterval(-120)
@@ -412,8 +532,8 @@ struct ModelProfileRPCTests {
         let (router, db, _) = makeRouter(stub: stub)
         defer { Task { await cleanupKeychain(db) } }
 
-        let tok = try await db.modelProfiles.create(name: "A", kind: .oauth)
-        try ModelProfileKeychain.store(id: tok.id.uuidString, token: "secret")
+        let tok = try await db.modelProfiles.create(name: "A", kind: .apiKey)
+        try ModelProfileKeychain.store(id: tok.id.uuidString, token: freshToken(Self.apiPrefix))
         let resp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileFetchUsage,
                                                       params: ModelProfileFetchUsageParams(id: tok.id)))
         #expect(!resp.success)
@@ -645,8 +765,7 @@ struct ModelProfileRPCTests {
             params: ModelProfileFetchUsageParams(id: row.id)
         ))
         #expect(!resp.success)
-        #expect(resp.error?.lowercased().contains("claude-direct") == true ||
-                resp.error?.lowercased().contains("only available") == true)
+        #expect(resp.error?.lowercased().contains("not available") == true)
         #expect(stub.callCount == 0)
     }
 }

@@ -7,3 +7,4 @@ DerivedData/
 .tbd/
 icon-iterations/
 docs/superpowers/plans/
+.claude/scheduled_tasks.lock

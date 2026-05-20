@@ -35,8 +35,9 @@ public struct ModelProfileResolver: Sendable {
 
     /// Load a profile by explicit ID, bypassing the precedence chain.
     /// Used by per-terminal pinning (resume) and mid-conversation swap.
-    /// Returns nil if the row is missing. For non-bedrock kinds, also returns
-    /// nil if the keychain secret is missing or empty.
+    /// Returns nil if the row is missing. For .apiKey profiles, also returns
+    /// nil if the keychain secret is missing or empty. OAuth and bedrock
+    /// profiles carry no TBD-stored secret and always succeed if the row exists.
     public func loadByID(_ id: UUID) async throws -> ResolvedModelProfile? {
         try await loadResolved(id: id)
     }
@@ -45,11 +46,11 @@ public struct ModelProfileResolver: Sendable {
         guard let row = try await profiles.get(id: id) else { return nil }
 
         let secret: String?
-        if row.kind == .bedrock {
-            secret = nil
-        } else {
+        if row.kind == .apiKey {
             guard let s = try keychain(id.uuidString), !s.isEmpty else { return nil }
             secret = s
+        } else {
+            secret = nil   // oauth + bedrock: no TBD-stored secret
         }
 
         try await profiles.touchLastUsed(id: row.id)
