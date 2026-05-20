@@ -88,6 +88,7 @@ struct TabBar: View {
     @Binding var activeTabIndex: Int
     var onAddShell: () -> Void = {}
     var onAddClaude: () -> Void = {}
+    var onAddClaudeProfile: (UUID) -> Void = { _ in }
     var onAddCodex: () -> Void = {}
     var onAddNote: () -> Void = {}
     var onCloseTab: (Int) -> Void
@@ -128,8 +129,10 @@ struct TabBar: View {
                 .frame(width: 1, height: 18)
 
             AddTabButton(
+                profiles: appState.modelProfiles,
                 onAddShell: onAddShell,
                 onAddClaude: onAddClaude,
+                onAddClaudeProfile: onAddClaudeProfile,
                 onAddCodex: onAddCodex,
                 onAddNote: onAddNote
             )
@@ -160,8 +163,10 @@ struct TabBar: View {
 /// swallows hover events, making custom hover styling impossible. Using NSMenu
 /// directly sidesteps this entirely.
 private struct AddTabButton: View {
+    let profiles: [ModelProfileWithUsage]
     let onAddShell: () -> Void
     let onAddClaude: () -> Void
+    let onAddClaudeProfile: (UUID) -> Void
     let onAddCodex: () -> Void
     let onAddNote: () -> Void
     @State private var isHovering = false
@@ -183,64 +188,42 @@ private struct AddTabButton: View {
     }
 
     private func showMenu() {
-        let menu = NSMenu()
-
-        let shellItem = NSMenuItem(title: "Shell", action: nil, keyEquivalent: "")
-        shellItem.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
-        menu.addItem(shellItem)
-
-        let claudeItem = NSMenuItem(title: "Claude", action: nil, keyEquivalent: "")
-        let claudeLabel = NSAttributedString(string: "✳", attributes: [.font: NSFont.systemFont(ofSize: 13)])
-        let claudeLabelSize = claudeLabel.size()
-        let claudeImage = NSImage(size: claudeLabelSize)
-        claudeImage.lockFocus()
-        claudeLabel.draw(at: .zero)
-        claudeImage.unlockFocus()
-        claudeImage.isTemplate = true
-        claudeItem.image = claudeImage
-        menu.addItem(claudeItem)
-
-        let codexItem = NSMenuItem(title: "Codex", action: nil, keyEquivalent: "")
-        codexItem.image = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: nil)
-        menu.addItem(codexItem)
-
-        menu.addItem(.separator())
-
-        let noteItem = NSMenuItem(title: "Note", action: nil, keyEquivalent: "")
-        noteItem.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: nil)
-        menu.addItem(noteItem)
-
-        // Use a coordinator to handle menu item actions via closures
         let coordinator = MenuCoordinator(
-            onShell: onAddShell, onClaude: onAddClaude, onCodex: onAddCodex, onNote: onAddNote
+            onShell: onAddShell,
+            onClaude: onAddClaude,
+            onClaudeProfile: onAddClaudeProfile,
+            onCodex: onAddCodex,
+            onNote: onAddNote
         )
-        shellItem.target = coordinator
-        shellItem.action = #selector(MenuCoordinator.addShell)
-        claudeItem.target = coordinator
-        claudeItem.action = #selector(MenuCoordinator.addClaude)
-        codexItem.target = coordinator
-        codexItem.action = #selector(MenuCoordinator.addCodex)
-        noteItem.target = coordinator
-        noteItem.action = #selector(MenuCoordinator.addNote)
+        let menu = AddTabMenu.build(profiles: profiles, coordinator: coordinator)
 
-        // Keep coordinator alive for the duration of the menu
+        // Keep coordinator alive for the duration of the menu.
         objc_setAssociatedObject(menu, "coordinator", coordinator, .OBJC_ASSOCIATION_RETAIN)
 
         let location = NSEvent.mouseLocation
         menu.popUp(positioning: nil, at: location, in: nil)
     }
-
 }
 
-private class MenuCoordinator: NSObject {
+/// Routes "+" menu clicks from AppKit's target/selector world into SwiftUI
+/// closures. Internal (not private) so AddTabMenu and the unit tests can use it.
+final class MenuCoordinator: NSObject {
     let onShell: () -> Void
     let onClaude: () -> Void
+    let onClaudeProfile: (UUID) -> Void
     let onCodex: () -> Void
     let onNote: () -> Void
 
-    init(onShell: @escaping () -> Void, onClaude: @escaping () -> Void, onCodex: @escaping () -> Void, onNote: @escaping () -> Void) {
+    init(
+        onShell: @escaping () -> Void,
+        onClaude: @escaping () -> Void,
+        onClaudeProfile: @escaping (UUID) -> Void,
+        onCodex: @escaping () -> Void,
+        onNote: @escaping () -> Void
+    ) {
         self.onShell = onShell
         self.onClaude = onClaude
+        self.onClaudeProfile = onClaudeProfile
         self.onCodex = onCodex
         self.onNote = onNote
     }
@@ -249,6 +232,103 @@ private class MenuCoordinator: NSObject {
     @objc func addClaude() { onClaude() }
     @objc func addCodex() { onCodex() }
     @objc func addNote() { onNote() }
+
+    /// Profile menu items carry their `ModelProfile.id` in `representedObject`.
+    /// A nil representedObject (should not happen for profile items) is a no-op.
+    @objc func addClaudeProfile(_ sender: NSMenuItem) {
+        guard let profileID = sender.representedObject as? UUID else { return }
+        onClaudeProfile(profileID)
+    }
+}
+
+// MARK: - AddTabMenu
+
+/// Pure builder for the "+" new-tab NSMenu. Extracted from AddTabButton so the
+/// menu structure (especially the nested Claude profile items) can be
+/// unit-tested without popping up UI.
+enum AddTabMenu {
+    /// Builds the new-tab menu. Profile items are inserted, indented, directly
+    /// below the "Claude" item — clicking one starts a Claude session pinned to
+    /// that profile. With an empty `profiles` list, no profile items appear and
+    /// the menu is identical to the pre-feature menu.
+    static func build(profiles: [ModelProfileWithUsage], coordinator: MenuCoordinator) -> NSMenu {
+        let menu = NSMenu()
+
+        let shellItem = NSMenuItem(
+            title: "Shell", action: #selector(MenuCoordinator.addShell), keyEquivalent: ""
+        )
+        shellItem.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
+        shellItem.target = coordinator
+        menu.addItem(shellItem)
+
+        let claudeIcon = claudeAsteriskImage()
+        let claudeItem = NSMenuItem(
+            title: "Claude", action: #selector(MenuCoordinator.addClaude), keyEquivalent: ""
+        )
+        claudeItem.image = claudeIcon
+        claudeItem.target = coordinator
+        menu.addItem(claudeItem)
+
+        // One item per profile, titled with the profile's display name. Each
+        // gets a transparent placeholder icon the same size as the Claude
+        // asterisk so its title lines up in the same title column as "Claude"
+        // — the empty icon slot is the visual nesting cue. The profile id
+        // rides along in `representedObject` for MenuCoordinator.addClaudeProfile.
+        for entry in profiles {
+            let item = NSMenuItem(
+                title: entry.profile.name,
+                action: #selector(MenuCoordinator.addClaudeProfile(_:)),
+                keyEquivalent: ""
+            )
+            item.image = blankIcon(size: claudeIcon.size)
+            item.representedObject = entry.profile.id
+            item.target = coordinator
+            menu.addItem(item)
+        }
+
+        let codexItem = NSMenuItem(
+            title: "Codex", action: #selector(MenuCoordinator.addCodex), keyEquivalent: ""
+        )
+        codexItem.image = NSImage(
+            systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: nil
+        )
+        codexItem.target = coordinator
+        menu.addItem(codexItem)
+
+        menu.addItem(.separator())
+
+        let noteItem = NSMenuItem(
+            title: "Note", action: #selector(MenuCoordinator.addNote), keyEquivalent: ""
+        )
+        noteItem.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: nil)
+        noteItem.target = coordinator
+        menu.addItem(noteItem)
+
+        return menu
+    }
+
+    /// Renders the ✳ glyph as a template image for the Claude menu item.
+    private static func claudeAsteriskImage() -> NSImage {
+        let label = NSAttributedString(
+            string: "✳", attributes: [.font: NSFont.systemFont(ofSize: 13)]
+        )
+        let image = NSImage(size: label.size())
+        image.lockFocus()
+        label.draw(at: .zero)
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }
+
+    /// A fully-transparent image used as the icon for profile menu items, so
+    /// their titles align with the "Claude" item's title (the empty icon slot
+    /// is the visual nesting cue). Sized to match `claudeAsteriskImage()`.
+    private static func blankIcon(size: NSSize) -> NSImage {
+        let image = NSImage(size: size)
+        image.lockFocus()   // empty draw pass — produces a transparent representation
+        image.unlockFocus()
+        return image
+    }
 }
 
 // MARK: - TabBarItem
