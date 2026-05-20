@@ -4,10 +4,10 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "usagePoller")
 
-/// Background poller that keeps `claude_token_usage` rows fresh for OAuth tokens.
+/// Background poller that keeps `claude_token_usage` rows fresh for API key profiles.
 ///
 /// Rules (from spec "Usage fetching"):
-/// - OAuth only; api_key kind is skipped permanently.
+/// - API key profiles only (OAuth profiles are skipped — they don't store TBD-side secrets).
 /// - Default cadence: 30 min per token.
 /// - Startup stagger: first poll for each token at random(0..30s) from start().
 /// - HTTP 429 → next poll 60 min out; first success after that reverts to 30 min.
@@ -199,8 +199,8 @@ public actor ClaudeUsagePoller {
         }
     }
 
-    /// Re-read profiles from the store, add new oauth profiles (Claude direct
-    /// only — `baseURL == nil`) to the schedule, drop missing / api_key /
+    /// Re-read profiles from the store, add new API key profiles (Claude direct
+    /// only — `baseURL == nil`) to the schedule, drop missing / oauth /
     /// proxy-routed profiles.
     private func refreshSchedule() async {
         let allProfiles: [ModelProfile]
@@ -209,22 +209,23 @@ public actor ClaudeUsagePoller {
         } catch {
             return
         }
-        // Only poll OAuth profiles that target Claude direct (baseURL == nil).
+        // Only poll API key profiles that target Claude direct (baseURL == nil).
+        // OAuth profiles don't store TBD-side secrets, so they can't be polled.
         // Proxy-routed profiles can't use the Claude API usage endpoint —
         // cross-profile cost tracking is out of scope per the spec.
-        let oauthIDs = Set(
+        let apiKeyIDs = Set(
             allProfiles
-                .filter { $0.kind == .oauth && $0.baseURL == nil }
+                .filter { $0.kind == .apiKey && $0.baseURL == nil }
                 .map { $0.id.uuidString }
         )
 
         // Drop profiles no longer present, or no longer eligible.
-        for key in schedule.keys where !oauthIDs.contains(key) {
+        for key in schedule.keys where !apiKeyIDs.contains(key) {
             schedule.removeValue(forKey: key)
         }
         // Add new profiles with stagger.
         let now = clock.now()
-        for id in oauthIDs where schedule[id] == nil && !permanentlyExcluded.contains(id) {
+        for id in apiKeyIDs where schedule[id] == nil && !permanentlyExcluded.contains(id) {
             schedule[id] = Entry(
                 nextFireAt: now.addingTimeInterval(staggerProvider()),
                 backoffActive: false,
@@ -245,7 +246,7 @@ public actor ClaudeUsagePoller {
     // MARK: - Tick (single-token fetch)
 
     private func tick(profileID: String) async {
-        // 1. Confirm still exists, is oauth, and is Claude direct.
+        // 1. Confirm still exists, is apiKey, and is Claude direct.
         guard let uuid = UUID(uuidString: profileID) else {
             schedule.removeValue(forKey: profileID)
             return
@@ -256,7 +257,7 @@ public actor ClaudeUsagePoller {
         } catch {
             return
         }
-        guard let profile = row, profile.kind == .oauth, profile.baseURL == nil else {
+        guard let profile = row, profile.kind == .apiKey, profile.baseURL == nil else {
             schedule.removeValue(forKey: profileID)
             return
         }

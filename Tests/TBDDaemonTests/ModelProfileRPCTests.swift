@@ -37,7 +37,10 @@ struct ModelProfileRPCTests {
         prefix + UUID().uuidString
     }
 
-    private func makeRouter(stub: StubClaudeUsageFetcher = StubClaudeUsageFetcher())
+    private func makeRouter(
+        stub: StubClaudeUsageFetcher = StubClaudeUsageFetcher(),
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager()
+    )
         -> (RPCRouter, TBDDatabase, StubClaudeUsageFetcher)
     {
         let db = try! TBDDatabase(inMemory: true)
@@ -50,7 +53,8 @@ struct ModelProfileRPCTests {
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
-            usageFetcher: stub
+            usageFetcher: stub,
+            configDirManager: configDirManager
         )
         return (router, db, stub)
     }
@@ -362,28 +366,26 @@ struct ModelProfileRPCTests {
         try FileManager.default.createDirectory(at: tempBaseDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempBaseDir) }
 
-        let (router, db, _) = makeRouter()
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir)
+        let (router, db, _) = makeRouter(configDirManager: manager)
 
         // Create an OAuth profile and ensure its config dir is created with temp base
         let oauthProfile = try await db.modelProfiles.create(name: "OAuth", kind: .oauth)
-        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir)
         let _ = try manager.ensureOAuthDir(forProfileID: oauthProfile.id)
         let profileDir = manager.profileDirectory(forProfileID: oauthProfile.id)
 
         // Verify dir exists before deletion
         #expect(FileManager.default.fileExists(atPath: profileDir.path))
 
-        // Inject the custom base directory into the RPC handler by verifying through a custom cleanup
-        // The actual deletion happens in the handler, so we verify via inspecting the filesystem
-        // after calling delete. We'll manually verify the fix works by checking that the deletion
-        // code path doesn't crash and the profile is removed from the database.
+        // Delete the profile via RPC; the handler uses the injected manager
         let resp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileDelete,
                                                       params: ModelProfileDeleteParams(id: oauthProfile.id)))
         #expect(resp.success)
 
-        // The RPC handler removes the default location. For this test, we just verify the database
-        // deletion works correctly; the directory cleanup is tested via integration/system tests.
+        // Verify the profile is removed from the database
         #expect(try await db.modelProfiles.list().isEmpty)
+        // Verify the config directory was deleted
+        #expect(!FileManager.default.fileExists(atPath: profileDir.path))
     }
 
     @Test("delete apiKey: removes per-profile config directory")
@@ -392,7 +394,8 @@ struct ModelProfileRPCTests {
         try FileManager.default.createDirectory(at: tempBaseDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempBaseDir) }
 
-        let (router, db, _) = makeRouter()
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir)
+        let (router, db, _) = makeRouter(configDirManager: manager)
         defer { Task { await cleanupKeychain(db) } }
 
         // Create an API key profile and ensure its config dir is created with temp base
@@ -400,21 +403,21 @@ struct ModelProfileRPCTests {
         let token = freshToken(Self.apiPrefix)
         try ModelProfileKeychain.store(id: apiKeyProfile.id.uuidString, token: token)
 
-        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir)
         let _ = try manager.ensureAPIKeyDir(forProfileID: apiKeyProfile.id, apiKey: token)
         let profileDir = manager.profileDirectory(forProfileID: apiKeyProfile.id)
 
         // Verify dir exists before deletion
         #expect(FileManager.default.fileExists(atPath: profileDir.path))
 
-        // Delete the profile via RPC
+        // Delete the profile via RPC; the handler uses the injected manager
         let resp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileDelete,
                                                       params: ModelProfileDeleteParams(id: apiKeyProfile.id)))
         #expect(resp.success)
 
-        // The RPC handler removes the default location. For this test, we just verify the database
-        // deletion works correctly; the directory cleanup is tested via integration/system tests.
+        // Verify the profile is removed from the database
         #expect(try await db.modelProfiles.list().isEmpty)
+        // Verify the config directory was deleted
+        #expect(!FileManager.default.fileExists(atPath: profileDir.path))
     }
 
     // MARK: - rename

@@ -153,8 +153,8 @@ struct ClaudeUsagePollerTests {
 
     @Test func happyPathStaggerAndCadence() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let a = try await db.modelProfiles.create(name: "A", kind: .oauth)
-        let b = try await db.modelProfiles.create(name: "B", kind: .oauth)
+        let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
+        let b = try await db.modelProfiles.create(name: "B", kind: .apiKey)
         let clock = TestPollerClock()
         let fetcher = MockUsageFetcher(default: .ok(sampleUsageOK()))
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock, stagger: 30)
@@ -184,7 +184,7 @@ struct ClaudeUsagePollerTests {
 
     @Test func dedupeWithinSixtySeconds() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let a = try await db.modelProfiles.create(name: "A", kind: .oauth)
+        let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
         let clock = TestPollerClock()
 
         // Pre-populate a fresh usage row (fetched 30s ago).
@@ -215,7 +215,7 @@ struct ClaudeUsagePollerTests {
 
     @Test func http429BackoffThenRecovery() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let a = try await db.modelProfiles.create(name: "A", kind: .oauth)
+        let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
         let clock = TestPollerClock()
         let fetcher = MockUsageFetcher(default: .ok(sampleUsageOK()))
         // First call: 429. Subsequent: ok.
@@ -250,7 +250,7 @@ struct ClaudeUsagePollerTests {
 
     @Test func http401PermanentExclusion() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let a = try await db.modelProfiles.create(name: "A", kind: .oauth)
+        let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
         let clock = TestPollerClock()
         let fetcher = MockUsageFetcher(default: .ok(sampleUsageOK()))
         fetcher.enqueue(token: a.id.uuidString, .http401)
@@ -270,10 +270,10 @@ struct ClaudeUsagePollerTests {
         await poller.stop()
     }
 
-    @Test func apiKeyTokensSkipped() async throws {
+    @Test func oauthProfilesNotPolled() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let oauthTok = try await db.modelProfiles.create(name: "Oauth", kind: .oauth)
-        let apiKey = try await db.modelProfiles.create(name: "Api", kind: .apiKey)
+        let oauthProfile = try await db.modelProfiles.create(name: "Oauth", kind: .oauth)
+        let apiKeyProfile = try await db.modelProfiles.create(name: "Api", kind: .apiKey)
         let clock = TestPollerClock()
         let fetcher = MockUsageFetcher(default: .ok(sampleUsageOK()))
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock)
@@ -283,16 +283,18 @@ struct ClaudeUsagePollerTests {
         await clock.advance(by: 5 * 60)
         await pump()
 
-        #expect(fetcher.callCount(for: oauthTok.id.uuidString) == 1)
-        #expect(fetcher.callCount(for: apiKey.id.uuidString) == 0)
+        // OAuth profiles don't store TBD-side secrets, so they are not polled
+        #expect(fetcher.callCount(for: oauthProfile.id.uuidString) == 0)
+        // API key profiles store secrets and are polled
+        #expect(fetcher.callCount(for: apiKeyProfile.id.uuidString) == 1)
 
         await poller.stop()
     }
 
     @Test func focusPauseAndResume() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let a = try await db.modelProfiles.create(name: "A", kind: .oauth)
-        let b = try await db.modelProfiles.create(name: "B", kind: .oauth)
+        let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
+        let b = try await db.modelProfiles.create(name: "B", kind: .apiKey)
         let clock = TestPollerClock()
         let fetcher = MockUsageFetcher(default: .ok(sampleUsageOK()))
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock)
@@ -328,8 +330,8 @@ struct ClaudeUsagePollerTests {
 
     @Test func pokeAllFiresEverythingEligible() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let a = try await db.modelProfiles.create(name: "A", kind: .oauth)
-        let b = try await db.modelProfiles.create(name: "B", kind: .oauth)
+        let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
+        let b = try await db.modelProfiles.create(name: "B", kind: .apiKey)
         let clock = TestPollerClock()
         let fetcher = MockUsageFetcher(default: .ok(sampleUsageOK()))
         // Use big stagger so first tick is far in the future.
@@ -353,7 +355,7 @@ struct ClaudeUsagePollerTests {
 
     @Test func broadcastCalledOnEachWrite() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let a = try await db.modelProfiles.create(name: "A", kind: .oauth)
+        let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
         let clock = TestPollerClock()
         let fetcher = MockUsageFetcher(default: .ok(sampleUsageOK()))
         // First .ok, then .http429.
@@ -388,11 +390,11 @@ struct ClaudeUsagePollerTests {
     func proxyProfileSkipped() async throws {
         let db = try TBDDatabase(inMemory: true)
         // Claude direct profile — should be polled.
-        let direct = try await db.modelProfiles.create(name: "Direct", kind: .oauth)
+        let direct = try await db.modelProfiles.create(name: "Direct", kind: .apiKey)
         // Proxy-routed profile — must be skipped (baseURL != nil).
         _ = try await db.modelProfiles.create(
             name: "ProxyOAuth",
-            kind: .oauth,
+            kind: .apiKey,
             baseURL: "http://127.0.0.1:3456",
             model: "gpt-5-codex"
         )

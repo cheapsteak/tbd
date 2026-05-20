@@ -124,7 +124,7 @@ extension RPCRouter {
                 try? await db.modelProfiles.delete(id: profileRow.id)
                 return RPCResponse(error: "Failed to store secret in keychain")
             }
-        } else if !trimmed.isEmpty {
+        } else {
             // OAuth profile was created with a token supplied, but OAuth profiles
             // don't store secrets. Warn the user that the token was discarded.
             warning = "OAuth profiles authenticate per-session via /login. The supplied token was not stored."
@@ -170,8 +170,7 @@ extension RPCRouter {
             // Remove the per-profile config directory. Non-bedrock profiles have an
             // isolated config dir at ~/tbd/profiles/<uuid>/; bedrock profiles do not.
             do {
-                let manager = ClaudeProfileConfigDirManager()
-                let profileDir = manager.profileDirectory(forProfileID: params.id)
+                let profileDir = self.configDirManager.profileDirectory(forProfileID: params.id)
                 try FileManager.default.removeItem(at: profileDir)
             } catch {
                 logger.warning("Failed to delete config directory for \(params.id, privacy: .public): \(error.localizedDescription, privacy: .public)")

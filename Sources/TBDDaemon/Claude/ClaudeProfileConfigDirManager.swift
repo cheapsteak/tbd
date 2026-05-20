@@ -19,10 +19,10 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeProfil
 /// For OAuth profiles, `.claude.json` is pre-populated with only:
 ///   - `hasCompletedOnboarding: true` (no `customApiKeyResponses`, since the
 ///     user will `/login` into this isolated config dir).
-struct ClaudeProfileConfigDirManager: Sendable {
+public struct ClaudeProfileConfigDirManager: Sendable {
     let baseDirectory: URL
 
-    init(baseDirectory: URL? = nil) {
+    public init(baseDirectory: URL? = nil) {
         // Resolve inside the init to keep the `TBDConstants.configDir` access
         // out of the caller's compilation context — see HookResolver for the
         // Xcode 26.3 unsafeMutableAddressor link-failure rationale.
@@ -30,12 +30,12 @@ struct ClaudeProfileConfigDirManager: Sendable {
             ?? TBDConstants.configDir.appendingPathComponent("profiles", isDirectory: true)
     }
 
-    func profileDirectory(forProfileID profileID: UUID) -> URL {
+    public func profileDirectory(forProfileID profileID: UUID) -> URL {
         baseDirectory
             .appendingPathComponent(profileID.uuidString.lowercased(), isDirectory: true)
     }
 
-    func configDirectory(forProfileID profileID: UUID) -> URL {
+    public func configDirectory(forProfileID profileID: UUID) -> URL {
         profileDirectory(forProfileID: profileID)
             .appendingPathComponent("claude", isDirectory: true)
     }
@@ -47,7 +47,7 @@ struct ClaudeProfileConfigDirManager: Sendable {
     /// include the approval for this key, the file is rewritten with the
     /// correct content. Existing approvals for other keys are preserved.
     @discardableResult
-    func ensureAPIKeyDir(forProfileID profileID: UUID, apiKey: String) throws -> URL {
+    public func ensureAPIKeyDir(forProfileID profileID: UUID, apiKey: String) throws -> URL {
         let dir = configDirectory(forProfileID: profileID)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -95,7 +95,7 @@ struct ClaudeProfileConfigDirManager: Sendable {
     /// this isolated config dir, and the credential persists in the Keychain
     /// entry derived from the `CLAUDE_CONFIG_DIR` path.
     @discardableResult
-    func ensureOAuthDir(forProfileID profileID: UUID) throws -> URL {
+    public func ensureOAuthDir(forProfileID profileID: UUID) throws -> URL {
         let dir = configDirectory(forProfileID: profileID)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -121,7 +121,7 @@ struct ClaudeProfileConfigDirManager: Sendable {
     /// (confirmed by inspecting `~/.claude.json#customApiKeyResponses.approved`).
     /// For keys shorter than 20 chars (unusual but possible in tests), use the
     /// full string — matches Claude Code's `.suffix(20)` behavior.
-    static func approvalToken(forAPIKey apiKey: String) -> String {
+    public static func approvalToken(forAPIKey apiKey: String) -> String {
         String(apiKey.suffix(20))
     }
 }
