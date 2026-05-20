@@ -79,16 +79,83 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         "settings.json",
     ]
 
+    /// Walk `src` against `dst`, returning the path of the first real collision
+    /// found, or nil if `src` can be merged into `dst` without overwriting any
+    /// existing file. Read-only.
+    ///
+    /// "Real collision" means: at some matching path, both sides exist AND
+    /// (either they have different types, or both are non-directory files).
+    /// Same-named directories on both sides recurse.
+    private func findCollisionRecursive(src: URL, dst: URL) -> URL? {
+        let fm = FileManager.default
+
+        var dstIsDir: ObjCBool = false
+        let dstExists = fm.fileExists(atPath: dst.path, isDirectory: &dstIsDir)
+        if !dstExists {
+            return nil  // dst absent → src can be moved whole-tree
+        }
+
+        // If src has vanished between enumeration and this recursive call
+        // (rare race with another process), treat as no collision — there's
+        // nothing to merge so nothing to clash with.
+        var srcIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: src.path, isDirectory: &srcIsDir) else { return nil }
+
+        // Type mismatch (one file, one directory) → real collision.
+        if srcIsDir.boolValue != dstIsDir.boolValue {
+            return dst
+        }
+
+        // Both files at the same path → real collision (no overwrite).
+        if !srcIsDir.boolValue {
+            return dst
+        }
+
+        // Both directories — recurse into src's children.
+        let srcEntries = (try? fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)) ?? []
+        for entry in srcEntries {
+            let dstEntry = dst.appendingPathComponent(entry.lastPathComponent)
+            if let collision = findCollisionRecursive(src: entry, dst: dstEntry) {
+                return collision
+            }
+        }
+        return nil
+    }
+
+    /// Move every file/subdirectory in `src` into the corresponding location
+    /// under `dst`. The caller must have already verified
+    /// `findCollisionRecursive(src:dst:)` returned nil — no overwrite checks are
+    /// performed here. After a successful merge, `src` is removed.
+    private func mergeRecursive(src: URL, dst: URL) throws {
+        let fm = FileManager.default
+
+        if !fm.fileExists(atPath: dst.path) {
+            try fm.moveItem(at: src, to: dst)  // whole-subtree move
+            return
+        }
+
+        // dst exists; pre-check guarantees it's a directory and src is too.
+        // Use `try` (not `try?`) so a listing failure surfaces to the caller
+        // instead of producing a misleading ENOTEMPTY from `removeItem` below.
+        let srcEntries = try fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)
+        for entry in srcEntries {
+            let dstEntry = dst.appendingPathComponent(entry.lastPathComponent)
+            try mergeRecursive(src: entry, dst: dstEntry)
+        }
+        try fm.removeItem(at: src)  // now empty
+    }
+
     /// Ensure one host-mirror slot is a symlink from the profile dir into the
     /// host base. Best-effort: filesystem errors are logged and swallowed.
     ///
     /// For `projects/` (migrateContent=true), performs file-level collision detection
-    /// by recursing one directory deep into cwd-hash directories. Cwd-hash directories
-    /// with disjoint session files are merged into the host store; only actual file
-    /// collisions abort the migration. Atomic with respect to name collisions: pass 1
-    /// confirms no file-level conflicts before pass 2 moves anything. Not atomic with
-    /// respect to I/O failures during pass 2 — those leave partial state that the next
-    /// call cleans up.
+    /// by recursively walking the full tree structure. Same-named directories on both
+    /// sides recurse; type mismatches and same-named files are real collisions that
+    /// trigger atomic abort. Cwd-hash directories with disjoint trees are merged into
+    /// the host store. Atomic with respect to name collisions: pass 1 confirms no
+    /// file-level conflicts before pass 2 moves anything. Not atomic with respect to
+    /// I/O failures during pass 2 — those leave partial state that the next call
+    /// cleans up.
     ///
     /// For other slots (migrateContent=false) with real content, the content is moved
     /// to a `<slot>.profile-local` sidecar, allowing the symlink to be created and the
@@ -125,68 +192,50 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     try fm.createDirectory(at: hostEntry, withIntermediateDirectories: true)
                     let entries = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
 
-                    // Pass 1: Collision scan at file level. For each top-level cwd-hash entry,
-                    // check if it exists on host and if so, scan for file collisions inside.
-                    var hasCollision = false
-                    var collidingFilePath: String?
+                    // Pass 1: Recursive collision scan. For each top-level cwd-hash entry,
+                    // check if it exists on host and scan the full tree for collisions.
+                    var collidingPath: URL?
                     for entry in entries {
                         let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
                         let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
 
-                        // projects/ is expected to contain only cwd-hash subdirectories.
-                        // Skip stray non-directory entries (e.g. a .DS_Store Finder leaves
-                        // behind) for the collision scan — they get swept explicitly before
-                        // the final removeItem below.
+                        // Skip stray non-directory entries at the top level (e.g. .DS_Store).
+                        // These get swept explicitly before the final removeItem.
                         var isCwdHashDir: ObjCBool = false
                         guard fm.fileExists(atPath: cwdHashPath.path, isDirectory: &isCwdHashDir),
                               isCwdHashDir.boolValue else { continue }
 
-                        // If host doesn't have this cwd-hash dir, no collision possible.
-                        guard fm.fileExists(atPath: hostCwdHashPath.path) else { continue }
-
-                        // Host has this cwd-hash dir. Check for file-level collisions inside.
-                        let profileFiles = (try? fm.contentsOfDirectory(at: cwdHashPath, includingPropertiesForKeys: nil)) ?? []
-                        for profileFile in profileFiles {
-                            let hostFilePath = hostCwdHashPath.appendingPathComponent(profileFile.lastPathComponent)
-                            if fm.fileExists(atPath: hostFilePath.path) {
-                                hasCollision = true
-                                collidingFilePath = "\(entry.lastPathComponent)/\(profileFile.lastPathComponent)"
-                                break
-                            }
+                        if let collision = findCollisionRecursive(src: cwdHashPath, dst: hostCwdHashPath) {
+                            collidingPath = collision
+                            break
                         }
-                        if hasCollision { break }
                     }
 
-                    if hasCollision {
-                        let collisionDesc = collidingFilePath.map { " (\($0))" } ?? ""
-                        logger.warning("projects migration incomplete for profile due to file collision\(collisionDesc); symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
+                    if let collidingPath {
+                        // Log the colliding entry as a path relative to the host slot root
+                        // (e.g. "-cwd-A/sub/leaf.md") rather than the absolute host path —
+                        // less noisy, and the host-slot context is already obvious from the
+                        // slot name in the message.
+                        let hostPrefix = hostEntry.path + "/"
+                        let rel = collidingPath.path.hasPrefix(hostPrefix)
+                            ? String(collidingPath.path.dropFirst(hostPrefix.count))
+                            : collidingPath.path
+                        let collisionDesc = " (\(rel))"
+                        logger.warning("projects migration incomplete for profile due to file collision\(collisionDesc, privacy: .public); symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
                         return
                     }
 
-                    // Pass 2: No collisions detected; safe to migrate all entries.
+                    // Pass 2: No collisions detected; safe to migrate all entries recursively.
                     for entry in entries {
                         let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
                         let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
 
-                        // Same directory-only guard as pass 1 — stray files are handled
-                        // explicitly in the sweep below.
+                        // Same directory-only guard as pass 1 — strays handled by the sweep below.
                         var isCwdHashDir: ObjCBool = false
                         guard fm.fileExists(atPath: cwdHashPath.path, isDirectory: &isCwdHashDir),
                               isCwdHashDir.boolValue else { continue }
 
-                        if fm.fileExists(atPath: hostCwdHashPath.path) {
-                            // Host has this cwd-hash dir. Migrate files individually.
-                            let profileFiles = (try? fm.contentsOfDirectory(at: cwdHashPath, includingPropertiesForKeys: nil)) ?? []
-                            for profileFile in profileFiles {
-                                let srcPath = cwdHashPath.appendingPathComponent(profileFile.lastPathComponent)
-                                let destPath = hostCwdHashPath.appendingPathComponent(profileFile.lastPathComponent)
-                                try fm.moveItem(at: srcPath, to: destPath)
-                            }
-                            try fm.removeItem(at: cwdHashPath)
-                        } else {
-                            // Host doesn't have this cwd-hash dir. Move the whole directory.
-                            try fm.moveItem(at: cwdHashPath, to: hostCwdHashPath)
-                        }
+                        try mergeRecursive(src: cwdHashPath, dst: hostCwdHashPath)
                     }
 
                     // Sweep any stray non-directory entries left behind by the

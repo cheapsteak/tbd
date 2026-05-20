@@ -877,6 +877,192 @@ struct ClaudeProfileConfigDirManagerTests {
         _ = try manager.ensureOAuthDir(forProfileID: profileID)
         #expect((try? fm.destinationOfSymbolicLink(atPath: pluginsLink.path)) != nil)
     }
+
+    // MARK: - recursive-projects-merge.AC1: same-name directories merge by recursing
+
+    @Test("recursive-projects-merge.AC1.1: nested dir-vs-dir with disjoint files merges successfully")
+    func hostMirrorProjectsMigrationNestedDirMerges() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create host projects with cwd-A/sub/ containing one file
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-cwd-A/sub", isDirectory: true), withIntermediateDirectories: true)
+        let hostLeaf = tempHost.appendingPathComponent("projects/-cwd-A/sub/host-leaf.md")
+        try "HOST".write(to: hostLeaf, atomically: true, encoding: .utf8)
+
+        // Pre-create profile projects with cwd-A/sub/ containing a different file
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileProjectsBase = profileClaudeDir.appendingPathComponent("projects", isDirectory: true)
+        try fm.createDirectory(at: profileProjectsBase.appendingPathComponent("-cwd-A/sub", isDirectory: true), withIntermediateDirectories: true)
+        let profileLeaf = profileProjectsBase.appendingPathComponent("-cwd-A/sub/profile-leaf.md")
+        try "PROFILE".write(to: profileLeaf, atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify: host file untouched
+        #expect(try String(contentsOf: hostLeaf, encoding: .utf8) == "HOST")
+
+        // Verify: profile file migrated into host tree
+        let migratedLeaf = tempHost.appendingPathComponent("projects/-cwd-A/sub/profile-leaf.md")
+        #expect(fm.fileExists(atPath: migratedLeaf.path))
+        #expect(try String(contentsOf: migratedLeaf, encoding: .utf8) == "PROFILE")
+
+        // Verify: profile projects/ is now a symlink
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBase.path)) != nil)
+    }
+
+    @Test("recursive-projects-merge.AC1.2: empty profile-side memory/ merges (the real bug)")
+    func hostMirrorProjectsMigrationEmptyProfileMemory() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create host projects with cwd-A/memory/ containing one file
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-cwd-A/memory", isDirectory: true), withIntermediateDirectories: true)
+        let hostMemNote = tempHost.appendingPathComponent("projects/-cwd-A/memory/note.md")
+        try "HOST NOTE".write(to: hostMemNote, atomically: true, encoding: .utf8)
+
+        // Pre-create profile projects with an empty cwd-A/memory/ directory
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileProjectsBase = profileClaudeDir.appendingPathComponent("projects", isDirectory: true)
+        try fm.createDirectory(at: profileProjectsBase.appendingPathComponent("-cwd-A/memory", isDirectory: true), withIntermediateDirectories: true)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify: host memory/note.md still has original content
+        #expect(try String(contentsOf: hostMemNote, encoding: .utf8) == "HOST NOTE")
+
+        // Verify: profile projects/ is now a symlink (recursive merge removed the empty memory dir)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBase.path)) != nil)
+    }
+
+    // MARK: - recursive-projects-merge.AC2: real collisions still abort atomically
+
+    @Test("recursive-projects-merge.AC2.1: nested file-vs-file collision aborts atomically")
+    func hostMirrorProjectsMigrationNestedFileCollisionAbortsAtomically() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create host projects with cwd-A/sub/leaf.md (collision point)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-cwd-A/sub", isDirectory: true), withIntermediateDirectories: true)
+        let hostLeaf = tempHost.appendingPathComponent("projects/-cwd-A/sub/leaf.md")
+        try "HOST LEAF".write(to: hostLeaf, atomically: true, encoding: .utf8)
+
+        // Pre-create profile projects with cwd-A/sub/leaf.md (collision) and cwd-B/x.md (clean, non-colliding)
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileProjectsBase = profileClaudeDir.appendingPathComponent("projects", isDirectory: true)
+        try fm.createDirectory(at: profileProjectsBase, withIntermediateDirectories: true)
+
+        // cwd-A with collision file
+        try fm.createDirectory(at: profileProjectsBase.appendingPathComponent("-cwd-A/sub", isDirectory: true), withIntermediateDirectories: true)
+        let profileLeaf = profileProjectsBase.appendingPathComponent("-cwd-A/sub/leaf.md")
+        try "PROFILE LEAF".write(to: profileLeaf, atomically: true, encoding: .utf8)
+
+        // cwd-B with non-colliding file (to verify atomic abort)
+        try fm.createDirectory(at: profileProjectsBase.appendingPathComponent("-cwd-B", isDirectory: true), withIntermediateDirectories: true)
+        let profileX = profileProjectsBase.appendingPathComponent("-cwd-B/x.md")
+        try "PROFILE X".write(to: profileX, atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify: host leaf still has original content (collision not overwritten)
+        #expect(try String(contentsOf: hostLeaf, encoding: .utf8) == "HOST LEAF")
+
+        // Verify: profile collision file was NOT migrated (atomic abort)
+        #expect(fm.fileExists(atPath: profileLeaf.path))
+        #expect(try String(contentsOf: profileLeaf, encoding: .utf8) == "PROFILE LEAF")
+
+        // Verify: profile non-colliding file was NOT migrated (atomic abort)
+        #expect(fm.fileExists(atPath: profileX.path))
+        #expect(try String(contentsOf: profileX, encoding: .utf8) == "PROFILE X")
+
+        // Verify: host cwd-B was NOT created (atomic abort)
+        #expect(!fm.fileExists(atPath: tempHost.appendingPathComponent("projects/-cwd-B").path))
+
+        // Verify: profile projects/ is still a real directory (NOT a symlink)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBase.path)) == nil)
+    }
+
+    @Test("recursive-projects-merge.AC2.2: type-mismatch collision (directory vs file) aborts atomically")
+    func hostMirrorProjectsMigrationTypeCollisionAbortsAtomically() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create host projects with cwd-A/foo as a directory containing a file
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-cwd-A/foo", isDirectory: true), withIntermediateDirectories: true)
+        let hostFooFile = tempHost.appendingPathComponent("projects/-cwd-A/foo/content.txt")
+        try "HOST FOO CONTENT".write(to: hostFooFile, atomically: true, encoding: .utf8)
+
+        // Pre-create profile projects with cwd-A/foo as a file
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileProjectsBase = profileClaudeDir.appendingPathComponent("projects", isDirectory: true)
+        try fm.createDirectory(at: profileProjectsBase.appendingPathComponent("-cwd-A", isDirectory: true), withIntermediateDirectories: true)
+        let profileFooFile = profileProjectsBase.appendingPathComponent("-cwd-A/foo")
+        try "PROFILE FOO FILE".write(to: profileFooFile, atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify: host foo is still a directory with original content
+        #expect(fm.fileExists(atPath: hostFooFile.path))
+        #expect(try String(contentsOf: hostFooFile, encoding: .utf8) == "HOST FOO CONTENT")
+
+        // Verify: profile foo is still a file with original content
+        #expect(fm.fileExists(atPath: profileFooFile.path))
+        var profileIsDir: ObjCBool = false
+        fm.fileExists(atPath: profileFooFile.path, isDirectory: &profileIsDir)
+        #expect(!profileIsDir.boolValue, "profile foo should be a file, not a directory")
+        #expect(try String(contentsOf: profileFooFile, encoding: .utf8) == "PROFILE FOO FILE")
+
+        // Verify: profile projects/ is still a real directory (NOT a symlink)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBase.path)) == nil)
+    }
 }
 
 /// Run env-mutating tests serialized so they don't race each other. Each test
