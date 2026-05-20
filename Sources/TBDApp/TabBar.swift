@@ -261,23 +261,26 @@ enum AddTabMenu {
         shellItem.target = coordinator
         menu.addItem(shellItem)
 
+        let claudeIcon = claudeAsteriskImage()
         let claudeItem = NSMenuItem(
             title: "Claude", action: #selector(MenuCoordinator.addClaude), keyEquivalent: ""
         )
-        claudeItem.image = claudeAsteriskImage()
+        claudeItem.image = claudeIcon
         claudeItem.target = coordinator
         menu.addItem(claudeItem)
 
-        // One indented item per profile, titled with the profile's display
-        // name. The profile id rides along in `representedObject` for
-        // MenuCoordinator.addClaudeProfile.
+        // One item per profile, titled with the profile's display name. Each
+        // gets a transparent placeholder icon the same size as the Claude
+        // asterisk so its title lines up in the same title column as "Claude"
+        // — the empty icon slot is the visual nesting cue. The profile id
+        // rides along in `representedObject` for MenuCoordinator.addClaudeProfile.
         for entry in profiles {
             let item = NSMenuItem(
                 title: entry.profile.name,
                 action: #selector(MenuCoordinator.addClaudeProfile(_:)),
                 keyEquivalent: ""
             )
-            item.indentationLevel = 1
+            item.image = blankIcon(size: claudeIcon.size)
             item.representedObject = entry.profile.id
             item.target = coordinator
             menu.addItem(item)
@@ -314,6 +317,16 @@ enum AddTabMenu {
         label.draw(at: .zero)
         image.unlockFocus()
         image.isTemplate = true
+        return image
+    }
+
+    /// A fully-transparent image used as the icon for profile menu items, so
+    /// their titles align with the "Claude" item's title (the empty icon slot
+    /// is the visual nesting cue). Sized to match `claudeAsteriskImage()`.
+    private static func blankIcon(size: NSSize) -> NSImage {
+        let image = NSImage(size: size)
+        image.lockFocus()   // empty draw pass — produces a transparent representation
+        image.unlockFocus()
         return image
     }
 }

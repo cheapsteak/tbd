@@ -33,7 +33,7 @@ private func claudeIndex(_ menu: NSMenu) -> Int {
 // MARK: - AddTabMenu.build
 
 @MainActor
-@Test func addTabMenu_withNoProfiles_hasNoIndentedItems() {
+@Test func addTabMenu_withNoProfiles_insertsNoProfileItems() {
     let menu = AddTabMenu.build(profiles: [], coordinator: makeCoordinator())
 
     let idx = claudeIndex(menu)
@@ -52,11 +52,13 @@ private func claudeIndex(_ menu: NSMenu) -> Int {
     let second = menu.items[idx + 2]
 
     #expect(first.title == "Work")
-    #expect(first.indentationLevel == 1)
+    #expect(first.indentationLevel == 0)
+    #expect(first.image != nil)
     #expect(first.representedObject as? UUID == work.profile.id)
 
     #expect(second.title == "Personal")
-    #expect(second.indentationLevel == 1)
+    #expect(second.indentationLevel == 0)
+    #expect(second.image != nil)
     #expect(second.representedObject as? UUID == personal.profile.id)
 
     #expect(menu.items[idx + 3].title == "Codex")
