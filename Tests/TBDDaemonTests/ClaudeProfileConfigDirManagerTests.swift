@@ -466,6 +466,65 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(profileUniqueContent == "PROFILE UNIQUE")
     }
 
+    @Test("AC3.2b: collision with multiple cwds aborts migration atomically")
+    func hostMirrorProjectsMigrationCollisionAbortsAtomically() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create host projects with cwd-hash A (collision point)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-Users-test-cwd-A", isDirectory: true), withIntermediateDirectories: true)
+        let hostFileA = tempHost.appendingPathComponent("projects/-Users-test-cwd-A/host-sess.jsonl")
+        try "HOST A".write(to: hostFileA, atomically: true, encoding: .utf8)
+
+        // Pre-create profile projects with:
+        // - cwd-hash A (collides with host, should not be migrated)
+        // - cwd-hash B (no collision, but should NOT be migrated if A collides)
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileProjectsBaseDir = profileClaudeDir.appendingPathComponent("projects", isDirectory: true)
+        try fm.createDirectory(at: profileProjectsBaseDir, withIntermediateDirectories: true)
+
+        // Pre-create cwd-hash A (colliding side)
+        try fm.createDirectory(at: profileProjectsBaseDir.appendingPathComponent("-Users-test-cwd-A", isDirectory: true), withIntermediateDirectories: true)
+        let profileFileA = profileProjectsBaseDir.appendingPathComponent("-Users-test-cwd-A/profile-sess-A.jsonl")
+        try "PROFILE A".write(to: profileFileA, atomically: true, encoding: .utf8)
+
+        // Pre-create cwd-hash B (non-colliding side)
+        try fm.createDirectory(at: profileProjectsBaseDir.appendingPathComponent("-Users-test-cwd-B", isDirectory: true), withIntermediateDirectories: true)
+        let profileFileB = profileProjectsBaseDir.appendingPathComponent("-Users-test-cwd-B/profile-sess-B.jsonl")
+        try "PROFILE B".write(to: profileFileB, atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify: cwd-hash A (colliding) should still exist in profile, not moved
+        #expect(fm.fileExists(atPath: profileFileA.path), "colliding cwd-hash A was moved despite collision")
+        let profileContentA = try String(contentsOf: profileFileA, encoding: .utf8)
+        #expect(profileContentA == "PROFILE A")
+
+        // Verify: cwd-hash B (non-colliding) should still exist in profile, NOT moved to host
+        // This is the key regression test: it ensures atomicity of the migration.
+        #expect(fm.fileExists(atPath: profileFileB.path), "non-colliding cwd-hash B was migrated despite collision in A")
+        let profileContentB = try String(contentsOf: profileFileB, encoding: .utf8)
+        #expect(profileContentB == "PROFILE B")
+
+        // Verify: host should NOT have received any migration from the profile
+        #expect(!fm.fileExists(atPath: tempHost.appendingPathComponent("projects/-Users-test-cwd-B").path), "cwd-hash B was migrated to host despite collision in A")
+
+        // Verify: profile projects/ is still a real directory (NOT a symlink)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBaseDir.path)) == nil, "profile projects/ was symlinked despite collision")
+    }
+
     @Test("AC3.3a: non-projects directory with content is left alone")
     func hostMirrorNonProjectsDirWithContent() throws {
         let tempBase = tempBase()

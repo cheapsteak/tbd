@@ -113,22 +113,23 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     // succeeding, but be defensive on race / non-dir).
                     try fm.createDirectory(at: hostEntry, withIntermediateDirectories: true)
                     let entries = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
-                    var anySkipped = false
-                    for entry in entries {
-                        let dest = hostEntry.appendingPathComponent(entry.lastPathComponent)
-                        if fm.fileExists(atPath: dest.path) {
-                            logger.debug("collision migrating \(entry.lastPathComponent, privacy: .public) into \(name, privacy: .public); skipping")
-                            anySkipped = true
-                            continue
-                        }
-                        try fm.moveItem(at: entry, to: dest)
+
+                    // Two-pass approach: first check if any entries would collide with host.
+                    // If any collision exists, abort the entire migration to preserve atomicity.
+                    // This ensures that if we can't migrate everything, we don't partially move
+                    // entries and orphan sessions.
+                    let hasCollision = entries.contains { entry in
+                        fm.fileExists(atPath: hostEntry.appendingPathComponent(entry.lastPathComponent).path)
                     }
-                    // Only remove profile-side dir if all entries were successfully migrated.
-                    // If any were skipped due to collision, preserve the profile dir to avoid
-                    // data loss (profile-unique sessions in the skipped dirs are still there).
-                    if anySkipped {
+                    if hasCollision {
                         logger.warning("projects migration incomplete for profile due to collisions; symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
                         return
+                    }
+
+                    // No collisions detected; safe to move all entries.
+                    for entry in entries {
+                        let dest = hostEntry.appendingPathComponent(entry.lastPathComponent)
+                        try fm.moveItem(at: entry, to: dest)
                     }
                     try fm.removeItem(at: profileEntry)
                 } catch {
