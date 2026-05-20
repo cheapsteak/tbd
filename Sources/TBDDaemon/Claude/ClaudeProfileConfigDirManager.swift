@@ -194,7 +194,6 @@ public struct ClaudeProfileConfigDirManager: Sendable {
 
                     // Pass 1: Recursive collision scan. For each top-level cwd-hash entry,
                     // check if it exists on host and scan the full tree for collisions.
-                    var hasCollision = false
                     var collidingPath: URL?
                     for entry in entries {
                         let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
@@ -207,27 +206,21 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                               isCwdHashDir.boolValue else { continue }
 
                         if let collision = findCollisionRecursive(src: cwdHashPath, dst: hostCwdHashPath) {
-                            hasCollision = true
                             collidingPath = collision
                             break
                         }
                     }
 
-                    if hasCollision {
+                    if let collidingPath {
                         // Log the colliding entry as a path relative to the host slot root
                         // (e.g. "-cwd-A/sub/leaf.md") rather than the absolute host path —
                         // less noisy, and the host-slot context is already obvious from the
                         // slot name in the message.
-                        let collisionDesc: String
-                        if let path = collidingPath {
-                            let hostPrefix = hostEntry.path + "/"
-                            let rel = path.path.hasPrefix(hostPrefix)
-                                ? String(path.path.dropFirst(hostPrefix.count))
-                                : path.path
-                            collisionDesc = " (\(rel))"
-                        } else {
-                            collisionDesc = ""
-                        }
+                        let hostPrefix = hostEntry.path + "/"
+                        let rel = collidingPath.path.hasPrefix(hostPrefix)
+                            ? String(collidingPath.path.dropFirst(hostPrefix.count))
+                            : collidingPath.path
+                        let collisionDesc = " (\(rel))"
                         logger.warning("projects migration incomplete for profile due to file collision\(collisionDesc, privacy: .public); symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
                         return
                     }
