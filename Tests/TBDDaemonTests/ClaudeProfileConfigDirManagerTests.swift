@@ -744,12 +744,27 @@ struct ClaudeProfileConfigDirManagerTests {
 
         // Run 2: Simulate Claude writing new content to the profile-side file
         // (this could happen if someone edits CLAUDE.md after the first mirror, before the second)
+        // Note: String.write(to:atomically:true) uses rename(2) under the hood, which replaces
+        // the symlink with a real file rather than writing through it. So at the start of the
+        // second ensureOAuthDir, profileClaudeFile is a real file with "Run 2" content.
+        // This documents that the "skip if sidecar exists" code path is genuinely exercised.
         try "# Profile CLAUDE.md Run 2".write(to: profileClaudeFile, atomically: true, encoding: .utf8)
         _ = try manager.ensureOAuthDir(forProfileID: profileID)
 
-        // Verify: sidecar still has Run 1 content (not overwritten)
+        // Verify full post-Run-2 state:
+        // 1. Sidecar still has Run 1 content (not overwritten)
         sidecarContent = try String(contentsOf: sidecar, encoding: .utf8)
         #expect(sidecarContent == "# Profile CLAUDE.md Run 1")
+
+        // 2. Profile-side CLAUDE.md is a real file (not a symlink) containing "Run 2"
+        let isSidecarSymlink = (try? fm.destinationOfSymbolicLink(atPath: profileClaudeFile.path)) != nil
+        #expect(!isSidecarSymlink, "profile-side CLAUDE.md should be a real file, not a symlink after atomic write")
+        let profileContent = try String(contentsOf: profileClaudeFile, encoding: .utf8)
+        #expect(profileContent == "# Profile CLAUDE.md Run 2")
+
+        // 3. Host CLAUDE.md is unchanged
+        let hostContent = try String(contentsOf: tempHost.appendingPathComponent("CLAUDE.md"), encoding: .utf8)
+        #expect(hostContent == "# Host CLAUDE.md")
     }
 
     @Test("AC2.3: empty real directory becomes symlink without sidecar")

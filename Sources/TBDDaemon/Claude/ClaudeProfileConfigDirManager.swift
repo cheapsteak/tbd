@@ -83,7 +83,10 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// For `projects/` (migrateContent=true), performs file-level collision detection
     /// by recursing one directory deep into cwd-hash directories. Cwd-hash directories
     /// with disjoint session files are merged into the host store; only actual file
-    /// collisions abort the migration.
+    /// collisions abort the migration. Atomic with respect to name collisions: pass 1
+    /// confirms no file-level conflicts before pass 2 moves anything. Not atomic with
+    /// respect to I/O failures during pass 2 — those leave partial state that the next
+    /// call cleans up.
     ///
     /// For other slots (migrateContent=false) with real content, the content is moved
     /// to a `<slot>.profile-local` sidecar, allowing the symlink to be created and the
@@ -123,7 +126,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     // Pass 1: Collision scan at file level. For each top-level cwd-hash entry,
                     // check if it exists on host and if so, scan for file collisions inside.
                     var hasCollision = false
-                    var collidingFileName: String?
+                    var collidingFilePath: String?
                     for entry in entries {
                         let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
                         let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
@@ -137,7 +140,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                             let hostFilePath = hostCwdHashPath.appendingPathComponent(profileFile.lastPathComponent)
                             if fm.fileExists(atPath: hostFilePath.path) {
                                 hasCollision = true
-                                collidingFileName = profileFile.lastPathComponent
+                                collidingFilePath = "\(entry.lastPathComponent)/\(profileFile.lastPathComponent)"
                                 break
                             }
                         }
@@ -145,7 +148,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     }
 
                     if hasCollision {
-                        let collisionDesc = collidingFileName.map { " (\($0))" } ?? ""
+                        let collisionDesc = collidingFilePath.map { " (\($0))" } ?? ""
                         logger.warning("projects migration incomplete for profile due to file collision\(collisionDesc); symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
                         return
                     }
@@ -182,6 +185,8 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                 } else {
                     // Non-empty directory: rename to sidecar if it doesn't already exist.
                     let sidecarURL = profileEntry.appendingPathExtension("profile-local")
+                    // Note: fileExists(atPath:) returns false for dangling symlinks. We never
+                    // create dangling symlinks, so this is unlikely, but edge case documented.
                     if !fm.fileExists(atPath: sidecarURL.path) {
                         do {
                             try fm.moveItem(at: profileEntry, to: sidecarURL)
