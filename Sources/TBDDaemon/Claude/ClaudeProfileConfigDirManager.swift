@@ -95,8 +95,11 @@ public struct ClaudeProfileConfigDirManager: Sendable {
             return nil  // dst absent → src can be moved whole-tree
         }
 
+        // If src has vanished between enumeration and this recursive call
+        // (rare race with another process), treat as no collision — there's
+        // nothing to merge so nothing to clash with.
         var srcIsDir: ObjCBool = false
-        _ = fm.fileExists(atPath: src.path, isDirectory: &srcIsDir)
+        guard fm.fileExists(atPath: src.path, isDirectory: &srcIsDir) else { return nil }
 
         // Type mismatch (one file, one directory) → real collision.
         if srcIsDir.boolValue != dstIsDir.boolValue {
@@ -132,7 +135,9 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         }
 
         // dst exists; pre-check guarantees it's a directory and src is too.
-        let srcEntries = (try? fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)) ?? []
+        // Use `try` (not `try?`) so a listing failure surfaces to the caller
+        // instead of producing a misleading ENOTEMPTY from `removeItem` below.
+        let srcEntries = try fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil)
         for entry in srcEntries {
             let dstEntry = dst.appendingPathComponent(entry.lastPathComponent)
             try mergeRecursive(src: entry, dst: dstEntry)
