@@ -131,6 +131,13 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                         let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
                         let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
 
+                        // projects/ is expected to contain only cwd-hash subdirectories.
+                        // Skip stray non-directory entries (e.g. a .DS_Store Finder leaves
+                        // behind) so they aren't silently deleted by removeItem in pass 2.
+                        var isCwdHashDir: ObjCBool = false
+                        guard fm.fileExists(atPath: cwdHashPath.path, isDirectory: &isCwdHashDir),
+                              isCwdHashDir.boolValue else { continue }
+
                         // If host doesn't have this cwd-hash dir, no collision possible.
                         guard fm.fileExists(atPath: hostCwdHashPath.path) else { continue }
 
@@ -157,6 +164,12 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     for entry in entries {
                         let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
                         let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
+
+                        // Same directory-only guard as pass 1 — skip stray files so
+                        // removeItem can't silently destroy them.
+                        var isCwdHashDir: ObjCBool = false
+                        guard fm.fileExists(atPath: cwdHashPath.path, isDirectory: &isCwdHashDir),
+                              isCwdHashDir.boolValue else { continue }
 
                         if fm.fileExists(atPath: hostCwdHashPath.path) {
                             // Host has this cwd-hash dir. Migrate files individually.

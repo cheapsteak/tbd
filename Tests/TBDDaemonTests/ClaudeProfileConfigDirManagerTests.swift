@@ -245,7 +245,7 @@ struct ClaudeProfileConfigDirManagerTests {
 
     // MARK: - host mirror slots
 
-    @Test("AC1.1 / AC1.2: symlink dir and file host slots after ensureOAuthDir and ensureAPIKeyDir")
+    @Test("shared-claude-projects.AC1.1/AC1.2: symlink dir and file host slots after ensureOAuthDir and ensureAPIKeyDir")
     func hostMirrorSymlinksOAuthAndAPIKey() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
@@ -288,7 +288,7 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect((try? fm.destinationOfSymbolicLink(atPath: claudeLink.path)) != nil)
     }
 
-    @Test("AC1.3: skip host slot if not present on host")
+    @Test("shared-claude-projects.AC1.3: skip host slot if not present on host")
     func hostMirrorSkipsAbsentSlot() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
