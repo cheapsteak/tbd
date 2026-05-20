@@ -135,7 +135,8 @@ public struct ClaudeProfileConfigDirManager: Sendable {
 
                         // projects/ is expected to contain only cwd-hash subdirectories.
                         // Skip stray non-directory entries (e.g. a .DS_Store Finder leaves
-                        // behind) so they aren't silently deleted by removeItem in pass 2.
+                        // behind) for the collision scan — they get swept explicitly before
+                        // the final removeItem below.
                         var isCwdHashDir: ObjCBool = false
                         guard fm.fileExists(atPath: cwdHashPath.path, isDirectory: &isCwdHashDir),
                               isCwdHashDir.boolValue else { continue }
@@ -167,8 +168,8 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                         let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
                         let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
 
-                        // Same directory-only guard as pass 1 — skip stray files so
-                        // removeItem can't silently destroy them.
+                        // Same directory-only guard as pass 1 — stray files are handled
+                        // explicitly in the sweep below.
                         var isCwdHashDir: ObjCBool = false
                         guard fm.fileExists(atPath: cwdHashPath.path, isDirectory: &isCwdHashDir),
                               isCwdHashDir.boolValue else { continue }
@@ -186,6 +187,16 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                             // Host doesn't have this cwd-hash dir. Move the whole directory.
                             try fm.moveItem(at: cwdHashPath, to: hostCwdHashPath)
                         }
+                    }
+
+                    // Sweep any stray non-directory entries left behind by the
+                    // pass 1/2 guards (e.g. a .DS_Store). removeItem(at:) on the
+                    // parent would delete them recursively without a log trail
+                    // — do it explicitly here so the destruction is observable.
+                    let leftover = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
+                    for stray in leftover {
+                        logger.debug("removing stray entry \(stray.lastPathComponent, privacy: .public) from profile projects/ during migration")
+                        try? fm.removeItem(at: stray)
                     }
                     try fm.removeItem(at: profileEntry)
                 } catch {
