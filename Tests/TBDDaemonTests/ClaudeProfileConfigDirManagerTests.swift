@@ -11,6 +11,11 @@ struct ClaudeProfileConfigDirManagerTests {
             .appendingPathComponent("tbd-profile-cfg-test-\(UUID().uuidString)", isDirectory: true)
     }
 
+    private func tempHostBase() -> URL {
+        URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-host-cfg-test-\(UUID().uuidString)", isDirectory: true)
+    }
+
     // MARK: - approvalToken
 
     @Test("approval token is last 20 chars of api key")
@@ -236,5 +241,305 @@ struct ClaudeProfileConfigDirManagerTests {
             awsProfile: nil
         )
         #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
+    }
+
+    // MARK: - host mirror slots
+
+    @Test("AC1.1 / AC1.2: symlink dir and file host slots after ensureOAuthDir and ensureAPIKeyDir")
+    func hostMirrorSymlinksOAuthAndAPIKey() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create host slots: plugins (dir) and CLAUDE.md (file)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+        try "# Host CLAUDE.md".write(to: tempHost.appendingPathComponent("CLAUDE.md"), atomically: true, encoding: .utf8)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+
+        // Test ensureOAuthDir
+        let oauthDir = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Check plugins symlink
+        let pluginsLink = oauthDir.appendingPathComponent("plugins")
+        let pluginsDest = try fm.destinationOfSymbolicLink(atPath: pluginsLink.path)
+        let pluginsResolved = URL(fileURLWithPath: pluginsDest, relativeTo: pluginsLink.deletingLastPathComponent()).standardizedFileURL
+        #expect(pluginsResolved == tempHost.appendingPathComponent("plugins").standardizedFileURL)
+
+        // Check CLAUDE.md symlink
+        let claudeLink = oauthDir.appendingPathComponent("CLAUDE.md")
+        let claudeDest = try fm.destinationOfSymbolicLink(atPath: claudeLink.path)
+        let claudeResolved = URL(fileURLWithPath: claudeDest, relativeTo: claudeLink.deletingLastPathComponent()).standardizedFileURL
+        #expect(claudeResolved == tempHost.appendingPathComponent("CLAUDE.md").standardizedFileURL)
+
+        // Test ensureAPIKeyDir with same profile
+        let apiKey = "sk-ant-test-AAAAAAAAAAAAAAAAAAAAAAAAA-LASTTWENTYCHARSXXX1"
+        _ = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
+
+        // Symlinks should still be there
+        #expect((try? fm.destinationOfSymbolicLink(atPath: pluginsLink.path)) != nil)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: claudeLink.path)) != nil)
+    }
+
+    @Test("AC1.3: skip host slot if not present on host")
+    func hostMirrorSkipsAbsentSlot() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create only plugins; skills is absent
+        try fm.createDirectory(at: tempHost.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+
+        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // plugins should be symlinked
+        #expect((try? fm.destinationOfSymbolicLink(atPath: dir.appendingPathComponent("plugins").path)) != nil)
+
+        // skills should NOT exist
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("skills").path))
+    }
+
+    @Test("AC2.1: idempotent — calling ensureOAuthDir twice leaves symlink intact")
+    func hostMirrorIdempotentOAuth() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+
+        let dir1 = try manager.ensureOAuthDir(forProfileID: profileID)
+        let pluginsLink = dir1.appendingPathComponent("plugins")
+        let dest1 = try fm.destinationOfSymbolicLink(atPath: pluginsLink.path)
+
+        let dir2 = try manager.ensureOAuthDir(forProfileID: profileID)
+        let dest2 = try fm.destinationOfSymbolicLink(atPath: pluginsLink.path)
+
+        #expect(dir1 == dir2)
+        #expect(dest1 == dest2)
+    }
+
+    @Test("AC3.1: migrate projects directory content to host before symlinking")
+    func hostMirrorMigrateProjectsDir() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects", isDirectory: true), withIntermediateDirectories: true)
+
+        // Pre-create profile projects dir with content
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let projectsDir = profileClaudeDir.appendingPathComponent("projects")
+        try fm.createDirectory(at: projectsDir.appendingPathComponent("-Users-test-cwd", isDirectory: true), withIntermediateDirectories: true)
+        let sessionFile = projectsDir.appendingPathComponent("-Users-test-cwd/sess-1.jsonl")
+        try "PROFILE CONTENT".write(to: sessionFile, atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify profile projects is now a symlink
+        #expect((try? fm.destinationOfSymbolicLink(atPath: projectsDir.path)) != nil)
+
+        // Verify content was migrated to host
+        let hostSessionFile = tempHost.appendingPathComponent("projects/-Users-test-cwd/sess-1.jsonl")
+        #expect(fm.fileExists(atPath: hostSessionFile.path))
+        let migrated = try String(contentsOf: hostSessionFile, encoding: .utf8)
+        #expect(migrated == "PROFILE CONTENT")
+    }
+
+    @Test("AC3.2: collision skip during projects migration")
+    func hostMirrorProjectsMigrationCollisionSkip() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create host projects with a collision file
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-Users-test-cwd", isDirectory: true), withIntermediateDirectories: true)
+        let hostFile = tempHost.appendingPathComponent("projects/-Users-test-cwd/sess-X.jsonl")
+        try "HOST".write(to: hostFile, atomically: true, encoding: .utf8)
+
+        // Pre-create profile projects with same file (should not overwrite)
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileProjectsDir = profileClaudeDir.appendingPathComponent("projects/-Users-test-cwd", isDirectory: true)
+        try fm.createDirectory(at: profileProjectsDir, withIntermediateDirectories: true)
+        let profileFile = profileClaudeDir.appendingPathComponent("projects/-Users-test-cwd/sess-X.jsonl")
+        try "PROFILE".write(to: profileFile, atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Host file should still contain "HOST"
+        let hostContent = try String(contentsOf: hostFile, encoding: .utf8)
+        #expect(hostContent == "HOST")
+    }
+
+    @Test("AC3.3a: non-projects directory with content is left alone")
+    func hostMirrorNonProjectsDirWithContent() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+
+        // Pre-create profile plugins with content
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profilePlugins = profileClaudeDir.appendingPathComponent("plugins")
+        try fm.createDirectory(at: profilePlugins, withIntermediateDirectories: true)
+        try "plugin content".write(to: profilePlugins.appendingPathComponent("foo.txt"), atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Profile plugins should still be a real directory (NOT symlink)
+        var isDir: ObjCBool = false
+        #expect(fm.fileExists(atPath: profilePlugins.path, isDirectory: &isDir))
+        #expect(isDir.boolValue)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profilePlugins.path)) == nil)
+
+        // Content should still be there
+        #expect(fm.fileExists(atPath: profilePlugins.appendingPathComponent("foo.txt").path))
+    }
+
+    @Test("AC3.3b: non-projects empty directory is replaced with symlink")
+    func hostMirrorNonProjectsEmptyDir() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+
+        // Pre-create empty profile plugins dir
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profilePlugins = profileClaudeDir.appendingPathComponent("plugins")
+        try fm.createDirectory(at: profilePlugins, withIntermediateDirectories: true)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Profile plugins should now be a symlink
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profilePlugins.path)) != nil)
+    }
+
+    @Test("AC3.3c: non-projects file is left alone")
+    func hostMirrorNonProjectsFile() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        try "# Host CLAUDE.md".write(to: tempHost.appendingPathComponent("CLAUDE.md"), atomically: true, encoding: .utf8)
+
+        // Pre-create profile CLAUDE.md with different content
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileClaudeFile = profileClaudeDir.appendingPathComponent("CLAUDE.md")
+        try "# Profile CLAUDE.md".write(to: profileClaudeFile, atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Profile file should still exist with original content (NOT symlink)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileClaudeFile.path)) == nil)
+        let content = try String(contentsOf: profileClaudeFile, encoding: .utf8)
+        #expect(content == "# Profile CLAUDE.md")
+    }
+
+    @Test("AC3.3c variant: symlink with wrong target is left alone")
+    func hostMirrorSymlinkWrongTarget() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+
+        // Pre-create profile plugins as a symlink to a junk dir
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let junkDir = profileClaudeDir.appendingPathComponent("junk-plugins", isDirectory: true)
+        try fm.createDirectory(at: junkDir, withIntermediateDirectories: true)
+        let profilePlugins = profileClaudeDir.appendingPathComponent("plugins")
+        try fm.createSymbolicLink(at: profilePlugins, withDestinationURL: junkDir)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Profile plugins symlink should still point to junk (unchanged)
+        let dest = try fm.destinationOfSymbolicLink(atPath: profilePlugins.path)
+        #expect(dest.contains("junk-plugins"))
     }
 }
