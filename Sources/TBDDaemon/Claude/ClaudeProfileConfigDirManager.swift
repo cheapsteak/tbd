@@ -12,7 +12,8 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claudeProfil
 /// Each profile dir mirrors customization slots from the host's `~/.claude/`
 /// directory via symlinks: `projects/`, `plugins/`, `skills/`, `agents/`,
 /// `commands/`, `hooks/`, `CLAUDE.md`, and `settings.json`. Per-profile identity
-/// (`.claude.json` and Keychain entry keyed on `CLAUDE_CONFIG_DIR` path) is
+/// (`.claude.json`, Keychain entry keyed on `CLAUDE_CONFIG_DIR` path, and
+/// `.credentials.json` as a fallback when Keychain is unavailable) is
 /// owned by each profile. The `apiKeyHelper` mode uses the profile's Keychain
 /// entry as a bridge; do not store API keys outside the per-profile context.
 ///
@@ -36,9 +37,18 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         // Xcode 26.3 unsafeMutableAddressor link-failure rationale.
         self.baseDirectory = baseDirectory
             ?? TBDConstants.configDir.appendingPathComponent("profiles", isDirectory: true)
-        self.hostBaseDirectory = hostBaseDirectory
-            ?? FileManager.default.homeDirectoryForCurrentUser
+
+        // Honor TBD_CLAUDE_HOST_HOME env var (e.g., for test isolation, matching
+        // the TBD_HOME pattern used by TBDConstants). Falls back to ~/.claude/
+        // in production.
+        if let override = hostBaseDirectory {
+            self.hostBaseDirectory = override
+        } else if let envOverride = ProcessInfo.processInfo.environment["TBD_CLAUDE_HOST_HOME"], !envOverride.isEmpty {
+            self.hostBaseDirectory = URL(fileURLWithPath: envOverride, isDirectory: true)
+        } else {
+            self.hostBaseDirectory = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".claude", isDirectory: true)
+        }
     }
 
     public func profileDirectory(forProfileID profileID: UUID) -> URL {
@@ -86,8 +96,8 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         // leave it and log (don't fight an owner we don't recognize).
         if let dest = try? fm.destinationOfSymbolicLink(atPath: profileEntry.path) {
             let resolved = URL(fileURLWithPath: dest, relativeTo: profileEntry.deletingLastPathComponent())
-                .standardizedFileURL
-            if resolved == hostEntry.standardizedFileURL { return }
+                .resolvingSymlinksInPath()
+            if resolved == hostEntry.resolvingSymlinksInPath() { return }
             logger.warning("mirror slot \(name, privacy: .public) symlink for profile points elsewhere; leaving as-is")
             return
         }
@@ -133,10 +143,18 @@ public struct ClaudeProfileConfigDirManager: Sendable {
             }
         }
 
-        // Create the symlink. Best-effort.
+        // Create the symlink. Best-effort; on EEXIST race (concurrent winner),
+        // verify idempotency before logging a warning.
         do {
             try fm.createSymbolicLink(at: profileEntry, withDestinationURL: hostEntry)
         } catch {
+            // If entry now exists and is a symlink to the correct target,
+            // treat as idempotent success. Otherwise log and return.
+            if let dest = try? fm.destinationOfSymbolicLink(atPath: profileEntry.path) {
+                let resolved = URL(fileURLWithPath: dest, relativeTo: profileEntry.deletingLastPathComponent())
+                    .resolvingSymlinksInPath()
+                if resolved == hostEntry.resolvingSymlinksInPath() { return }
+            }
             logger.warning("failed creating mirror symlink for \(name, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }

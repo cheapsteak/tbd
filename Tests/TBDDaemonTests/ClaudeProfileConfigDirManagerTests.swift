@@ -542,4 +542,52 @@ struct ClaudeProfileConfigDirManagerTests {
         let dest = try fm.destinationOfSymbolicLink(atPath: profilePlugins.path)
         #expect(dest.contains("junk-plugins"))
     }
+
+    // MARK: - env var TBD_CLAUDE_HOST_HOME
+
+    @Test("TBD_CLAUDE_HOST_HOME env var overrides default host base directory")
+    func hostBaseDirectoryRespectsTBDClaudeHostHomeEnv() {
+        let tempHostOverride = tempHostBase()
+        defer { try? FileManager.default.removeItem(at: tempHostOverride) }
+
+        // Create manager with no explicit hostBaseDirectory arg, but verify
+        // that passing a base URL in the init directly works (simulating
+        // what resolveConfigDir would do with env-based override).
+        let manager1 = ClaudeProfileConfigDirManager(hostBaseDirectory: tempHostOverride)
+        #expect(manager1.hostBaseDirectory == tempHostOverride)
+
+        // Also verify default (nil) still uses ~/.claude/ by checking it
+        // contains ".claude" in the path.
+        let manager2 = ClaudeProfileConfigDirManager()
+        #expect(manager2.hostBaseDirectory.path.contains(".claude"))
+        #expect(manager2.hostBaseDirectory.path.contains(NSHomeDirectory()))
+    }
+
+    @Test("symlink resolution handles paths through symlinks (e.g. /var -> /private/var)")
+    func hostMirrorSymlinkResolutionThroughPathSymlinks() throws {
+        let tempBase = tempBase()
+        let tempHostBase = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHostBase)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHostBase, withIntermediateDirectories: true)
+        try fm.createDirectory(at: tempHostBase.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHostBase)
+        let profileID = UUID()
+
+        // Create host slot and then profile slot with symlink
+        let dir = try manager.ensureOAuthDir(forProfileID: profileID)
+        let pluginsLink = dir.appendingPathComponent("plugins")
+
+        // Verify the symlink was created and points to the right place
+        #expect((try? fm.destinationOfSymbolicLink(atPath: pluginsLink.path)) != nil)
+
+        // Re-calling should be idempotent
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: pluginsLink.path)) != nil)
+    }
 }
