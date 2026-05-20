@@ -113,13 +113,22 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     // succeeding, but be defensive on race / non-dir).
                     try fm.createDirectory(at: hostEntry, withIntermediateDirectories: true)
                     let entries = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
+                    var anySkipped = false
                     for entry in entries {
                         let dest = hostEntry.appendingPathComponent(entry.lastPathComponent)
                         if fm.fileExists(atPath: dest.path) {
                             logger.debug("collision migrating \(entry.lastPathComponent, privacy: .public) into \(name, privacy: .public); skipping")
+                            anySkipped = true
                             continue
                         }
                         try fm.moveItem(at: entry, to: dest)
+                    }
+                    // Only remove profile-side dir if all entries were successfully migrated.
+                    // If any were skipped due to collision, preserve the profile dir to avoid
+                    // data loss (profile-unique sessions in the skipped dirs are still there).
+                    if anySkipped {
+                        logger.warning("projects migration incomplete for profile due to collisions; symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
+                        return
                     }
                     try fm.removeItem(at: profileEntry)
                 } catch {
@@ -233,6 +242,10 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// `customApiKeyResponses` is written. The user will `/login` once into
     /// this isolated config dir, and the credential persists in the Keychain
     /// entry derived from the `CLAUDE_CONFIG_DIR` path.
+    ///
+    /// Host mirror slots are always ensured, regardless of whether `.claude.json`
+    /// already existed. This is critical for profiles created before mirror support
+    /// was added; without this, they would never get their symlinked customizations.
     @discardableResult
     public func ensureOAuthDir(forProfileID profileID: UUID) throws -> URL {
         let dir = configDirectory(forProfileID: profileID)
@@ -243,15 +256,17 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         // If `.claude.json` already exists, leave it untouched.
         if FileManager.default.fileExists(atPath: claudeJSONPath.path) {
             logger.debug("claude config dir exists at \(dir.path, privacy: .public) for oauth profile \(profileID, privacy: .public); skipping .claude.json")
-            return dir
+        } else {
+            let payload: [String: Any] = [
+                "hasCompletedOnboarding": true,
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: claudeJSONPath, options: [.atomic])
         }
 
-        let payload: [String: Any] = [
-            "hasCompletedOnboarding": true,
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: claudeJSONPath, options: [.atomic])
-
+        // Always ensure host mirrors, even if .claude.json already existed.
+        // Profiles created before mirror support was added must get their
+        // symlinks set up on subsequent calls.
         ensureHostMirrors(in: dir)
 
         logger.debug("ensured claude config dir at \(dir.path, privacy: .public) for oauth profile \(profileID, privacy: .public)")

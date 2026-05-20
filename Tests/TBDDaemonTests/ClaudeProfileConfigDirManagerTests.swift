@@ -342,6 +342,46 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(dest1 == dest2)
     }
 
+    @Test("Issue 1 regression: ensureOAuthDir sets up mirrors when .claude.json already exists")
+    func ensureOAuthDirSetsUpMirrorsWhenClaudeJSONAlreadyExists() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create host plugins so there's a slot to mirror
+        try fm.createDirectory(at: tempHost.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+
+        // Pre-create profile dir with existing .claude.json (simulating a profile
+        // created before mirror support was added)
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let claudeJSONPath = profileClaudeDir.appendingPathComponent(".claude.json")
+        let existingJSON: [String: Any] = ["hasCompletedOnboarding": true]
+        let existingData = try JSONSerialization.data(withJSONObject: existingJSON, options: [.prettyPrinted, .sortedKeys])
+        try existingData.write(to: claudeJSONPath, options: [.atomic])
+
+        // Call ensureOAuthDir on a profile that already has .claude.json
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Assert that plugins symlink was created (the early-return bug would skip this)
+        let pluginsLink = profileClaudeDir.appendingPathComponent("plugins")
+        #expect((try? fm.destinationOfSymbolicLink(atPath: pluginsLink.path)) != nil)
+
+        // Verify the symlink points to the host plugins
+        let dest = try fm.destinationOfSymbolicLink(atPath: pluginsLink.path)
+        let resolved = URL(fileURLWithPath: dest, relativeTo: pluginsLink.deletingLastPathComponent()).standardizedFileURL
+        #expect(resolved == tempHost.appendingPathComponent("plugins").standardizedFileURL)
+    }
+
     @Test("AC3.1: migrate projects directory content to host before symlinking")
     func hostMirrorMigrateProjectsDir() throws {
         let tempBase = tempBase()
@@ -396,7 +436,9 @@ struct ClaudeProfileConfigDirManagerTests {
         let hostFile = tempHost.appendingPathComponent("projects/-Users-test-cwd/sess-X.jsonl")
         try "HOST".write(to: hostFile, atomically: true, encoding: .utf8)
 
-        // Pre-create profile projects with same file (should not overwrite)
+        // Pre-create profile projects with same cwd-hash dir but different session files:
+        // - sess-X.jsonl (collides with host, should not be migrated)
+        // - profile-unique-sess.jsonl (unique to profile, should be preserved)
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
         let profileID = UUID()
         let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
@@ -406,13 +448,22 @@ struct ClaudeProfileConfigDirManagerTests {
         try fm.createDirectory(at: profileProjectsDir, withIntermediateDirectories: true)
         let profileFile = profileClaudeDir.appendingPathComponent("projects/-Users-test-cwd/sess-X.jsonl")
         try "PROFILE".write(to: profileFile, atomically: true, encoding: .utf8)
+        let profileUniqueFile = profileClaudeDir.appendingPathComponent("projects/-Users-test-cwd/profile-unique-sess.jsonl")
+        try "PROFILE UNIQUE".write(to: profileUniqueFile, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
         _ = try manager.ensureOAuthDir(forProfileID: profileID)
 
-        // Host file should still contain "HOST"
+        // Host file should still contain "HOST" (collision not overwritten)
         let hostContent = try String(contentsOf: hostFile, encoding: .utf8)
         #expect(hostContent == "HOST")
+
+        // Issue 2 regression: Profile-unique session file should still exist.
+        // When a collision occurs, the profile-side projects/ dir is preserved
+        // (not deleted), so the unique session is not lost.
+        #expect(fm.fileExists(atPath: profileUniqueFile.path), "profile-unique session was destroyed during migration collision")
+        let profileUniqueContent = try String(contentsOf: profileUniqueFile, encoding: .utf8)
+        #expect(profileUniqueContent == "PROFILE UNIQUE")
     }
 
     @Test("AC3.3a: non-projects directory with content is left alone")
