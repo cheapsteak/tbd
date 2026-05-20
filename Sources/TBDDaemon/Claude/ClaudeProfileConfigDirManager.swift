@@ -79,6 +79,15 @@ public struct ClaudeProfileConfigDirManager: Sendable {
 
     /// Ensure one host-mirror slot is a symlink from the profile dir into the
     /// host base. Best-effort: filesystem errors are logged and swallowed.
+    ///
+    /// For `projects/` (migrateContent=true), performs file-level collision detection
+    /// by recursing one directory deep into cwd-hash directories. Cwd-hash directories
+    /// with disjoint session files are merged into the host store; only actual file
+    /// collisions abort the migration.
+    ///
+    /// For other slots (migrateContent=false) with real content, the content is moved
+    /// to a `<slot>.profile-local` sidecar, allowing the symlink to be created and the
+    /// profile to access host customizations.
     private func ensureMirrorSlot(
         _ name: String,
         in profileClaudeDir: URL,
@@ -106,30 +115,59 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: profileEntry.path, isDirectory: &isDir) {
             if isDir.boolValue, migrateContent {
-                // projects/ special-case: merge content into host store, then
-                // remove the profile-side dir and proceed to symlink.
+                // projects/ special-case: file-level collision detection with one-level recursion.
                 do {
-                    // Ensure host dir exists (created above by fileExists check
-                    // succeeding, but be defensive on race / non-dir).
                     try fm.createDirectory(at: hostEntry, withIntermediateDirectories: true)
                     let entries = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
 
-                    // Two-pass approach: first check if any entries would collide with host.
-                    // If any collision exists, abort the entire migration to preserve atomicity.
-                    // This ensures that if we can't migrate everything, we don't partially move
-                    // entries and orphan sessions.
-                    let hasCollision = entries.contains { entry in
-                        fm.fileExists(atPath: hostEntry.appendingPathComponent(entry.lastPathComponent).path)
+                    // Pass 1: Collision scan at file level. For each top-level cwd-hash entry,
+                    // check if it exists on host and if so, scan for file collisions inside.
+                    var hasCollision = false
+                    var collidingFileName: String?
+                    for entry in entries {
+                        let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
+                        let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
+
+                        // If host doesn't have this cwd-hash dir, no collision possible.
+                        guard fm.fileExists(atPath: hostCwdHashPath.path) else { continue }
+
+                        // Host has this cwd-hash dir. Check for file-level collisions inside.
+                        let profileFiles = (try? fm.contentsOfDirectory(at: cwdHashPath, includingPropertiesForKeys: nil)) ?? []
+                        for profileFile in profileFiles {
+                            let hostFilePath = hostCwdHashPath.appendingPathComponent(profileFile.lastPathComponent)
+                            if fm.fileExists(atPath: hostFilePath.path) {
+                                hasCollision = true
+                                collidingFileName = profileFile.lastPathComponent
+                                break
+                            }
+                        }
+                        if hasCollision { break }
                     }
+
                     if hasCollision {
-                        logger.warning("projects migration incomplete for profile due to collisions; symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
+                        let collisionDesc = collidingFileName.map { " (\($0))" } ?? ""
+                        logger.warning("projects migration incomplete for profile due to file collision\(collisionDesc); symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
                         return
                     }
 
-                    // No collisions detected; safe to move all entries.
+                    // Pass 2: No collisions detected; safe to migrate all entries.
                     for entry in entries {
-                        let dest = hostEntry.appendingPathComponent(entry.lastPathComponent)
-                        try fm.moveItem(at: entry, to: dest)
+                        let cwdHashPath = profileEntry.appendingPathComponent(entry.lastPathComponent)
+                        let hostCwdHashPath = hostEntry.appendingPathComponent(entry.lastPathComponent)
+
+                        if fm.fileExists(atPath: hostCwdHashPath.path) {
+                            // Host has this cwd-hash dir. Migrate files individually.
+                            let profileFiles = (try? fm.contentsOfDirectory(at: cwdHashPath, includingPropertiesForKeys: nil)) ?? []
+                            for profileFile in profileFiles {
+                                let srcPath = cwdHashPath.appendingPathComponent(profileFile.lastPathComponent)
+                                let destPath = hostCwdHashPath.appendingPathComponent(profileFile.lastPathComponent)
+                                try fm.moveItem(at: srcPath, to: destPath)
+                            }
+                            try fm.removeItem(at: cwdHashPath)
+                        } else {
+                            // Host doesn't have this cwd-hash dir. Move the whole directory.
+                            try fm.moveItem(at: cwdHashPath, to: hostCwdHashPath)
+                        }
                     }
                     try fm.removeItem(at: profileEntry)
                 } catch {
@@ -137,19 +175,40 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     return
                 }
             } else if isDir.boolValue {
-                // Non-projects directory in profile: replace only if empty.
+                // Non-projects directory in profile: move to sidecar if non-empty, otherwise remove.
                 let entries = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
                 if entries.isEmpty {
                     try? fm.removeItem(at: profileEntry)
                 } else {
-                    logger.warning("profile has real \(name, privacy: .public)/ with content; leaving as-is")
-                    return
+                    // Non-empty directory: rename to sidecar if it doesn't already exist.
+                    let sidecarURL = profileEntry.appendingPathExtension("profile-local")
+                    if !fm.fileExists(atPath: sidecarURL.path) {
+                        do {
+                            try fm.moveItem(at: profileEntry, to: sidecarURL)
+                            logger.warning("profile has real \(name, privacy: .public)/ with content; moved to \(sidecarURL.lastPathComponent, privacy: .public)")
+                        } catch {
+                            logger.warning("failed moving \(name, privacy: .public)/ to sidecar: \(error.localizedDescription, privacy: .public)")
+                            return
+                        }
+                    } else {
+                        logger.debug("profile has real \(name, privacy: .public)/ with content and sidecar already exists; skipping rename")
+                    }
                 }
             } else {
                 // Real file (e.g. profile-side settings.json or CLAUDE.md).
-                // Don't destroy user content; leave alone.
-                logger.warning("profile has real \(name, privacy: .public) file; leaving as-is")
-                return
+                // Move to sidecar if it doesn't already exist.
+                let sidecarURL = profileEntry.appendingPathExtension("profile-local")
+                if !fm.fileExists(atPath: sidecarURL.path) {
+                    do {
+                        try fm.moveItem(at: profileEntry, to: sidecarURL)
+                        logger.warning("profile has real \(name, privacy: .public) file; moved to \(sidecarURL.lastPathComponent, privacy: .public)")
+                    } catch {
+                        logger.warning("failed moving \(name, privacy: .public) file to sidecar: \(error.localizedDescription, privacy: .public)")
+                        return
+                    }
+                } else {
+                    logger.debug("profile has real \(name, privacy: .public) file and sidecar already exists; skipping rename")
+                }
             }
         }
 
