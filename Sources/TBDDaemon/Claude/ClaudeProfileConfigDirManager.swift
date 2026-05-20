@@ -63,9 +63,11 @@ public struct ClaudeProfileConfigDirManager: Sendable {
 
     /// Slots that each TBD profile dir mirrors from the host's claude config dir.
     /// Symlinked from <profile>/claude/<slot> to <host-base>/<slot>.
-    /// `projects` is special: pre-existing real-dir content is migrated into
-    /// the host store before symlinking. Every other slot is left alone if it
-    /// already exists as a non-empty real file or directory.
+    /// `projects` migrates pre-existing real-dir content into the host store
+    /// before symlinking (file-level collision check; atomic abort). Every other
+    /// slot with pre-existing real content is moved to `<slot>.profile-local`
+    /// as a sidecar before the symlink is created — see `ensureMirrorSlot` for
+    /// the full per-slot policy.
     private static let mirrorSlots: [String] = [
         "projects",
         "plugins",
