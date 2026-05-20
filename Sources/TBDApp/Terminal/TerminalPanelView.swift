@@ -175,6 +175,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.tmuxBridge = tmuxBridge
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
+        context.coordinator.appState = appState
         context.coordinator.onDeadWindow = onDeadWindow
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
 
@@ -216,6 +217,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         appState.snapshotProviders[captureID] = { [weak tv] in
             tv?.captureScreenshot()
         }
+        appState.registerTerminalView(tv, for: terminalID)
 
         return tv
     }
@@ -225,6 +227,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
+        coordinator.appState?.unregisterTerminalView(nsView, for: coordinator.panelID)
         coordinator.cleanup()
     }
 
@@ -236,6 +239,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
 
     final class Coordinator: NSObject, TerminalViewDelegate, LocalProcessDelegate, @unchecked Sendable {
         weak var terminalView: TerminalView?
+        weak var appState: AppState?
         var tmuxBridge: TmuxBridge?
         var tmuxServer: String = ""
         var panelID: UUID = UUID()
