@@ -46,6 +46,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// If the dir already exists but `.claude.json` is missing or doesn't yet
     /// include the approval for this key, the file is rewritten with the
     /// correct content. Existing approvals for other keys are preserved.
+    /// All unknown top-level keys in the existing `.claude.json` are preserved.
     @discardableResult
     public func ensureAPIKeyDir(forProfileID profileID: UUID, apiKey: String) throws -> URL {
         let dir = configDirectory(forProfileID: profileID)
@@ -57,6 +58,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         var approved: [String] = []
         var rejected: [String] = []
         var hasOnboarding = true
+        var unknownKeys: [String: Any] = [:]
 
         if let existing = try? Data(contentsOf: claudeJSONPath),
            let parsed = try? JSONSerialization.jsonObject(with: existing) as? [String: Any] {
@@ -65,19 +67,26 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                 rejected = (responses["rejected"] as? [String]) ?? []
             }
             hasOnboarding = (parsed["hasCompletedOnboarding"] as? Bool) ?? true
+
+            // Preserve all unknown top-level keys from the existing file.
+            for (key, value) in parsed {
+                if key != "customApiKeyResponses" && key != "hasCompletedOnboarding" {
+                    unknownKeys[key] = value
+                }
+            }
         }
 
         if !approved.contains(approvalToken) {
             approved.append(approvalToken)
         }
 
-        let payload: [String: Any] = [
-            "customApiKeyResponses": [
-                "approved": approved,
-                "rejected": rejected,
-            ],
-            "hasCompletedOnboarding": hasOnboarding,
+        var payload: [String: Any] = unknownKeys
+        payload["customApiKeyResponses"] = [
+            "approved": approved,
+            "rejected": rejected,
         ]
+        payload["hasCompletedOnboarding"] = hasOnboarding
+
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: claudeJSONPath, options: [.atomic])
 

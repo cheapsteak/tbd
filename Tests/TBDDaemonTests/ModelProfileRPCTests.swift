@@ -303,8 +303,12 @@ struct ModelProfileRPCTests {
     @Test("delete clears global default + keychain + usage")
     func deleteClearsDefault() async throws {
         let (router, db, _) = makeRouter()
-        let tok = try await db.modelProfiles.create(name: "Solo", kind: .oauth)
-        try ModelProfileKeychain.store(id: tok.id.uuidString, token: "value")
+        defer { Task { await cleanupKeychain(db) } }
+
+        // Use an API-key profile (the only kind that stores keychain entries)
+        let tok = try await db.modelProfiles.create(name: "Solo", kind: .apiKey)
+        let token = freshToken(Self.apiPrefix)
+        try ModelProfileKeychain.store(id: tok.id.uuidString, token: token)
         try await db.modelProfileUsage.upsert(ModelProfileUsage(profileID: tok.id, fetchedAt: Date()))
         try await db.config.setDefaultProfileID(tok.id)
 

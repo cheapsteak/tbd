@@ -159,16 +159,18 @@ extension RPCRouter {
         // DB row deletion is the source of truth — don't fail the RPC if the
         // on-disk secret file delete fails (permission, missing, disk error).
         // Log so an orphan file isn't completely silent.
-        // Bedrock profiles never wrote a Keychain entry, so skip the delete.
-        if profile.kind != .bedrock {
+        // Only API-key profiles store a Keychain entry; OAuth and Bedrock profiles do not.
+        if profile.kind == .apiKey {
             do {
                 try ModelProfileKeychain.delete(id: params.id.uuidString)
             } catch {
                 logger.warning("Failed to delete secret file for \(params.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
+        }
 
-            // Remove the per-profile config directory. Non-bedrock profiles have an
-            // isolated config dir at ~/tbd/profiles/<uuid>/; bedrock profiles do not.
+        // Remove the per-profile config directory. Non-bedrock profiles have an
+        // isolated config dir at ~/tbd/profiles/<uuid>/; bedrock profiles do not.
+        if profile.kind != .bedrock {
             do {
                 let profileDir = self.configDirManager.profileDirectory(forProfileID: params.id)
                 try FileManager.default.removeItem(at: profileDir)

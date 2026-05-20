@@ -635,10 +635,11 @@ struct AddModelProfileSheet: View {
                     appState.alertMessage = priorAlert
                     return
                 }
-                // OAuth-add returned a non-nil verification warning (e.g. 429
-                // or network error from the Anthropic usage endpoint). Show it
-                // inline and keep the sheet open — the user must acknowledge
-                // before deciding whether to keep the unverified profile.
+                // For OAuth profiles with the claudeDirect preset, warning is always nil
+                // (the server doesn't store the token or perform usage checks).
+                // For backward-compat paths with a supplied OAuth token, the warning
+                // indicates the token was not stored. Show it inline and keep the sheet
+                // open so the user can acknowledge before deciding to keep the profile.
                 if let warning {
                     errorMessage = warning
                     return

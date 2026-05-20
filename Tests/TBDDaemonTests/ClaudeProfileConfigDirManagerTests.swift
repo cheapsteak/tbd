@@ -92,6 +92,48 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(approved?.contains(String(newKey.suffix(20))) == true)
     }
 
+    @Test("ensureAPIKeyDir preserves unknown top-level keys from existing .claude.json")
+    func ensureAPIKeyDirPreservesUnknownKeys() throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: base)
+        let profileID = UUID()
+        let apiKey = "sk-ant-test-AAAAAAAAAAAAAAAAAAAAAAAAA-LASTTWENTYCHARSXXX1"
+
+        // Manually write a .claude.json with an unknown top-level key
+        let dir = manager.configDirectory(forProfileID: profileID)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let initialPayload: [String: Any] = [
+            "customApiKeyResponses": [
+                "approved": [],
+                "rejected": [],
+            ],
+            "hasCompletedOnboarding": true,
+            "someClaudeCodeKey": "value",
+            "anotherCustomKey": 42,
+        ]
+        let initialData = try JSONSerialization.data(withJSONObject: initialPayload, options: [.prettyPrinted, .sortedKeys])
+        try initialData.write(to: dir.appendingPathComponent(".claude.json"), options: [.atomic])
+
+        // Call ensureAPIKeyDir and verify unknown keys survive
+        _ = try manager.ensureAPIKeyDir(forProfileID: profileID, apiKey: apiKey)
+
+        let claudeJSON = dir.appendingPathComponent(".claude.json")
+        let finalData = try Data(contentsOf: claudeJSON)
+        let finalJson = try JSONSerialization.jsonObject(with: finalData) as? [String: Any]
+
+        // Verify TBD keys are correct
+        let responses = finalJson?["customApiKeyResponses"] as? [String: Any]
+        let approved = responses?["approved"] as? [String]
+        #expect(approved?.contains(String(apiKey.suffix(20))) == true)
+        #expect(finalJson?["hasCompletedOnboarding"] as? Bool == true)
+
+        // Verify unknown keys are preserved
+        #expect(finalJson?["someClaudeCodeKey"] as? String == "value")
+        #expect(finalJson?["anotherCustomKey"] as? Int == 42)
+    }
+
     // MARK: - ensureOAuthDir
 
     @Test("ensureOAuthDir creates the directory and writes .claude.json with hasCompletedOnboarding only")
