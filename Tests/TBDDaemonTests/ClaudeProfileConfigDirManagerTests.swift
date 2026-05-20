@@ -653,16 +653,14 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(dest.contains("junk-plugins"))
     }
 
-    // MARK: - env var TBD_CLAUDE_HOST_HOME
+    // MARK: - hostBaseDirectory constructor and default
 
-    @Test("TBD_CLAUDE_HOST_HOME env var overrides default host base directory")
-    func hostBaseDirectoryRespectsTBDClaudeHostHomeEnv() {
+    @Test("hostBaseDirectory constructor arg and default")
+    func hostBaseDirectoryConstructorArgAndDefault() {
         let tempHostOverride = tempHostBase()
         defer { try? FileManager.default.removeItem(at: tempHostOverride) }
 
-        // Create manager with no explicit hostBaseDirectory arg, but verify
-        // that passing a base URL in the init directly works (simulating
-        // what resolveConfigDir would do with env-based override).
+        // Verify that passing a base URL in the init directly works.
         let manager1 = ClaudeProfileConfigDirManager(hostBaseDirectory: tempHostOverride)
         #expect(manager1.hostBaseDirectory == tempHostOverride)
 
@@ -699,5 +697,35 @@ struct ClaudeProfileConfigDirManagerTests {
         // Re-calling should be idempotent
         _ = try manager.ensureOAuthDir(forProfileID: profileID)
         #expect((try? fm.destinationOfSymbolicLink(atPath: pluginsLink.path)) != nil)
+    }
+}
+
+/// Run env-mutating tests serialized so they don't race each other. Each test
+/// snapshots the prior env value and restores it via defer.
+@Suite("ClaudeProfileConfigDirManager env vars", .serialized)
+struct ClaudeProfileConfigDirManagerEnvVarTests {
+    private func tempHostBase() -> URL {
+        URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-host-cfg-test-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    @Test("TBD_CLAUDE_HOST_HOME env var is honored in default init")
+    func hostBaseDirectoryRespectsTBDClaudeHostHomeEnvVar() {
+        let tempHostOverride = tempHostBase()
+        defer { try? FileManager.default.removeItem(at: tempHostOverride) }
+
+        let priorValue = ProcessInfo.processInfo.environment["TBD_CLAUDE_HOST_HOME"]
+        setenv("TBD_CLAUDE_HOST_HOME", tempHostOverride.path, 1)
+        defer {
+            if let prior = priorValue {
+                setenv("TBD_CLAUDE_HOST_HOME", prior, 1)
+            } else {
+                unsetenv("TBD_CLAUDE_HOST_HOME")
+            }
+        }
+
+        let manager = ClaudeProfileConfigDirManager()
+        #expect(manager.hostBaseDirectory.resolvingSymlinksInPath()
+                == tempHostOverride.resolvingSymlinksInPath())
     }
 }

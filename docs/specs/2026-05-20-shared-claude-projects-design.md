@@ -208,9 +208,11 @@ The mirror list is:
   *real directory* (e.g. created between PR #177 merging and this follow-up
   shipping), its contents are merged into `<host-base>/projects/` before being
   replaced by the symlink.
-- **AC3.2 Success:** A `<host-base>/projects/<cwd-hash>/<id>.jsonl` that
-  already existed before the migration is NOT overwritten — collisions skip
-  rather than clobber.
+- **AC3.2 Success:** If any top-level entry (cwd-hash directory) of the
+  profile's `projects/` already exists in the host's `projects/`, the entire
+  migration is aborted and the profile-side dir is preserved intact.
+  All-or-nothing atomicity prevents partial migrations that could orphan
+  sessions across stores.
 - **AC3.3 Success:** For *non-projects* slots, if `<profile-dir>/claude/<slot>`
   already exists as a real file or non-empty real directory, it is **left in
   place** (we do not silently move user content out of profile dirs) and the
