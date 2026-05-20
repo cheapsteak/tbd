@@ -209,8 +209,21 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     }
 
                     if hasCollision {
-                        let collisionDesc = collidingPath.map { " (\($0.path))" } ?? ""
-                        logger.warning("projects migration incomplete for profile due to file collision\(collisionDesc); symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
+                        // Log the colliding entry as a path relative to the host slot root
+                        // (e.g. "-cwd-A/sub/leaf.md") rather than the absolute host path —
+                        // less noisy, and the host-slot context is already obvious from the
+                        // slot name in the message.
+                        let collisionDesc: String
+                        if let path = collidingPath {
+                            let hostPrefix = hostEntry.path + "/"
+                            let rel = path.path.hasPrefix(hostPrefix)
+                                ? String(path.path.dropFirst(hostPrefix.count))
+                                : path.path
+                            collisionDesc = " (\(rel))"
+                        } else {
+                            collisionDesc = ""
+                        }
+                        logger.warning("projects migration incomplete for profile due to file collision\(collisionDesc, privacy: .public); symlink will not be created. profile-side \(name, privacy: .public)/ dir preserved.")
                         return
                     }
 

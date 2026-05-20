@@ -880,7 +880,7 @@ struct ClaudeProfileConfigDirManagerTests {
 
     // MARK: - recursive-projects-merge.AC1: same-name directories merge by recursing
 
-    @Test("AC1.1: nested dir-vs-dir with disjoint files merges successfully")
+    @Test("recursive-projects-merge.AC1.1: nested dir-vs-dir with disjoint files merges successfully")
     func hostMirrorProjectsMigrationNestedDirMerges() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
@@ -923,7 +923,7 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBase.path)) != nil)
     }
 
-    @Test("AC1.2: empty profile-side memory/ merges (the real bug)")
+    @Test("recursive-projects-merge.AC1.2: empty profile-side memory/ merges (the real bug)")
     func hostMirrorProjectsMigrationEmptyProfileMemory() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
@@ -961,7 +961,7 @@ struct ClaudeProfileConfigDirManagerTests {
 
     // MARK: - recursive-projects-merge.AC2: real collisions still abort atomically
 
-    @Test("AC2.1: nested file-vs-file collision aborts atomically")
+    @Test("recursive-projects-merge.AC2.1: nested file-vs-file collision aborts atomically")
     func hostMirrorProjectsMigrationNestedFileCollisionAbortsAtomically() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
@@ -1018,7 +1018,7 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBase.path)) == nil)
     }
 
-    @Test("AC2.2: type-mismatch collision (directory vs file) aborts atomically")
+    @Test("recursive-projects-merge.AC2.2: type-mismatch collision (directory vs file) aborts atomically")
     func hostMirrorProjectsMigrationTypeCollisionAbortsAtomically() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
