@@ -245,7 +245,7 @@ struct ClaudeProfileConfigDirManagerTests {
 
     // MARK: - host mirror slots
 
-    @Test("AC1.1 / AC1.2: symlink dir and file host slots after ensureOAuthDir and ensureAPIKeyDir")
+    @Test("shared-claude-projects.AC1.1/AC1.2: symlink dir and file host slots after ensureOAuthDir and ensureAPIKeyDir")
     func hostMirrorSymlinksOAuthAndAPIKey() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
@@ -288,7 +288,7 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect((try? fm.destinationOfSymbolicLink(atPath: claudeLink.path)) != nil)
     }
 
-    @Test("AC1.3: skip host slot if not present on host")
+    @Test("shared-claude-projects.AC1.3: skip host slot if not present on host")
     func hostMirrorSkipsAbsentSlot() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
@@ -466,8 +466,8 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(profileUniqueContent == "PROFILE UNIQUE")
     }
 
-    @Test("AC3.2b: collision with multiple cwds aborts migration atomically")
-    func hostMirrorProjectsMigrationCollisionAbortsAtomically() throws {
+    @Test("AC1.1: overlapping cwd-hash dirs with disjoint files merge successfully")
+    func hostMirrorProjectsMigrationMergesDisjointFiles() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -478,14 +478,98 @@ struct ClaudeProfileConfigDirManagerTests {
         let fm = FileManager.default
         try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
 
-        // Pre-create host projects with cwd-hash A (collision point)
-        try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-Users-test-cwd-A", isDirectory: true), withIntermediateDirectories: true)
-        let hostFileA = tempHost.appendingPathComponent("projects/-Users-test-cwd-A/host-sess.jsonl")
-        try "HOST A".write(to: hostFileA, atomically: true, encoding: .utf8)
+        // Pre-create host projects with cwd-hash A, one session file
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-cwd-A", isDirectory: true), withIntermediateDirectories: true)
+        let hostFileA = tempHost.appendingPathComponent("projects/-cwd-A/sess-host.jsonl")
+        try "HOST".write(to: hostFileA, atomically: true, encoding: .utf8)
+
+        // Pre-create profile projects with same cwd-hash A but different session file
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileProjectsBaseDir = profileClaudeDir.appendingPathComponent("projects", isDirectory: true)
+        try fm.createDirectory(at: profileProjectsBaseDir.appendingPathComponent("-cwd-A", isDirectory: true), withIntermediateDirectories: true)
+        let profileFileA = profileProjectsBaseDir.appendingPathComponent("-cwd-A/sess-profile.jsonl")
+        try "PROFILE".write(to: profileFileA, atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify: host file still has original content (untouched)
+        let hostContent = try String(contentsOf: hostFileA, encoding: .utf8)
+        #expect(hostContent == "HOST")
+
+        // Verify: profile file was migrated to host
+        let migratedFile = tempHost.appendingPathComponent("projects/-cwd-A/sess-profile.jsonl")
+        #expect(fm.fileExists(atPath: migratedFile.path))
+        let migratedContent = try String(contentsOf: migratedFile, encoding: .utf8)
+        #expect(migratedContent == "PROFILE")
+
+        // Verify: profile projects/ is now a symlink to host
+        let profileProjectsLink = profileClaudeDir.appendingPathComponent("projects")
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsLink.path)) != nil)
+    }
+
+    @Test("AC1.2: cwd-hash dir only in profile is moved to host intact")
+    func hostMirrorProjectsMigrationMovesProfileOnlyDir() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects", isDirectory: true), withIntermediateDirectories: true)
+
+        // Pre-create profile projects with a cwd-hash dir that doesn't exist on host
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileProjectsBaseDir = profileClaudeDir.appendingPathComponent("projects", isDirectory: true)
+        try fm.createDirectory(at: profileProjectsBaseDir.appendingPathComponent("-cwd-only-profile", isDirectory: true), withIntermediateDirectories: true)
+        let profileFile = profileProjectsBaseDir.appendingPathComponent("-cwd-only-profile/sess-X.jsonl")
+        try "PROFILE ONLY".write(to: profileFile, atomically: true, encoding: .utf8)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify: profile-only dir was moved to host intact
+        let hostFile = tempHost.appendingPathComponent("projects/-cwd-only-profile/sess-X.jsonl")
+        #expect(fm.fileExists(atPath: hostFile.path))
+        let content = try String(contentsOf: hostFile, encoding: .utf8)
+        #expect(content == "PROFILE ONLY")
+
+        // Verify: profile projects/ is now a symlink
+        let profileProjectsLink = profileClaudeDir.appendingPathComponent("projects")
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsLink.path)) != nil)
+    }
+
+    @Test("AC1.3: actual file-level collision aborts migration atomically")
+    func hostMirrorProjectsMigrationFileCollisionAbortsAtomically() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+
+        // Pre-create host projects with cwd-hash A with a specific session file (collision point)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("projects/-cwd-A", isDirectory: true), withIntermediateDirectories: true)
+        let hostFileCollide = tempHost.appendingPathComponent("projects/-cwd-A/sess-collide.jsonl")
+        try "HOST".write(to: hostFileCollide, atomically: true, encoding: .utf8)
 
         // Pre-create profile projects with:
-        // - cwd-hash A (collides with host, should not be migrated)
-        // - cwd-hash B (no collision, but should NOT be migrated if A collides)
+        // - cwd-hash A with same session file (file-level collision)
+        // - cwd-hash B with unique content (should NOT be migrated due to atomic abort)
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
         let profileID = UUID()
         let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
@@ -494,39 +578,42 @@ struct ClaudeProfileConfigDirManagerTests {
         let profileProjectsBaseDir = profileClaudeDir.appendingPathComponent("projects", isDirectory: true)
         try fm.createDirectory(at: profileProjectsBaseDir, withIntermediateDirectories: true)
 
-        // Pre-create cwd-hash A (colliding side)
-        try fm.createDirectory(at: profileProjectsBaseDir.appendingPathComponent("-Users-test-cwd-A", isDirectory: true), withIntermediateDirectories: true)
-        let profileFileA = profileProjectsBaseDir.appendingPathComponent("-Users-test-cwd-A/profile-sess-A.jsonl")
-        try "PROFILE A".write(to: profileFileA, atomically: true, encoding: .utf8)
+        // cwd-hash A with collision file
+        try fm.createDirectory(at: profileProjectsBaseDir.appendingPathComponent("-cwd-A", isDirectory: true), withIntermediateDirectories: true)
+        let profileFileCollide = profileProjectsBaseDir.appendingPathComponent("-cwd-A/sess-collide.jsonl")
+        try "PROFILE".write(to: profileFileCollide, atomically: true, encoding: .utf8)
 
-        // Pre-create cwd-hash B (non-colliding side)
-        try fm.createDirectory(at: profileProjectsBaseDir.appendingPathComponent("-Users-test-cwd-B", isDirectory: true), withIntermediateDirectories: true)
-        let profileFileB = profileProjectsBaseDir.appendingPathComponent("-Users-test-cwd-B/profile-sess-B.jsonl")
-        try "PROFILE B".write(to: profileFileB, atomically: true, encoding: .utf8)
+        // cwd-hash B with clean content (but should not be migrated due to atomic abort)
+        try fm.createDirectory(at: profileProjectsBaseDir.appendingPathComponent("-cwd-B", isDirectory: true), withIntermediateDirectories: true)
+        let profileFileClean = profileProjectsBaseDir.appendingPathComponent("-cwd-B/sess-clean.jsonl")
+        try "PROFILE B".write(to: profileFileClean, atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
         _ = try manager.ensureOAuthDir(forProfileID: profileID)
 
-        // Verify: cwd-hash A (colliding) should still exist in profile, not moved
-        #expect(fm.fileExists(atPath: profileFileA.path), "colliding cwd-hash A was moved despite collision")
-        let profileContentA = try String(contentsOf: profileFileA, encoding: .utf8)
-        #expect(profileContentA == "PROFILE A")
+        // Verify: host file still has original content (collision not overwritten)
+        let hostContent = try String(contentsOf: hostFileCollide, encoding: .utf8)
+        #expect(hostContent == "HOST")
 
-        // Verify: cwd-hash B (non-colliding) should still exist in profile, NOT moved to host
-        // This is the key regression test: it ensures atomicity of the migration.
-        #expect(fm.fileExists(atPath: profileFileB.path), "non-colliding cwd-hash B was migrated despite collision in A")
-        let profileContentB = try String(contentsOf: profileFileB, encoding: .utf8)
-        #expect(profileContentB == "PROFILE B")
+        // Verify: profile collision file was NOT migrated (atomic abort)
+        #expect(fm.fileExists(atPath: profileFileCollide.path))
+        let profileContent = try String(contentsOf: profileFileCollide, encoding: .utf8)
+        #expect(profileContent == "PROFILE")
 
-        // Verify: host should NOT have received any migration from the profile
-        #expect(!fm.fileExists(atPath: tempHost.appendingPathComponent("projects/-Users-test-cwd-B").path), "cwd-hash B was migrated to host despite collision in A")
+        // Verify: profile clean file was NOT migrated (atomic abort)
+        #expect(fm.fileExists(atPath: profileFileClean.path))
+        let profileCleanContent = try String(contentsOf: profileFileClean, encoding: .utf8)
+        #expect(profileCleanContent == "PROFILE B")
+
+        // Verify: host cwd-hash B was NOT created (atomic abort)
+        #expect(!fm.fileExists(atPath: tempHost.appendingPathComponent("projects/-cwd-B").path))
 
         // Verify: profile projects/ is still a real directory (NOT a symlink)
-        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBaseDir.path)) == nil, "profile projects/ was symlinked despite collision")
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjectsBaseDir.path)) == nil)
     }
 
-    @Test("AC3.3a: non-projects directory with content is left alone")
-    func hostMirrorNonProjectsDirWithContent() throws {
+    @Test("AC2.1: non-projects directory with content gets sidecar + symlink")
+    func hostMirrorNonProjectsDirWithContentGetsSidecar() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -546,19 +633,19 @@ struct ClaudeProfileConfigDirManagerTests {
 
         let profilePlugins = profileClaudeDir.appendingPathComponent("plugins")
         try fm.createDirectory(at: profilePlugins, withIntermediateDirectories: true)
-        try "plugin content".write(to: profilePlugins.appendingPathComponent("foo.txt"), atomically: true, encoding: .utf8)
+        try "plugin content".write(to: profilePlugins.appendingPathComponent("profile-only.txt"), atomically: true, encoding: .utf8)
 
         // Call ensureOAuthDir
         _ = try manager.ensureOAuthDir(forProfileID: profileID)
 
-        // Profile plugins should still be a real directory (NOT symlink)
-        var isDir: ObjCBool = false
-        #expect(fm.fileExists(atPath: profilePlugins.path, isDirectory: &isDir))
-        #expect(isDir.boolValue)
-        #expect((try? fm.destinationOfSymbolicLink(atPath: profilePlugins.path)) == nil)
+        // Profile plugins should now be a symlink to host
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profilePlugins.path)) != nil)
 
-        // Content should still be there
-        #expect(fm.fileExists(atPath: profilePlugins.appendingPathComponent("foo.txt").path))
+        // Sidecar should exist with original content
+        let sidecar = profileClaudeDir.appendingPathComponent("plugins.profile-local")
+        #expect(fm.fileExists(atPath: sidecar.path))
+        let sidecarContent = try String(contentsOf: sidecar.appendingPathComponent("profile-only.txt"), encoding: .utf8)
+        #expect(sidecarContent == "plugin content")
     }
 
     @Test("AC3.3b: non-projects empty directory is replaced with symlink")
@@ -590,8 +677,8 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect((try? fm.destinationOfSymbolicLink(atPath: profilePlugins.path)) != nil)
     }
 
-    @Test("AC3.3c: non-projects file is left alone")
-    func hostMirrorNonProjectsFile() throws {
+    @Test("AC2.1 file variant: non-projects file gets sidecar + symlink")
+    func hostMirrorNonProjectsFileGetsSidecar() throws {
         let tempBase = tempBase()
         let tempHost = tempHostBase()
         defer {
@@ -615,10 +702,102 @@ struct ClaudeProfileConfigDirManagerTests {
         // Call ensureOAuthDir
         _ = try manager.ensureOAuthDir(forProfileID: profileID)
 
-        // Profile file should still exist with original content (NOT symlink)
-        #expect((try? fm.destinationOfSymbolicLink(atPath: profileClaudeFile.path)) == nil)
-        let content = try String(contentsOf: profileClaudeFile, encoding: .utf8)
-        #expect(content == "# Profile CLAUDE.md")
+        // Profile CLAUDE.md should now be a symlink to host
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileClaudeFile.path)) != nil)
+
+        // Sidecar should exist with original profile content
+        let sidecar = profileClaudeDir.appendingPathComponent("CLAUDE.md.profile-local")
+        #expect(fm.fileExists(atPath: sidecar.path))
+        let sidecarContent = try String(contentsOf: sidecar, encoding: .utf8)
+        #expect(sidecarContent == "# Profile CLAUDE.md")
+    }
+
+    @Test("AC2.2: pre-existing sidecar is not overwritten")
+    func hostMirrorSidecarNotOverwritten() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        try "# Host CLAUDE.md".write(to: tempHost.appendingPathComponent("CLAUDE.md"), atomically: true, encoding: .utf8)
+
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileClaudeFile = profileClaudeDir.appendingPathComponent("CLAUDE.md")
+        let sidecar = profileClaudeDir.appendingPathComponent("CLAUDE.md.profile-local")
+
+        // Run 1: Create the file and sidecar
+        try "# Profile CLAUDE.md Run 1".write(to: profileClaudeFile, atomically: true, encoding: .utf8)
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify sidecar was created with Run 1 content
+        #expect(fm.fileExists(atPath: sidecar.path))
+        var sidecarContent = try String(contentsOf: sidecar, encoding: .utf8)
+        #expect(sidecarContent == "# Profile CLAUDE.md Run 1")
+
+        // Run 2: Simulate Claude writing new content to the profile-side file
+        // (this could happen if someone edits CLAUDE.md after the first mirror, before the second)
+        // Note: String.write(to:atomically:true) uses rename(2) under the hood, which replaces
+        // the symlink with a real file rather than writing through it. So at the start of the
+        // second ensureOAuthDir, profileClaudeFile is a real file with "Run 2" content.
+        // This documents that the "skip if sidecar exists" code path is genuinely exercised.
+        try "# Profile CLAUDE.md Run 2".write(to: profileClaudeFile, atomically: true, encoding: .utf8)
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Verify full post-Run-2 state:
+        // 1. Sidecar still has Run 1 content (not overwritten)
+        sidecarContent = try String(contentsOf: sidecar, encoding: .utf8)
+        #expect(sidecarContent == "# Profile CLAUDE.md Run 1")
+
+        // 2. Profile-side CLAUDE.md is a real file (not a symlink) containing "Run 2"
+        let isSidecarSymlink = (try? fm.destinationOfSymbolicLink(atPath: profileClaudeFile.path)) != nil
+        #expect(!isSidecarSymlink, "profile-side CLAUDE.md should be a real file, not a symlink after atomic write")
+        let profileContent = try String(contentsOf: profileClaudeFile, encoding: .utf8)
+        #expect(profileContent == "# Profile CLAUDE.md Run 2")
+
+        // 3. Host CLAUDE.md is unchanged
+        let hostContent = try String(contentsOf: tempHost.appendingPathComponent("CLAUDE.md"), encoding: .utf8)
+        #expect(hostContent == "# Host CLAUDE.md")
+    }
+
+    @Test("AC2.3: empty real directory becomes symlink without sidecar")
+    func hostMirrorEmptyDirNoSidecar() throws {
+        let tempBase = tempBase()
+        let tempHost = tempHostBase()
+        defer {
+            try? FileManager.default.removeItem(at: tempBase)
+            try? FileManager.default.removeItem(at: tempHost)
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(at: tempHost, withIntermediateDirectories: true)
+        try fm.createDirectory(at: tempHost.appendingPathComponent("skills", isDirectory: true), withIntermediateDirectories: true)
+
+        // Pre-create empty profile skills dir
+        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBase, hostBaseDirectory: tempHost)
+        let profileID = UUID()
+        let profileClaudeDir = manager.configDirectory(forProfileID: profileID)
+        try fm.createDirectory(at: profileClaudeDir, withIntermediateDirectories: true)
+
+        let profileSkills = profileClaudeDir.appendingPathComponent("skills")
+        try fm.createDirectory(at: profileSkills, withIntermediateDirectories: true)
+
+        // Call ensureOAuthDir
+        _ = try manager.ensureOAuthDir(forProfileID: profileID)
+
+        // Profile skills should now be a symlink
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileSkills.path)) != nil)
+
+        // No sidecar should exist
+        let sidecar = profileClaudeDir.appendingPathComponent("skills.profile-local")
+        #expect(!fm.fileExists(atPath: sidecar.path))
     }
 
     @Test("AC3.3c variant: symlink with wrong target is left alone")

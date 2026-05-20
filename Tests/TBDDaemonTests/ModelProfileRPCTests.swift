@@ -424,7 +424,7 @@ struct ModelProfileRPCTests {
         #expect(!FileManager.default.fileExists(atPath: profileDir.path))
     }
 
-    @Test("delete preserves host mirror targets across multiple slots")
+    @Test("delete preserves host mirror targets across multiple slots and removes sidecars")
     func deletePreservesHostMirrors() async throws {
         let tempBaseDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let tempHostDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -440,6 +440,7 @@ struct ModelProfileRPCTests {
         // Pre-create host slots
         try fm.createDirectory(at: tempHostDir.appendingPathComponent("projects", isDirectory: true), withIntermediateDirectories: true)
         try fm.createDirectory(at: tempHostDir.appendingPathComponent("plugins", isDirectory: true), withIntermediateDirectories: true)
+        try "# Host CLAUDE.md".write(to: tempHostDir.appendingPathComponent("CLAUDE.md"), atomically: true, encoding: .utf8)
 
         let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir, hostBaseDirectory: tempHostDir)
         let (router, db, _) = makeRouter(configDirManager: manager)
@@ -447,6 +448,7 @@ struct ModelProfileRPCTests {
 
         // Create an OAuth profile and ensure its config dir with mirror symlinks
         let oauthProfile = try await db.modelProfiles.create(name: "OAuth", kind: .oauth)
+        let profileClaudeDir = manager.configDirectory(forProfileID: oauthProfile.id)
         _ = try manager.ensureOAuthDir(forProfileID: oauthProfile.id)
 
         // Write sentinel files in host slots
@@ -457,13 +459,25 @@ struct ModelProfileRPCTests {
         let pluginsSentinel = tempHostDir.appendingPathComponent("plugins/sentinel.txt")
         try "PLUGINS_SENTINEL".write(to: pluginsSentinel, atomically: true, encoding: .utf8)
 
+        // Create a sidecar by seeding profile-side CLAUDE.md, then calling ensure again
+        let profileClaudeFile = profileClaudeDir.appendingPathComponent("CLAUDE.md")
+        try "# Profile CLAUDE.md".write(to: profileClaudeFile, atomically: true, encoding: .utf8)
+        _ = try manager.ensureOAuthDir(forProfileID: oauthProfile.id)
+
         let profileDir = manager.profileDirectory(forProfileID: oauthProfile.id)
 
         // Verify symlinks were created
-        let profileProjects = manager.configDirectory(forProfileID: oauthProfile.id).appendingPathComponent("projects")
-        let profilePlugins = manager.configDirectory(forProfileID: oauthProfile.id).appendingPathComponent("plugins")
+        let profileProjects = profileClaudeDir.appendingPathComponent("projects")
+        let profilePlugins = profileClaudeDir.appendingPathComponent("plugins")
         #expect((try? fm.destinationOfSymbolicLink(atPath: profileProjects.path)) != nil)
         #expect((try? fm.destinationOfSymbolicLink(atPath: profilePlugins.path)) != nil)
+        #expect((try? fm.destinationOfSymbolicLink(atPath: profileClaudeFile.path)) != nil)
+
+        // Verify sidecar was created
+        let sidecar = profileClaudeDir.appendingPathComponent("CLAUDE.md.profile-local")
+        #expect(fm.fileExists(atPath: sidecar.path))
+        let sidecarContent = try String(contentsOf: sidecar, encoding: .utf8)
+        #expect(sidecarContent == "# Profile CLAUDE.md")
 
         // Delete the profile via RPC
         let resp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileDelete,
@@ -482,6 +496,9 @@ struct ModelProfileRPCTests {
 
         let pluginsContent = try String(contentsOf: pluginsSentinel, encoding: .utf8)
         #expect(pluginsContent == "PLUGINS_SENTINEL")
+
+        // Verify sidecar is also gone (deleted with the profile dir)
+        #expect(!fm.fileExists(atPath: sidecar.path))
     }
 
     // MARK: - rename
