@@ -80,13 +80,17 @@ extension AppState {
     }
 
     /// Create a Claude terminal in a worktree and add a new tab for it.
-    func createClaudeTerminal(worktreeID: UUID) async {
+    /// `profileID` pins the session to a specific model profile; when nil the
+    /// daemon resolves the profile normally (repo override → global default →
+    /// keychain login).
+    func createClaudeTerminal(worktreeID: UUID, profileID: UUID? = nil) async {
         do {
             let size = mainAreaTerminalSize()
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
                 cmd: nil,
                 type: .claude,
+                overrideProfileID: profileID,
                 cols: size.cols,
                 rows: size.rows
             )

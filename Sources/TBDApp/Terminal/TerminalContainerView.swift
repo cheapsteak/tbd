@@ -157,6 +157,14 @@ struct SingleWorktreeView: View {
                                 selectLastTab()
                             }
                         },
+                        onAddClaudeProfile: { profileID in
+                            Task {
+                                await appState.createClaudeTerminal(
+                                    worktreeID: worktreeID, profileID: profileID
+                                )
+                                selectLastTab()
+                            }
+                        },
                         onAddCodex: {
                             Task {
                                 await appState.createCodexTerminal(worktreeID: worktreeID)
