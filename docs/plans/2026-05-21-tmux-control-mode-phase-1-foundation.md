@@ -53,7 +53,7 @@ Create `Tests/TBDDaemonTests/TmuxVersionTests.swift`:
 
 ```swift
 import Testing
-@testable import TBDDaemon
+@testable import TBDDaemonLib
 
 @Suite("TmuxVersion")
 struct TmuxVersionTests {
@@ -281,7 +281,7 @@ Create `Tests/TBDDaemonTests/TmuxOutputDecoderTests.swift`:
 ```swift
 import Foundation
 import Testing
-@testable import TBDDaemon
+@testable import TBDDaemonLib
 
 @Suite("TmuxOutputDecoder")
 struct TmuxOutputDecoderTests {
@@ -408,7 +408,7 @@ Create `Tests/TBDDaemonTests/TmuxControlParserTests.swift`:
 ```swift
 import Foundation
 import Testing
-@testable import TBDDaemon
+@testable import TBDDaemonLib
 
 @Suite("TmuxControlParser — notifications")
 struct TmuxControlParserNotificationTests {
@@ -786,7 +786,7 @@ Create `Tests/TBDDaemonTests/ControlModeGateTests.swift`:
 
 ```swift
 import Testing
-@testable import TBDDaemon
+@testable import TBDDaemonLib
 
 @Suite("ControlModeGate")
 struct ControlModeGateTests {
@@ -1109,7 +1109,7 @@ Create `Tests/TBDDaemonTests/TmuxControlConnectionIntegrationTests.swift`:
 ```swift
 import Foundation
 import Testing
-@testable import TBDDaemon
+@testable import TBDDaemonLib
 
 @Suite("TmuxControlConnection integration")
 struct TmuxControlConnectionIntegrationTests {
