@@ -141,9 +141,11 @@ values are **persisted in the daemon database**.
   semantic setting ID, never by env-var name.
 - New RPC `setClaudeSpawnPreferences(ClaudeSpawnPreferences)`. The daemon
   writes the overrides map into the `config` table.
-- The daemon broadcasts the current overrides (via the existing state
-  delta mechanism) so the app's Settings UI reflects the daemon's
-  persisted truth.
+- No daemon→app broadcast. The app's Settings UI binds directly to its
+  own `@AppStorage` values — the app is the display source of truth. The
+  daemon `config` table is the *spawn-time* persistence, and the app keeps
+  it in sync by pushing (see below). Since no other writer of the
+  overrides exists, a broadcast would add nothing.
 - **App push timing.** The app pushes `setClaudeSpawnPreferences`
   (a) whenever the user changes a setting, and (b) whenever it
   establishes or re-establishes a daemon connection — both
