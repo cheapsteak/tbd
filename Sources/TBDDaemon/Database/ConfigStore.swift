@@ -51,4 +51,16 @@ public struct ConfigStore: Sendable {
             )
         }
     }
+
+    /// Persist the Claude spawn-env setting overrides map. An empty map
+    /// clears all overrides; spawns then use every setting's registry default.
+    public func setEnvSettingOverrides(_ overrides: [String: ClaudeEnvValue]) async throws {
+        let json = String(data: try JSONEncoder().encode(overrides), encoding: .utf8)
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET claude_env_settings = ? WHERE id = ?",
+                arguments: [json, Self.singletonID]
+            )
+        }
+    }
 }
