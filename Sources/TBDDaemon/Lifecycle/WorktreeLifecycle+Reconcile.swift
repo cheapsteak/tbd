@@ -163,7 +163,18 @@ extension WorktreeLifecycle {
                 if serverAlive {
                     let alive = await tmux.windowExists(server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
                     if !alive {
-                        try? await db.terminals.delete(id: terminal.id)
+                        if let sessionID = terminal.claudeSessionID {
+                            // Window is gone but a resumable session exists.
+                            // Suspend the terminal instead of deleting it — the
+                            // suspend/resume machinery rebuilds a window from the
+                            // session ID on demand. Deleting here would orphan the
+                            // transcript and the session would vanish from TBD.
+                            try? await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID)
+                            logger.info("reconcile: suspended terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
+                        } else {
+                            try? await db.terminals.delete(id: terminal.id)
+                            logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, no session to preserve")
+                        }
                         await pendingQuestions.clear(terminalID: terminal.id)
                     }
                 } else {

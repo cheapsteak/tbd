@@ -736,6 +736,96 @@ import Testing
     try? await realTmux.killServer(server: socketName)
 }
 
+/// Dead-window cleanup, real tmux server alive: a terminal that holds a
+/// `claudeSessionID` must be SUSPENDED (not deleted) so the session can be
+/// resumed. Regression test for the 2026-05-21 mass session-loss incident.
+@Test func testReconcileDeadWindowClaudeTerminalSuspended() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let realTmux = TmuxManager()
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
+    // Start a REAL tmux server so reconcile sees serverAlive == true.
+    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
+
+    // A worktree whose path == the repo path is reported by `git worktree
+    // list`, so reconcile will not archive it as missing.
+    let wt = try await db.worktrees.create(
+        repoID: repo.id, name: "wt", branch: "main",
+        path: repoDir.path, tmuxServer: serverName
+    )
+    // A claude terminal pointing at a window that does not exist on the server.
+    let sessionID = UUID().uuidString
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@stale-claude", tmuxPaneID: "%stale-claude",
+        label: "claude", claudeSessionID: sessionID, kind: .claude
+    )
+
+    do {
+        try await lifecycle.reconcile(repoID: repo.id)
+    } catch {
+        try? await realTmux.killServer(server: serverName)
+        throw error
+    }
+
+    let after = try await db.terminals.get(id: terminal.id)
+    try? await realTmux.killServer(server: serverName)
+
+    #expect(after != nil, "claude terminal must NOT be deleted on dead window")
+    #expect(after?.suspendedAt != nil, "claude terminal must be marked suspended")
+    #expect(after?.claudeSessionID == sessionID, "session ID must be preserved")
+}
+
+/// Dead-window cleanup, real tmux server alive: a terminal with NO
+/// `claudeSessionID` (plain shell) has nothing to recover and is still
+/// deleted — unchanged behavior.
+@Test func testReconcileDeadWindowShellTerminalDeleted() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let realTmux = TmuxManager()
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
+    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
+
+    let wt = try await db.worktrees.create(
+        repoID: repo.id, name: "wt", branch: "main",
+        path: repoDir.path, tmuxServer: serverName
+    )
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@stale-shell", tmuxPaneID: "%stale-shell"
+    )
+
+    do {
+        try await lifecycle.reconcile(repoID: repo.id)
+    } catch {
+        try? await realTmux.killServer(server: serverName)
+        throw error
+    }
+
+    let after = try await db.terminals.get(id: terminal.id)
+    try? await realTmux.killServer(server: serverName)
+
+    #expect(after == nil, "shell terminal with no session must still be deleted")
+}
+
 // MARK: - Helpers
 
 /// Thread-safe collector for TmuxManager dryRun recorded args.
