@@ -28,6 +28,12 @@ final class TmuxControlConnection: @unchecked Sendable {
     /// pty master fd; bidirectional (write = tmux stdin, read = tmux stdout).
     /// -1 before `start()` and after `stop()`.
     private var masterFD: Int32 = -1
+    /// Signaled by the reader thread once `read()` has returned EOF/error and
+    /// the thread is about to exit. `stop()` waits on this before closing the
+    /// master fd: on Darwin, `close()`ing a fd out from under a thread blocked
+    /// in `read()` does NOT wake that thread, so the fd must only be closed
+    /// after the reader has already left the syscall.
+    private let readerExited = DispatchSemaphore(value: 0)
 
     /// Stream of decoded protocol events. Finishes when the connection stops
     /// or the tmux process exits.
@@ -92,14 +98,29 @@ final class TmuxControlConnection: @unchecked Sendable {
         thread.start()
     }
 
-    /// Stop the connection: close the pty, terminate tmux, finish the stream.
+    /// Stop the connection: terminate tmux, let the reader drain to EOF, then
+    /// close the pty and finish the stream.
+    ///
+    /// Order matters. Terminating tmux first makes the child release the pty
+    /// slave, which delivers EOF to the master and lets the reader's blocked
+    /// `read()` return cleanly. Only then is it safe to `close()` the master —
+    /// closing it while the reader is still parked in `read()` would leak the
+    /// reader thread in an uninterruptible wait. `readerExited` (with a bounded
+    /// timeout so a misbehaving child can't hang `stop()` forever) gates the
+    /// close on the reader having actually left the syscall.
     func stop() {
         ioLock.lock()
         let fd = masterFD
         masterFD = -1
         ioLock.unlock()
-        if fd >= 0 { Darwin.close(fd) }
+
         if process.isRunning { process.terminate() }
+
+        if fd >= 0 {
+            // Wait for the reader to observe EOF before closing the fd.
+            _ = readerExited.wait(timeout: .now() + 2)
+            Darwin.close(fd)
+        }
         eventContinuation.finish()
     }
 
@@ -123,6 +144,9 @@ final class TmuxControlConnection: @unchecked Sendable {
                 eventContinuation.yield(event)
             }
         }
+        // Unblock `stop()`: the reader has left `read()`, so the master fd can
+        // now be closed safely.
+        readerExited.signal()
         eventContinuation.finish()
     }
 }
