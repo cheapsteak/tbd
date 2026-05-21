@@ -28,6 +28,32 @@ enum HistoryLoadState {
     }
 }
 
+// MARK: - EmptyTabsContent
+
+/// What a worktree's main area shows when it has no open tabs.
+enum EmptyTabsContent: Equatable {
+    case history       // render HistoryPaneView
+    case placeholder   // render the "No terminals" empty state
+}
+
+extension HistoryLoadState {
+    /// Decide what to show in the empty-tabs state. Loading states and any
+    /// worktree with at least one past session show history; an empty load
+    /// result or a failure falls back to the placeholder. `.idle` shows
+    /// history so the placeholder never flashes before the first fetch
+    /// resolves.
+    var emptyTabsContent: EmptyTabsContent {
+        switch self {
+        case .idle, .loading, .loadingStale:
+            return .history
+        case .loaded(let sessions):
+            return sessions.isEmpty ? .placeholder : .history
+        case .failed:
+            return .placeholder
+        }
+    }
+}
+
 // MARK: - Equatable
 
 extension HistoryLoadState: Equatable {
