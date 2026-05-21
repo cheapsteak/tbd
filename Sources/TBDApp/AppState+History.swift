@@ -73,6 +73,13 @@ extension HistoryLoadState: Equatable {
 
 extension AppState {
 
+    /// Whether an empty-tabs worktree should populate its session history.
+    /// `.main` worktrees auto-create a terminal and never sit in the empty
+    /// state, so they skip the fetch; every other worktree fetches.
+    nonisolated static func shouldPopulateHistoryForEmptyTabs(worktree: Worktree) -> Bool {
+        worktree.status != .main
+    }
+
     /// Toggle the history pane for a worktree. Shows it (and triggers a fetch) or hides it.
     func toggleHistory(worktreeID: UUID) {
         if historyActiveWorktrees.contains(worktreeID) {

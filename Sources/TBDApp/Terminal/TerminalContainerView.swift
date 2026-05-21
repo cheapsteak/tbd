@@ -236,7 +236,8 @@ struct SingleWorktreeView: View {
                 // When a non-main worktree has no tabs, populate session
                 // history so the empty state can show it. `.main` worktrees
                 // auto-create a terminal above and never sit in this state.
-                guard worktreeTabs.isEmpty, worktree.status != .main else { return }
+                guard worktreeTabs.isEmpty,
+                      AppState.shouldPopulateHistoryForEmptyTabs(worktree: worktree) else { return }
                 await appState.fetchSessions(worktreeID: worktreeID)
             }
         } else {

@@ -53,4 +53,32 @@ struct HistoryEmptyStateTests {
     func failedShowsPlaceholder() {
         #expect(HistoryLoadState.failed("boom").emptyTabsContent == .placeholder)
     }
+
+    // MARK: - shouldPopulateHistoryForEmptyTabs
+
+    private func makeWorktree(status: WorktreeStatus) -> Worktree {
+        Worktree(
+            repoID: UUID(),
+            name: "test",
+            displayName: "Test",
+            branch: "main",
+            path: "/tmp/test",
+            status: status,
+            tmuxServer: "test-server"
+        )
+    }
+
+    @Test("main worktree does not populate history for empty tabs")
+    func mainWorktreeSkipsHistoryFetch() {
+        let worktree = makeWorktree(status: .main)
+        #expect(AppState.shouldPopulateHistoryForEmptyTabs(worktree: worktree) == false)
+    }
+
+    @Test("non-main worktree populates history for empty tabs")
+    func nonMainWorktreeFetchesHistory() {
+        for status in [WorktreeStatus.active, .archived, .creating, .failed] {
+            let worktree = makeWorktree(status: status)
+            #expect(AppState.shouldPopulateHistoryForEmptyTabs(worktree: worktree) == true)
+        }
+    }
 }
