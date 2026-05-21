@@ -70,6 +70,14 @@ public struct WorktreeLifecycle: Sendable {
     /// Default `preSession` hook timeout (production value).
     public static let defaultPreSessionTimeout: TimeInterval = 600
 
+    /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
+    /// one (tests, older callers); when present, lifecycle paths open a gated
+    /// logging-only `tmux -CC` connection after each `ensureServer()`.
+    ///
+    /// Set by `Daemon` after construction (`internal`, so the public init's
+    /// signature does not leak the internal bridge type).
+    var controlMode: TmuxControlModeBridge?
+
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -96,6 +104,7 @@ public struct WorktreeLifecycle: Sendable {
         self.subscriptions = subscriptions
         self.modelProfileResolver = modelProfileResolver
         self.pendingQuestions = pendingQuestions
+        self.controlMode = nil
         self.preSessionTimeout = preSessionTimeout
         self.preSessionPollInterval = preSessionPollInterval
         self.processSignaller = processSignaller

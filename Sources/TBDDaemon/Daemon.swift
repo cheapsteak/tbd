@@ -61,6 +61,10 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
+    /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
+    /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
+    /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
+    let controlModeSupervisor = TmuxControlSupervisor()
     public let pidFile: PIDFile
     public let startTime: Date
 
@@ -205,12 +209,24 @@ public final class Daemon: Sendable {
             config: database.config
         )
         let pendingQuestions = PendingQuestionStore()
-        let lifecycle = WorktreeLifecycle(
+
+        // Detect the local tmux version once. The control-mode bridge is shared
+        // by lifecycle + router so every `ensureServer()` call site can open a
+        // gated control connection through a single supervisor. When the gate
+        // is off (the default), `enableIfGated` is a no-op.
+        let tmuxVersion = await TmuxVersion.detect()
+        let controlModeBridge = TmuxControlModeBridge(
+            supervisor: controlModeSupervisor,
+            tmuxVersion: tmuxVersion
+        )
+
+        var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions
         )
+        lifecycle.controlMode = controlModeBridge
         let prManager = PRStatusManager()
 
         // Hydrate PR status cache from the DB so PR icons survive restart, then
@@ -243,6 +259,7 @@ public final class Daemon: Sendable {
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions
         )
+        rpcRouter.controlMode = controlModeBridge
         self.router = rpcRouter
 
         // 9. Start socket server
@@ -383,6 +400,9 @@ public final class Daemon: Sendable {
         if let poller = claudeUsagePoller {
             await poller.stop()
         }
+
+        // Stop any tmux control-mode connections (no-op when the gate is off).
+        await controlModeSupervisor.stopAll()
 
         // Cancel background tasks
         sshRefreshTask?.cancel()
