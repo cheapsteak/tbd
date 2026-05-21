@@ -195,6 +195,7 @@ public struct TmuxManager: Sendable {
             // Session does not exist, create it — capture the initial window ID
             let args = Self.newServerCommand(server: server, session: session, cwd: cwd, cols: cols, rows: rows)
             let output = try await runTmux(args)
+            logger.info("ensureServer: created tmux server \(server, privacy: .public)")
             // Hide tmux chrome globally — TBD app provides its own UI
             try? await runTmux(["-L", server, "set", "-g", "status", "off"])
             try? await runTmux(["-L", server, "set", "-g", "pane-border-style", "fg=black"])
@@ -216,6 +217,7 @@ public struct TmuxManager: Sendable {
     /// Kills an entire tmux server and all its sessions.
     public func killServer(server: String) async throws {
         if dryRun { return }
+        logger.info("killServer: killing tmux server \(server, privacy: .public)")
         try await runTmux(["-L", server, "kill-server"])
     }
 

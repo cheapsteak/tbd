@@ -88,6 +88,10 @@ if [ "$app_only" = false ]; then
     # Clean stale files
     rm -f ~/tbd/sock ~/tbd/tbdd.pid ~/tbd/port
 
+    # Preserve the previous daemon's log for post-mortem diagnostics — the
+    # daemon does not persist os.Logger output, so this file is the only
+    # record of a crash that happened before a restart.
+    [ -f /tmp/tbdd.log ] && mv /tmp/tbdd.log /tmp/tbdd.log.1
     echo "Starting daemon..."
     "$BUILD_DIR/TBDDaemon" > /tmp/tbdd.log 2>&1 &
     # Wait for socket
