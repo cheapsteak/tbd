@@ -46,9 +46,9 @@ final class TmuxControlParser {
         let fields = line.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
         switch fields[0] {
         case "%output":
-            return .unhandled(line: line)            // implemented in Task 5
+            return parseOutput(fields: fields, line: line)
         case "%extended-output":
-            return .unhandled(line: line)            // implemented in Task 5
+            return parseExtendedOutput(fields: fields, line: line)
         case "%begin":
             return .unhandled(line: line)            // implemented in Task 6
         case "%window-add":
@@ -69,6 +69,36 @@ final class TmuxControlParser {
         default:
             return .unhandled(line: line)
         }
+    }
+
+    private func parseOutput(fields: [String], line: String) -> TmuxControlEvent {
+        guard fields.count >= 2 else { return .unhandled(line: line) }
+        let payload = payloadAfterSpaces(2, in: line)
+        return .output(paneID: fields[1], bytes: TmuxOutputDecoder.decode(payload))
+    }
+
+    private func parseExtendedOutput(fields: [String], line: String) -> TmuxControlEvent {
+        guard fields.count >= 4, let age = Int(fields[2]),
+              let colon = line.range(of: " : ") else { return .unhandled(line: line) }
+        let payload = String(line[colon.upperBound...])
+        return .extendedOutput(paneID: fields[1], ageMillis: age,
+                               bytes: TmuxOutputDecoder.decode(payload))
+    }
+
+    /// Returns the remainder of `line` after the first `count` space-separated
+    /// tokens (and the space following the last of them). Used for `%output`,
+    /// whose payload may contain literal spaces and must not be field-split.
+    private func payloadAfterSpaces(_ count: Int, in line: String) -> String {
+        var seen = 0
+        var idx = line.startIndex
+        while idx < line.endIndex {
+            if line[idx] == " " {
+                seen += 1
+                if seen == count { return String(line[line.index(after: idx)...]) }
+            }
+            idx = line.index(after: idx)
+        }
+        return ""
     }
 
     private func closeBlock(_ line: String) -> TmuxControlEvent {

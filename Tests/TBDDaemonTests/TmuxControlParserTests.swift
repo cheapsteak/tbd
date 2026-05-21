@@ -54,3 +54,36 @@ struct TmuxControlParserNotificationTests {
                 [.windowAdd(windowID: "@1"), .windowClose(windowID: "@1")])
     }
 }
+
+@Suite("TmuxControlParser — output")
+struct TmuxControlParserOutputTests {
+    private func feed(_ string: String) -> [TmuxControlEvent] {
+        TmuxControlParser().feed(Data(string.utf8))
+    }
+
+    @Test("parses %output with literal text")
+    func plainOutput() {
+        #expect(feed("%output %3 hello\n") == [.output(paneID: "%3", bytes: Data("hello".utf8))])
+    }
+
+    @Test("parses %output with an octal escape")
+    func escapedOutput() {
+        #expect(feed("%output %3 a\\012b\n") == [.output(paneID: "%3", bytes: Data([97, 10, 98]))])
+    }
+
+    @Test("parses %output whose payload contains literal spaces")
+    func spacedOutput() {
+        #expect(feed("%output %3 a b c\n") == [.output(paneID: "%3", bytes: Data("a b c".utf8))])
+    }
+
+    @Test("parses %output with an empty payload")
+    func emptyOutput() {
+        #expect(feed("%output %3 \n") == [.output(paneID: "%3", bytes: Data())])
+    }
+
+    @Test("parses %extended-output with age and payload")
+    func extendedOutput() {
+        let events = feed("%extended-output %3 150 : hello\n")
+        #expect(events == [.extendedOutput(paneID: "%3", ageMillis: 150, bytes: Data("hello".utf8))])
+    }
+}
