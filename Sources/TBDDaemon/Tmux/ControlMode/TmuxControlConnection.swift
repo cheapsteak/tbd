@@ -1,19 +1,22 @@
+import Darwin
 import Foundation
 import os
 
 /// Owns a single `tmux -CC attach` control-mode connection to one tmux server.
 ///
-/// stdout is drained on a dedicated `Thread` so a burst of `%output` cannot
-/// starve the cooperative thread pool. Decoded events are delivered through
-/// `events`, an `AsyncStream` the caller iterates. `start()` then `stop()` is
-/// the expected lifecycle; both are safe to call once.
+/// tmux's control client only emits its protocol stream when stdout is a tty,
+/// and refuses to attach unless stdin is a tty — so the subprocess is driven
+/// over a pty pair, not plain pipes. The child gets the pty slave as its
+/// stdin/stdout; this object keeps the master and drains it on a dedicated
+/// `Thread` (not a Swift actor task) so a burst of `%output` cannot starve the
+/// cooperative thread pool. Decoded events are delivered through `events`.
 ///
 /// Thread-safety: this type is `@unchecked Sendable`. `start()` and `stop()`
 /// are called only from the owning `TmuxControlSupervisor` actor, so they are
-/// serialized. `parser` is touched exclusively by the reader thread.
-/// `stdinHandle` is guarded by `stdinLock`. `process` is fully configured in
-/// `start()` before `run()`; afterwards only `terminate()`/`isRunning` are
-/// used. `AsyncStream.Continuation` is itself thread-safe.
+/// serialized. `parser` is touched exclusively by the reader thread. `masterFD`
+/// is guarded by `ioLock`. `process` is fully configured in `start()` before
+/// `run()`; afterwards only `terminate()`/`isRunning` are used.
+/// `AsyncStream.Continuation` is itself thread-safe.
 final class TmuxControlConnection: @unchecked Sendable {
     let serverName: String
     private let tmuxBinary: String
@@ -21,8 +24,10 @@ final class TmuxControlConnection: @unchecked Sendable {
 
     private let process = Process()
     private let parser = TmuxControlParser()
-    private let stdinLock = NSLock()
-    private var stdinHandle: FileHandle?
+    private let ioLock = NSLock()
+    /// pty master fd; bidirectional (write = tmux stdin, read = tmux stdout).
+    /// -1 before `start()` and after `stop()`.
+    private var masterFD: Int32 = -1
 
     /// Stream of decoded protocol events. Finishes when the connection stops
     /// or the tmux process exits.
@@ -37,17 +42,24 @@ final class TmuxControlConnection: @unchecked Sendable {
         self.eventContinuation = continuation
     }
 
-    /// Spawn `tmux -CC attach` and begin draining its output. Throws if the
-    /// process fails to launch.
+    /// Spawn `tmux -CC attach` over a pty and begin draining its output.
+    /// Throws if the pty cannot be allocated or the process fails to launch.
     func start() throws {
-        let stdoutPipe = Pipe()
-        let stdinPipe = Pipe()
+        var master: Int32 = -1
+        var slave: Int32 = -1
+        var term = termios()
+        cfmakeraw(&term)  // no echo / no canonical editing: feed tmux exact bytes
+        var size = winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
+        guard openpty(&master, &slave, nil, &term, &size) == 0 else {
+            throw TmuxControlConnectionError.ptyAllocationFailed(errno)
+        }
+
+        let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
         process.executableURL = URL(fileURLWithPath: tmuxBinary)
         process.arguments = ["-L", serverName, "-CC", "attach", "-t", "main"]
-        process.standardOutput = stdoutPipe
-        process.standardInput = stdinPipe
+        process.standardInput = slaveHandle
+        process.standardOutput = slaveHandle
         process.standardError = FileHandle.nullDevice
-        stdinHandle = stdinPipe.fileHandleForWriting
 
         let server = serverName
         process.terminationHandler = { [weak self] proc in
@@ -56,22 +68,37 @@ final class TmuxControlConnection: @unchecked Sendable {
             self?.eventContinuation.finish()
         }
 
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            Darwin.close(master)
+            Darwin.close(slave)
+            throw error
+        }
+        // The child now holds the slave; close the parent's copy so the master
+        // sees EOF when the child exits.
+        Darwin.close(slave)
+
+        ioLock.lock()
+        masterFD = master
+        ioLock.unlock()
+
         logger.info("started tmux -CC connection for server \(server, privacy: .public)")
 
-        let readHandle = stdoutPipe.fileHandleForReading
-        let thread = Thread { [weak self] in self?.readLoop(readHandle) }
+        let readFD = master
+        let thread = Thread { [weak self] in self?.readLoop(readFD) }
         thread.name = "tmux-control-\(serverName)"
         thread.stackSize = 512 * 1024
         thread.start()
     }
 
-    /// Stop the connection: close stdin, terminate tmux, finish the stream.
+    /// Stop the connection: close the pty, terminate tmux, finish the stream.
     func stop() {
-        stdinLock.lock()
-        try? stdinHandle?.close()
-        stdinHandle = nil
-        stdinLock.unlock()
+        ioLock.lock()
+        let fd = masterFD
+        masterFD = -1
+        ioLock.unlock()
+        if fd >= 0 { Darwin.close(fd) }
         if process.isRunning { process.terminate() }
         eventContinuation.finish()
     }
@@ -80,21 +107,27 @@ final class TmuxControlConnection: @unchecked Sendable {
     /// Phase 1 has no production callers; exercising the path here keeps later
     /// phases (resize, send-keys) on a working writer.
     func sendCommand(_ command: String) {
-        stdinLock.lock()
-        defer { stdinLock.unlock() }
-        guard let handle = stdinHandle else { return }
-        let line = command.hasSuffix("\n") ? command : command + "\n"
-        try? handle.write(contentsOf: Data(line.utf8))
+        let bytes = Array((command.hasSuffix("\n") ? command : command + "\n").utf8)
+        ioLock.lock()
+        defer { ioLock.unlock() }
+        guard masterFD >= 0 else { return }
+        _ = bytes.withUnsafeBytes { Darwin.write(masterFD, $0.baseAddress, $0.count) }
     }
 
-    private func readLoop(_ handle: FileHandle) {
+    private func readLoop(_ fd: Int32) {
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
         while true {
-            let chunk = handle.availableData
-            if chunk.isEmpty { break }  // EOF
-            for event in parser.feed(chunk) {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if count <= 0 { break }  // 0 = EOF, <0 = error (EIO when the child exits)
+            for event in parser.feed(Data(buffer[0..<count])) {
                 eventContinuation.yield(event)
             }
         }
         eventContinuation.finish()
     }
+}
+
+/// Failure modes for `TmuxControlConnection.start()`.
+enum TmuxControlConnectionError: Error {
+    case ptyAllocationFailed(Int32)
 }
