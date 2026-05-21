@@ -45,9 +45,46 @@ public final class Daemon: Sendable {
         unsetenv("CODEX_THREAD_ID")
     }
 
+    /// Raise the process's `RLIMIT_NOFILE` soft limit so every tmux server the
+    /// daemon spawns inherits a generous file-descriptor budget. Called at
+    /// startup before any tmux server is created.
+    ///
+    /// Rationale: macOS hands LaunchServices-spawned apps a 256-fd soft limit.
+    /// The daemon inherits it from the App, and tmux inherits it from the
+    /// daemon. A tmux server hosting dozens of pty panes can exhaust 256
+    /// descriptors and `exit(1)`, taking every session with it.
+    ///
+    /// Best-effort: a `getrlimit`/`setrlimit` failure is logged and ignored —
+    /// the daemon must still start. Returns the resulting limit (for tests).
+    @discardableResult
+    public static func raiseFileDescriptorLimit() -> rlimit {
+        var limit = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &limit) == 0 else {
+            daemonLogger.warning("getrlimit(RLIMIT_NOFILE) failed: \(String(cString: strerror(errno)), privacy: .public)")
+            return limit
+        }
+        let target = min(limit.rlim_max, rlim_t(8192))
+        if limit.rlim_cur < target {
+            let previous = limit.rlim_cur
+            limit.rlim_cur = target
+            if setrlimit(RLIMIT_NOFILE, &limit) == 0 {
+                daemonLogger.info("Raised RLIMIT_NOFILE soft limit \(previous, privacy: .public) → \(target, privacy: .public)")
+            } else {
+                daemonLogger.warning("setrlimit(RLIMIT_NOFILE) failed: \(String(cString: strerror(errno)), privacy: .public)")
+                limit.rlim_cur = previous
+            }
+        } else {
+            daemonLogger.info("RLIMIT_NOFILE soft limit already \(limit.rlim_cur, privacy: .public) (≥ \(target, privacy: .public))")
+        }
+        return limit
+    }
+
     /// Start the daemon: create config directory, clean up stale state,
     /// initialize database and all managers, start servers, reconcile worktrees.
     public func start() async throws {
+        // 0. Raise the file-descriptor limit before any tmux server is spawned.
+        Self.raiseFileDescriptorLimit()
+
         // 1. Create ~/tbd/ directory if needed
         let configDir = TBDConstants.configDir.path
         let fm = FileManager.default
