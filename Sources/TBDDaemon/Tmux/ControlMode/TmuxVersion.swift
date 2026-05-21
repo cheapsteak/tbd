@@ -50,12 +50,12 @@ struct TmuxVersion: Comparable, CustomStringConvertible {
 extension TmuxVersion {
     /// Run `tmux -V` once and parse the result. Returns nil on any failure
     /// (tmux not installed, non-zero exit, unparseable output).
-    static func detect(tmuxBinary: String = "/usr/bin/env") async -> TmuxVersion? {
+    static func detect(tmuxBinary: String = TmuxManager.tmuxPath()) async -> TmuxVersion? {
         await withCheckedContinuation { continuation in
             let process = Process()
             let pipe = Pipe()
             process.executableURL = URL(fileURLWithPath: tmuxBinary)
-            process.arguments = ["tmux", "-V"]
+            process.arguments = ["-V"]
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
             process.terminationHandler = { _ in
