@@ -7,10 +7,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 
     var id: String
     var default_profile_id: String?
+    /// JSON-encoded `[String: ClaudeEnvValue]` overrides map. Nil/absent
+    /// means no overrides — every setting falls back to its registry default.
+    var claude_env_settings: String?
 
     func toModel() -> Config {
         Config(
-            defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:))
+            defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
+            envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings)
         )
     }
 }
@@ -27,6 +31,16 @@ public struct ConfigStore: Sendable {
         try await writer.read { db in
             try ConfigRecord.fetchOne(db, key: Self.singletonID)?.toModel() ?? Config()
         }
+    }
+
+    /// Decode the `claude_env_settings` JSON column into an overrides map.
+    /// Any malformed/absent value decodes to an empty map so a corrupt row
+    /// degrades to registry defaults rather than crashing a spawn.
+    static func decodeOverrides(_ json: String?) -> [String: ClaudeEnvValue] {
+        guard let json, let data = json.data(using: .utf8),
+              let map = try? JSONDecoder().decode([String: ClaudeEnvValue].self, from: data)
+        else { return [:] }
+        return map
     }
 
     public func setDefaultProfileID(_ id: UUID?) async throws {

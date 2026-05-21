@@ -346,14 +346,20 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
 
 public struct Config: Codable, Sendable, Equatable {
     public var defaultProfileID: UUID?
+    /// Claude spawn-env setting overrides, keyed by `ClaudeEnvSetting.id`.
+    public var envSettingOverrides: [String: ClaudeEnvValue]
 
-    public init(defaultProfileID: UUID? = nil) {
+    public init(defaultProfileID: UUID? = nil,
+                envSettingOverrides: [String: ClaudeEnvValue] = [:]) {
         self.defaultProfileID = defaultProfileID
+        self.envSettingOverrides = envSettingOverrides
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         defaultProfileID = try c.decodeIfPresent(UUID.self, forKey: .defaultProfileID)
+        envSettingOverrides = try c.decodeIfPresent(
+            [String: ClaudeEnvValue].self, forKey: .envSettingOverrides) ?? [:]
     }
 }
 

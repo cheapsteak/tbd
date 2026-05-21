@@ -501,6 +501,10 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "model_profiles", column: "aws_profile", type: .text)
         }
 
+        migrator.registerMigration("v26_claude_env_settings") { db in
+            try db.addColumnIfMissing(table: "config", column: "claude_env_settings", type: .text)
+        }
+
         return migrator
     }
 }
