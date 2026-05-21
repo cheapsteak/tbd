@@ -136,85 +136,84 @@ struct SingleWorktreeView: View {
     var body: some View {
         if let worktree {
             VStack(spacing: 0) {
-                // Tab bar
-                if !worktreeTabs.isEmpty {
-                    TabBar(
-                        tabs: worktreeTabs,
-                        worktreeID: worktreeID,
-                        activeTabIndex: Binding(
-                            get: { activeTabIndex },
-                            set: { activeTabIndex = $0 }
-                        ),
-                        onAddShell: {
-                            Task {
-                                await appState.createTerminal(worktreeID: worktreeID)
-                                selectLastTab()
-                            }
-                        },
-                        onAddClaude: {
-                            Task {
-                                await appState.createClaudeTerminal(worktreeID: worktreeID)
-                                selectLastTab()
-                            }
-                        },
-                        onAddClaudeProfile: { profileID in
-                            Task {
-                                await appState.createClaudeTerminal(
-                                    worktreeID: worktreeID, profileID: profileID
-                                )
-                                selectLastTab()
-                            }
-                        },
-                        onAddCodex: {
-                            Task {
-                                await appState.createCodexTerminal(worktreeID: worktreeID)
-                                selectLastTab()
-                            }
-                        },
-                        onAddNote: {
-                            Task {
-                                await appState.createNote(worktreeID: worktreeID)
-                                selectLastTab()
-                            }
-                        },
-                        onCloseTab: { index in
-                            closeTab(at: index)
-                        },
-                        terminalForTab: { tabID in
-                            guard let terminalID = terminalID(for: tabID) else { return nil }
-                            return appState.terminals[worktreeID]?.first { $0.id == terminalID }
-                        },
-                        onSuspendTab: { tabID in
-                            guard let terminalID = terminalID(for: tabID) else { return }
-                            Task {
-                                try? await appState.daemonClient.terminalSuspend(terminalID: terminalID)
-                                await appState.refreshTerminals(worktreeID: worktreeID)
-                            }
-                        },
-                        onResumeTab: { tabID in
-                            guard let terminalID = terminalID(for: tabID) else { return }
-                            Task {
-                                try? await appState.daemonClient.terminalResume(terminalID: terminalID)
-                                await appState.refreshTerminals(worktreeID: worktreeID)
-                            }
-                        },
-                        onForkTab: { tabID in
-                            guard let tID = terminalID(for: tabID) else { return }
-                            let terminal = appState.terminals[worktreeID]?.first { $0.id == tID }
-                            guard let sessionID = terminal?.claudeSessionID else { return }
-                            Task {
-                                await appState.forkClaudeTerminal(worktreeID: worktreeID, sessionID: sessionID, tokenID: terminal?.profileID)
-                                selectLastTab()
-                            }
-                        },
-                        isHistorySelected: appState.historyActiveWorktrees.contains(worktreeID),
-                        onHistoryTab: {
-                            appState.toggleHistory(worktreeID: worktreeID)
+                // Tab bar — always visible, even with no tabs, so the + menu
+                // and history button remain reachable from the empty state.
+                TabBar(
+                    tabs: worktreeTabs,
+                    worktreeID: worktreeID,
+                    activeTabIndex: Binding(
+                        get: { activeTabIndex },
+                        set: { activeTabIndex = $0 }
+                    ),
+                    onAddShell: {
+                        Task {
+                            await appState.createTerminal(worktreeID: worktreeID)
+                            selectLastTab()
                         }
-                    )
+                    },
+                    onAddClaude: {
+                        Task {
+                            await appState.createClaudeTerminal(worktreeID: worktreeID)
+                            selectLastTab()
+                        }
+                    },
+                    onAddClaudeProfile: { profileID in
+                        Task {
+                            await appState.createClaudeTerminal(
+                                worktreeID: worktreeID, profileID: profileID
+                            )
+                            selectLastTab()
+                        }
+                    },
+                    onAddCodex: {
+                        Task {
+                            await appState.createCodexTerminal(worktreeID: worktreeID)
+                            selectLastTab()
+                        }
+                    },
+                    onAddNote: {
+                        Task {
+                            await appState.createNote(worktreeID: worktreeID)
+                            selectLastTab()
+                        }
+                    },
+                    onCloseTab: { index in
+                        closeTab(at: index)
+                    },
+                    terminalForTab: { tabID in
+                        guard let terminalID = terminalID(for: tabID) else { return nil }
+                        return appState.terminals[worktreeID]?.first { $0.id == terminalID }
+                    },
+                    onSuspendTab: { tabID in
+                        guard let terminalID = terminalID(for: tabID) else { return }
+                        Task {
+                            try? await appState.daemonClient.terminalSuspend(terminalID: terminalID)
+                            await appState.refreshTerminals(worktreeID: worktreeID)
+                        }
+                    },
+                    onResumeTab: { tabID in
+                        guard let terminalID = terminalID(for: tabID) else { return }
+                        Task {
+                            try? await appState.daemonClient.terminalResume(terminalID: terminalID)
+                            await appState.refreshTerminals(worktreeID: worktreeID)
+                        }
+                    },
+                    onForkTab: { tabID in
+                        guard let tID = terminalID(for: tabID) else { return }
+                        let terminal = appState.terminals[worktreeID]?.first { $0.id == tID }
+                        guard let sessionID = terminal?.claudeSessionID else { return }
+                        Task {
+                            await appState.forkClaudeTerminal(worktreeID: worktreeID, sessionID: sessionID, tokenID: terminal?.profileID)
+                            selectLastTab()
+                        }
+                    },
+                    isHistorySelected: appState.historyActiveWorktrees.contains(worktreeID),
+                    onHistoryTab: {
+                        appState.toggleHistory(worktreeID: worktreeID)
+                    }
+                )
 
-                    Divider()
-                }
+                Divider()
 
                 // Split layout view for the active tab's layout. Publish its
                 // measured size to MainAreaSizeKey so the daemon-side tmux
@@ -232,6 +231,13 @@ struct SingleWorktreeView: View {
                 if worktree.status == .main && terminals.isEmpty {
                     await appState.createTerminal(worktreeID: worktreeID)
                 }
+            }
+            .task(id: worktreeTabs.isEmpty) {
+                // When a non-main worktree has no tabs, populate session
+                // history so the empty state can show it. `.main` worktrees
+                // auto-create a terminal above and never sit in this state.
+                guard worktreeTabs.isEmpty, worktree.status != .main else { return }
+                await appState.fetchSessions(worktreeID: worktreeID)
             }
         } else {
             Text("Worktree not found")
@@ -256,19 +262,24 @@ struct SingleWorktreeView: View {
             )
             .id(tab.id) // Force new view hierarchy when switching tabs
         } else {
-            VStack(spacing: 12) {
-                Image(systemName: "terminal")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.tertiary)
-                Text("No terminals")
-                    .foregroundStyle(.secondary)
-                Button("Create Terminal") {
-                    Task {
-                        await appState.createTerminal(worktreeID: worktreeID)
+            switch (appState.historyLoadStates[worktreeID] ?? .idle).emptyTabsContent {
+            case .history:
+                HistoryPaneView(worktreeID: worktreeID)
+            case .placeholder:
+                VStack(spacing: 12) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 40))
+                        .foregroundStyle(.tertiary)
+                    Text("No terminals")
+                        .foregroundStyle(.secondary)
+                    Button("Create Terminal") {
+                        Task {
+                            await appState.createTerminal(worktreeID: worktreeID)
+                        }
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
