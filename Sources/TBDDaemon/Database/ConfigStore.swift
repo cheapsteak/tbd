@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
+
+private let configLogger = Logger(subsystem: "com.tbd.daemon", category: "config")
 
 struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "config"
@@ -35,12 +38,19 @@ public struct ConfigStore: Sendable {
 
     /// Decode the `claude_env_settings` JSON column into an overrides map.
     /// Any malformed/absent value decodes to an empty map so a corrupt row
-    /// degrades to registry defaults rather than crashing a spawn.
+    /// degrades to registry defaults rather than crashing a spawn. A genuinely
+    /// corrupt row (JSON present but undecodable) is logged so it's observable
+    /// via `log stream` instead of silently resetting the user's settings.
     static func decodeOverrides(_ json: String?) -> [String: ClaudeEnvValue] {
-        guard let json, let data = json.data(using: .utf8),
-              let map = try? JSONDecoder().decode([String: ClaudeEnvValue].self, from: data)
-        else { return [:] }
-        return map
+        guard let json, let data = json.data(using: .utf8) else { return [:] }
+        do {
+            return try JSONDecoder().decode([String: ClaudeEnvValue].self, from: data)
+        } catch {
+            configLogger.error(
+                "Corrupt claude_env_settings row, falling back to defaults: \(String(describing: error), privacy: .public)"
+            )
+            return [:]
+        }
     }
 
     public func setDefaultProfileID(_ id: UUID?) async throws {
