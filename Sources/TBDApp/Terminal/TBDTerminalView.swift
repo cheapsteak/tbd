@@ -228,7 +228,7 @@ class TBDTerminalView: TerminalView {
                     self.didDrag = true
                 }
             case .leftMouseUp:
-                self.handleClickPassthrough(at: locationInSelf)
+                self.handleClickPassthrough(at: locationInSelf, modifiers: event.modifierFlags)
             default:
                 break
             }
@@ -289,7 +289,18 @@ class TBDTerminalView: TerminalView {
         }
     }
 
-    private func handleClickPassthrough(at point: CGPoint) {
+    /// Plain (unmodified) clicks are forwarded into the pane; clicks carrying
+    /// a modifier belong to TBD's own file/link handling and must not also be
+    /// forwarded — otherwise a Cmd+click both opens a file and clicks Claude.
+    static func clickPassthroughBlocked(by modifiers: NSEvent.ModifierFlags) -> Bool {
+        !modifiers
+            .intersection(.deviceIndependentFlagsMask)
+            .intersection([.command, .shift, .control, .option])
+            .isEmpty
+    }
+
+    private func handleClickPassthrough(at point: CGPoint, modifiers: NSEvent.ModifierFlags) {
+        guard !Self.clickPassthroughBlocked(by: modifiers) else { return }
         // If this was a click (not a drag) and tmux has mouse mode enabled,
         // forward the click to tmux so it can handle pane switching.
         //
