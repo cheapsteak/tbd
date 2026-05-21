@@ -295,8 +295,7 @@ class TBDTerminalView: TerminalView {
     nonisolated static func clickPassthroughBlocked(by modifiers: NSEvent.ModifierFlags) -> Bool {
         !modifiers
             .intersection(.deviceIndependentFlagsMask)
-            .intersection([.command, .shift, .control, .option])
-            .isEmpty
+            .isDisjoint(with: [.command, .shift, .control, .option])
     }
 
     private func handleClickPassthrough(at point: CGPoint, modifiers: NSEvent.ModifierFlags) {
