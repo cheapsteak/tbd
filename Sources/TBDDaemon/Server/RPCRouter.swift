@@ -140,6 +140,8 @@ public final class RPCRouter: Sendable {
                 return try await handlePRRefresh(request.paramsData)
             case RPCMethod.worktreeSelectionChanged:
                 return try await handleWorktreeSelectionChanged(request.paramsData)
+            case RPCMethod.claudeSetSpawnPreferences:
+                return try await handleSetClaudeSpawnPreferences(request.paramsData)
             case RPCMethod.terminalSuspend:
                 return try await handleTerminalSuspend(request.paramsData)
             case RPCMethod.terminalResume:
