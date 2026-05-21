@@ -60,7 +60,7 @@ extension TmuxVersion {
             process.standardError = FileHandle.nullDevice
             process.terminationHandler = { _ in
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: TmuxVersion.parse(String(decoding: data, as: UTF8.self)))
+                continuation.resume(returning: TmuxVersion.parse(String(bytes: data, encoding: .utf8) ?? ""))
             }
             do {
                 try process.run()

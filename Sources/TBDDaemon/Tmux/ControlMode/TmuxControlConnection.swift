@@ -6,14 +6,14 @@ import os
 ///
 /// tmux's control client only emits its protocol stream when stdout is a tty,
 /// and refuses to attach unless stdin is a tty — so the subprocess is driven
-/// over a pty pair, not plain pipes. The child gets the pty slave as its
-/// stdin/stdout; this object keeps the master and drains it on a dedicated
+/// over a pty pair, not plain pipes. The child gets the pty replica as its
+/// stdin/stdout; this object keeps the primary and drains it on a dedicated
 /// `Thread` (not a Swift actor task) so a burst of `%output` cannot starve the
 /// cooperative thread pool. Decoded events are delivered through `events`.
 ///
 /// Thread-safety: this type is `@unchecked Sendable`. `start()` and `stop()`
 /// are called only from the owning `TmuxControlSupervisor` actor, so they are
-/// serialized. `parser` is touched exclusively by the reader thread. `masterFD`
+/// serialized. `parser` is touched exclusively by the reader thread. `primaryFD`
 /// is guarded by `ioLock`. `process` is fully configured in `start()` before
 /// `run()`; afterwards only `terminate()`/`isRunning` are used.
 /// `AsyncStream.Continuation` is itself thread-safe.
@@ -25,12 +25,12 @@ final class TmuxControlConnection: @unchecked Sendable {
     private let process = Process()
     private let parser = TmuxControlParser()
     private let ioLock = NSLock()
-    /// pty master fd; bidirectional (write = tmux stdin, read = tmux stdout).
+    /// pty primary fd; bidirectional (write = tmux stdin, read = tmux stdout).
     /// -1 before `start()` and after `stop()`.
-    private var masterFD: Int32 = -1
+    private var primaryFD: Int32 = -1
     /// Signaled by the reader thread once `read()` has returned EOF/error and
     /// the thread is about to exit. `stop()` waits on this before closing the
-    /// master fd: on Darwin, `close()`ing a fd out from under a thread blocked
+    /// primary fd: on Darwin, `close()`ing a fd out from under a thread blocked
     /// in `read()` does NOT wake that thread, so the fd must only be closed
     /// after the reader has already left the syscall.
     private let readerExited = DispatchSemaphore(value: 0)
@@ -51,20 +51,20 @@ final class TmuxControlConnection: @unchecked Sendable {
     /// Spawn `tmux -CC attach` over a pty and begin draining its output.
     /// Throws if the pty cannot be allocated or the process fails to launch.
     func start() throws {
-        var master: Int32 = -1
-        var slave: Int32 = -1
+        var primary: Int32 = -1
+        var replica: Int32 = -1
         var term = termios()
         cfmakeraw(&term)  // no echo / no canonical editing: feed tmux exact bytes
         var size = winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
-        guard openpty(&master, &slave, nil, &term, &size) == 0 else {
+        guard openpty(&primary, &replica, nil, &term, &size) == 0 else {
             throw TmuxControlConnectionError.ptyAllocationFailed(errno)
         }
 
-        let slaveHandle = FileHandle(fileDescriptor: slave, closeOnDealloc: false)
+        let replicaHandle = FileHandle(fileDescriptor: replica, closeOnDealloc: false)
         process.executableURL = URL(fileURLWithPath: tmuxBinary)
         process.arguments = ["-L", serverName, "-CC", "attach", "-t", "main"]
-        process.standardInput = slaveHandle
-        process.standardOutput = slaveHandle
+        process.standardInput = replicaHandle
+        process.standardOutput = replicaHandle
         process.standardError = FileHandle.nullDevice
 
         let server = serverName
@@ -77,21 +77,21 @@ final class TmuxControlConnection: @unchecked Sendable {
         do {
             try process.run()
         } catch {
-            Darwin.close(master)
-            Darwin.close(slave)
+            Darwin.close(primary)
+            Darwin.close(replica)
             throw error
         }
-        // The child now holds the slave; close the parent's copy so the master
-        // sees EOF when the child exits.
-        Darwin.close(slave)
+        // The child now holds the replica; close the parent's copy so the
+        // primary sees EOF when the child exits.
+        Darwin.close(replica)
 
         ioLock.lock()
-        masterFD = master
+        primaryFD = primary
         ioLock.unlock()
 
         logger.info("started tmux -CC connection for server \(server, privacy: .public)")
 
-        let readFD = master
+        let readFD = primary
         let thread = Thread { [weak self] in self?.readLoop(readFD) }
         thread.name = "tmux-control-\(serverName)"
         thread.stackSize = 512 * 1024
@@ -102,16 +102,16 @@ final class TmuxControlConnection: @unchecked Sendable {
     /// close the pty and finish the stream.
     ///
     /// Order matters. Terminating tmux first makes the child release the pty
-    /// slave, which delivers EOF to the master and lets the reader's blocked
-    /// `read()` return cleanly. Only then is it safe to `close()` the master —
+    /// replica, which delivers EOF to the primary and lets the reader's blocked
+    /// `read()` return cleanly. Only then is it safe to `close()` the primary —
     /// closing it while the reader is still parked in `read()` would leak the
     /// reader thread in an uninterruptible wait. `readerExited` (with a bounded
     /// timeout so a misbehaving child can't hang `stop()` forever) gates the
     /// close on the reader having actually left the syscall.
     func stop() {
         ioLock.lock()
-        let fd = masterFD
-        masterFD = -1
+        let fd = primaryFD
+        primaryFD = -1
         ioLock.unlock()
 
         if process.isRunning { process.terminate() }
@@ -131,8 +131,8 @@ final class TmuxControlConnection: @unchecked Sendable {
         let bytes = Array((command.hasSuffix("\n") ? command : command + "\n").utf8)
         ioLock.lock()
         defer { ioLock.unlock() }
-        guard masterFD >= 0 else { return }
-        _ = bytes.withUnsafeBytes { Darwin.write(masterFD, $0.baseAddress, $0.count) }
+        guard primaryFD >= 0 else { return }
+        _ = bytes.withUnsafeBytes { Darwin.write(primaryFD, $0.baseAddress, $0.count) }
     }
 
     private func readLoop(_ fd: Int32) {
@@ -144,7 +144,7 @@ final class TmuxControlConnection: @unchecked Sendable {
                 eventContinuation.yield(event)
             }
         }
-        // Unblock `stop()`: the reader has left `read()`, so the master fd can
+        // Unblock `stop()`: the reader has left `read()`, so the primary fd can
         // now be closed safely.
         readerExited.signal()
         eventContinuation.finish()

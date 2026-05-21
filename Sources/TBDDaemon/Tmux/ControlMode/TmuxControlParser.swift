@@ -22,7 +22,7 @@ final class TmuxControlParser {
             var slice = Data(lineBuffer[lineBuffer.startIndex..<newlineIndex])
             if slice.last == UInt8(ascii: "\r") { slice.removeLast() }
             lineBuffer.removeSubrange(lineBuffer.startIndex...newlineIndex)
-            if let event = parseLine(String(decoding: slice, as: UTF8.self)) {
+            if let event = parseLine(String(bytes: slice, encoding: .utf8) ?? "") {
                 events.append(event)
             }
         }
