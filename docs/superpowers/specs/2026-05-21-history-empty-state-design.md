@@ -65,10 +65,12 @@ when the empty-tabs state is entered, in two situations:
 - Selecting a worktree that already has no tabs.
 - Closing the last open tab of the currently selected worktree.
 
-Add a trigger in `TerminalContainerView` (e.g. `.task(id: worktreeTabs.isEmpty)`
-or `.onChange` of tab count) that, when tabs become empty on a non-`.main`
-worktree and `historyLoadStates[worktreeID]` is `.idle`, calls
-`appState.fetchSessions(worktreeID:)`.
+Add a trigger in `TerminalContainerView` (`.task(id: worktreeTabs.isEmpty)`)
+that, whenever tabs become empty on a non-`.main` worktree, calls
+`appState.fetchSessions(worktreeID:)`. The fetch runs unconditionally on each
+empty-tabs transition (not gated on `.idle`) so the history list is refreshed
+after closing a tab — `fetchSessions` keeps any prior data visible via
+`.loadingStale` while it revalidates, so this never flashes the placeholder.
 
 `.main` worktrees auto-create a terminal when empty (existing
 `.task(id: worktreeID)` logic), so they never sit in the empty state and need no
