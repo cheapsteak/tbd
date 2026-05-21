@@ -28,6 +28,32 @@ enum HistoryLoadState {
     }
 }
 
+// MARK: - EmptyTabsContent
+
+/// What a worktree's main area shows when it has no open tabs.
+enum EmptyTabsContent: Equatable {
+    case history       // render HistoryPaneView
+    case placeholder   // render the "No terminals" empty state
+}
+
+extension HistoryLoadState {
+    /// Decide what to show in the empty-tabs state. Loading states and any
+    /// worktree with at least one past session show history; an empty load
+    /// result or a failure falls back to the placeholder. `.idle` shows
+    /// history so the placeholder never flashes before the first fetch
+    /// resolves.
+    var emptyTabsContent: EmptyTabsContent {
+        switch self {
+        case .idle, .loading, .loadingStale:
+            return .history
+        case .loaded(let sessions):
+            return sessions.isEmpty ? .placeholder : .history
+        case .failed:
+            return .placeholder
+        }
+    }
+}
+
 // MARK: - Equatable
 
 extension HistoryLoadState: Equatable {
@@ -46,6 +72,13 @@ extension HistoryLoadState: Equatable {
 // MARK: - AppState History Extension
 
 extension AppState {
+
+    /// Whether an empty-tabs worktree should populate its session history.
+    /// `.main` worktrees auto-create a terminal and never sit in the empty
+    /// state, so they skip the fetch; every other worktree fetches.
+    nonisolated static func shouldPopulateHistoryForEmptyTabs(worktree: Worktree) -> Bool {
+        worktree.status != .main
+    }
 
     /// Toggle the history pane for a worktree. Shows it (and triggers a fetch) or hides it.
     func toggleHistory(worktreeID: UUID) {
