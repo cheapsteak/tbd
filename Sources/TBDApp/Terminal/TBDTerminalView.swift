@@ -292,7 +292,7 @@ class TBDTerminalView: TerminalView {
     /// Plain (unmodified) clicks are forwarded into the pane; clicks carrying
     /// a modifier belong to TBD's own file/link handling and must not also be
     /// forwarded — otherwise a Cmd+click both opens a file and clicks Claude.
-    static func clickPassthroughBlocked(by modifiers: NSEvent.ModifierFlags) -> Bool {
+    nonisolated static func clickPassthroughBlocked(by modifiers: NSEvent.ModifierFlags) -> Bool {
         !modifiers
             .intersection(.deviceIndependentFlagsMask)
             .intersection([.command, .shift, .control, .option])
