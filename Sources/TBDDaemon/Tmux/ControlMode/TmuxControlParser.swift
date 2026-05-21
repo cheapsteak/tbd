@@ -50,7 +50,8 @@ final class TmuxControlParser {
         case "%extended-output":
             return parseExtendedOutput(fields: fields, line: line)
         case "%begin":
-            return .unhandled(line: line)            // implemented in Task 6
+            openBlock = (number: fields.count >= 3 ? (Int(fields[2]) ?? -1) : -1, lines: [])
+            return nil
         case "%window-add":
             return fields.count >= 2 ? .windowAdd(windowID: fields[1]) : .unhandled(line: line)
         case "%window-close", "%unlinked-window-close":

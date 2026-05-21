@@ -87,3 +87,34 @@ struct TmuxControlParserOutputTests {
         #expect(events == [.extendedOutput(paneID: "%3", ageMillis: 150, bytes: Data("hello".utf8))])
     }
 }
+
+@Suite("TmuxControlParser — command blocks")
+struct TmuxControlParserBlockTests {
+    private func feed(_ string: String) -> [TmuxControlEvent] {
+        TmuxControlParser().feed(Data(string.utf8))
+    }
+
+    @Test("collects a successful command block's lines")
+    func successBlock() {
+        let events = feed("%begin 123 7 0\nline one\nline two\n%end 123 7 0\n")
+        #expect(events == [.commandSucceeded(number: 7, lines: ["line one", "line two"])])
+    }
+
+    @Test("reports a failed command block")
+    func errorBlock() {
+        let events = feed("%begin 1 2 0\nbad command\n%error 1 2 0\n")
+        #expect(events == [.commandFailed(number: 2, lines: ["bad command"])])
+    }
+
+    @Test("handles an empty command block")
+    func emptyBlock() {
+        #expect(feed("%begin 1 3 0\n%end 1 3 0\n") == [.commandSucceeded(number: 3, lines: [])])
+    }
+
+    @Test("emits a notification that follows a block")
+    func blockThenNotification() {
+        let events = feed("%begin 1 4 0\nx\n%end 1 4 0\n%window-add @9\n")
+        #expect(events == [.commandSucceeded(number: 4, lines: ["x"]),
+                           .windowAdd(windowID: "@9")])
+    }
+}
