@@ -556,6 +556,7 @@ final class AppState: ObservableObject {
                     } else {
                         let didConnect = await self.daemonClient.connect()
                         self.isConnected = didConnect
+                        if didConnect { self.pushClaudeSpawnPreferences() }
                     }
                     if !self.isConnected { return }
                 }
@@ -590,6 +591,7 @@ final class AppState: ObservableObject {
                     suspendEnabled: suspendEnabled
                 )
             }
+            pushClaudeSpawnPreferences()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }
@@ -934,6 +936,38 @@ final class AppState: ObservableObject {
     /// the developer's live app preferences.
     static func autoSuspendClaudeEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? true
+    }
+
+    /// UserDefaults key for a Claude spawn-env setting, by registry ID.
+    nonisolated static func claudeEnvKey(_ settingID: String) -> String {
+        "claudeEnvSetting.\(settingID)"
+    }
+
+    /// Build the overrides map from UserDefaults: a setting is included only
+    /// when the user has changed it from its registry default. Settings left
+    /// at default are omitted so the daemon falls back to registry defaults.
+    nonisolated static func claudeEnvOverrides(defaults: UserDefaults = .standard) -> [String: ClaudeEnvValue] {
+        var overrides: [String: ClaudeEnvValue] = [:]
+        for setting in ClaudeEnvRegistry.all {
+            let key = claudeEnvKey(setting.id)
+            switch setting.kind {
+            case .toggle(let def, _):
+                if let stored = defaults.object(forKey: key) as? Bool, stored != def {
+                    overrides[setting.id] = .bool(stored)
+                }
+            }
+        }
+        return overrides
+    }
+
+    /// Push the current Claude spawn-env setting overrides to the daemon.
+    /// Safe to call repeatedly — the daemon persists the latest value.
+    func pushClaudeSpawnPreferences() {
+        let overrides = Self.claudeEnvOverrides(defaults: userDefaults)
+        Task { [daemonClient] in
+            try? await daemonClient.setClaudeSpawnPreferences(
+                ClaudeSpawnPreferences(settingOverrides: overrides))
+        }
     }
 
     /// Convert the current `mainAreaSize` (pixels) into tmux cell dimensions
