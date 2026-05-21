@@ -147,9 +147,7 @@ struct LiveTranscriptPaneView: View {
                 guard let _ = oldID, let _ = newID, atBottom else { return }
                 guard let targetID = lastRenderedNodeID(for: messages) else { return }
                 let scrollInterval = TranscriptSignposts.signposter.beginInterval("transcript.scrollTo")
-                withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo(targetID, anchor: .bottom)
-                }
+                proxy.scrollTo(targetID, anchor: .bottom)
                 TranscriptSignposts.signposter.endInterval("transcript.scrollTo", scrollInterval)
             }
             .onChange(of: messages.count) { _, newCount in
@@ -179,9 +177,7 @@ struct LiveTranscriptPaneView: View {
             Button {
                 guard let lastID = lastRenderedNodeID(for: messages) else { return }
                 let scrollInterval = TranscriptSignposts.signposter.beginInterval("transcript.scrollTo")
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(lastID, anchor: .bottom)
-                }
+                proxy.scrollTo(lastID, anchor: .bottom)
                 TranscriptSignposts.signposter.endInterval("transcript.scrollTo", scrollInterval)
             } label: {
                 Image(systemName: "arrow.down.circle.fill")
