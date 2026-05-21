@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDDaemonLib
+import TBDShared
 
 @Suite("ClaudeSpawnCommandBuilder")
 struct ClaudeSpawnCommandBuilderTests {
@@ -21,7 +22,8 @@ struct ClaudeSpawnCommandBuilderTests {
             shellFallback: "/bin/zsh"
         )
         #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions")
-        #expect(r.sensitiveEnv.isEmpty)
+        // Registry injects CLAUDE_CODE_NO_FLICKER=1 by default for all Claude spawns.
+        #expect(r.sensitiveEnv == ["CLAUDE_CODE_NO_FLICKER": "1"])
     }
 
     @Test("fresh session id only")
@@ -36,7 +38,8 @@ struct ClaudeSpawnCommandBuilderTests {
             shellFallback: "/bin/zsh"
         )
         #expect(r.command == "claude --session-id sid-1 --dangerously-skip-permissions")
-        #expect(r.sensitiveEnv.isEmpty)
+        // Registry injects CLAUDE_CODE_NO_FLICKER=1 by default for all Claude spawns.
+        #expect(r.sensitiveEnv == ["CLAUDE_CODE_NO_FLICKER": "1"])
     }
 
     @Test("fresh + appendSystemPrompt")
@@ -148,7 +151,8 @@ struct ClaudeSpawnCommandBuilderTests {
             shellFallback: ""
         )
         #expect(!r.command.contains(fakeOauth))
-        #expect(r.sensitiveEnv == ["ANTHROPIC_API_KEY": fakeOauth])
+        // Registry injects CLAUDE_CODE_NO_FLICKER=1 by default for all Claude spawns.
+        #expect(r.sensitiveEnv == ["ANTHROPIC_API_KEY": fakeOauth, "CLAUDE_CODE_NO_FLICKER": "1"])
     }
 
     @Test("cmd path ignores token (non-claude shell)")
@@ -540,8 +544,8 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv["ANTHROPIC_BASE_URL"] == nil)
         #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == nil)
         #expect(r.sensitiveEnv["ANTHROPIC_CONFIG_DIR"] == nil)
-        // Exactly these 4 keys
-        #expect(r.sensitiveEnv.keys.sorted() == ["ANTHROPIC_MODEL", "AWS_PROFILE", "AWS_REGION", "CLAUDE_CODE_USE_BEDROCK"])
+        // Exactly these 5 keys (registry adds CLAUDE_CODE_NO_FLICKER=1 for all Claude spawns)
+        #expect(r.sensitiveEnv.keys.sorted() == ["ANTHROPIC_MODEL", "AWS_PROFILE", "AWS_REGION", "CLAUDE_CODE_NO_FLICKER", "CLAUDE_CODE_USE_BEDROCK"])
     }
 
     @Test("bedrock: AWS_PROFILE omitted when nil")
@@ -609,5 +613,48 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv["CLAUDE_CODE_OAUTH_TOKEN"] == nil)
         #expect(r.sensitiveEnv["AWS_REGION"] == nil)
         #expect(r.sensitiveEnv["CLAUDE_CODE_USE_BEDROCK"] == nil)
+    }
+}
+
+@Suite("ClaudeSpawnCommandBuilder env settings")
+struct ClaudeSpawnCommandBuilderEnvTests {
+    @Test("fresh Claude spawn with no overrides emits CLAUDE_CODE_NO_FLICKER=1")
+    func defaultOnFresh() {
+        let result = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: "S1", appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil,
+            cmd: nil, shellFallback: "/bin/zsh",
+            envSettingOverrides: [:])
+        #expect(result.sensitiveEnv["CLAUDE_CODE_NO_FLICKER"] == "1")
+    }
+
+    @Test("explicit false override omits CLAUDE_CODE_NO_FLICKER")
+    func falseOverrideOmits() {
+        let result = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: "S1", appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil,
+            cmd: nil, shellFallback: "/bin/zsh",
+            envSettingOverrides: ["fullscreenRendering": .bool(false)])
+        #expect(result.sensitiveEnv["CLAUDE_CODE_NO_FLICKER"] == nil)
+    }
+
+    @Test("resume Claude spawn also emits the env var")
+    func defaultOnResume() {
+        let result = ClaudeSpawnCommandBuilder.build(
+            resumeID: "R1", freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil,
+            cmd: nil, shellFallback: "/bin/zsh",
+            envSettingOverrides: [:])
+        #expect(result.sensitiveEnv["CLAUDE_CODE_NO_FLICKER"] == "1")
+    }
+
+    @Test("non-Claude (cmd) spawn never emits the env var")
+    func cmdSpawnNoEnv() {
+        let result = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil,
+            cmd: "codex", shellFallback: "/bin/zsh",
+            envSettingOverrides: [:])
+        #expect(result.sensitiveEnv["CLAUDE_CODE_NO_FLICKER"] == nil)
     }
 }
