@@ -377,6 +377,7 @@ public actor SuspendResumeCoordinator {
             }
         }
 
+        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
@@ -392,7 +393,8 @@ public actor SuspendResumeCoordinator {
             cmd: nil,
             shellFallback: defaultShell,
             settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-            pluginDirPath: PluginDirWriter.pluginDirPath
+            pluginDirPath: PluginDirWriter.pluginDirPath,
+            envSettingOverrides: claudeEnvOverrides
         )
         // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID into the resumed pane so
         // notifications and the SessionStart hook bridge attribute to the

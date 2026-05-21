@@ -227,6 +227,7 @@ extension WorktreeLifecycle {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
         let worktreePath = worktreePath ?? worktree.path
+        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
         // Resolve a usable size: prefer caller's value, otherwise fall back to
         // TmuxManager's defaults. tmux's own 80x24 default would let Claude
         // render into hard-wrapped scrollback that can never be reflowed when
@@ -292,7 +293,8 @@ extension WorktreeLifecycle {
                 cmd: nil,
                 shellFallback: defaultShell,
                 settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-                pluginDirPath: PluginDirWriter.pluginDirPath
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                envSettingOverrides: claudeEnvOverrides
             )
             claudeCommand = spawn.command
             claudeSensitiveEnv = spawn.sensitiveEnv
@@ -376,7 +378,8 @@ extension WorktreeLifecycle {
                     cmd: nil,
                     shellFallback: defaultShell,
                     settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-                    pluginDirPath: PluginDirWriter.pluginDirPath
+                    pluginDirPath: PluginDirWriter.pluginDirPath,
+                    envSettingOverrides: claudeEnvOverrides
                 )
                 let perTermEnv: [String: String] = [
                     "TBD_WORKTREE_ID": worktreeID.uuidString,
