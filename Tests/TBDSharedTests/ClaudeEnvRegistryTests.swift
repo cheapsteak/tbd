@@ -41,4 +41,12 @@ struct ClaudeEnvRegistryTests {
         let setting = try #require(ClaudeEnvRegistry.setting(id: "fullscreenRendering"))
         #expect(setting.emit(.string("garbage")) == "1")
     }
+
+    @Test("decoding an unknown kind throws")
+    func decodeUnknownKindThrows() {
+        let data = Data(#"{"kind":"date","value":1}"#.utf8)
+        #expect(throws: (any Error).self) {
+            try JSONDecoder().decode(ClaudeEnvValue.self, from: data)
+        }
+    }
 }
