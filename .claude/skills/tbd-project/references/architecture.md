@@ -153,16 +153,16 @@ JSON-RPC style over Unix socket (newline-delimited) and HTTP POST `/rpc`. Method
 
 - **Repo**: `repo.add`, `repo.remove`, `repo.list`, `repo.rename`, `repo.relocate`, `repo.updateInstructions`, hidden/expanded toggles
 - **Worktree**: `worktree.create`, `.list`, `.archive`, `.revive`, `.adopt`, `.rename`, `.reorder`, `.move` (reparent), `.selectionChanged`, `.suspend`, `.resume`
-- **Terminal**: `terminal.create` (`type`/`prompt`), `.list`, `.send` (`submit`), `.delete`, `.setPin`, `.output`, `.conversation`, `.transcript`, `.suspend`, `.resume`, `.recreateWindow`
-- **Tab**: set label, set order, list, set active tab
-- **Session**: `session.list`, `session.messages` — list/parse Claude JSONL transcripts; plus the `session-event` bridge that records SessionStart hook data
-- **AskUserQuestion**: pre/post bridge handlers backed by `PendingQuestionStore`
-- **Model profile**: CRUD + global default + usage
+- **Terminal**: `terminal.create` (`type`/`prompt`), `.list`, `.send` (`submit`), `.delete`, `.setPin`, `.output`, `.conversation`, `.transcript`, `.transcriptItemFullBody`, `.suspend`, `.resume`, `.recreateWindow`, `.swapProfile`
+- **Tab**: `tab.setLabel`, `tab.setOrder`, `tab.list`, `worktree.setActiveTab`
+- **Session**: `session.list`, `session.messages` — list/parse Claude JSONL transcripts; plus `terminal.sessionEvent` (SessionStart hook bridge)
+- **AskUserQuestion**: `terminal.askUserQuestionPending` / `terminal.askUserQuestionCleared`, backed by `PendingQuestionStore`
+- **Model profile**: `modelProfile.list`/`.add`/`.delete`/`.rename`/`.updateEndpoint`/`.updateBedrock`/`.setGlobalDefault`/`.setRepoOverride`/`.fetchUsage`/`.healthCheck`
 - **Notification**: `notify`, `notifications.list`, `notifications.markRead`
 - **PR**: `pr.list`, `pr.refresh`
 - **Note**: `note.create`/`.get`/`.update`/`.delete`/`.list`
-- **Legacy hooks**: scan + remove legacy globally-installed `tbd` hook entries
-- **Meta**: `daemon.status`, `resolve.path`, `cleanup`, `state.subscribe`
+- **Legacy hooks**: `daemon.legacyHooksStatus`, `daemon.removeLegacyGlobalHooks`
+- **Meta**: `daemon.status`, `resolve.path`, `cleanup`, `state.subscribe`, `app.setForegroundState`, `app.setMainAreaSize`
 
 ## CLI Commands
 
