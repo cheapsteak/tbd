@@ -32,7 +32,8 @@ final class TmuxControlParser {
     private func parseLine(_ line: String) -> TmuxControlEvent? {
         // Inside a command block, every line is response text until %end/%error.
         if openBlock != nil {
-            if line.hasPrefix("%end ") || line.hasPrefix("%error ") {
+            if line == "%end" || line.hasPrefix("%end ")
+                || line == "%error" || line.hasPrefix("%error ") {
                 return closeBlock(line)
             }
             openBlock?.lines.append(line)
@@ -105,7 +106,7 @@ final class TmuxControlParser {
     private func closeBlock(_ line: String) -> TmuxControlEvent {
         let block = openBlock!
         openBlock = nil
-        return line.hasPrefix("%end ")
+        return line == "%end" || line.hasPrefix("%end ")
             ? .commandSucceeded(number: block.number, lines: block.lines)
             : .commandFailed(number: block.number, lines: block.lines)
     }

@@ -111,6 +111,11 @@ struct TmuxControlParserBlockTests {
         #expect(feed("%begin 1 3 0\n%end 1 3 0\n") == [.commandSucceeded(number: 3, lines: [])])
     }
 
+    @Test("closes a block on a bare %end line with no trailing fields")
+    func bareEndLine() {
+        #expect(feed("%begin 1 5 0\nx\n%end\n") == [.commandSucceeded(number: 5, lines: ["x"])])
+    }
+
     @Test("emits a notification that follows a block")
     func blockThenNotification() {
         let events = feed("%begin 1 4 0\nx\n%end 1 4 0\n%window-add @9\n")

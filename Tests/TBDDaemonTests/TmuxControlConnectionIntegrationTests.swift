@@ -50,6 +50,9 @@ struct TmuxControlConnectionIntegrationTests {
         tmux(["-L", server, "send-keys", "echo tbd-marker", "Enter"])
         try await Task.sleep(for: .milliseconds(800))
 
+        connection.sendCommand("list-windows")
+        try await Task.sleep(for: .milliseconds(400))
+
         connection.stop()
         collector.cancel()
 
@@ -58,6 +61,8 @@ struct TmuxControlConnectionIntegrationTests {
                 "expected a %window-add event")
         #expect(events.contains { if case .output = $0 { return true } else { return false } },
                 "expected at least one %output event")
+        #expect(events.contains { if case .commandSucceeded = $0 { return true } else { return false } },
+                "expected a %begin/%end command block from sendCommand")
     }
 }
 
