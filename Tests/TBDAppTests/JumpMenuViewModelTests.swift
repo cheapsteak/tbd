@@ -161,6 +161,103 @@ struct JumpMenuViewModelTests {
         #expect(vm.selectedRow == nil)
     }
 
+    @Test func match_recentOutranksNonRecentByName() {
+        // A recently-used match must rank above a non-recent one even when
+        // it sorts later alphabetically.
+        let recent = UUID(); let nonRecent = UUID()
+        let vm = JumpMenuViewModel(
+            worktrees: [
+                snap(recent, name: "zzz-standup"),
+                snap(nonRecent, name: "aaa-standup"),
+            ],
+            unread: [:],
+            recentIDs: [recent]   // only `recent` was visited
+        )
+        vm.query = "standup"
+        let rows = vm.rows
+        #expect(rows.count == 2)
+        #expect(rows[0].id == recent)      // recency beats alphabetical
+        #expect(rows[1].id == nonRecent)
+    }
+
+    @Test func match_unreadOutranksMoreRecentRead() {
+        // An unread worktree stays on top even when a read worktree was
+        // used more recently.
+        let read = UUID(); let unreadWT = UUID()
+        let now = Date()
+        let vm = JumpMenuViewModel(
+            worktrees: [
+                snap(read, name: "standup-read"),
+                snap(unreadWT, name: "standup-unread"),
+            ],
+            unread: [unreadWT: UnreadSummary(type: .error, mostRecentAt: now)],
+            recentIDs: [read]   // `read` is the most recently used
+        )
+        vm.query = "standup"
+        let rows = vm.rows
+        #expect(rows.count == 2)
+        #expect(rows[0].id == unreadWT)   // unread tier wins over recency
+        #expect(rows[1].id == read)
+    }
+
+    @Test func match_recencyOrdersWithinUnreadTier() {
+        // Two equal-severity unread matches order by recency.
+        let older = UUID(); let newer = UUID()
+        let now = Date()
+        let vm = JumpMenuViewModel(
+            worktrees: [
+                snap(older, name: "standup-a"),
+                snap(newer, name: "standup-b"),
+            ],
+            unread: [
+                older: UnreadSummary(type: .error, mostRecentAt: now),
+                newer: UnreadSummary(type: .error, mostRecentAt: now),
+            ],
+            recentIDs: [newer, older]   // `newer` is more recent
+        )
+        vm.query = "standup"
+        let rows = vm.rows
+        #expect(rows.count == 2)
+        #expect(rows[0].id == newer)   // equal severity -> recency decides
+        #expect(rows[1].id == older)
+    }
+
+    @Test func match_emojiPrefixSortsByWords() {
+        // Non-recent matches fall back to alphabetical; a leading emoji
+        // must not drive the order.
+        let apple = UUID(); let zebra = UUID()
+        let vm = JumpMenuViewModel(
+            worktrees: [
+                snap(zebra, name: "🔧 zebra standup"),
+                snap(apple, name: "🦓 apple standup"),
+            ],
+            unread: [:],
+            recentIDs: []   // neither recent -> alphabetical fallback
+        )
+        vm.query = "standup"
+        let rows = vm.rows
+        #expect(rows.count == 2)
+        #expect(rows[0].id == apple)   // "apple..." < "zebra..." despite emoji
+        #expect(rows[1].id == zebra)
+    }
+
+    @Test func match_nonRecentFallbackAlphabetical() {
+        // With no recency data, matches order alphabetically by words.
+        let a = UUID(); let b = UUID(); let c = UUID()
+        let vm = JumpMenuViewModel(
+            worktrees: [
+                snap(c, name: "charlie-standup"),
+                snap(a, name: "alpha-standup"),
+                snap(b, name: "bravo-standup"),
+            ],
+            unread: [:],
+            recentIDs: []
+        )
+        vm.query = "standup"
+        let rows = vm.rows
+        #expect(rows.map(\.id) == [a, b, c])
+    }
+
     @Test func deletionsAreFiltered() {
         let stale = UUID()    // not present in `worktrees`
         let live = UUID()
