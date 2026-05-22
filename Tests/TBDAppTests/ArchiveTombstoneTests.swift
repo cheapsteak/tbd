@@ -30,7 +30,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         let wtID = UUID()
         let activeWt = makeWorktree(id: wtID)
 
-        let visible = visibleWorktrees(
+        let visible = AppState.visibleWorktrees(
             from: [activeWt],
             tombstones: [wtID]
         )
@@ -44,7 +44,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         let wtID = UUID()
         let activeWt = makeWorktree(id: wtID)
 
-        let visible = visibleWorktrees(
+        let visible = AppState.visibleWorktrees(
             from: [activeWt],
             tombstones: []
         )
@@ -59,7 +59,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         let wtID = UUID()
         let archivedWt = makeWorktree(id: wtID, status: .archived)
 
-        let visible = visibleWorktrees(
+        let visible = AppState.visibleWorktrees(
             from: [archivedWt],
             tombstones: []
         )
@@ -74,7 +74,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         let now = Date()
         let activeWt = makeWorktree(id: wtID, status: .active)
 
-        let reconciled = reconcileTombstones(
+        let reconciled = AppState.reconcileTombstones(
             [wtID: now],
             daemonWorktrees: [activeWt],
             now: now
@@ -90,7 +90,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         let now = Date()
         let archivedWt = makeWorktree(id: wtID, status: .archived)
 
-        let reconciled = reconcileTombstones(
+        let reconciled = AppState.reconcileTombstones(
             [wtID: now],
             daemonWorktrees: [archivedWt],
             now: now
@@ -105,7 +105,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         let wtID = UUID()
         let now = Date()
 
-        let reconciled = reconcileTombstones(
+        let reconciled = AppState.reconcileTombstones(
             [wtID: now],
             daemonWorktrees: [],
             now: now
@@ -122,7 +122,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         let now = createdAt.addingTimeInterval(31) // Past 30-second TTL
         let activeWt = makeWorktree(id: wtID, status: .active)
 
-        let reconciled = reconcileTombstones(
+        let reconciled = AppState.reconcileTombstones(
             [wtID: createdAt],
             daemonWorktrees: [activeWt],
             now: now,
@@ -140,7 +140,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         let now = createdAt.addingTimeInterval(29.9) // Just before 30-second TTL
         let activeWt = makeWorktree(id: wtID, status: .active)
 
-        let reconciled = reconcileTombstones(
+        let reconciled = AppState.reconcileTombstones(
             [wtID: createdAt],
             daemonWorktrees: [activeWt],
             now: now,
@@ -163,7 +163,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         let wt2 = makeWorktree(id: id2, status: .archived)
         // id3 is absent
 
-        let reconciled = reconcileTombstones(
+        let reconciled = AppState.reconcileTombstones(
             [id1: now, id2: now, id3: oldDate],
             daemonWorktrees: [wt1, wt2],
             now: now,
@@ -212,7 +212,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         var tombstones: [UUID: Date] = [wtID: Date()]
 
         // Before clearing: worktree should be hidden
-        var visible = visibleWorktrees(
+        var visible = AppState.visibleWorktrees(
             from: [activeWt],
             tombstones: Set(tombstones.keys)
         )
@@ -222,7 +222,7 @@ final class ArchiveTombstoneTests: XCTestCase {
         tombstones.removeValue(forKey: wtID)
 
         // After clearing: worktree should be visible again
-        visible = visibleWorktrees(
+        visible = AppState.visibleWorktrees(
             from: [activeWt],
             tombstones: Set(tombstones.keys)
         )
@@ -254,7 +254,7 @@ final class ArchiveTombstoneTests: XCTestCase {
 
         // Verify the invariant: a worktree with cleared tombstone is visible
         let activeWt = makeWorktree(id: wtID)
-        let visible = visibleWorktrees(
+        let visible = AppState.visibleWorktrees(
             from: [activeWt],
             tombstones: Set(state.recentlyArchivedWorktreeIDs.keys)
         )
