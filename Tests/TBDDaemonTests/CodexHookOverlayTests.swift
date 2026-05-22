@@ -105,4 +105,66 @@ import TBDShared
         #expect(output.contains("enabled = true"))
         #expect(!output.contains("enabled = false"))
     }
+
+    @Test func ensurePluginEnabledIsIdempotent() {
+        let inputs = [
+            "",
+            """
+            model = "gpt-5.1"
+
+            [plugins."tbd@tbd"]
+            enabled = false
+            custom = "keep"
+
+            [tools]
+            web_search = true
+            """,
+            """
+            model = "gpt-5.1"
+
+            [plugins."tbd@tbd"]
+            enabled = true
+
+            """
+        ]
+        for input in inputs {
+            let first = CodexProfileWriter.ensurePluginEnabled(in: input)
+            let second = CodexProfileWriter.ensurePluginEnabled(in: first)
+            #expect(first == second, "ensurePluginEnabled must be idempotent")
+        }
+    }
+
+    @Test func ensureProfileIsIdempotentAndDoesNotRewrite() throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-profile-idem-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+
+        try CodexProfileWriter.ensureProfile(in: codexHome)
+        let path = CodexProfileWriter.profilePath(in: codexHome)
+        let firstContent = try String(contentsOf: path, encoding: .utf8)
+        let firstModified = try FileManager.default
+            .attributesOfItem(atPath: path.path)[.modificationDate] as? Date
+
+        try CodexProfileWriter.ensureProfile(in: codexHome)
+        let secondContent = try String(contentsOf: path, encoding: .utf8)
+        let secondModified = try FileManager.default
+            .attributesOfItem(atPath: path.path)[.modificationDate] as? Date
+
+        #expect(firstContent == secondContent, "profile content must be byte-identical after second run")
+        #expect(firstModified == secondModified, "second ensureProfile run must not rewrite the file")
+    }
+
+    @Test func ensurePluginEnabledPreservesEnabledPrefixedKeys() {
+        let input = """
+        [plugins."tbd@tbd"]
+        enabled_features = ["x"]
+        enabled = false
+        """
+
+        let output = CodexProfileWriter.ensurePluginEnabled(in: input)
+
+        #expect(output.contains(#"enabled_features = ["x"]"#))
+        #expect(output.contains("enabled = true"))
+        #expect(!output.contains("enabled = false"))
+    }
 }

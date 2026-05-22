@@ -160,7 +160,7 @@ enum CodexProfileWriter {
         let current = (try? String(contentsOf: path, encoding: .utf8)) ?? ""
         let updated = ensurePluginEnabled(in: current)
 
-        guard updated != current || !FileManager.default.fileExists(atPath: path.path) else {
+        guard updated != current else {
             return
         }
 
@@ -173,7 +173,17 @@ enum CodexProfileWriter {
 
     static func ensurePluginEnabled(in toml: String) -> String {
         let header = #"[plugins."\#(CodexPlugin.pluginKey)"]"#
+
+        // Splitting a `\n`-terminated string with `omittingEmptySubsequences:
+        // false` yields a trailing empty element. Drop it so the join below
+        // does not append an extra blank line on every call — otherwise the
+        // file grows and `ensureProfile`'s `updated != current` guard never
+        // short-circuits.
         var lines = toml.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let hadTrailingNewline = toml.hasSuffix("\n")
+        if hadTrailingNewline, lines.last == "" {
+            lines.removeLast()
+        }
 
         guard let headerIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == header }) else {
             var updated = toml
@@ -189,18 +199,29 @@ enum CodexProfileWriter {
 
         let nextSectionIndex = lines[(headerIndex + 1)...]
             .firstIndex { line in
+                // A section header is a line that trims to `[...]` and is not
+                // a key/value assignment — reject lines containing `=` so a
+                // multi-line array value or `[[table]]` element inside the
+                // section is not misread as the next section boundary.
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                return trimmed.hasPrefix("[") && trimmed.hasSuffix("]")
+                return trimmed.hasPrefix("[") && trimmed.hasSuffix("]") && !trimmed.contains("=")
             } ?? lines.endIndex
 
         if let enabledIndex = lines[(headerIndex + 1)..<nextSectionIndex]
-            .firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("enabled") }) {
+            .firstIndex(where: { line in
+                // Match the exact `enabled` key, not prefixes like
+                // `enabled_features` which would otherwise be clobbered.
+                let key = line.trimmingCharacters(in: .whitespaces)
+                    .prefix { $0 != "=" }
+                    .trimmingCharacters(in: .whitespaces)
+                return key == "enabled"
+            }) {
             lines[enabledIndex] = "enabled = true"
         } else {
             lines.insert("enabled = true", at: headerIndex + 1)
         }
 
-        return lines.joined(separator: "\n") + (toml.hasSuffix("\n") ? "\n" : "")
+        return lines.joined(separator: "\n") + (hadTrailingNewline ? "\n" : "")
     }
 }
 
