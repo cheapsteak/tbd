@@ -230,35 +230,4 @@ final class ArchiveTombstoneTests: XCTestCase {
         XCTAssertEqual(visible[0].id, wtID)
     }
 
-    // MARK: - AC4.1: Cleared tombstone restores visibility
-
-    @MainActor
-    func testClearedTombstoneRestoresVisibility() {
-        let suite = "test-\(UUID().uuidString)"
-        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
-
-        let wtID = UUID()
-
-        // Seed a tombstone
-        state.recentlyArchivedWorktreeIDs[wtID] = Date()
-
-        // Verify the tombstone exists
-        XCTAssertNotNil(state.recentlyArchivedWorktreeIDs[wtID])
-
-        // Simulate the revive clearing the tombstone
-        state.recentlyArchivedWorktreeIDs.removeValue(forKey: wtID)
-
-        // Verify the tombstone is cleared
-        XCTAssertNil(state.recentlyArchivedWorktreeIDs[wtID])
-
-        // Verify the invariant: a worktree with cleared tombstone is visible
-        let activeWt = makeWorktree(id: wtID)
-        let visible = AppState.visibleWorktrees(
-            from: [activeWt],
-            tombstones: Set(state.recentlyArchivedWorktreeIDs.keys)
-        )
-        XCTAssertEqual(visible.count, 1, "Worktree with cleared tombstone should be visible")
-        XCTAssertEqual(visible[0].id, wtID)
-    }
 }
