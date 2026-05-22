@@ -505,11 +505,25 @@ private struct TabBarItem: View {
             .background(Color(nsColor: .controlBackgroundColor))
             .cornerRadius(4)
             .opacity(0.85)
-            .onAppear { appState.draggingTabID = tab.id }
+            // Defer the @Published write off SwiftUI's view-graph update pass.
+            // Writing it synchronously here re-invalidates the body that owns
+            // this preview, causing a runaway re-render loop. The equality
+            // guard also keeps a redundant same-value write (the catch-all
+            // .onDrop below also clears to nil) from publishing needlessly.
+            .onAppear {
+                let id = tab.id
+                DispatchQueue.main.async {
+                    if appState.draggingTabID != id { appState.draggingTabID = id }
+                }
+            }
             // Drag preview is dismissed on any drag end — drop, drop-outside-window,
             // Escape, drop on a non-target. Covers cancel paths that neither the
             // per-tab delegate nor the outer catch-all see.
-            .onDisappear { appState.draggingTabID = nil }
+            .onDisappear {
+                DispatchQueue.main.async {
+                    if appState.draggingTabID != nil { appState.draggingTabID = nil }
+                }
+            }
         }
         // Use onDrop+DropDelegate (instead of .dropDestination) so we get
         // info.location during hover via dropUpdated, which is required to
