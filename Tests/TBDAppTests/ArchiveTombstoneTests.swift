@@ -176,6 +176,34 @@ final class ArchiveTombstoneTests: XCTestCase {
     }
 
 
+    // MARK: - AC3.1: handleDelta(.worktreeArchived) removes row and tombstones
+
+    @MainActor
+    func testHandleDeltaWorktreeArchivedRemovesRowAndTombstones() {
+        let suite = "test-\(UUID().uuidString)"
+        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+
+        let wtID = UUID()
+        let wt = makeWorktree(id: wtID)
+        state.worktrees = [testRepoID: [wt]]
+
+        // Apply the delta
+        state.handleDelta(.worktreeArchived(WorktreeIDDelta(worktreeID: wtID)))
+
+        // Assert the worktree is removed
+        XCTAssertTrue(
+            state.worktrees[testRepoID]?.contains(where: { $0.id == wtID }) ?? false == false,
+            "Worktree should be removed from state"
+        )
+
+        // Assert the tombstone is created
+        XCTAssertNotNil(
+            state.recentlyArchivedWorktreeIDs[wtID],
+            "Worktree ID should be tombstoned"
+        )
+    }
+
     // MARK: - AC4.1: Clearing tombstone makes worktree visible again
 
     func testClearingTombstoneRestoresVisibility() {
