@@ -31,6 +31,10 @@ enum ColorSchemes {
         tango, tbdDefault,
         solarizedDark, tomorrowNight, dracula,
         nord, oneDark, gruvboxDark,
+
+        // Light themes
+        solarizedLight, githubLight, catppuccinLatte, gruvboxLight,
+        rosePineDawn, flexokiLight, tokyoNightDay,
     ]
 
     // MARK: - tbd-default
@@ -265,6 +269,209 @@ enum ColorSchemes {
         background: rgb(40, 40, 40),
         cursor: rgb(235, 219, 178),
         selection: rgb(60, 56, 54)
+    )
+
+    // MARK: - solarized-light
+    /// Solarized Light — Ethan Schoonover, https://ethanschoonover.com/solarized/
+    static let solarizedLight = TerminalColorScheme(
+        id: "solarized-light",
+        displayName: "Solarized Light",
+        ansi: [
+            rgb(0, 43, 54),         // 0 base03 (black)
+            rgb(220, 50, 47),       // 1 red
+            rgb(133, 153, 0),       // 2 green
+            rgb(181, 137, 0),       // 3 yellow
+            rgb(38, 139, 210),      // 4 blue
+            rgb(211, 54, 130),      // 5 magenta
+            rgb(42, 161, 152),      // 6 cyan
+            rgb(238, 232, 213),     // 7 base2 (white)
+            rgb(7, 54, 66),         // 8 base02 (bright black)
+            rgb(203, 75, 22),       // 9 orange (bright red)
+            rgb(88, 110, 117),      // 10 base01 (bright green)
+            rgb(101, 123, 131),     // 11 base00 (bright yellow)
+            rgb(131, 148, 150),     // 12 base0 (bright blue)
+            rgb(108, 113, 196),     // 13 violet (bright magenta)
+            rgb(147, 161, 161),     // 14 base1 (bright cyan)
+            rgb(253, 246, 227),     // 15 base3 (bright white)
+        ],
+        foreground: rgb(101, 123, 131),
+        background: rgb(253, 246, 227),
+        cursor: rgb(101, 123, 131),
+        selection: rgb(238, 232, 213)
+    )
+
+    // MARK: - github-light
+    /// GitHub Light — https://github.com
+    static let githubLight = TerminalColorScheme(
+        id: "github-light",
+        displayName: "GitHub Light",
+        ansi: [
+            rgb(36, 41, 46),        // 0 black
+            rgb(209, 18, 47),       // 1 red
+            rgb(46, 160, 67),       // 2 green
+            rgb(158, 106, 3),       // 3 yellow
+            rgb(9, 105, 218),       // 4 blue
+            rgb(139, 58, 98),       // 5 magenta
+            rgb(7, 112, 122),       // 6 cyan
+            rgb(225, 228, 232),     // 7 white
+            rgb(87, 96, 106),       // 8 bright black
+            rgb(248, 81, 73),       // 9 bright red
+            rgb(63, 185, 80),       // 10 bright green
+            rgb(210, 153, 34),      // 11 bright yellow
+            rgb(88, 166, 255),      // 12 bright blue
+            rgb(188, 142, 247),     // 13 bright magenta
+            rgb(57, 197, 207),      // 14 bright cyan
+            rgb(255, 255, 255),     // 15 bright white
+        ],
+        foreground: rgb(36, 41, 46),
+        background: rgb(255, 255, 255),
+        cursor: rgb(9, 105, 218),
+        selection: rgb(225, 228, 232)
+    )
+
+    // MARK: - catppuccin-latte
+    /// Catppuccin Latte — https://github.com/catppuccin/catppuccin
+    static let catppuccinLatte = TerminalColorScheme(
+        id: "catppuccin-latte",
+        displayName: "Catppuccin Latte",
+        ansi: [
+            rgb(92, 95, 119),       // 0 black
+            rgb(210, 15, 57),       // 1 red
+            rgb(64, 160, 43),       // 2 green
+            rgb(223, 142, 29),      // 3 yellow
+            rgb(30, 102, 245),      // 4 blue
+            rgb(234, 118, 203),     // 5 magenta
+            rgb(32, 159, 181),      // 6 cyan
+            rgb(230, 233, 239),     // 7 white
+            rgb(108, 111, 133),     // 8 bright black
+            rgb(210, 15, 57),       // 9 bright red
+            rgb(64, 160, 43),       // 10 bright green
+            rgb(223, 142, 29),      // 11 bright yellow
+            rgb(30, 102, 245),      // 12 bright blue
+            rgb(234, 118, 203),     // 13 bright magenta
+            rgb(32, 159, 181),      // 14 bright cyan
+            rgb(239, 241, 245),     // 15 bright white
+        ],
+        foreground: rgb(76, 79, 105),
+        background: rgb(239, 241, 245),
+        cursor: rgb(30, 102, 245),
+        selection: rgb(230, 233, 239)
+    )
+
+    // MARK: - gruvbox-light
+    /// Gruvbox Light — Pavel Pertsev, https://github.com/morhetz/gruvbox
+    static let gruvboxLight = TerminalColorScheme(
+        id: "gruvbox-light",
+        displayName: "Gruvbox Light",
+        ansi: [
+            rgb(251, 241, 199),     // 0 black
+            rgb(204, 36, 29),       // 1 red
+            rgb(152, 151, 26),      // 2 green
+            rgb(215, 153, 33),      // 3 yellow
+            rgb(69, 133, 136),      // 4 blue
+            rgb(177, 98, 134),      // 5 magenta
+            rgb(104, 157, 106),     // 6 cyan
+            rgb(60, 56, 54),        // 7 white
+            rgb(146, 131, 116),     // 8 bright black
+            rgb(157, 0, 6),         // 9 bright red
+            rgb(121, 116, 14),      // 10 bright green
+            rgb(181, 118, 20),      // 11 bright yellow
+            rgb(7, 102, 120),       // 12 bright blue
+            rgb(143, 63, 113),      // 13 bright magenta
+            rgb(66, 123, 88),       // 14 bright cyan
+            rgb(40, 40, 40),        // 15 bright white
+        ],
+        foreground: rgb(60, 56, 54),
+        background: rgb(251, 241, 199),
+        cursor: rgb(69, 133, 136),
+        selection: rgb(242, 229, 188)
+    )
+
+    // MARK: - rose-pine-dawn
+    /// Rosé Pine Dawn — https://github.com/rose-pine/alacritty
+    static let rosePineDawn = TerminalColorScheme(
+        id: "rose-pine-dawn",
+        displayName: "Rosé Pine Dawn",
+        ansi: [
+            rgb(242, 233, 225),     // 0 black
+            rgb(180, 99, 122),      // 1 red
+            rgb(40, 105, 131),      // 2 green
+            rgb(234, 157, 52),      // 3 yellow
+            rgb(86, 148, 159),      // 4 blue
+            rgb(144, 122, 169),     // 5 magenta
+            rgb(215, 130, 126),     // 6 cyan
+            rgb(87, 82, 121),       // 7 white
+            rgb(152, 147, 165),     // 8 bright black
+            rgb(180, 99, 122),      // 9 bright red
+            rgb(40, 105, 131),      // 10 bright green
+            rgb(234, 157, 52),      // 11 bright yellow
+            rgb(86, 148, 159),      // 12 bright blue
+            rgb(144, 122, 169),     // 13 bright magenta
+            rgb(215, 130, 126),     // 14 bright cyan
+            rgb(87, 82, 121),       // 15 bright white
+        ],
+        foreground: rgb(87, 82, 121),
+        background: rgb(250, 244, 237),
+        cursor: rgb(206, 202, 205),
+        selection: rgb(223, 218, 217)
+    )
+
+    // MARK: - tokyo-night-day
+    /// Tokyo Night Day — https://github.com/folke/tokyonight.nvim
+    static let tokyoNightDay = TerminalColorScheme(
+        id: "tokyo-night-day",
+        displayName: "Tokyo Night Day",
+        ansi: [
+            rgb(180, 181, 185),     // 0 black
+            rgb(245, 42, 101),      // 1 red
+            rgb(88, 117, 57),       // 2 green
+            rgb(140, 108, 62),      // 3 yellow
+            rgb(46, 125, 233),      // 4 blue
+            rgb(152, 84, 241),      // 5 magenta
+            rgb(0, 113, 151),       // 6 cyan
+            rgb(97, 114, 176),      // 7 white
+            rgb(161, 166, 197),     // 8 bright black
+            rgb(255, 71, 116),      // 9 bright red
+            rgb(92, 133, 36),       // 10 bright green
+            rgb(162, 118, 41),      // 11 bright yellow
+            rgb(53, 138, 255),      // 12 bright blue
+            rgb(164, 99, 255),      // 13 bright magenta
+            rgb(0, 126, 168),       // 14 bright cyan
+            rgb(55, 96, 191),       // 15 bright white
+        ],
+        foreground: rgb(60, 62, 71),
+        background: rgb(225, 226, 231),
+        cursor: rgb(46, 125, 233),
+        selection: rgb(183, 193, 227)
+    )
+
+    // MARK: - flexoki-light
+    /// Flexoki Light — https://github.com/kepano/flexoki
+    static let flexokiLight = TerminalColorScheme(
+        id: "flexoki-light",
+        displayName: "Flexoki Light",
+        ansi: [
+            rgb(16, 15, 15),        // 0 black
+            rgb(209, 77, 65),       // 1 red
+            rgb(135, 154, 57),      // 2 green
+            rgb(208, 162, 21),      // 3 yellow
+            rgb(67, 133, 190),      // 4 blue
+            rgb(206, 93, 151),      // 5 magenta
+            rgb(58, 169, 159),      // 6 cyan
+            rgb(255, 252, 240),     // 7 white
+            rgb(16, 15, 15),        // 8 bright black
+            rgb(209, 77, 65),       // 9 bright red
+            rgb(135, 154, 57),      // 10 bright green
+            rgb(208, 162, 21),      // 11 bright yellow
+            rgb(67, 133, 190),      // 12 bright blue
+            rgb(206, 93, 151),      // 13 bright magenta
+            rgb(58, 169, 159),      // 14 bright cyan
+            rgb(255, 252, 240),     // 15 bright white
+        ],
+        foreground: rgb(16, 15, 15),
+        background: rgb(255, 252, 240),
+        cursor: rgb(16, 15, 15),
+        selection: rgb(240, 235, 220)
     )
 
     /// 8-bit-per-channel → SwiftTerm.Color (16-bit per channel).

@@ -41,12 +41,14 @@ struct ColorSchemesTests {
         #expect(scheme.id == ColorSchemes.defaultScheme.id)
     }
 
-    @Test("bundled contains exactly 8 schemes with expected IDs")
+    @Test("bundled contains exactly 15 schemes with expected IDs")
     func bundledCount() {
         let ids = Set(ColorSchemes.bundled.map(\.id))
         let expected: Set<String> = [
             "tbd-default", "tango", "solarized-dark", "tomorrow-night",
             "dracula", "nord", "one-dark", "gruvbox-dark",
+            "solarized-light", "github-light", "catppuccin-latte", "gruvbox-light",
+            "rose-pine-dawn", "flexoki-light", "tokyo-night-day",
         ]
         #expect(ids == expected)
     }
