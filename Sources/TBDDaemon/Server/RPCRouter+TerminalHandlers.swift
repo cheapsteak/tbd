@@ -114,6 +114,10 @@ extension RPCRouter {
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
             codexEnv["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
+            // Explicitly export the global Codex home. This is intentional —
+            // the design's allowed "set the global path" option — not leftover
+            // per-repo isolation: it pins deterministic behavior and lets the
+            // TBD_TEST_CODEX_HOME test-isolation override flow through.
             codexEnv["CODEX_HOME"] = codexHome.path
 
             let window = try await tmux.createWindow(
@@ -319,6 +323,10 @@ extension RPCRouter {
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = worktree.id.uuidString
             codexEnv["TBD_TERMINAL_ID"] = terminal.id.uuidString
+            // Explicitly export the global Codex home. This is intentional —
+            // the design's allowed "set the global path" option — not leftover
+            // per-repo isolation: it pins deterministic behavior and lets the
+            // TBD_TEST_CODEX_HOME test-isolation override flow through.
             codexEnv["CODEX_HOME"] = codexHome.path
 
             let window = try await tmux.createWindow(

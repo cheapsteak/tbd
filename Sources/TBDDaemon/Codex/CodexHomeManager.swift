@@ -91,7 +91,9 @@ enum CodexHookOverlay {
     }
 }
 
-enum CodexSkillWriter {
+/// On-disk layout of the TBD skill inside the Codex plugin cache. This is a
+/// pure path helper — the actual write happens in `CodexPluginWriter.writeSkill`.
+enum CodexSkillLayout {
     static let relativePath = "skills/tbd/SKILL.md"
 
     static func skillPath(in pluginRoot: URL) -> URL {
@@ -139,7 +141,7 @@ enum CodexPluginWriter {
     }
 
     private static func writeSkill(in root: URL) throws {
-        let path = CodexSkillWriter.skillPath(in: root)
+        let path = CodexSkillLayout.skillPath(in: root)
         try FileManager.default.createDirectory(
             at: path.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -174,19 +176,36 @@ enum CodexProfileWriter {
     static func ensurePluginEnabled(in toml: String) -> String {
         let header = #"[plugins."\#(CodexPlugin.pluginKey)"]"#
 
+        // Normalize line endings to `\n` before splitting. A CRLF-terminated
+        // `tbd.config.toml` would otherwise leave a trailing `\r` on every
+        // line: `CharacterSet.whitespaces` does NOT include `\r`, so the
+        // header matcher, the exact-`enabled` key matcher, and the
+        // section-boundary detector below would all silently fail — appending
+        // a duplicate `[plugins."tbd@tbd"]` table and orphaning the user's
+        // original section. TBD owns this profile section, so we deliberately
+        // normalize the whole file to LF on rewrite; a file that was CRLF
+        // becomes LF. That is intentional and acceptable (and keeps the
+        // writer's output well-formed so `ensureProfile`'s `updated != current`
+        // idempotency guard still short-circuits on the second run).
+        let normalized = toml
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
         // Splitting a `\n`-terminated string with `omittingEmptySubsequences:
         // false` yields a trailing empty element. Drop it so the join below
         // does not append an extra blank line on every call — otherwise the
         // file grows and `ensureProfile`'s `updated != current` guard never
         // short-circuits.
-        var lines = toml.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let hadTrailingNewline = toml.hasSuffix("\n")
+        var lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let hadTrailingNewline = normalized.hasSuffix("\n")
         if hadTrailingNewline, lines.last == "" {
             lines.removeLast()
         }
 
         guard let headerIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == header }) else {
-            var updated = toml
+            // Build from `normalized`, not the raw `toml`, so TBD's appended
+            // section is LF-terminated even if the source file was CRLF.
+            var updated = normalized
             if !updated.isEmpty, !updated.hasSuffix("\n") {
                 updated += "\n"
             }
