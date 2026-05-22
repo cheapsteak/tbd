@@ -15,6 +15,7 @@ final class JumpMenuController {
     private weak var appState: AppState?
     private var panel: FloatingPanel?
     private var viewModel: JumpMenuViewModel?
+    private var resignKeyObserver: NSObjectProtocol?
 
     private init() {}
 
@@ -81,10 +82,36 @@ final class JumpMenuController {
         panel.makeKey()
         self.panel = panel
 
+        // Auto-close when the panel loses key status (user clicked outside).
+        // Defensive: remove any prior token so reopening can't stack observers
+        // even if close() didn't run. resignKey fires only on losing focus,
+        // never on gaining it, so registering here (post-makeKey) is safe.
+        if let resignKeyObserver {
+            NotificationCenter.default.removeObserver(resignKeyObserver)
+        }
+        resignKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: panel,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                logger.debug("Jump menu lost key focus — auto-closing")
+                self.close()
+            }
+        }
+
         logger.debug("Jump menu opened with \(snapshots.count, privacy: .public) worktrees, \(appState.unreadByWorktree.count, privacy: .public) unread, \(appState.recentWorktreeIDs.count, privacy: .public) recents")
     }
 
     private func close() {
+        // Remove the observer before dismissing so dismiss()'s own key-loss
+        // doesn't re-enter close(). A nil token makes a second close() a no-op
+        // for the observer path, so submit/Escape -> close() can't double-fire.
+        if let resignKeyObserver {
+            NotificationCenter.default.removeObserver(resignKeyObserver)
+            self.resignKeyObserver = nil
+        }
         panel?.dismiss()
         panel = nil
         viewModel = nil
