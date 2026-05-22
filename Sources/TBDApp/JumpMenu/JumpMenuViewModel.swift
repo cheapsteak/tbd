@@ -122,6 +122,12 @@ final class JumpMenuViewModel: ObservableObject {
 
     private func matchRows(query: String) -> [JumpMenuRow] {
         let needle = query.lowercased()
+        // Recency rank: position in the LRU list (0 = most recent). Worktrees
+        // absent from the list (never visited this session, or past the
+        // 32-item cap) rank `Int.max` and sink to the bottom of their tier.
+        let recencyRank: [UUID: Int] = Dictionary(
+            uniqueKeysWithValues: recentIDs.enumerated().map { ($0.element, $0.offset) }
+        )
         return allWorktrees
             .filter { snap in
                 snap.displayName.lowercased().contains(needle)
@@ -136,23 +142,39 @@ final class JumpMenuViewModel: ObservableObject {
                     section: .match
                 )
             }
-            // Order: rows with an unread severity first (severity desc), then
-            // rows without. Within each group, sort by displayName asc, with
-            // a UUID lexicographic tiebreak for determinism. Dict iteration
-            // order of `allWorktrees` is otherwise arbitrary.
+            // Order: unread rows first (severity desc), then recency
+            // (most-recently-used first) across both tiers, then an
+            // emoji-stripped alphabetical fallback, then a UUID tiebreak
+            // for determinism (dict iteration order is otherwise arbitrary).
             .sorted { lhs, rhs in
-                let lhsSev = lhs.severity?.severity ?? -1
-                let rhsSev = rhs.severity?.severity ?? -1
                 let lhsHas = lhs.severity != nil
                 let rhsHas = rhs.severity != nil
                 if lhsHas != rhsHas { return lhsHas && !rhsHas }
+                let lhsSev = lhs.severity?.severity ?? -1
+                let rhsSev = rhs.severity?.severity ?? -1
                 if lhsSev != rhsSev { return lhsSev > rhsSev }
-                if lhs.displayName != rhs.displayName {
-                    return lhs.displayName < rhs.displayName
-                }
+                let lhsRank = recencyRank[lhs.id] ?? Int.max
+                let rhsRank = recencyRank[rhs.id] ?? Int.max
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                let lhsKey = Self.alphabeticalSortKey(lhs.displayName)
+                let rhsKey = Self.alphabeticalSortKey(rhs.displayName)
+                if lhsKey != rhsKey { return lhsKey < rhsKey }
                 return lhs.id.uuidString < rhs.id.uuidString
             }
             .prefix(Self.rowCap)
             .map { $0 }
+    }
+
+    /// Sort key for the alphabetical fallback. Display names are formatted
+    /// `<emoji> <Title Case>`, so leading non-alphanumeric characters (the
+    /// emoji and the space after it) are dropped to order by words rather
+    /// than emoji codepoints. A `Character` is a grapheme cluster, so a
+    /// multi-scalar emoji (flags, ZWJ sequences) is dropped as one unit. A
+    /// name that is entirely emoji yields an empty key; the UUID tiebreak
+    /// keeps such rows deterministically ordered.
+    private static func alphabeticalSortKey(_ displayName: String) -> String {
+        displayName
+            .drop { !$0.isLetter && !$0.isNumber }
+            .lowercased()
     }
 }
