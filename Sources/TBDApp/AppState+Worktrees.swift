@@ -94,6 +94,7 @@ extension AppState {
             let size = mainAreaTerminalSize()
             try await daemonClient.reviveWorktree(id: id, cols: size.cols, rows: size.rows)
             revivingArchived[id] = .done(snapshot: snapshot)
+            recentlyArchivedWorktreeIDs.removeValue(forKey: id)
             await refreshWorktrees()
             await refreshArchivedWorktrees(repoID: snapshot.repoID)
         } catch {
