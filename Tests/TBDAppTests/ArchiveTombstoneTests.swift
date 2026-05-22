@@ -230,10 +230,10 @@ final class ArchiveTombstoneTests: XCTestCase {
         XCTAssertEqual(visible[0].id, wtID)
     }
 
-    // MARK: - AC4.1: Revive operation clears the tombstone
+    // MARK: - AC4.1: Cleared tombstone restores visibility
 
     @MainActor
-    func testReviveWorktreeClearsTombstone() {
+    func testClearedTombstoneRestoresVisibility() {
         let suite = "test-\(UUID().uuidString)"
         let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
         defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
