@@ -494,12 +494,7 @@ final class AppState: ObservableObject {
     /// client). Tombstone it and drop the row so it cannot be resurrected by a
     /// poll snapshot that predates the archive.
     private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
-        recentlyArchivedWorktreeIDs[delta.worktreeID] = Date()
-        for repoID in worktrees.keys {
-            worktrees[repoID]?.removeAll { $0.id == delta.worktreeID }
-        }
-        selectedWorktreeIDs.remove(delta.worktreeID)
-        terminals.removeValue(forKey: delta.worktreeID)
+        removeArchivedWorktreeFromState(id: delta.worktreeID)
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)

@@ -39,4 +39,17 @@ extension AppState {
     ) -> [Worktree] {
         daemonWorktrees.filter { $0.status != .archived && !tombstones.contains($0.id) }
     }
+
+    /// Remove an archived worktree from all state: insert tombstone, remove from
+    /// all repos' worktree lists, drop from selection, and clean up terminals.
+    /// This is the single place archive cleanup lives so both `archiveWorktree`
+    /// and delta-handler paths stay in sync when cleanup is extended.
+    func removeArchivedWorktreeFromState(id: UUID) {
+        recentlyArchivedWorktreeIDs[id] = Date()
+        for repoID in worktrees.keys {
+            worktrees[repoID]?.removeAll { $0.id == id }
+        }
+        selectedWorktreeIDs.remove(id)
+        terminals.removeValue(forKey: id)
+    }
 }
