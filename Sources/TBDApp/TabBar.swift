@@ -16,6 +16,10 @@ extension UTType {
     static let tbdTabDrag = UTType(exportedAs: "com.tbd.app.tab-drag")
 }
 
+private struct TabWidthPreference: PreferenceKey {
+    static let defaultValue: CGFloat = 100
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
 
 /// DropDelegate so we can read `info.location` during hover via `dropUpdated`,
 /// which is the only API path that gives us cursor position before drop time.
@@ -345,6 +349,7 @@ private struct TabBarItem: View {
     @State private var isHoveringClose = false
     @State private var isEditing: Bool = false
     @State private var dropEdge: DropEdge? = nil
+    @State private var measuredWidth: CGFloat = 100
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
     @EnvironmentObject private var appState: AppState
 
@@ -460,6 +465,12 @@ private struct TabBarItem: View {
                 ? Color(nsColor: .controlBackgroundColor)
                 : (isHovering ? Color.primary.opacity(0.04) : Color.clear)
         )
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: TabWidthPreference.self, value: geo.size.width)
+            }
+        )
+        .onPreferenceChange(TabWidthPreference.self) { measuredWidth = $0 }
         .animation(.easeInOut(duration: 0.1), value: isHovering)
         .contextMenu { contextMenuContent }
         .onHover { hovering in
@@ -522,7 +533,7 @@ private struct TabBarItem: View {
             delegate: TabDropDelegate(
                 targetTabID: tab.id,
                 worktreeID: worktreeID,
-                measuredWidth: 100,
+                measuredWidth: measuredWidth,
                 dropEdge: $dropEdge,
                 appState: appState
             )
