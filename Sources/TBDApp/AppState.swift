@@ -470,6 +470,7 @@ final class AppState: ObservableObject {
             applyWorktreeArchivedDelta(d)
         case .worktreeRevived(let d):
             recentlyArchivedWorktreeIDs.removeValue(forKey: d.worktreeID)
+            Task { [weak self] in await self?.refreshWorktrees() }
         default:
             break
         }
