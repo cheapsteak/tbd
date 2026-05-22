@@ -59,11 +59,7 @@ extension AppState {
         let worktreeName = worktrees.values.flatMap { $0 }.first { $0.id == id }?.displayName ?? "worktree"
         do {
             try await daemonClient.archiveWorktree(id: id, force: force)
-            for repoID in worktrees.keys {
-                worktrees[repoID]?.removeAll { $0.id == id }
-            }
-            selectedWorktreeIDs.remove(id)
-            terminals.removeValue(forKey: id)
+            removeArchivedWorktreeFromState(id: id)
             logger.info("Archived \(worktreeName)")
         } catch {
             logger.error("Failed to archive worktree: \(error)")
@@ -93,6 +89,7 @@ extension AppState {
             let size = mainAreaTerminalSize()
             try await daemonClient.reviveWorktree(id: id, cols: size.cols, rows: size.rows)
             revivingArchived[id] = .done(snapshot: snapshot)
+            recentlyArchivedWorktreeIDs.removeValue(forKey: id)
             await refreshWorktrees()
             await refreshArchivedWorktrees(repoID: snapshot.repoID)
         } catch {

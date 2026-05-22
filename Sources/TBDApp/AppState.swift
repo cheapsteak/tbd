@@ -198,6 +198,12 @@ final class AppState: ObservableObject {
     @Published var draggingTabID: UUID? = nil
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
+    /// Worktree IDs optimistically removed by an archive that has not yet been
+    /// confirmed by daemon data. `refreshWorktrees` filters these out so a
+    /// `listWorktrees` poll issued before the daemon flipped the status cannot
+    /// resurrect the row. Value is the time the tombstone was created, used for
+    /// TTL-based eviction when an archive fails or stalls.
+    var recentlyArchivedWorktreeIDs: [UUID: Date] = [:]
     @Published var suspendingTerminalIDs: Set<UUID> = []
     /// Closures registered by live TerminalPanelView instances to capture a screenshot.
     /// Keyed by terminal UUID. Populated in makeNSView, cleared on view disappear.
@@ -460,6 +466,11 @@ final class AppState: ObservableObject {
             applyTerminalSessionDelta(d)
         case .worktreeMoved(let d):
             applyWorktreeMovedDelta(d)
+        case .worktreeArchived(let d):
+            applyWorktreeArchivedDelta(d)
+        case .worktreeRevived(let d):
+            recentlyArchivedWorktreeIDs.removeValue(forKey: d.worktreeID)
+            Task { [weak self] in await self?.refreshWorktrees() }
         default:
             break
         }
@@ -480,6 +491,13 @@ final class AppState: ObservableObject {
                 break
             }
         }
+    }
+
+    /// Daemon confirmed a worktree was archived (possibly from the CLI or another
+    /// client). Tombstone it and drop the row so it cannot be resurrected by a
+    /// poll snapshot that predates the archive.
+    private func applyWorktreeArchivedDelta(_ delta: WorktreeIDDelta) {
+        removeArchivedWorktreeFromState(id: delta.worktreeID)
     }
 
     /// Apply a Claude session rollover (post-`/clear` / `/compact` / startup)
@@ -707,9 +725,23 @@ final class AppState: ObservableObject {
     /// Fetches both active and main worktrees.
     func refreshWorktrees(repoID: UUID? = nil) async {
         do {
-            // Single RPC — fetch all non-archived worktrees, filter client-side
+            // Single RPC — fetch all worktrees (including archived)
             let allWts = try await daemonClient.listWorktrees(repoID: repoID)
-            let fetched = allWts.filter { $0.status != .archived }
+            // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
+            // stale poll predating an archive cannot resurrect the row.
+            // Reconcile only on the unscoped path: a scoped allWts omits other repos'
+            // worktrees, which would look absent and evict their tombstones prematurely.
+            if repoID == nil {
+                recentlyArchivedWorktreeIDs = AppState.reconcileTombstones(
+                    recentlyArchivedWorktreeIDs,
+                    daemonWorktrees: allWts,
+                    now: Date()
+                )
+            }
+            let fetched = AppState.visibleWorktrees(
+                from: allWts,
+                tombstones: Set(recentlyArchivedWorktreeIDs.keys)
+            )
 
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet
