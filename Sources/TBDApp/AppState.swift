@@ -198,6 +198,12 @@ final class AppState: ObservableObject {
     @Published var draggingTabID: UUID? = nil
     @Published var repoFilter: UUID? = nil
     @Published var pendingWorktreeIDs: Set<UUID> = []
+    /// Worktree IDs optimistically removed by an archive that has not yet been
+    /// confirmed by daemon data. `refreshWorktrees` filters these out so a
+    /// `listWorktrees` poll issued before the daemon flipped the status cannot
+    /// resurrect the row. Value is the time the tombstone was created, used for
+    /// TTL-based eviction when an archive fails or stalls.
+    var recentlyArchivedWorktreeIDs: [UUID: Date] = [:]
     @Published var suspendingTerminalIDs: Set<UUID> = []
     /// Closures registered by live TerminalPanelView instances to capture a screenshot.
     /// Keyed by terminal UUID. Populated in makeNSView, cleared on view disappear.
