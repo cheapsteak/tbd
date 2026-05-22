@@ -713,9 +713,19 @@ final class AppState: ObservableObject {
     /// Fetches both active and main worktrees.
     func refreshWorktrees(repoID: UUID? = nil) async {
         do {
-            // Single RPC — fetch all non-archived worktrees, filter client-side
+            // Single RPC — fetch all worktrees (including archived)
             let allWts = try await daemonClient.listWorktrees(repoID: repoID)
-            let fetched = allWts.filter { $0.status != .archived }
+            // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
+            // stale poll predating an archive cannot resurrect the row.
+            recentlyArchivedWorktreeIDs = reconcileTombstones(
+                recentlyArchivedWorktreeIDs,
+                daemonWorktrees: allWts,
+                now: Date()
+            )
+            let fetched = visibleWorktrees(
+                from: allWts,
+                tombstones: Set(recentlyArchivedWorktreeIDs.keys)
+            )
 
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet
