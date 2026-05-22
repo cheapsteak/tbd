@@ -512,7 +512,7 @@ private struct TabBarItem: View {
             // .onDrop below also clears to nil) from publishing needlessly.
             .onAppear {
                 let id = tab.id
-                DispatchQueue.main.async {
+                Task { @MainActor in
                     if appState.draggingTabID != id { appState.draggingTabID = id }
                 }
             }
@@ -520,7 +520,7 @@ private struct TabBarItem: View {
             // Escape, drop on a non-target. Covers cancel paths that neither the
             // per-tab delegate nor the outer catch-all see.
             .onDisappear {
-                DispatchQueue.main.async {
+                Task { @MainActor in
                     if appState.draggingTabID != nil { appState.draggingTabID = nil }
                 }
             }
