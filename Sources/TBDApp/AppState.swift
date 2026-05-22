@@ -731,6 +731,9 @@ final class AppState: ObservableObject {
             let allWts = try await daemonClient.listWorktrees(repoID: repoID)
             // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
             // stale poll predating an archive cannot resurrect the row.
+            // NOTE: reconcileTombstones treats absent IDs as "confirmed gone" — only safe
+            // when allWts is unscoped (repoID == nil). Scoped calls would evict tombstones
+            // for worktrees in other repos. No caller currently passes a non-nil repoID.
             recentlyArchivedWorktreeIDs = AppState.reconcileTombstones(
                 recentlyArchivedWorktreeIDs,
                 daemonWorktrees: allWts,
