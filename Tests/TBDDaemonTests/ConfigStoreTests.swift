@@ -27,4 +27,25 @@ struct ConfigStoreTests {
         let cfg = try await db.config.get()
         #expect(cfg.defaultProfileID == nil)
     }
+
+    @Test func envOverridesDefaultEmpty() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.envSettingOverrides.isEmpty)
+    }
+
+    @Test func setAndGetEnvOverrides() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setEnvSettingOverrides(["fullscreenRendering": .bool(false)])
+        let cfg = try await db.config.get()
+        #expect(cfg.envSettingOverrides["fullscreenRendering"] == .bool(false))
+    }
+
+    @Test func overwriteEnvOverrides() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setEnvSettingOverrides(["fullscreenRendering": .bool(false)])
+        try await db.config.setEnvSettingOverrides([:])
+        let cfg = try await db.config.get()
+        #expect(cfg.envSettingOverrides.isEmpty)
+    }
 }

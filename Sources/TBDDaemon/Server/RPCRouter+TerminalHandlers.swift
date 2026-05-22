@@ -195,6 +195,7 @@ extension RPCRouter {
             label = nil
         }
 
+        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: params.resumeSessionID,
             freshSessionID: freshSessionID,
@@ -210,7 +211,8 @@ extension RPCRouter {
             cmd: params.cmd,
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
             settingsOverlayPath: isClaudeType ? ClaudeHookOverlay.overlayPath : nil,
-            pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil
+            pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
+            envSettingOverrides: claudeEnvOverrides
         )
 
         let window = try await tmux.createWindow(
@@ -565,6 +567,7 @@ extension RPCRouter {
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
 
+        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
         let spawn: ClaudeSpawnCommandBuilder.Result
         let storedSessionID: String
         let scheduleRecapture: Bool
@@ -586,7 +589,8 @@ extension RPCRouter {
                 cmd: nil,
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-                pluginDirPath: PluginDirWriter.pluginDirPath
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                envSettingOverrides: claudeEnvOverrides
             )
             storedSessionID = resumeID
             scheduleRecapture = true
@@ -610,7 +614,8 @@ extension RPCRouter {
                 cmd: nil,
                 shellFallback: "",
                 settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-                pluginDirPath: PluginDirWriter.pluginDirPath
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                envSettingOverrides: claudeEnvOverrides
             )
             storedSessionID = newSessionID
             scheduleRecapture = false

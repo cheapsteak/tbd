@@ -263,6 +263,7 @@ extension WorktreeLifecycle {
             server: worktree.tmuxServer, session: "main", cwd: worktree.path
         )
 
+        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
         let spawn: ClaudeSpawnCommandBuilder.Result
         var env: [String: String] = [:]
         // Always announce the worktree to recreated panes. Without this, the
@@ -296,7 +297,8 @@ extension WorktreeLifecycle {
                 cmd: nil,
                 shellFallback: defaultShell,
                 settingsOverlayPath: ClaudeHookOverlay.overlayPath,
-                pluginDirPath: PluginDirWriter.pluginDirPath
+                pluginDirPath: PluginDirWriter.pluginDirPath,
+                envSettingOverrides: claudeEnvOverrides
             )
         } else if terminal.kind == .codex || terminal.label == "Codex" {
             // Codex terminal — detected by kind (primary signal) or legacy label fallback.

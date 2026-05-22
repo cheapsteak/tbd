@@ -586,6 +586,14 @@ actor DaemonClient {
         )
     }
 
+    /// Push the user's Claude spawn-env setting overrides to the daemon.
+    func setClaudeSpawnPreferences(_ preferences: ClaudeSpawnPreferences) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.claudeSetSpawnPreferences,
+            params: preferences
+        )
+    }
+
     /// Manually suspend a single Claude terminal.
     func terminalSuspend(terminalID: UUID) async throws {
         try await callVoidAsync(

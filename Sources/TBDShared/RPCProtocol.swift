@@ -102,6 +102,7 @@ public enum RPCMethod {
     public static let prRefresh = "pr.refresh"
     public static let cleanup = "cleanup"
     public static let worktreeSelectionChanged = "worktree.selectionChanged"
+    public static let claudeSetSpawnPreferences = "claude.setSpawnPreferences"
     public static let terminalSuspend = "terminal.suspend"
     public static let terminalResume = "terminal.resume"
     public static let worktreeSuspend = "worktree.suspend"
@@ -620,6 +621,17 @@ public struct NotifyParams: Codable, Sendable {
 public struct ResolvePathParams: Codable, Sendable {
     public let path: String
     public init(path: String) { self.path = path }
+}
+
+/// Params for `claude.setSpawnPreferences`. Carries the user's Claude
+/// spawn-env setting overrides, keyed by `ClaudeEnvSetting.id` (semantic
+/// key — never an env-var name). Optional/defaulted for backward
+/// compatibility with clients that omit it.
+public struct ClaudeSpawnPreferences: Codable, Sendable, Equatable {
+    public let settingOverrides: [String: ClaudeEnvValue]?
+    public init(settingOverrides: [String: ClaudeEnvValue]? = nil) {
+        self.settingOverrides = settingOverrides
+    }
 }
 
 public struct WorktreeSelectionChangedParams: Codable, Sendable {

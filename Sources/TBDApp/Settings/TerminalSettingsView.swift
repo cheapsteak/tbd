@@ -5,6 +5,7 @@ import TBDShared
 
 struct TerminalSettingsView: View {
     @EnvironmentObject var appearance: AppearanceSettings
+    @EnvironmentObject var appState: AppState
     @AppStorage(AppState.terminalAutoResizeKey) private var enableTerminalAutoResize: Bool = false
 
     var body: some View {
@@ -74,6 +75,20 @@ struct TerminalSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section {
+                ForEach(ClaudeEnvRegistry.all, id: \.id) { setting in
+                    ClaudeEnvSettingRow(setting: setting) {
+                        appState.pushClaudeSpawnPreferences()
+                    }
+                }
+            } header: {
+                Text("Claude Environment")
+            } footer: {
+                Text("Applies to newly spawned Claude sessions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding()
@@ -83,6 +98,34 @@ struct TerminalSettingsView: View {
         // Use the resolved font's display name so a poisoned/missing font name
         // shows the actual fallback in the Settings label, not the invalid stored value.
         appearance.font.displayName ?? appearance.fontName
+    }
+}
+
+/// One row in the registry-driven Claude Environment settings section.
+/// Renders the control matching the setting's `Kind`. v1 handles `.toggle`;
+/// adding `.integer` / `.choice` is a new `switch` arm here.
+private struct ClaudeEnvSettingRow: View {
+    let setting: ClaudeEnvSetting
+    let onChange: () -> Void
+    @AppStorage private var boolValue: Bool
+
+    init(setting: ClaudeEnvSetting, onChange: @escaping () -> Void) {
+        self.setting = setting
+        self.onChange = onChange
+        let def: Bool
+        switch setting.kind {
+        case .toggle(let d, _): def = d
+        }
+        _boolValue = AppStorage(wrappedValue: def, AppState.claudeEnvKey(setting.id))
+    }
+
+    var body: some View {
+        switch setting.kind {
+        case .toggle:
+            Toggle(setting.title, isOn: $boolValue)
+                .help(setting.help)
+                .onChange(of: boolValue) { _, _ in onChange() }
+        }
     }
 }
 

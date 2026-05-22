@@ -54,6 +54,7 @@ enum ClaudeSpawnCommandBuilder {
         shellFallback: String,
         settingsOverlayPath: String? = nil,
         pluginDirPath: String? = nil,
+        envSettingOverrides: [String: ClaudeEnvValue] = [:],
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Result {
         // Optional --settings flag merged into the claude invocation.
@@ -121,6 +122,15 @@ enum ClaudeSpawnCommandBuilder {
             // a dir, so if profileConfigDir is non-nil, inject it.
             if let configDir = profileConfigDir {
                 env["CLAUDE_CONFIG_DIR"] = configDir
+            }
+        }
+        // Registry-driven Claude spawn-env settings. This block only runs in
+        // the Claude branches — the `cmd` / `shellFallback` branches return
+        // earlier, before `env` exists — so non-Claude spawns are unaffected.
+        for setting in ClaudeEnvRegistry.all {
+            let value = envSettingOverrides[setting.id] ?? setting.defaultValue
+            if let envValue = setting.emit(value) {
+                env[setting.envVar] = envValue
             }
         }
         return Result(command: base, sensitiveEnv: env)
