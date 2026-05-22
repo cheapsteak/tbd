@@ -1,7 +1,7 @@
 # Jump Menu — Recency-Dominant Search Result Ordering
 
 **Date:** 2026-05-22
-**Status:** Approved, ready for implementation
+**Status:** Implemented (PR #191)
 
 ## Problem
 
