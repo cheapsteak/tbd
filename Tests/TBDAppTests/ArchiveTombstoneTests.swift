@@ -192,8 +192,8 @@ final class ArchiveTombstoneTests: XCTestCase {
         state.handleDelta(.worktreeArchived(WorktreeIDDelta(worktreeID: wtID)))
 
         // Assert the worktree is removed
-        XCTAssertTrue(
-            state.worktrees[testRepoID]?.contains(where: { $0.id == wtID }) ?? false == false,
+        XCTAssertNil(
+            state.worktrees[testRepoID]?.first(where: { $0.id == wtID }),
             "Worktree should be removed from state"
         )
 
