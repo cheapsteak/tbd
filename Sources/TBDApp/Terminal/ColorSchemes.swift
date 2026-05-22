@@ -301,7 +301,7 @@ enum ColorSchemes {
     )
 
     // MARK: - github-light
-    /// GitHub Light — https://github.com
+    /// GitHub Light — https://github.com/primer/github-vscode-theme
     static let githubLight = TerminalColorScheme(
         id: "github-light",
         displayName: "GitHub Light",
