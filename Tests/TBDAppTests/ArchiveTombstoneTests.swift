@@ -204,6 +204,40 @@ final class ArchiveTombstoneTests: XCTestCase {
         )
     }
 
+    // MARK: - External revive clears the tombstone
+
+    @MainActor
+    func testHandleDeltaWorktreeRevivedClearsTombstone() {
+        let suite = "test-\(UUID().uuidString)"
+        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+
+        let wtID = UUID()
+
+        // Seed a tombstone
+        state.recentlyArchivedWorktreeIDs[wtID] = Date()
+
+        // Verify the tombstone exists
+        XCTAssertNotNil(state.recentlyArchivedWorktreeIDs[wtID])
+
+        // Simulate an external revive via delta
+        let reviveWt = makeWorktree(id: wtID)
+        let delta = WorktreeDelta(
+            worktreeID: reviveWt.id,
+            repoID: reviveWt.repoID,
+            name: reviveWt.name,
+            path: reviveWt.path,
+            status: reviveWt.status
+        )
+        state.handleDelta(.worktreeRevived(delta))
+
+        // Assert the tombstone is cleared
+        XCTAssertNil(
+            state.recentlyArchivedWorktreeIDs[wtID],
+            "Tombstone should be cleared on external revive delta"
+        )
+    }
+
     // MARK: - AC4.1: Clearing tombstone makes worktree visible again
 
     func testClearingTombstoneRestoresVisibility() {

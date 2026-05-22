@@ -468,6 +468,8 @@ final class AppState: ObservableObject {
             applyWorktreeMovedDelta(d)
         case .worktreeArchived(let d):
             applyWorktreeArchivedDelta(d)
+        case .worktreeRevived(let d):
+            recentlyArchivedWorktreeIDs.removeValue(forKey: d.worktreeID)
         default:
             break
         }
