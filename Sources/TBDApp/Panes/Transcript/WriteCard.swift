@@ -9,24 +9,14 @@ struct WriteCard: View {
     let timestamp: Date?
     let terminalID: UUID?
 
-    @State private var expanded = true
-    @State private var containerExpanded = false
-    @State private var fullInputJSON: String? = nil
-    @EnvironmentObject var appState: AppState
-    @Environment(\.openFilePreview) private var openFilePreview
+    @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
 
     private struct Input: Decodable { let file_path: String; let content: String }
-
     private static let decoder = JSONDecoder()
 
     private func decodeInput() -> Input? {
-        guard let data = (fullInputJSON ?? inputJSON).data(using: .utf8) else { return nil }
+        guard let data = inputJSON.data(using: .utf8) else { return nil }
         return try? Self.decoder.decode(Input.self, from: data)
-    }
-
-    private var resolvedFilePath: String? {
-        if let p = decodeInput()?.file_path { return p }
-        return ToolInputFilePath.extract(from: fullInputJSON ?? inputJSON)
     }
 
     private func lineCount(for parsed: Input?) -> Int {
@@ -36,10 +26,10 @@ struct WriteCard: View {
 
     var body: some View {
         let parsedInput = decodeInput()
-        return ActivityRowChrome(
+        ActivityRowChrome(
             icon: "square.and.pencil",
             timestamp: timestamp,
-            expanded: $expanded
+            onOpen: { openTranscriptOverlay?(id) }
         ) {
             HStack(spacing: 6) {
                 Text("Write")
@@ -47,64 +37,9 @@ struct WriteCard: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 let count = lineCount(for: parsedInput)
-                let prefix = (inputTruncatedTo != nil && fullInputJSON == nil) ? "≥" : ""
+                let prefix = (inputTruncatedTo != nil) ? "≥" : ""
                 Text("\(prefix)\(count) lines").font(.caption2).foregroundStyle(.tertiary)
             }
-        } body: {
-            VStack(alignment: .leading, spacing: 8) {
-                if let content = parsedInput?.content {
-                    ZStack(alignment: .topTrailing) {
-                        ScrollView(.vertical) {
-                            Text(content)
-                                .font(.system(.caption, design: .monospaced))
-                                .transcriptSelectableText()
-                                .padding(8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        // Finite cap (not .infinity) so _FlexFrameLayout short-circuits inside
-                        // LazyVStack — see #129. .infinity forces per-row content measurement.
-                        .frame(maxHeight: containerExpanded ? TranscriptCardLayout.expandedMaxHeight : TranscriptCardLayout.collapsedMaxHeight)
-                        .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-
-                        Button(action: { containerExpanded.toggle() }) {
-                            Image(systemName: containerExpanded
-                                ? "arrow.down.right.and.arrow.up.left"
-                                : "arrow.up.left.and.arrow.down.right")
-                                .font(.caption2)
-                                .padding(4)
-                                .background(Color(nsColor: .windowBackgroundColor).opacity(0.9))
-                                .clipShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                        .padding(4)
-                        .help(containerExpanded ? "Collapse container" : "Expand container")
-                    }
-                }
-                let showTruncation = inputTruncatedTo != nil && fullInputJSON == nil && terminalID != nil
-                let previewPath = resolvedFilePath
-                let showPreview = previewPath != nil && openFilePreview != nil
-                if showPreview || showTruncation {
-                    HStack(spacing: 12) {
-                        if showPreview, let path = previewPath, let open = openFilePreview {
-                            PreviewFileButton(path: path) { open(path) }
-                        }
-                        if showTruncation, let cap = inputTruncatedTo {
-                            TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
-                                Task { await fetchFullInput() }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func fetchFullInput() async {
-        guard let terminalID else { return }
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input") {
-            await MainActor.run { fullInputJSON = r.text }
         }
     }
 }

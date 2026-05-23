@@ -82,6 +82,13 @@ struct TranscriptOverlayView: View {
                     result: toolResult,
                     terminalID: frame.terminalID
                 )
+            case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, _, _, _, _) where name == "Write":
+                WriteCardBody(
+                    id: toolID,
+                    inputJSON: inputJSON,
+                    inputTruncatedTo: inputTruncatedTo,
+                    terminalID: frame.terminalID
+                )
             default:
                 Text(String(describing: item))
                     .font(.system(.caption, design: .monospaced))
