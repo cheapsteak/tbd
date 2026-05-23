@@ -61,6 +61,8 @@ custom_rules:
     excluded:
       - "Sources/TBDApp/Panes/Transcript/BashCard\\.swift"
       - "Sources/TBDApp/Panes/Transcript/WriteCard\\.swift"
+      # TranscriptOverlayView renders outside the LazyVStack — ScrollView is safe here (#129).
+      - "Sources/TBDApp/Panes/Transcript/TranscriptOverlayView\\.swift"
     regex: '\bScrollView\s*\('
     message: "Transcript row cards must not contain a direct ScrollView — see Sources/TBDApp/Panes/Transcript/CLAUDE.md and issue #129."
     severity: error
