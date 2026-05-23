@@ -94,8 +94,8 @@ unmanaged hooks runnable, including all plugin hooks. It is not scoped to one
 plugin.
 
 Codex hook state supports per-hook `trusted_hash` entries. Plugin hook keys
-include plugin/source identity, so TBD can trust only the hooks from the TBD
-plugin by writing trust entries into the `tbd` profile.
+include plugin/source identity, so Codex can persist trust for the TBD plugin
+without trusting unrelated user hooks or other plugins.
 
 ## Design
 
@@ -154,7 +154,7 @@ Create a real Codex plugin with a manifest:
 
 The manifest name must be `tbd` so it can be activated as `tbd@tbd`.
 
-Install or link it into Codex's plugin cache path:
+Install it into Codex's plugin cache path:
 
 ```text
 ~/.codex/plugins/cache/tbd/tbd/local/
@@ -203,11 +203,11 @@ So the trust flow is:
    `tbd.config.toml` (because the `--profile tbd` session's
    `user_config_path` override points there).
 
-This is **one-and-done and machine-global**: plugin hook keys carry no `cwd`,
+This is **machine-global after trust**: plugin hook keys carry no `cwd`,
 session, tab, or worktree dimension, so a single trust applies to every
-TBD-launched Codex session on the machine, forever after. It scopes trust to
-the TBD plugin — other user hooks and other plugin hooks remain subject to
-normal Codex trust behavior.
+TBD-launched Codex session on the machine while the hook identity and command
+hash are unchanged. It scopes trust to the TBD plugin — other user hooks and
+other plugin hooks remain subject to normal Codex trust behavior.
 
 The one re-prompt trigger: if TBD changes a plugin hook's command string, its
 `current_hash` changes, the stored `trusted_hash` no longer matches, and Codex
@@ -362,7 +362,7 @@ hook command string, which is under TBD's control.
 ### Profile file ownership
 
 Users may edit `~/.codex/tbd.config.toml`. TBD should preserve unknown fields
-and only own the plugin enablement and hook-state entries it manages.
+and only own the TBD plugin enablement. Codex owns hook-state entries.
 
 ### Plugin cache mutation
 
