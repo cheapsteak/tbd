@@ -8,3 +8,6 @@ DerivedData/
 icon-iterations/
 docs/superpowers/plans/
 .claude/scheduled_tasks.lock
+
+# Brainstorming companion (local-only session artifacts)
+.superpowers/
