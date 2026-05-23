@@ -96,6 +96,15 @@ struct TranscriptOverlayView: View {
                     result: toolResult,
                     terminalID: frame.terminalID
                 )
+            case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _) where name == "Edit" || name == "MultiEdit":
+                EditCardBody(
+                    id: toolID,
+                    name: name,
+                    inputJSON: inputJSON,
+                    inputTruncatedTo: inputTruncatedTo,
+                    result: toolResult,
+                    terminalID: frame.terminalID
+                )
             default:
                 Text(String(describing: item))
                     .font(.system(.caption, design: .monospaced))
