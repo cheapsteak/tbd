@@ -157,79 +157,82 @@ struct TranscriptOverlayView: View {
     @ViewBuilder
     private var bodyContent: some View {
         if let item = lookupItem() {
-            switch item {
-            case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _) where name == "Bash":
-                BashCardBody(
-                    id: toolID,
-                    inputJSON: inputJSON,
-                    inputTruncatedTo: inputTruncatedTo,
-                    result: toolResult,
-                    terminalID: frame.terminalID
-                )
-            case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, _, _, _, _) where name == "Write":
-                WriteCardBody(
-                    id: toolID,
-                    inputJSON: inputJSON,
-                    inputTruncatedTo: inputTruncatedTo,
-                    terminalID: frame.terminalID
-                )
-            case .toolCall(let toolID, let name, let inputJSON, _, let toolResult, _, _, _) where name == "Read":
-                ReadCardBody(
-                    id: toolID,
-                    inputJSON: inputJSON,
-                    result: toolResult,
-                    terminalID: frame.terminalID
-                )
-            case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _) where name == "Edit" || name == "MultiEdit":
-                EditCardBody(
-                    id: toolID,
-                    name: name,
-                    inputJSON: inputJSON,
-                    inputTruncatedTo: inputTruncatedTo,
-                    result: toolResult,
-                    terminalID: frame.terminalID
-                )
-            case .toolCall(let toolID, let name, _, _, let toolResult, _, _, _) where name == "Grep":
-                GrepCardBody(
-                    id: toolID,
-                    result: toolResult,
-                    terminalID: frame.terminalID
-                )
-            case .toolCall(let toolID, let name, _, _, let toolResult, _, _, _) where name == "Glob":
-                GlobCardBody(
-                    id: toolID,
-                    result: toolResult,
-                    terminalID: frame.terminalID
-                )
-            case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, let subagent, _, _) where name == "Task" || name == "Agent":
-                AgentCardBody(
-                    id: toolID,
-                    inputJSON: inputJSON,
-                    inputTruncatedTo: inputTruncatedTo,
-                    result: toolResult,
-                    subagent: subagent,
-                    terminalID: frame.terminalID
-                )
-            case .toolCall(let toolID, _, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _):
-                GenericToolCardBody(
-                    id: toolID,
-                    inputJSON: inputJSON,
-                    inputTruncatedTo: inputTruncatedTo,
-                    result: toolResult,
-                    terminalID: frame.terminalID
-                )
-            case .systemReminder(_, let kind, let text, _) where kind == .skillBody:
-                SkillBodyRowBody(text: text)
-            case .thinking(_, let text, _):
-                ThinkingRowBody(text: text)
-            case .systemReminder(_, _, let text, _):
-                SystemReminderRowBody(text: text)
-            default:
-                Text(String(describing: item))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+            Group {
+                switch item {
+                case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _) where name == "Bash":
+                    BashCardBody(
+                        id: toolID,
+                        inputJSON: inputJSON,
+                        inputTruncatedTo: inputTruncatedTo,
+                        result: toolResult,
+                        terminalID: frame.terminalID
+                    )
+                case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, _, _, _, _) where name == "Write":
+                    WriteCardBody(
+                        id: toolID,
+                        inputJSON: inputJSON,
+                        inputTruncatedTo: inputTruncatedTo,
+                        terminalID: frame.terminalID
+                    )
+                case .toolCall(let toolID, let name, let inputJSON, _, let toolResult, _, _, _) where name == "Read":
+                    ReadCardBody(
+                        id: toolID,
+                        inputJSON: inputJSON,
+                        result: toolResult,
+                        terminalID: frame.terminalID
+                    )
+                case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _) where name == "Edit" || name == "MultiEdit":
+                    EditCardBody(
+                        id: toolID,
+                        name: name,
+                        inputJSON: inputJSON,
+                        inputTruncatedTo: inputTruncatedTo,
+                        result: toolResult,
+                        terminalID: frame.terminalID
+                    )
+                case .toolCall(let toolID, let name, _, _, let toolResult, _, _, _) where name == "Grep":
+                    GrepCardBody(
+                        id: toolID,
+                        result: toolResult,
+                        terminalID: frame.terminalID
+                    )
+                case .toolCall(let toolID, let name, _, _, let toolResult, _, _, _) where name == "Glob":
+                    GlobCardBody(
+                        id: toolID,
+                        result: toolResult,
+                        terminalID: frame.terminalID
+                    )
+                case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, let subagent, _, _) where name == "Task" || name == "Agent":
+                    AgentCardBody(
+                        id: toolID,
+                        inputJSON: inputJSON,
+                        inputTruncatedTo: inputTruncatedTo,
+                        result: toolResult,
+                        subagent: subagent,
+                        terminalID: frame.terminalID
+                    )
+                case .toolCall(let toolID, _, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _):
+                    GenericToolCardBody(
+                        id: toolID,
+                        inputJSON: inputJSON,
+                        inputTruncatedTo: inputTruncatedTo,
+                        result: toolResult,
+                        terminalID: frame.terminalID
+                    )
+                case .systemReminder(_, let kind, let text, _) where kind == .skillBody:
+                    SkillBodyRowBody(text: text)
+                case .thinking(_, let text, _):
+                    ThinkingRowBody(text: text)
+                case .systemReminder(_, _, let text, _):
+                    SystemReminderRowBody(text: text)
+                default:
+                    Text(String(describing: item))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
             }
+            .id(frame.itemID)
         } else {
             Text("Item not found.")
                 .font(.caption)
