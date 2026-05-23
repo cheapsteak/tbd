@@ -41,26 +41,27 @@ struct TranscriptOverlayView: View {
         HStack(spacing: 8) {
             if hasBack {
                 Button(action: onBack) {
-                    Image(systemName: "chevron.left")
-                        .font(.caption)
+                    Image(systemName: "chevron.left").font(.caption)
                 }
                 .buttonStyle(.plain)
                 .help("Back")
             }
-            // Per-card icon/title resolution is added during the migration
-            // phase. For now we surface the raw item ID so unmigrated cards
-            // remain visible during incremental rollout.
-            Image(systemName: "doc.text")
+            Image(systemName: headerIcon)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("Transcript item \(frame.itemID)")
+            Text(headerLabel)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .truncationMode(.middle)
             Spacer()
+            if let ts = lookupItem()?.timestamp {
+                Text(ts.absoluteShort)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
             Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.caption)
+                Image(systemName: "xmark").font(.caption)
             }
             .buttonStyle(.plain)
             .help("Close")
@@ -68,6 +69,89 @@ struct TranscriptOverlayView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var headerIcon: String {
+        guard let item = lookupItem() else { return "doc.text" }
+        switch item {
+        case .toolCall(_, let name, _, _, _, _, _, _):
+            switch name {
+            case "Bash":              return "terminal"
+            case "Write":             return "square.and.pencil"
+            case "Read":              return "doc.text"
+            case "Edit", "MultiEdit": return "pencil"
+            case "Grep":              return "magnifyingglass"
+            case "Glob":              return "folder"
+            case "Task", "Agent":     return "sparkles"
+            default:                  return "wrench.and.screwdriver"
+            }
+        case .thinking:
+            return "brain"
+        case .systemReminder(_, let kind, _, _):
+            return kind == .skillBody ? "sparkles" : "info.circle"
+        case .userPrompt, .assistantText, .slashCommand:
+            return "doc.text"
+        }
+    }
+
+    private var headerLabel: String {
+        guard let item = lookupItem() else { return "" }
+        switch item {
+        case .toolCall(_, let name, let inputJSON, _, _, _, _, _):
+            return toolCallLabel(name: name, inputJSON: inputJSON)
+        case .thinking:
+            return "Thinking"
+        case .systemReminder(_, let kind, _, _):
+            switch kind {
+            case .skillBody:          return "Skill"
+            case .toolReminder:       return "system-reminder"
+            case .hookOutput:         return "hook"
+            case .environmentDetails: return "env"
+            case .slashEnvelope:      return "command"
+            case .other:              return "info"
+            }
+        case .userPrompt:   return "User"
+        case .assistantText: return "Assistant"
+        case .slashCommand(_, let name, _, _): return "/\(name)"
+        }
+    }
+
+    /// One-line label matching what each collapsed row's `ActivityRowChrome`
+    /// header `Text(...)` renders. For tool calls, decodes the input enough to
+    /// surface the same first-line summary the card itself shows.
+    private func toolCallLabel(name: String, inputJSON: String) -> String {
+        struct AnyInput: Decodable {
+            let command: String?
+            let description: String?
+            let file_path: String?
+            let pattern: String?
+            let path: String?
+            let prompt: String?
+        }
+        let parsed = (inputJSON.data(using: .utf8)
+            .flatMap { try? JSONDecoder().decode(AnyInput.self, from: $0) })
+        switch name {
+        case "Bash":
+            if let desc = parsed?.description, !desc.isEmpty { return "Bash · \(desc)" }
+            if let cmd = parsed?.command {
+                let oneLine = cmd.replacingOccurrences(of: "\n", with: " ")
+                let trimmed = oneLine.count > 60 ? "\(oneLine.prefix(60))…" : oneLine
+                return "Bash · $(\(trimmed))"
+            }
+            return "Bash"
+        case "Write", "Read":
+            return "\(name) · \(parsed?.file_path ?? "…")"
+        case "Edit", "MultiEdit":
+            return "\(name) · \(parsed?.file_path ?? "…")"
+        case "Grep", "Glob":
+            return "\(name) · \(parsed?.pattern ?? "…")"
+        case "Task", "Agent":
+            if let desc = parsed?.description, !desc.isEmpty { return "Agent · \(desc)" }
+            return "Agent"
+        default:
+            return name.replacingOccurrences(of: "mcp__", with: "mcp · ")
+                .replacingOccurrences(of: "__", with: " · ")
+        }
     }
 
     @ViewBuilder
