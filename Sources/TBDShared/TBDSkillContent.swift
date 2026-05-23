@@ -8,8 +8,8 @@ import Foundation
 /// - `PluginDirWriter` → `~/Library/Application Support/TBD/plugin/skills/tbd/SKILL.md`
 ///   (loaded into TBD-spawned Claude sessions via `--plugin-dir`, where the
 ///   skill registers as `tbd:tbd`)
-/// - `CodexSkillWriter` → `$CODEX_HOME/skills/tbd/SKILL.md`
-///   (loaded into TBD-spawned Codex sessions through the isolated CODEX_HOME)
+/// - `CodexPluginWriter` → `$CODEX_HOME/plugins/cache/tbd/tbd/local/skills/tbd/SKILL.md`
+///   (loaded into TBD-spawned Codex sessions through the `tbd` profile plugin)
 public enum TBDSkillContent {
 
     public static let body: String = """

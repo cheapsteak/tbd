@@ -303,7 +303,11 @@ extension WorktreeLifecycle {
         } else if terminal.kind == .codex || terminal.label == "Codex" {
             // Codex terminal — detected by kind (primary signal) or legacy label fallback.
             // kind is the primary discriminator; label is checked for backward compatibility.
-            let codexHome = try CodexHomeManager().ensureHomeWithHooks(forRepoID: worktree.repoID)
+            let codexHome = try CodexHomeManager().ensureProfilePlugin()
+            // Explicitly export the global Codex home. This is intentional —
+            // the design's allowed "set the global path" option — not leftover
+            // per-repo isolation: it pins deterministic behavior and lets the
+            // TBD_TEST_CODEX_HOME test-isolation override flow through.
             env["CODEX_HOME"] = codexHome.path
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,

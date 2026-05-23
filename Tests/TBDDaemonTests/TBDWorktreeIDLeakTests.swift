@@ -41,6 +41,18 @@ private func newWindowBodies(_ recorded: [[String]]) -> [String] {
     }
 }
 
+private let codexTestHomePath: String = {
+    let path = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tbd-codex-home-tests-\(UUID().uuidString)", isDirectory: true)
+        .path
+    setenv("TBD_TEST_CODEX_HOME", path, 1)
+    return path
+}()
+
+private func installCodexTestHomeOverride() {
+    _ = codexTestHomePath
+}
+
 // MARK: - Fix 1: Daemon scrubInheritedTBDEnv
 
 @Test("Daemon.scrubInheritedTBDEnv clears inherited routing vars")
@@ -127,6 +139,9 @@ func testRecreateAfterRebootClaudeBranchSetsWorktreeID() async throws {
 
 @Test("recreateAfterReboot — codex branch sets TBD_WORKTREE_ID")
 func testRecreateAfterRebootCodexBranchSetsWorktreeID() async throws {
+    installCodexTestHomeOverride()
+    defer { unsetenv("TBD_TEST_CODEX_HOME") }
+
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
     let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
@@ -164,11 +179,12 @@ func testRecreateAfterRebootCodexBranchSetsWorktreeID() async throws {
     let expected = "export TBD_WORKTREE_ID='\(wt.id.uuidString)';"
     #expect(bodies.contains { $0.contains(expected) },
             "codex-branch recreation must export TBD_WORKTREE_ID; got bodies: \(bodies)")
-    // CODEX_HOME should still be exported alongside (regression guard).
+    // Global CODEX_HOME should still be exported alongside (regression guard).
     #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
             "codex-branch must still export CODEX_HOME; got bodies: \(bodies)")
-    #expect(bodies.contains { $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --dangerously-bypass-approvals-and-sandbox") },
-            "codex-branch must launch current interactive codex without inherited session env; got bodies: \(bodies)")
+    #expect(bodies.contains {
+        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox")
+    }, "codex-branch must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "codex-branch must not use removed --full-auto flag; got bodies: \(bodies)")
 }
@@ -266,6 +282,9 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
 
 @Test("handleTerminalRecreateWindow uses current Codex launch command")
 func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
+    installCodexTestHomeOverride()
+    defer { unsetenv("TBD_TEST_CODEX_HOME") }
+
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
     let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
@@ -308,8 +327,9 @@ func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
     #expect(response.success, "expected success; error: \(response.error ?? "nil")")
 
     let bodies = newWindowBodies(recorded.snapshot())
-    #expect(bodies.contains { $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --dangerously-bypass-approvals-and-sandbox") },
-            "recreated codex tab must launch current interactive codex without inherited session env; got bodies: \(bodies)")
+    #expect(bodies.contains {
+        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox")
+    }, "recreated codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "recreated codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
 }
@@ -438,6 +458,9 @@ func testHandleTerminalCreateRegressionWorktreeID() async throws {
 
 @Test("handleTerminalCreate uses current Codex launch command")
 func testHandleTerminalCreateCodexLaunchCommand() async throws {
+    installCodexTestHomeOverride()
+    defer { unsetenv("TBD_TEST_CODEX_HOME") }
+
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
     let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
@@ -479,8 +502,9 @@ func testHandleTerminalCreateCodexLaunchCommand() async throws {
     let bodies = newWindowBodies(recorded.snapshot())
     #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
             "created codex tab must export CODEX_HOME; got bodies: \(bodies)")
-    #expect(bodies.contains { $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --dangerously-bypass-approvals-and-sandbox") },
-            "created codex tab must launch current interactive codex without inherited session env; got bodies: \(bodies)")
+    #expect(bodies.contains {
+        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox")
+    }, "created codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "created codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
 }

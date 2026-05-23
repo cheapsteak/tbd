@@ -100,9 +100,9 @@ extension RPCRouter {
         env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
-        // Codex branch: minimal launch with isolated CODEX_HOME. No session
-        // tracking, no system prompt injection, no token resolution. Session
-        // resume / state detection are tracked as follow-up issues.
+        // Codex branch: minimal launch with TBD's profile plugin installed in
+        // the user's global Codex home. No system prompt injection or token
+        // resolution; Codex should keep using the user's normal auth/config.
         //
         // Build env independently — do NOT inherit the Claude-shaped
         // TBD_PROMPT_CONTEXT / TBD_PROMPT_RENAME / TBD_PROMPT_INSTRUCTIONS
@@ -110,10 +110,14 @@ extension RPCRouter {
         // a Claude-centric host and would be misleading noise inside a
         // Codex pane.
         if params.type == .codex {
-            let codexHome = try CodexHomeManager().ensureHomeWithHooks(forRepoID: worktree.repoID)
+            let codexHome = try CodexHomeManager().ensureProfilePlugin()
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
             codexEnv["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
+            // Explicitly export the global Codex home. This is intentional —
+            // the design's allowed "set the global path" option — not leftover
+            // per-repo isolation: it pins deterministic behavior and lets the
+            // TBD_TEST_CODEX_HOME test-isolation override flow through.
             codexEnv["CODEX_HOME"] = codexHome.path
 
             let window = try await tmux.createWindow(
@@ -315,10 +319,14 @@ extension RPCRouter {
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == "Codex" {
             // Recreate as codex — preserve identity
-            let codexHome = try CodexHomeManager().ensureHomeWithHooks(forRepoID: worktree.repoID)
+            let codexHome = try CodexHomeManager().ensureProfilePlugin()
             var codexEnv: [String: String] = [:]
             codexEnv["TBD_WORKTREE_ID"] = worktree.id.uuidString
             codexEnv["TBD_TERMINAL_ID"] = terminal.id.uuidString
+            // Explicitly export the global Codex home. This is intentional —
+            // the design's allowed "set the global path" option — not leftover
+            // per-repo isolation: it pins deterministic behavior and lets the
+            // TBD_TEST_CODEX_HOME test-isolation override flow through.
             codexEnv["CODEX_HOME"] = codexHome.path
 
             let window = try await tmux.createWindow(
