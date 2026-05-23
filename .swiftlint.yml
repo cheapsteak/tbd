@@ -51,3 +51,16 @@ custom_rules:
       - identifier
     message: "Use os.Logger instead of print() in Sources/. See CLAUDE.md."
     severity: error
+
+  no_scrollview_in_transcript_cards:
+    name: "No direct ScrollView in transcript row cards"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/TBDApp/Panes/Transcript/.*\\.swift"
+    # Known violators — see #129. Remove when the transcript-card rework lands.
+    excluded:
+      - "Sources/TBDApp/Panes/Transcript/BashCard\\.swift"
+      - "Sources/TBDApp/Panes/Transcript/WriteCard\\.swift"
+    regex: '\bScrollView\s*\('
+    message: "Transcript row cards must not contain a direct ScrollView — see Sources/TBDApp/Panes/Transcript/CLAUDE.md and issue #129."
+    severity: error
