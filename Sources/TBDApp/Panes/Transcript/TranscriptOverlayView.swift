@@ -117,6 +117,15 @@ struct TranscriptOverlayView: View {
                     result: toolResult,
                     terminalID: frame.terminalID
                 )
+            case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, let subagent, _, _) where name == "Task" || name == "Agent":
+                AgentCardBody(
+                    id: toolID,
+                    inputJSON: inputJSON,
+                    inputTruncatedTo: inputTruncatedTo,
+                    result: toolResult,
+                    subagent: subagent,
+                    terminalID: frame.terminalID
+                )
             case .toolCall(let toolID, _, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _):
                 GenericToolCardBody(
                     id: toolID,
@@ -162,6 +171,18 @@ struct TranscriptOverlayView: View {
               let sessionID = terminal.claudeSessionID,
               let items = appState.sessionTranscripts[sessionID]
         else { return nil }
-        return items.first(where: { $0.id == frame.itemID })
+        return deepFind(frame.itemID, in: items)
+    }
+
+    private func deepFind(_ targetID: String, in items: [TranscriptItem]) -> TranscriptItem? {
+        for item in items {
+            if item.id == targetID { return item }
+            if case .toolCall(_, _, _, _, _, let subagent, _, _) = item,
+               let sub = subagent,
+               let found = deepFind(targetID, in: sub.items) {
+                return found
+            }
+        }
+        return nil
     }
 }
