@@ -310,6 +310,23 @@ struct PanePlaceholder: View {
                         }
                     }
                 }
+                .overlay {
+                    if let frame = overlayCoordinator.openOverlay,
+                       frame.terminalID == terminalID {
+                        TranscriptOverlayView(
+                            frame: frame,
+                            hasBack: overlayCoordinator.parentFrame != nil,
+                            onBack: { overlayCoordinator.popOverlay() },
+                            onClose: { overlayCoordinator.close() }
+                        )
+                        .padding(16)
+                        .background(
+                            // Click-outside catcher behind the overlay card itself.
+                            Color.black.opacity(0.001)
+                                .onTapGesture { overlayCoordinator.close() }
+                        )
+                    }
+                }
                 .onDisappear {
                     appState.snapshotProviders.removeValue(forKey: terminalID)
                 }
