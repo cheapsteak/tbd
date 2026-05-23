@@ -73,13 +73,21 @@ struct TranscriptOverlayView: View {
     @ViewBuilder
     private var bodyContent: some View {
         if let item = lookupItem() {
-            // Per-card body wiring is added one card at a time (Tasks 9–19).
-            // Until then, fall back to a textual dump so the overlay is
-            // demonstrable end-to-end.
-            Text(String(describing: item))
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
+            switch item {
+            case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _) where name == "Bash":
+                BashCardBody(
+                    id: toolID,
+                    inputJSON: inputJSON,
+                    inputTruncatedTo: inputTruncatedTo,
+                    result: toolResult,
+                    terminalID: frame.terminalID
+                )
+            default:
+                Text(String(describing: item))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
         } else {
             Text("Item not found.")
                 .font(.caption)
