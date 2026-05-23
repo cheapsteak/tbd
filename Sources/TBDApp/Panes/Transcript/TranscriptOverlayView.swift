@@ -117,6 +117,14 @@ struct TranscriptOverlayView: View {
                     result: toolResult,
                     terminalID: frame.terminalID
                 )
+            case .toolCall(let toolID, _, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _):
+                GenericToolCardBody(
+                    id: toolID,
+                    inputJSON: inputJSON,
+                    inputTruncatedTo: inputTruncatedTo,
+                    result: toolResult,
+                    terminalID: frame.terminalID
+                )
             default:
                 Text(String(describing: item))
                     .font(.system(.caption, design: .monospaced))
