@@ -140,6 +140,7 @@ func testRecreateAfterRebootClaudeBranchSetsWorktreeID() async throws {
 @Test("recreateAfterReboot — codex branch sets TBD_WORKTREE_ID")
 func testRecreateAfterRebootCodexBranchSetsWorktreeID() async throws {
     installCodexTestHomeOverride()
+    defer { unsetenv("TBD_TEST_CODEX_HOME") }
 
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
@@ -282,6 +283,7 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
 @Test("handleTerminalRecreateWindow uses current Codex launch command")
 func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
     installCodexTestHomeOverride()
+    defer { unsetenv("TBD_TEST_CODEX_HOME") }
 
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
@@ -457,6 +459,7 @@ func testHandleTerminalCreateRegressionWorktreeID() async throws {
 @Test("handleTerminalCreate uses current Codex launch command")
 func testHandleTerminalCreateCodexLaunchCommand() async throws {
     installCodexTestHomeOverride()
+    defer { unsetenv("TBD_TEST_CODEX_HOME") }
 
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
