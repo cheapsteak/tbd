@@ -57,10 +57,7 @@ custom_rules:
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
       - "Sources/TBDApp/Panes/Transcript/.*\\.swift"
-    # Known violators — see #129. Remove when the transcript-card rework lands.
     excluded:
-      - "Sources/TBDApp/Panes/Transcript/BashCard\\.swift"
-      - "Sources/TBDApp/Panes/Transcript/WriteCard\\.swift"
       # TranscriptOverlayView renders outside the LazyVStack — ScrollView is safe here (#129).
       - "Sources/TBDApp/Panes/Transcript/TranscriptOverlayView\\.swift"
     regex: '\bScrollView\s*\('
