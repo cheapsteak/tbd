@@ -4,9 +4,10 @@ import Foundation
 
 /// One frame of the transcript overlay state machine. Identifies the
 /// transcript item to display and the terminal pane region the overlay
-/// should render over.
+/// should render over. `terminalID` is nil when opened from the History
+/// pane (no bound terminal — uses the window-root centered-modal fallback).
 struct TranscriptOverlayFrame: Equatable {
-    let terminalID: UUID
+    let terminalID: UUID?
     let itemID: String
 }
 
@@ -23,7 +24,7 @@ final class TranscriptOverlayCoordinator: ObservableObject {
     /// close instead (modal-ish toggle: same row click = dismiss).
     /// Swap clears any parent back-stack — the user has navigated away
     /// from the AgentCard context.
-    func open(terminalID: UUID, itemID: String) {
+    func open(terminalID: UUID?, itemID: String) {
         let next = TranscriptOverlayFrame(terminalID: terminalID, itemID: itemID)
         if openOverlay == next {
             openOverlay = nil

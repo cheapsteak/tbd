@@ -282,6 +282,7 @@ struct SessionTranscriptView: View {
     let summary: SessionSummary
     let action: TranscriptAction
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
 
     /// True when the visible viewport is within ~50pt of the bottom of
     /// the transcript content. Drives the floating jump-to-bottom button:
@@ -359,6 +360,10 @@ struct SessionTranscriptView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         TranscriptItemsView(items: messages, terminalID: nil, atBottom: $atBottom)
+                            .environment(\.openTranscriptOverlay) { itemID in
+                                overlayCoordinator.open(terminalID: nil, itemID: itemID)
+                            }
+                            .environment(\.historyTranscriptItems, messages)
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .overlay(alignment: .bottomTrailing) {

@@ -16,6 +16,7 @@ struct TranscriptOverlayView: View {
     let onClose: () -> Void
 
     @EnvironmentObject var appState: AppState
+    @Environment(\.historyTranscriptItems) private var historyItems
 
     var body: some View {
         VStack(spacing: 0) {
@@ -242,8 +243,9 @@ struct TranscriptOverlayView: View {
 
     /// Look up the active transcript item by terminal + item ID.
     ///
-    /// AppState stores transcripts keyed by `claudeSessionID` (a String),
-    /// not directly by `terminalID`. The lookup resolves:
+    /// When `frame.terminalID` is nil (History pane, no bound terminal),
+    /// falls back to the `historyTranscriptItems` environment key injected
+    /// by `SessionTranscriptView`. Otherwise resolves via AppState:
     ///   terminalID (UUID) → Terminal.claudeSessionID (String?)
     ///   → appState.sessionTranscripts[sessionID] → [TranscriptItem]
     ///   → first(where: { $0.id == frame.itemID })
@@ -252,9 +254,13 @@ struct TranscriptOverlayView: View {
     /// the session isn't in the transcript store, or the item has been
     /// removed.
     private func lookupItem() -> TranscriptItem? {
-        guard let terminal = appState.terminals.values
-            .flatMap({ $0 })
-            .first(where: { $0.id == frame.terminalID }),
+        if frame.terminalID == nil {
+            return deepFind(frame.itemID, in: historyItems)
+        }
+        guard let terminalID = frame.terminalID,
+              let terminal = appState.terminals.values
+                .flatMap({ $0 })
+                .first(where: { $0.id == terminalID }),
               let sessionID = terminal.claudeSessionID,
               let items = appState.sessionTranscripts[sessionID]
         else { return nil }

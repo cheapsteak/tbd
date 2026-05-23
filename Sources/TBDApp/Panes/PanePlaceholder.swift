@@ -312,7 +312,7 @@ struct PanePlaceholder: View {
                 }
                 .overlay {
                     if let frame = overlayCoordinator.openOverlay,
-                       frame.terminalID == terminalID {
+                       let tid = frame.terminalID, tid == terminalID {
                         TranscriptOverlayView(
                             frame: frame,
                             hasBack: overlayCoordinator.parentFrame != nil,

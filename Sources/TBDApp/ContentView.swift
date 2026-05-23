@@ -61,7 +61,7 @@ struct ContentView: View {
                     .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
                     .overlay {
                         if let frame = overlayCoordinator.openOverlay,
-                           !visibleTerminalIDs.contains(frame.terminalID) {
+                           frame.terminalID.map({ !visibleTerminalIDs.contains($0) }) ?? true {
                             TranscriptOverlayView(
                                 frame: frame,
                                 hasBack: overlayCoordinator.parentFrame != nil,
