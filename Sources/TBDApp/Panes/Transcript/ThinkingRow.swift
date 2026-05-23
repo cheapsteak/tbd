@@ -6,24 +6,17 @@ struct ThinkingRow: View {
     let text: String
     let timestamp: Date?
 
-    @State private var expanded = false
+    @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
 
     var body: some View {
         ActivityRowChrome(
             icon: "brain",
             timestamp: timestamp,
-            expanded: $expanded
+            onOpen: { openTranscriptOverlay?(id) }
         ) {
             HStack(spacing: 6) {
                 Text("Thinking").italic()
             }
-        } body: {
-            Text(text)
-                .font(.caption2)
-                .italic()
-                .foregroundStyle(.tertiary)
-                .transcriptSelectableText()
-                .padding(.horizontal, 8)
         }
     }
 }
