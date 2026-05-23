@@ -70,10 +70,16 @@ struct ContentView: View {
                             )
                             .frame(maxWidth: 900, maxHeight: 700)
                             .padding(20)
-                            .background(
-                                Color.black.opacity(0.001)
-                                    .onTapGesture { overlayCoordinator.close() }
-                            )
+                        }
+                    }
+                    .background {
+                        // Window-wide click-outside catcher. Renders transparently behind
+                        // the entire detail area; only consumes taps when an overlay is
+                        // currently open, so it doesn't interfere with normal interaction.
+                        if overlayCoordinator.openOverlay != nil {
+                            Color.black.opacity(0.001)
+                                .onTapGesture { overlayCoordinator.close() }
+                                .allowsHitTesting(true)
                         }
                     }
                 }

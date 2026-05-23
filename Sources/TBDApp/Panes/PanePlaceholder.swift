@@ -320,11 +320,6 @@ struct PanePlaceholder: View {
                             onClose: { overlayCoordinator.close() }
                         )
                         .padding(16)
-                        .background(
-                            // Click-outside catcher behind the overlay card itself.
-                            Color.black.opacity(0.001)
-                                .onTapGesture { overlayCoordinator.close() }
-                        )
                     }
                 }
                 .onDisappear {
