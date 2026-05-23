@@ -10,6 +10,7 @@ struct PanePlaceholder: View {
     let worktree: Worktree
     @Binding var layout: LayoutNode
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @State private var isHeaderHovering = false
     @State private var showSourceCode = false
     @State private var hasRenderableContent = false
@@ -231,6 +232,9 @@ struct PanePlaceholder: View {
                     let newContent = PaneContent.codeViewer(id: UUID(), path: path)
                     layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
                 })
+                .environment(\.openTranscriptOverlay) { itemID in
+                    overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
+                }
         }
     }
 
