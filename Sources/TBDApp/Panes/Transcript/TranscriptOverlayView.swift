@@ -129,6 +129,8 @@ struct TranscriptOverlayView: View {
                 SkillBodyRowBody(text: text)
             case .thinking(_, let text, _):
                 ThinkingRowBody(text: text)
+            case .systemReminder(_, _, let text, _):
+                SystemReminderRowBody(text: text)
             default:
                 Text(String(describing: item))
                     .font(.system(.caption, design: .monospaced))

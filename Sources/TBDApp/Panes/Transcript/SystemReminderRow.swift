@@ -7,7 +7,7 @@ struct SystemReminderRow: View {
     let text: String
     let timestamp: Date?
 
-    @State private var expanded = false
+    @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
 
     private var kindLabel: String {
         switch kind {
@@ -24,7 +24,7 @@ struct SystemReminderRow: View {
         ActivityRowChrome(
             icon: "info.circle",
             timestamp: timestamp,
-            expanded: $expanded
+            onOpen: { openTranscriptOverlay?(id) }
         ) {
             HStack(spacing: 6) {
                 Text(kindLabel)
@@ -33,12 +33,6 @@ struct SystemReminderRow: View {
                     .background(Color(nsColor: .quaternaryLabelColor).opacity(0.5))
                     .clipShape(Capsule())
             }
-        } body: {
-            Text(text)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .transcriptSelectableText()
-                .padding(.horizontal, 8)
         }
     }
 }
