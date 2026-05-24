@@ -33,7 +33,7 @@ struct SettingsView: View {
 struct GeneralSettingsTab: View {
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
-    @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = true
+    @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
@@ -85,8 +85,11 @@ struct GeneralSettingsTab: View {
             Section("Claude") {
                 Toggle("Launch claude with --dangerously-skip-permissions", isOn: $skipPermissions)
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
+            }
+
+            Section("Experimental") {
                 Toggle("Auto-suspend idle Claude when switching worktrees", isOn: $autoSuspend)
-                    .help("Exit idle Claude instances when you switch away and resume them when you switch back, freeing memory")
+                    .help("Experimental: exit idle Claude instances when you switch away and resume them when you switch back, freeing memory. Off by default — may interrupt long-running work.")
             }
         }
         .formStyle(.grouped)

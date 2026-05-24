@@ -957,17 +957,17 @@ final class AppState: ObservableObject {
     }
 
     /// UserDefaults key mirroring the `@AppStorage("autoSuspendClaude")`
-    /// toggle in ContentView/SettingsView. Read from non-View contexts (e.g.
-    /// the daemon-reconnect path) to avoid sending `suspendEnabled=true`
-    /// when the user has the toggle off.
+    /// toggle in the Settings → Experimental section. Read from non-View
+    /// contexts (e.g. the daemon-reconnect path) to avoid sending
+    /// `suspendEnabled=true` when the user has not opted in.
     static let autoSuspendClaudeKey = "autoSuspendClaude"
 
-    /// Whether auto-suspend is enabled. Defaults to true when the user has
-    /// never touched the toggle, matching the `@AppStorage` defaults.
-    /// Tests pass a private `UserDefaults(suiteName:)` so they never mutate
-    /// the developer's live app preferences.
+    /// Whether auto-suspend is enabled. Fails closed: defaults to false when
+    /// the user has never touched the toggle, matching the `@AppStorage`
+    /// defaults. Tests pass a private `UserDefaults(suiteName:)` so they
+    /// never mutate the developer's live app preferences.
     static func autoSuspendClaudeEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? true
+        defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? false
     }
 
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.

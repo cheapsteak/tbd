@@ -7,7 +7,7 @@ struct ContentView: View {
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
-    @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspendClaude: Bool = true
+    @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspendClaude: Bool = false
     @State private var contentAreaHeight: CGFloat = 600
 
     private var selectedWorktree: Worktree? {
@@ -107,17 +107,6 @@ struct ContentView: View {
                 }
 
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        autoSuspendClaude.toggle()
-                    } label: {
-                        Image(systemName: autoSuspendClaude ? "pause.circle.fill" : "pause.circle")
-                            .foregroundStyle(autoSuspendClaude ? .primary : .secondary)
-                    }
-                    .accessibilityLabel(autoSuspendClaude ? "Auto-suspend on" : "Auto-suspend off")
-                    .help(autoSuspendClaude
-                        ? "Auto-suspend is on — idle Claude instances are suspended when switching worktrees"
-                        : "Auto-suspend is off — Claude instances stay running when switching worktrees")
-
                     Picker("Filter", selection: $appState.repoFilter) {
                         Text("All Repos").tag(UUID?.none)
                         Divider()
