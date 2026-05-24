@@ -17,6 +17,8 @@ struct TranscriptOverlayView: View {
 
     @EnvironmentObject var appState: AppState
 
+    private static let decoder = JSONDecoder()
+
     var body: some View {
         let item = lookupItem()
         VStack(spacing: 0) {
@@ -126,7 +128,7 @@ struct TranscriptOverlayView: View {
             let prompt: String?
         }
         let parsed = (inputJSON.data(using: .utf8)
-            .flatMap { try? JSONDecoder().decode(AnyInput.self, from: $0) })
+            .flatMap { try? Self.decoder.decode(AnyInput.self, from: $0) })
         switch name {
         case "Bash":
             if let desc = parsed?.description, !desc.isEmpty { return "Bash · \(desc)" }
