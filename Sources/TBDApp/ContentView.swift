@@ -62,14 +62,19 @@ struct ContentView: View {
                     .overlay {
                         if let frame = overlayCoordinator.openOverlay,
                            frame.terminalID.map({ !visibleTerminalIDs.contains($0) }) ?? true {
-                            TranscriptOverlayView(
-                                frame: frame,
-                                hasBack: overlayCoordinator.parentFrame != nil,
-                                onBack: { overlayCoordinator.popOverlay() },
-                                onClose: { overlayCoordinator.close() }
-                            )
-                            .frame(maxWidth: 900, maxHeight: 700)
-                            .padding(20)
+                            ZStack {
+                                Color.black.opacity(0.001)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { overlayCoordinator.close() }
+                                TranscriptOverlayView(
+                                    frame: frame,
+                                    hasBack: overlayCoordinator.parentFrame != nil,
+                                    onBack: { overlayCoordinator.popOverlay() },
+                                    onClose: { overlayCoordinator.close() }
+                                )
+                                .frame(maxWidth: 900, maxHeight: 700)
+                                .padding(20)
+                            }
                         }
                     }
                     .background {

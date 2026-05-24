@@ -313,13 +313,22 @@ struct PanePlaceholder: View {
                 .overlay {
                     if let frame = overlayCoordinator.openOverlay,
                        let tid = frame.terminalID, tid == terminalID {
-                        TranscriptOverlayView(
-                            frame: frame,
-                            hasBack: overlayCoordinator.parentFrame != nil,
-                            onBack: { overlayCoordinator.popOverlay() },
-                            onClose: { overlayCoordinator.close() }
-                        )
-                        .padding(16)
+                        ZStack {
+                            // Hit-test-blocking backdrop. Consumes scroll events that
+                            // would otherwise propagate to the AppKit TerminalPanelView
+                            // beneath, and provides click-to-dismiss in the area
+                            // surrounding the overlay card. See #129.
+                            Color.black.opacity(0.001)
+                                .contentShape(Rectangle())
+                                .onTapGesture { overlayCoordinator.close() }
+                            TranscriptOverlayView(
+                                frame: frame,
+                                hasBack: overlayCoordinator.parentFrame != nil,
+                                onBack: { overlayCoordinator.popOverlay() },
+                                onClose: { overlayCoordinator.close() }
+                            )
+                            .padding(16)
+                        }
                     }
                 }
                 .onDisappear {
