@@ -62,6 +62,11 @@ struct AgentCardBody: View {
                 Divider().padding(.vertical, 4)
                 Text("Subagent activity")
                     .font(.caption2).foregroundStyle(.tertiary).textCase(.uppercase)
+                // terminalID intentionally nil: subagent items are embedded in
+                // the parent toolCall's model, NOT indexed in the live transcript
+                // store. Passing the parent terminalID would make the "Show full
+                // output" buttons appear, but the daemon fetch path can't resolve
+                // these IDs — see #129.
                 TranscriptItemsView(items: subagent.items, terminalID: nil)
                     .environment(\.openTranscriptOverlay) { itemID in
                         overlayCoordinator.pushAndOpen(itemID: itemID)
