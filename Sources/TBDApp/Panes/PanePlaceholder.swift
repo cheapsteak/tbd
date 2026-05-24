@@ -284,7 +284,10 @@ struct PanePlaceholder: View {
                         Task { await appState.recreateTerminalWindow(terminalID: terminalID) }
                     },
                     initialSnapshot: terminal.suspendedSnapshot,
-                    isSuspendedSnapshot: terminal.suspendedAt != nil
+                    isSuspendedSnapshot: terminal.suspendedAt != nil,
+                    shouldSuppressEvents: { [overlayCoordinator] in
+                        overlayCoordinator.openOverlay?.terminalID == terminalID
+                    }
                 )
                 .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
                 .overlay(alignment: .topTrailing) {
@@ -313,22 +316,13 @@ struct PanePlaceholder: View {
                 .overlay {
                     if let frame = overlayCoordinator.openOverlay,
                        let tid = frame.terminalID, tid == terminalID {
-                        ZStack {
-                            // Hit-test-blocking backdrop. Consumes scroll events that
-                            // would otherwise propagate to the AppKit TerminalPanelView
-                            // beneath, and provides click-to-dismiss in the area
-                            // surrounding the overlay card. See #129.
-                            Color.black.opacity(0.001)
-                                .contentShape(Rectangle())
-                                .onTapGesture { overlayCoordinator.close() }
-                            TranscriptOverlayView(
-                                frame: frame,
-                                hasBack: overlayCoordinator.parentFrame != nil,
-                                onBack: { overlayCoordinator.popOverlay() },
-                                onClose: { overlayCoordinator.close() }
-                            )
-                            .padding(16)
-                        }
+                        TranscriptOverlayView(
+                            frame: frame,
+                            hasBack: overlayCoordinator.parentFrame != nil,
+                            onBack: { overlayCoordinator.popOverlay() },
+                            onClose: { overlayCoordinator.close() }
+                        )
+                        .padding(16)
                     }
                 }
                 .onDisappear {
