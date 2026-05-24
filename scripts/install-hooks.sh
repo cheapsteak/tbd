@@ -12,3 +12,9 @@ for hook in "$hooks_src"/*; do
   chmod +x "$hook"
   echo "Installed: $name"
 done
+
+if ! command -v swiftlint &>/dev/null; then
+  echo ""
+  echo "Warning: swiftlint not found on PATH. The pre-push hook requires it."
+  echo "Install with: brew install swiftlint"
+fi

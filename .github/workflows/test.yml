@@ -11,6 +11,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install swiftlint
+        run: brew install swiftlint
+
+      - name: SwiftLint (strict)
+        run: swiftlint --strict
+
   test:
     runs-on: macos-15
     steps:
@@ -53,8 +65,7 @@ jobs:
           # restored. restore-keys falls back to a cache with the same dep
           # set (same Package.resolved hash) — without this scoping, restore
           # could pull a cache from before a dep was added, leaving stale
-          # `.build/checkouts/` that breaks SPM resolution of binary targets
-          # (e.g. SwiftLintBinary).
+          # `.build/checkouts/` that breaks SPM resolution of binary targets.
           key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
@@ -78,9 +89,6 @@ jobs:
           echo "=== TBDShared artifacts after wipe ==="
           ls -la .build/*/debug/TBDShared.build 2>/dev/null || echo "(absent)"
           ls -la .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || echo "(absent)"
-
-      - name: SwiftLint (strict)
-        run: swift package plugin --allow-writing-to-package-directory swiftlint --strict
 
       # `-j 2` caps parallel swift-frontend processes. The macos-15 runner
       # has limited RAM (~7-14 GB) and Swift 6.2.4 frontends each consume
