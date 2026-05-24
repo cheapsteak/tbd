@@ -322,6 +322,10 @@ struct PanePlaceholder: View {
                             onBack: { overlayCoordinator.popOverlay() },
                             onClose: { overlayCoordinator.close() }
                         )
+                        .environment(\.openFilePreview, { path in
+                            let newContent = PaneContent.codeViewer(id: UUID(), path: path)
+                            layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                        })
                         .padding(16)
                     }
                 }
