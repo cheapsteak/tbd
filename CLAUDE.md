@@ -69,7 +69,7 @@ Applies to `TBDShared`, `TBDDaemonLib`, `TBDDaemon`, and `TBDApp`. **`TBDCLI` is
 
 Use `os.Logger` (`import os`) with one of the established subsystems (`com.tbd.app`, `com.tbd.daemon`) and a feature-shaped category. `.debug` is the right level for traces you'd previously have used `print()` for — they're silent by default and activated with `log stream --level debug`. Always pass an explicit `privacy:` argument on dynamic interpolations (default `.public` for this dev tool, `.private`/`.sensitive` for secrets). Full rationale and category taxonomy: [`docs/diagnostics-strategy.md`](docs/diagnostics-strategy.md).
 
-This rule is enforced mechanically by SwiftLint (custom rule `no_print_in_sources`) in CI (`swift package plugin swiftlint --strict`) and in the pre-push git hook. Run `swift package plugin --allow-writing-to-package-directory swiftlint --strict` locally to lint manually. See `.swiftlint.yml`.
+This rule is enforced mechanically by SwiftLint (custom rule `no_print_in_sources`) in the dedicated `lint` CI job and the pre-push git hook, both invoking a Homebrew-installed `swiftlint --strict` directly. To lint manually: `swiftlint --strict`. Prerequisite: `brew install swiftlint`. See `.swiftlint.yml`.
 
 ## Quick Reference
 

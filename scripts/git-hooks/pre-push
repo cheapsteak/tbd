@@ -5,6 +5,11 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
+if ! command -v swiftlint &>/dev/null; then
+  echo "[pre-push] swiftlint not found. Install it with: brew install swiftlint" >&2
+  exit 1
+fi
+
 # Determine merge base; fall back to HEAD~1 if origin/main isn't fetched.
 base="$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)"
 
@@ -21,4 +26,4 @@ if [ ${#files[@]} -eq 0 ]; then
 fi
 
 echo "[pre-push] Linting ${#files[@]} changed Swift file(s) with SwiftLint --strict..."
-swift package plugin --allow-writing-to-package-directory swiftlint --strict -- "${files[@]}"
+swiftlint --strict "${files[@]}"
