@@ -71,6 +71,11 @@ if [ ! -f "$BUNDLE_PLIST" ] || [ "$SOURCE_PLIST" -nt "$BUNDLE_PLIST" ]; then
     cp "$SOURCE_PLIST" "$BUNDLE_PLIST"
 fi
 
+# Stash the source worktree path inside the bundle so the running app can
+# show it in the status bar — it can no longer infer this from its own
+# exec path now that it runs from /Applications instead of .build/.
+printf '%s' "$REPO_ROOT" > "$BUNDLE_DIR/Contents/SourceWorktreePath.txt"
+
 # Sign + install to /Applications to satisfy macOS UNUserNotificationCenter:
 #  - Re-signing with --force --deep makes the codesign identifier match
 #    CFBundleIdentifier (com.tbd.app); SPM's default ad-hoc signature uses
