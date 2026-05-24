@@ -52,10 +52,10 @@ struct AutoSuspendPreferenceTests {
         }
     }
 
-    @Test("defaults to true when the user has never touched the toggle")
-    func defaultsToTrueWhenUnset() {
+    @Test("defaults to false when the user has never touched the toggle — fail-closed")
+    func defaultsToFalseWhenUnset() {
         withIsolatedDefaults(seed: nil) { defaults in
-            #expect(AppState.autoSuspendClaudeEnabled(defaults: defaults) == true)
+            #expect(AppState.autoSuspendClaudeEnabled(defaults: defaults) == false)
         }
     }
 }
