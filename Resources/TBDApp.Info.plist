@@ -8,6 +8,8 @@
     <string>TBD</string>
     <key>CFBundleExecutable</key>
     <string>TBDApp</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>

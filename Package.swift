@@ -24,6 +24,22 @@ let package = Package(
             name: "TBDShared",
             path: "Sources/TBDShared"
         ),
+        // Per-worktree icon generation (AppKit + CoreGraphics + CoreText).
+        // Extracted from TBDApp so the IconBaker executable can reuse the
+        // same drawing code to produce Resources/AppIcon.icns without pulling
+        // in the entire TBDApp dependency graph.
+        .target(
+            name: "TBDAppIcon",
+            path: "Sources/TBDAppIcon"
+        ),
+        // One-shot CLI that renders the default (no-ribbon) icon and writes
+        // a multi-rep .icns file. Run `swift run IconBaker Resources/AppIcon.icns`
+        // after changing TBDAppIcon/AppIcon.swift, then commit the result.
+        .executableTarget(
+            name: "IconBaker",
+            dependencies: ["TBDAppIcon"],
+            path: "Sources/IconBaker"
+        ),
         .target(
             name: "TBDDaemonLib",
             dependencies: [
@@ -71,6 +87,7 @@ let package = Package(
             name: "TBDApp",
             dependencies: [
                 "TBDShared",
+                "TBDAppIcon",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "Highlightr", package: "Highlightr"),
                 .product(name: "SwiftUIIntrospect", package: "swiftui-introspect"),

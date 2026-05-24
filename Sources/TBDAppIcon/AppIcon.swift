@@ -5,7 +5,7 @@ import CoreText
 // MARK: - Worktree Detection
 
 /// Returns the worktree name (without date prefix) if running from a worktree build, nil for main.
-func detectWorktreeName() -> String? {
+public func detectWorktreeName() -> String? {
     let path = ProcessInfo.processInfo.arguments[0]
     let home = FileManager.default.homeDirectoryForCurrentUser.path
     // Canonical lives under the user's home dir
@@ -42,7 +42,7 @@ func detectWorktreeName() -> String? {
 
 // MARK: - Icon Generation
 
-func generateAppIcon(worktreeName: String?) -> NSImage {
+public func generateAppIcon(worktreeName: String?) -> NSImage {
     let sizes: [CGFloat] = [16, 32, 128, 256, 512]
     let icon = NSImage(size: NSSize(width: 512, height: 512))
     for size in sizes {
