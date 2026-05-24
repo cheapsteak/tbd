@@ -48,34 +48,57 @@ SOURCE_PLIST="$REPO_ROOT/Resources/TBDApp.Info.plist"
 
 mkdir -p "$BUNDLE_MACOS"
 
-# Symlink the binary (idempotent).
-# Path is relative to $BUNDLE_MACOS (.build/debug/TBD.app/Contents/MacOS),
-# so three "..") gets us back to .build/debug/.
-ln -sf "../../../TBDApp" "$BUNDLE_MACOS/TBDApp"
+# Resolve the absolute real path of the swift-build output. We need this
+# first so we can pass an absolute path to `ln` below (sidesteps any
+# cwd-relative resolution issues) and so we have a stable pgrep/pkill
+# match target later.
+APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUILD_DIR/TBDApp")"
 
-# Resolve the symlink to the absolute real path the OS will exec (open(1)
-# resolves symlinks before exec, so the running TBDApp's command line will
-# contain this exact path). We use it as the pgrep/pkill match target so
-# we never match unrelated processes whose command line happens to
-# contain the repo path or the string "TBDApp".
-APP_EXEC_PATH="$(/usr/bin/readlink -f "$BUNDLE_MACOS/TBDApp")"
-APP_EXEC_PATTERN="$(printf '%s' "$APP_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
+# Hard link (not symlink) the binary into the bundle. Required for
+# Bundle.main to resolve at runtime: open(1) resolves symlinks before
+# exec, which would otherwise leave the process appearing to run from
+# .build/.../TBDApp with no surrounding .app, so APIs that depend on
+# CFBundleIdentifier (UNUserNotificationCenter for banners, etc.) silently
+# fail. A hard link shares the same inode as the swift-build output —
+# zero extra disk and `swift build` continues to update it directly —
+# while keeping the kernel-reported exec path inside the .app bundle.
+# `ln -f` replaces any existing entry (including a stale symlink from
+# previous restart.sh versions) idempotently.
+ln -f "$APP_EXEC_PATH" "$BUNDLE_MACOS/TBDApp"
 
 # Copy the Info.plist if missing or older than the source.
-plist_changed=false
 if [ ! -f "$BUNDLE_PLIST" ] || [ "$SOURCE_PLIST" -nt "$BUNDLE_PLIST" ]; then
     cp "$SOURCE_PLIST" "$BUNDLE_PLIST"
-    plist_changed=true
 fi
 
-# Re-register with LaunchServices when the plist changes (URL scheme update).
-if [ "$plist_changed" = true ]; then
-    LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
-    if [ -x "$LSREGISTER" ]; then
-        "$LSREGISTER" -f "$BUNDLE_DIR" >/dev/null 2>&1 || true
-        echo "  Registered tbd:// URL scheme"
-    fi
+# Sign + install to /Applications to satisfy macOS UNUserNotificationCenter:
+#  - Re-signing with --force --deep makes the codesign identifier match
+#    CFBundleIdentifier (com.tbd.app); SPM's default ad-hoc signature uses
+#    TBDApp-<hash>, which macOS uses for permission tracking and rejects.
+#  - /Applications is the only path macOS 15 accepts for requestAuthorization;
+#    bundles elsewhere return UNErrorDomain Code=1 with no permission dialog.
+#  - cp -cR uses APFS clonefile (copy-on-write, ~zero disk cost).
+#  - All TBD worktrees share CFBundleIdentifier=com.tbd.app, so whichever
+#    worktree most recently ran restart.sh "wins" /Applications — same
+#    last-restart-wins behavior already documented for tbd:// URL routing.
+codesign --force --deep --sign - "$BUNDLE_DIR" >/dev/null
+
+INSTALLED_BUNDLE="/Applications/TBD.app"
+rm -rf "$INSTALLED_BUNDLE"
+cp -cR "$BUNDLE_DIR" "$INSTALLED_BUNDLE"
+
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+if [ -x "$LSREGISTER" ]; then
+    "$LSREGISTER" -f "$INSTALLED_BUNDLE" >/dev/null 2>&1 || true
 fi
+
+# The running TBDApp's command line is the installed bundle's binary, since
+# we launch from /Applications below. Match against that for pgrep/pkill so
+# we only ever affect THIS worktree's running TBDApp (it's the one that most
+# recently won /Applications). Sibling worktrees launched from their own
+# .build/.../TBD.app would not match.
+BUNDLED_EXEC_PATH="$INSTALLED_BUNDLE/Contents/MacOS/TBDApp"
+APP_EXEC_PATTERN="$(printf '%s' "$BUNDLED_EXEC_PATH" | sed 's/[.+*?()\[\]^$|\\]/\\&/g')"
 
 # MARK: - Restart Daemon
 
@@ -116,7 +139,7 @@ if [ "$daemon_only" = false ]; then
     pkill -f "^${APP_EXEC_PATTERN}\$" 2>/dev/null && sleep 0.3 || true
 
     echo "Starting app..."
-    open "$BUNDLE_DIR" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
+    open "$INSTALLED_BUNDLE" --stdout /tmp/tbdapp.log --stderr /tmp/tbdapp.log
     # `open` returns immediately after asking LaunchServices to spawn the app.
     # Give it a moment, then verify the process is alive.
     sleep 0.5

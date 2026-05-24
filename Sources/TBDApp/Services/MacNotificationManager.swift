@@ -11,6 +11,7 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
     @AppStorage("enableNotifications") private var enabled: Bool = true
 
     private var hasRequestedPermission = false
+    private var hasLoggedUnavailable = false
 
     /// UNUserNotificationCenter crashes unbundled executables (no CFBundleIdentifier).
     private var isAvailable: Bool {
@@ -18,14 +19,23 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func requestPermissionIfNeeded() {
-        guard isAvailable, !hasRequestedPermission else { return }
+        guard !hasRequestedPermission else { return }
+        guard isAvailable else {
+            if !hasLoggedUnavailable {
+                logger.error("Notification banners disabled: Bundle.main.bundleIdentifier is nil. App must be launched via the .app bundle (scripts/restart.sh).")
+                hasLoggedUnavailable = true
+            }
+            return
+        }
         hasRequestedPermission = true
 
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert]) { granted, error in
             if let error {
-                logger.error("Permission error: \(error)")
+                logger.error("requestAuthorization failed: \(error.localizedDescription, privacy: .public)")
+            } else if !granted {
+                logger.error("requestAuthorization denied — banners will not appear. Enable in System Settings → Notifications → TBD.")
             }
         }
     }
