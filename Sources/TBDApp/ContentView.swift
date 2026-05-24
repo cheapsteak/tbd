@@ -173,6 +173,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 800, minHeight: 500)
         .onChange(of: appState.selectedWorktreeIDs) { oldSelection, newSelection in
+            overlayCoordinator.close()
             markSelectedWorktreesAsRead(newSelection)
             let newlySelected = newSelection.subtracting(oldSelection)
             for worktreeID in newlySelected {
