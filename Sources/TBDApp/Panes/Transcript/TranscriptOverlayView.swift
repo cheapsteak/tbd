@@ -18,11 +18,12 @@ struct TranscriptOverlayView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
+        let item = lookupItem()
         VStack(spacing: 0) {
-            header
+            header(item: item)
             Divider()
             ScrollView(.vertical) {
-                bodyContent
+                bodyContent(item: item)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(16)
             }
@@ -37,7 +38,7 @@ struct TranscriptOverlayView: View {
     }
 
     @ViewBuilder
-    private var header: some View {
+    private func header(item: TranscriptItem?) -> some View {
         HStack(spacing: 8) {
             if hasBack {
                 Button(action: onBack) {
@@ -46,16 +47,16 @@ struct TranscriptOverlayView: View {
                 .buttonStyle(.plain)
                 .help("Back")
             }
-            Image(systemName: headerIcon)
+            Image(systemName: headerIcon(item: item))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(headerLabel)
+            Text(headerLabel(item: item))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
-            if let ts = lookupItem()?.timestamp {
+            if let ts = item?.timestamp {
                 Text(ts.absoluteShort)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -71,8 +72,8 @@ struct TranscriptOverlayView: View {
         .padding(.vertical, 8)
     }
 
-    private var headerIcon: String {
-        guard let item = lookupItem() else { return "doc.text" }
+    private func headerIcon(item: TranscriptItem?) -> String {
+        guard let item else { return "doc.text" }
         switch item {
         case .toolCall(_, let name, _, _, _, _, _, _):
             switch name {
@@ -94,8 +95,8 @@ struct TranscriptOverlayView: View {
         }
     }
 
-    private var headerLabel: String {
-        guard let item = lookupItem() else { return "" }
+    private func headerLabel(item: TranscriptItem?) -> String {
+        guard let item else { return "" }
         switch item {
         case .toolCall(_, let name, let inputJSON, _, _, _, _, _):
             return toolCallLabel(name: name, inputJSON: inputJSON)
@@ -155,8 +156,8 @@ struct TranscriptOverlayView: View {
     }
 
     @ViewBuilder
-    private var bodyContent: some View {
-        if let item = lookupItem() {
+    private func bodyContent(item: TranscriptItem?) -> some View {
+        if let item {
             Group {
                 switch item {
                 case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _) where name == "Bash":
