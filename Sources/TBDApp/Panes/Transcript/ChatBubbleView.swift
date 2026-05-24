@@ -282,6 +282,8 @@ struct ChatBubbleView_Previews: PreviewProvider {
     """
 
     static var previews: some View {
+        // PreviewProvider only, not in LazyVStack — see #129
+        // swiftlint:disable:next no_scrollview_in_transcript_cards
         ScrollView {
             VStack(spacing: 8) {
                 ChatBubbleView(item: .assistantText(id: "a1", text: inlineProse, timestamp: nil))
@@ -372,6 +374,8 @@ struct ChatBubbleParityPreviews: PreviewProvider {
     }
 
     static var previews: some View {
+        // PreviewProvider only, not in LazyVStack — see #129
+        // swiftlint:disable:next no_scrollview_in_transcript_cards
         ScrollView {
             VStack(spacing: 16) {
                 row(sampleA)
