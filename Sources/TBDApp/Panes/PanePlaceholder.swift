@@ -330,6 +330,9 @@ struct PanePlaceholder: View {
                     }
                 }
                 .onDisappear {
+                    if overlayCoordinator.openOverlay?.terminalID == terminalID {
+                        overlayCoordinator.close()
+                    }
                     appState.snapshotProviders.removeValue(forKey: terminalID)
                 }
             }
