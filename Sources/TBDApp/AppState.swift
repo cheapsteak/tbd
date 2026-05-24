@@ -326,6 +326,10 @@ final class AppState: ObservableObject {
         }
         startMemoryPressureMonitor()
         registerFocusObservers()
+        // Give the notification manager a back-reference so banner clicks
+        // can call navigateToWorktree. All stored properties are now
+        // initialized, so `self` is fully usable here.
+        macNotificationManager.configure(appState: self)
         // Under `swift test`, the per-test `AppState()` instances would each
         // spawn a subscription Task that blocks indefinitely in `recv()` on
         // the daemon socket. With enough tests the Swift cooperative thread
