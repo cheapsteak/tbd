@@ -5,10 +5,22 @@ import Foundation
 /// One frame of the transcript overlay state machine. Identifies the
 /// transcript item to display and the terminal pane region the overlay
 /// should render over. `terminalID` is nil when opened from the History
-/// pane (no bound terminal — uses the window-root centered-modal fallback).
+/// pane (no bound terminal — uses the window-root centered-modal fallback);
+/// in that case `historySessionID` carries the session whose transcript is
+/// being viewed so the overlay can resolve items via
+/// `AppState.sessionTranscripts[sessionID]` without depending on SwiftUI
+/// environment propagation (the fallback overlay is a sibling of the
+/// History view, not a descendant — see #129).
 struct TranscriptOverlayFrame: Equatable {
     let terminalID: UUID?
     let itemID: String
+    let historySessionID: String?
+
+    init(terminalID: UUID?, itemID: String, historySessionID: String? = nil) {
+        self.terminalID = terminalID
+        self.itemID = itemID
+        self.historySessionID = historySessionID
+    }
 }
 
 /// At most one overlay open per window. Holds an optional one-step back
@@ -24,8 +36,17 @@ final class TranscriptOverlayCoordinator: ObservableObject {
     /// close instead (modal-ish toggle: same row click = dismiss).
     /// Swap clears any parent back-stack — the user has navigated away
     /// from the AgentCard context.
-    func open(terminalID: UUID?, itemID: String) {
-        let next = TranscriptOverlayFrame(terminalID: terminalID, itemID: itemID)
+    ///
+    /// `historySessionID` is set by the History pane so the overlay can
+    /// look the item up directly in `AppState.sessionTranscripts` instead
+    /// of relying on environment propagation (the fallback overlay lives
+    /// outside the History subtree). For terminal-bound opens it stays nil.
+    func open(terminalID: UUID?, itemID: String, historySessionID: String? = nil) {
+        let next = TranscriptOverlayFrame(
+            terminalID: terminalID,
+            itemID: itemID,
+            historySessionID: historySessionID
+        )
         if openOverlay == next {
             openOverlay = nil
             parentFrame = nil
@@ -41,7 +62,11 @@ final class TranscriptOverlayCoordinator: ObservableObject {
     func pushAndOpen(itemID: String) {
         guard let current = openOverlay else { return }
         parentFrame = current
-        openOverlay = TranscriptOverlayFrame(terminalID: current.terminalID, itemID: itemID)
+        openOverlay = TranscriptOverlayFrame(
+            terminalID: current.terminalID,
+            itemID: itemID,
+            historySessionID: current.historySessionID
+        )
     }
 
     /// Restore the back-stack frame. If no parent, close the overlay.

@@ -16,7 +16,6 @@ struct TranscriptOverlayView: View {
     let onClose: () -> Void
 
     @EnvironmentObject var appState: AppState
-    @Environment(\.historyTranscriptItems) private var historyItems
 
     var body: some View {
         VStack(spacing: 0) {
@@ -241,29 +240,37 @@ struct TranscriptOverlayView: View {
         }
     }
 
-    /// Look up the active transcript item by terminal + item ID.
+    /// Look up the active transcript item.
     ///
-    /// When `frame.terminalID` is nil (History pane, no bound terminal),
-    /// falls back to the `historyTranscriptItems` environment key injected
-    /// by `SessionTranscriptView`. Otherwise resolves via AppState:
-    ///   terminalID (UUID) → Terminal.claudeSessionID (String?)
-    ///   → appState.sessionTranscripts[sessionID] → [TranscriptItem]
-    ///   → first(where: { $0.id == frame.itemID })
+    /// Two resolution paths, both reading from `AppState.sessionTranscripts`
+    /// so the lookup does NOT depend on SwiftUI environment propagation
+    /// (the window-root fallback overlay lives outside the History view's
+    /// subtree, so a `.environment(\.…)` injected there is out of scope —
+    /// see issue #129):
+    ///
+    /// - Terminal-bound: `terminalID → Terminal.claudeSessionID → items`.
+    /// - History pane (no bound terminal): `frame.historySessionID → items`,
+    ///   set by `SessionTranscriptView` when it requests an overlay open.
     ///
     /// Returns nil if the terminal isn't found, has no active session,
     /// the session isn't in the transcript store, or the item has been
     /// removed.
     private func lookupItem() -> TranscriptItem? {
-        if frame.terminalID == nil {
-            return deepFind(frame.itemID, in: historyItems)
+        let items: [TranscriptItem]
+        if let terminalID = frame.terminalID {
+            guard let terminal = appState.terminals.values
+                    .flatMap({ $0 })
+                    .first(where: { $0.id == terminalID }),
+                  let sessionID = terminal.claudeSessionID,
+                  let stored = appState.sessionTranscripts[sessionID]
+            else { return nil }
+            items = stored
+        } else if let sessionID = frame.historySessionID,
+                  let stored = appState.sessionTranscripts[sessionID] {
+            items = stored
+        } else {
+            return nil
         }
-        guard let terminalID = frame.terminalID,
-              let terminal = appState.terminals.values
-                .flatMap({ $0 })
-                .first(where: { $0.id == terminalID }),
-              let sessionID = terminal.claudeSessionID,
-              let items = appState.sessionTranscripts[sessionID]
-        else { return nil }
         return deepFind(frame.itemID, in: items)
     }
 

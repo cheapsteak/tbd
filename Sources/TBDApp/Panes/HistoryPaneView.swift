@@ -361,9 +361,12 @@ struct SessionTranscriptView: View {
                     ScrollView {
                         TranscriptItemsView(items: messages, terminalID: nil, atBottom: $atBottom)
                             .environment(\.openTranscriptOverlay) { itemID in
-                                overlayCoordinator.open(terminalID: nil, itemID: itemID)
+                                overlayCoordinator.open(
+                                    terminalID: nil,
+                                    itemID: itemID,
+                                    historySessionID: sessionId
+                                )
                             }
-                            .environment(\.historyTranscriptItems, messages)
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .overlay(alignment: .bottomTrailing) {

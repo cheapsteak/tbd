@@ -89,4 +89,45 @@ struct TranscriptOverlayCoordinatorTests {
         #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: t1, itemID: "other"))
         #expect(c.parentFrame == nil)
     }
+
+    // The historySessionID branch — set when the History pane opens an
+    // overlay so the lookup can resolve via AppState.sessionTranscripts
+    // without depending on SwiftUI environment scope (#129 follow-up).
+
+    @Test func open_withHistorySessionID_storesIt() {
+        let c = TranscriptOverlayCoordinator()
+        c.open(terminalID: nil, itemID: "a", historySessionID: "sess-1")
+        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: nil, itemID: "a", historySessionID: "sess-1"))
+    }
+
+    @Test func open_terminalBound_defaultsHistorySessionIDToNil() {
+        let c = TranscriptOverlayCoordinator()
+        c.open(terminalID: t1, itemID: "a")
+        #expect(c.openOverlay?.historySessionID == nil)
+    }
+
+    @Test func pushAndOpen_propagatesHistorySessionID() {
+        let c = TranscriptOverlayCoordinator()
+        c.open(terminalID: nil, itemID: "parent", historySessionID: "sess-1")
+        c.pushAndOpen(itemID: "child")
+        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: nil, itemID: "child", historySessionID: "sess-1"))
+        #expect(c.parentFrame == TranscriptOverlayFrame(terminalID: nil, itemID: "parent", historySessionID: "sess-1"))
+    }
+
+    @Test func open_sameHistoryFrame_togglesClosed() {
+        let c = TranscriptOverlayCoordinator()
+        c.open(terminalID: nil, itemID: "a", historySessionID: "sess-1")
+        c.open(terminalID: nil, itemID: "a", historySessionID: "sess-1")
+        #expect(c.openOverlay == nil)
+    }
+
+    @Test func open_sameItemDifferentHistorySession_swapsContent() {
+        // Same itemID across different sessions must NOT be treated as the
+        // same frame — Equatable now includes historySessionID, so this
+        // opens (swaps) rather than toggling closed.
+        let c = TranscriptOverlayCoordinator()
+        c.open(terminalID: nil, itemID: "a", historySessionID: "sess-1")
+        c.open(terminalID: nil, itemID: "a", historySessionID: "sess-2")
+        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: nil, itemID: "a", historySessionID: "sess-2"))
+    }
 }
