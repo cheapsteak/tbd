@@ -9,3 +9,6 @@ icon-iterations/
 docs/superpowers/plans/
 docs/implementation-plans/
 .claude/scheduled_tasks.lock
+
+# Brainstorming companion (local-only session artifacts)
+.superpowers/

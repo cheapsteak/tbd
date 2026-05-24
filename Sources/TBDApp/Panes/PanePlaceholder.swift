@@ -10,6 +10,7 @@ struct PanePlaceholder: View {
     let worktree: Worktree
     @Binding var layout: LayoutNode
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @State private var isHeaderHovering = false
     @State private var showSourceCode = false
     @State private var hasRenderableContent = false
@@ -231,6 +232,9 @@ struct PanePlaceholder: View {
                     let newContent = PaneContent.codeViewer(id: UUID(), path: path)
                     layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
                 })
+                .environment(\.openTranscriptOverlay) { itemID in
+                    overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
+                }
         }
     }
 
@@ -280,7 +284,10 @@ struct PanePlaceholder: View {
                         Task { await appState.recreateTerminalWindow(terminalID: terminalID) }
                     },
                     initialSnapshot: terminal.suspendedSnapshot,
-                    isSuspendedSnapshot: terminal.suspendedAt != nil
+                    isSuspendedSnapshot: terminal.suspendedAt != nil,
+                    shouldSuppressEvents: { [overlayCoordinator] in
+                        overlayCoordinator.openOverlay?.terminalID == terminalID
+                    }
                 )
                 .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
                 .overlay(alignment: .topTrailing) {
@@ -306,7 +313,26 @@ struct PanePlaceholder: View {
                         }
                     }
                 }
+                .overlay {
+                    if let frame = overlayCoordinator.openOverlay,
+                       let tid = frame.terminalID, tid == terminalID {
+                        TranscriptOverlayView(
+                            frame: frame,
+                            hasBack: overlayCoordinator.parentFrame != nil,
+                            onBack: { overlayCoordinator.popOverlay() },
+                            onClose: { overlayCoordinator.close() }
+                        )
+                        .environment(\.openFilePreview, { path in
+                            let newContent = PaneContent.codeViewer(id: UUID(), path: path)
+                            layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                        })
+                        .padding(16)
+                    }
+                }
                 .onDisappear {
+                    if overlayCoordinator.openOverlay?.terminalID == terminalID {
+                        overlayCoordinator.close()
+                    }
                     appState.snapshotProviders.removeValue(forKey: terminalID)
                 }
             }

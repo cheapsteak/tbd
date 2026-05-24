@@ -412,6 +412,7 @@ struct TBDAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState()
     @StateObject private var appearance = AppearanceSettings()
+    @StateObject private var overlayCoordinator = TranscriptOverlayCoordinator()
 
     init() {
         lifecycleLogger.info("TBDApp launching pid=\(getpid(), privacy: .public)")
@@ -423,6 +424,7 @@ struct TBDAppMain: App {
             ContentView()
                 .environmentObject(appState)
                 .environmentObject(appearance)
+                .environmentObject(overlayCoordinator)
                 .onAppear {
                     lifecycleLogger.info("scene main onAppear")
                     JumpMenuController.shared.configure(appState: appState)
@@ -450,6 +452,7 @@ struct TBDAppMain: App {
             SettingsView()
                 .environmentObject(appState)
                 .environmentObject(appearance)
+                .environmentObject(overlayCoordinator)
         }
     }
 }

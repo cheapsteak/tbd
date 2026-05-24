@@ -42,6 +42,12 @@ struct TerminalPanelView: View {
     /// `tmuxWindowID` changes, the view is recreated (`.id` changes) with
     /// this flag false, and tmux connects normally.
     var isSuspendedSnapshot: Bool = false
+    /// Called on every scroll/click event. When it returns `true`, both
+    /// NSEvent monitors short-circuit — the terminal does NOT consume the
+    /// event, leaving it for whatever SwiftUI overlay (currently a
+    /// transcript-card overlay; see #129) is rendered on top. Must be
+    /// `@MainActor` since it is invoked from inside `assumeIsolated` blocks.
+    var shouldSuppressEvents: @MainActor () -> Bool = { false }
 
     @State private var proxyWarning: String?
     @State private var didProbe = false
@@ -83,7 +89,8 @@ struct TerminalPanelView: View {
                 onTerminalNotification: onTerminalNotification,
                 onDeadWindow: onDeadWindow,
                 initialSnapshot: initialSnapshot,
-                isSuspendedSnapshot: isSuspendedSnapshot
+                isSuspendedSnapshot: isSuspendedSnapshot,
+                shouldSuppressEvents: shouldSuppressEvents
             )
         }
         .task(id: pinnedProfileID) {
@@ -143,6 +150,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
     var onDeadWindow: (() -> Void)?
     var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
+    var shouldSuppressEvents: @MainActor () -> Bool = { false }
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -168,6 +176,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
         context.coordinator.onDeadWindow = onDeadWindow
+        context.coordinator.shouldSuppressEvents = shouldSuppressEvents
 
         // Feed snapshot before tmux connects so the user sees the last state
         let snapshot = initialSnapshot
@@ -231,6 +240,10 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         var tmuxServer: String = ""
         var panelID: UUID = UUID()
         var onDeadWindow: (() -> Void)?
+        /// Returns `true` when a SwiftUI overlay (e.g. transcript card) is open
+        /// over this terminal and should receive scroll/click events instead of
+        /// the terminal. Set by `TerminalPanelRepresentable.makeNSView`.
+        var shouldSuppressEvents: @MainActor () -> Bool = { false }
         private var localProcess: LocalProcess?
         private var scrollMonitor: Any?
         private var clickMonitor: Any?
@@ -331,9 +344,13 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
                 let location = event.locationInWindow
                 guard deltaY != 0 else { return event }
 
-                let consumed = MainActor.assumeIsolated {
+                let consumed = MainActor.assumeIsolated { [weak self] in
+                    guard let self else { return false }
                     guard let tv = ref.view as? TBDTerminalView else { return false }
                     guard tv.window != nil else { return false }
+                    // Short-circuit when a SwiftUI overlay is open on top of this
+                    // terminal — pass the event through so the overlay can handle it.
+                    if self.shouldSuppressEvents() { return false }
                     let point = tv.convert(location, from: nil)
                     guard tv.bounds.contains(point) else { return false }
                     guard tv.terminal.mouseMode != .off else { return false }
@@ -369,9 +386,14 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
                 let location = event.locationInWindow
 
                 // Claim first responder so key equivalents route to this terminal
-                MainActor.assumeIsolated {
+                MainActor.assumeIsolated { [weak self] in
+                    guard let self else { return }
                     guard let tv = ref.view else { return }
                     guard tv.window != nil else { return }
+                    // Short-circuit when a SwiftUI overlay is open on top of this
+                    // terminal — leave first-responder where it is so the overlay
+                    // receives key and click events.
+                    if self.shouldSuppressEvents() { return }
                     let point = tv.convert(location, from: nil)
                     guard tv.bounds.contains(point) else { return }
                     tv.window?.makeFirstResponder(tv)
@@ -379,9 +401,11 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
 
                 guard event.modifierFlags.contains(.command) else { return event }
 
-                let consumed = MainActor.assumeIsolated { () -> Bool in
+                let consumed = MainActor.assumeIsolated { [weak self] () -> Bool in
+                    guard let self else { return false }
                     guard let tv = ref.view as? TBDTerminalView else { return false }
                     guard tv.window != nil else { return false }
+                    if self.shouldSuppressEvents() { return false }
                     let point = tv.convert(location, from: nil)
                     guard tv.bounds.contains(point) else { return false }
 

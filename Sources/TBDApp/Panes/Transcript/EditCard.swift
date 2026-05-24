@@ -1,8 +1,8 @@
 import SwiftUI
 import TBDShared
 
-/// Curated renderer for `Edit` and `MultiEdit`. Shows an inline diff
-/// (red/green hunks) for old_string → new_string.
+/// Curated header-only renderer for `Edit` and `MultiEdit`. Click opens
+/// the overlay with the diff hunks (see #129).
 struct EditCard: View {
     let id: String
     let name: String           // "Edit" or "MultiEdit"
@@ -12,10 +12,7 @@ struct EditCard: View {
     let timestamp: Date?
     let terminalID: UUID?
 
-    @State private var expanded = true
-    @State private var fullInputJSON: String? = nil
-    @EnvironmentObject var appState: AppState
-    @Environment(\.openFilePreview) private var openFilePreview
+    @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
 
     private struct EditHunk: Decodable, Equatable {
         let old_string: String
@@ -34,23 +31,12 @@ struct EditCard: View {
     private static let decoder = JSONDecoder()
 
     private func decodeInput() -> EditInput? {
-        guard let data = (fullInputJSON ?? inputJSON).data(using: .utf8) else { return nil }
+        guard let data = inputJSON.data(using: .utf8) else { return nil }
         return try? Self.decoder.decode(EditInput.self, from: data)
-    }
-
-    private var resolvedFilePath: String? {
-        if let p = decodeInput()?.file_path { return p }
-        return ToolInputFilePath.extract(from: fullInputJSON ?? inputJSON)
     }
 
     var body: some View {
         let parsedInput = decodeInput()
-        let language: String? = {
-            if let path = parsedInput?.file_path {
-                return DiffSyntaxHighlighter.languageForFilename(path)
-            }
-            return nil
-        }()
         let hunks: [EditHunk] = {
             if let multi = parsedInput?.edits, !multi.isEmpty { return multi }
             if let i = parsedInput, let oldS = i.old_string, let newS = i.new_string {
@@ -62,7 +48,7 @@ struct EditCard: View {
         return ActivityRowChrome(
             icon: "pencil",
             timestamp: timestamp,
-            expanded: $expanded
+            onOpen: { openTranscriptOverlay?(id) }
         ) {
             HStack(spacing: 6) {
                 if name == "MultiEdit" {
@@ -89,73 +75,6 @@ struct EditCard: View {
                         .foregroundStyle(.red)
                 }
             }
-        } body: {
-            VStack(alignment: .leading, spacing: 8) {
-                if result?.isError == true, let r = result {
-                    Text(r.text)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.red)
-                        .transcriptSelectableText()
-                } else {
-                    ForEach(Array(hunks.enumerated()), id: \.offset) { idx, hunk in
-                        diffHunk(hunk, language: language)
-                        if idx < hunks.count - 1 { Divider() }
-                    }
-                }
-                let showTruncation = inputTruncatedTo != nil && fullInputJSON == nil && terminalID != nil
-                let previewPath = resolvedFilePath
-                let showPreview = previewPath != nil && openFilePreview != nil
-                if showPreview || showTruncation {
-                    HStack(spacing: 12) {
-                        if showPreview, let path = previewPath, let open = openFilePreview {
-                            PreviewFileButton(path: path) { open(path) }
-                        }
-                        if showTruncation, let cap = inputTruncatedTo {
-                            TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
-                                Task { await fetchFullInput() }
-                            }
-                        }
-                    }
-                }
-            }
         }
-    }
-
-    private func fetchFullInput() async {
-        guard let terminalID else { return }
-        if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input") {
-            await MainActor.run { fullInputJSON = r.text }
-        }
-    }
-
-    @ViewBuilder
-    private func diffHunk(_ hunk: EditHunk, language: String?) -> some View {
-        let oldLines = DiffSyntaxHighlighter.highlightLines(hunk.old_string, language: language)
-        let newLines = DiffSyntaxHighlighter.highlightLines(hunk.new_string, language: language)
-
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(oldLines.enumerated()), id: \.offset) { _, line in
-                HStack(spacing: 4) {
-                    Text("-").foregroundStyle(.red)
-                    Text(AttributedString(line))
-                }
-                .font(.system(.caption, design: .monospaced))
-                .padding(.horizontal, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.red.opacity(0.10))
-            }
-            ForEach(Array(newLines.enumerated()), id: \.offset) { _, line in
-                HStack(spacing: 4) {
-                    Text("+").foregroundStyle(.green)
-                    Text(AttributedString(line))
-                }
-                .font(.system(.caption, design: .monospaced))
-                .padding(.horizontal, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.green.opacity(0.10))
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .transcriptSelectableText()
     }
 }

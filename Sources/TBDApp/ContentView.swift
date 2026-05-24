@@ -4,6 +4,7 @@ import TBDShared
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspendClaude: Bool = true
@@ -12,6 +13,18 @@ struct ContentView: View {
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
         return appState.worktrees.values.flatMap { $0 }.first { $0.id == id }
+    }
+
+    /// Returns the set of terminal IDs currently rendered anywhere in the
+    /// detail layout. Used so the window-root fallback overlay only fires
+    /// when the bound terminal is NOT visible (closed terminal, History
+    /// pane, single-pane mode, etc.).
+    private var visibleTerminalIDs: Set<UUID> {
+        var ids: Set<UUID> = []
+        for layout in appState.layouts.values {
+            ids.formUnion(layout.allTerminalIDs())
+        }
+        return ids
     }
 
     var body: some View {
@@ -46,6 +59,29 @@ struct ContentView: View {
                         Color.clear.preference(key: ContentHeightKey.self, value: geometry.size.height)
                     })
                     .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
+                    .overlay {
+                        if let frame = overlayCoordinator.openOverlay,
+                           frame.terminalID.map({ !visibleTerminalIDs.contains($0) }) ?? true {
+                            TranscriptOverlayView(
+                                frame: frame,
+                                hasBack: overlayCoordinator.parentFrame != nil,
+                                onBack: { overlayCoordinator.popOverlay() },
+                                onClose: { overlayCoordinator.close() }
+                            )
+                            .frame(maxWidth: 900, maxHeight: 700)
+                            .padding(20)
+                        }
+                    }
+                    .background {
+                        // Window-wide click-outside catcher. Renders transparently behind
+                        // the entire detail area; only consumes taps when an overlay is
+                        // currently open, so it doesn't interfere with normal interaction.
+                        if overlayCoordinator.openOverlay != nil {
+                            Color.black.opacity(0.001)
+                                .onTapGesture { overlayCoordinator.close() }
+                                .allowsHitTesting(true)
+                        }
+                    }
                 }
             }
             .toolbar(removing: .sidebarToggle)
@@ -137,6 +173,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 800, minHeight: 500)
         .onChange(of: appState.selectedWorktreeIDs) { oldSelection, newSelection in
+            overlayCoordinator.close()
             markSelectedWorktreesAsRead(newSelection)
             let newlySelected = newSelection.subtracting(oldSelection)
             for worktreeID in newlySelected {

@@ -3,62 +3,57 @@ import TBDShared
 
 /// Shared chrome for non-bubble activity rows (tool calls, thinking, system).
 /// Provides the full-bleed row layout, header (icon + title + timestamp),
-/// expand/collapse toggle, and a truncation footer that lazily fetches the
-/// un-truncated body via the daemon.
-struct ActivityRowChrome<Header: View, BodyContent: View>: View {
+/// and a header-only click-to-overlay interaction (see #129 spec).
+struct ActivityRowChrome<Header: View>: View {
     let icon: String
     let timestamp: Date?
-    @Binding var expanded: Bool
+    let onOpen: () -> Void
     let headerContent: () -> Header
-    let bodyContent: () -> BodyContent
+
+    @State private var hovering = false
 
     init(
         icon: String,
         timestamp: Date?,
-        expanded: Binding<Bool>,
-        @ViewBuilder header: @escaping () -> Header,
-        @ViewBuilder body: @escaping () -> BodyContent
+        onOpen: @escaping () -> Void,
+        @ViewBuilder header: @escaping () -> Header
     ) {
         self.icon = icon
         self.timestamp = timestamp
-        self._expanded = expanded
+        self.onOpen = onOpen
         self.headerContent = header
-        self.bodyContent = body
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button(action: { expanded.toggle() }) {
-                HStack(spacing: 6) {
-                    Image(systemName: icon)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 14)
-                    headerContent()
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    if let ts = timestamp {
-                        Text(ts.absoluteShort)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+        Button(action: onOpen) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14)
+                headerContent()
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if let ts = timestamp {
+                    Text(ts.absoluteShort)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
-            }
-            .buttonStyle(.plain)
-
-            if expanded {
-                bodyContent()
-                    .padding(.leading, 20)
+                Image(systemName: "scope")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .opacity(hovering ? 0.8 : 0.0)
+                    .animation(.easeInOut(duration: 0.12), value: hovering)
             }
         }
+        .buttonStyle(.plain)
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.4))
+        .background(Color(nsColor: .windowBackgroundColor).opacity(hovering ? 0.65 : 0.4))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 }
 
