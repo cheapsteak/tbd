@@ -13,6 +13,14 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
     private var hasRequestedPermission = false
     private var hasLoggedUnavailable = false
 
+    /// Set by `AppState` after construction so banner clicks can drive navigation.
+    /// Weak to avoid a retain cycle — `AppState` owns this manager.
+    weak var appState: AppState?
+
+    func configure(appState: AppState) {
+        self.appState = appState
+    }
+
     /// UNUserNotificationCenter crashes unbundled executables (no CFBundleIdentifier).
     private var isAvailable: Bool {
         Bundle.main.bundleIdentifier != nil
@@ -81,5 +89,37 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler handler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         handler([.banner])
+    }
+
+    /// Parse a notification request identifier and navigate to the matching worktree.
+    /// Factored out of the delegate method so it's testable without faking
+    /// `UNNotificationResponse` (which has no public initializer).
+    func handleClick(identifier: String) {
+        guard let worktreeID = UUID(uuidString: identifier) else {
+            logger.error("Banner click identifier is not a UUID: \(identifier, privacy: .public)")
+            return
+        }
+        guard let appState else {
+            logger.error("Banner click ignored: appState not configured")
+            return
+        }
+        appState.navigateToWorktree(worktreeID)
+    }
+
+    /// Banner click → focus the worktree the notification was about.
+    /// `nonisolated` to satisfy the protocol's isolation requirement, matching
+    /// `willPresent` above. Hops back to the main actor to invoke `handleClick`.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let identifier = response.notification.request.identifier
+        // Call the completion handler synchronously to satisfy its
+        // non-Sendable isolation, then hop to the main actor for navigation.
+        completionHandler()
+        Task { @MainActor in
+            self.handleClick(identifier: identifier)
+        }
     }
 }
