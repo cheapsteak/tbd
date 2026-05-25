@@ -1,3 +1,4 @@
+import MarkdownUI
 import SwiftUI
 import TBDShared
 
@@ -43,9 +44,7 @@ struct AgentCardBody: View {
             if let prompt = parsed?.prompt, !prompt.isEmpty {
                 Text("Prompt")
                     .font(.caption2).foregroundStyle(.tertiary).textCase(.uppercase)
-                Text(prompt)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                promptMarkdown(prompt)
                     .transcriptSelectableText()
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -77,9 +76,7 @@ struct AgentCardBody: View {
                 Divider().padding(.vertical, 4)
                 Text("Result")
                     .font(.caption2).foregroundStyle(.tertiary).textCase(.uppercase)
-                Text(fullResultText ?? result.text)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                resultMarkdown(fullResultText ?? result.text)
                     .transcriptSelectableText()
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -105,6 +102,35 @@ struct AgentCardBody: View {
         guard let terminalID else { return }
         if let r = try? await appState.daemonClient.terminalTranscriptItemFullBody(terminalID: terminalID, itemID: "\(id)#input") {
             await MainActor.run { fullInputJSON = r.text }
+        }
+    }
+
+    @ViewBuilder
+    private func promptMarkdown(_ text: String) -> some View {
+        Markdown(LocalFileLinker.linkify(text))
+            .markdownTheme(.chatBubble)
+            .environment(\.openURL, fileLinkOpenAction)
+    }
+
+    @ViewBuilder
+    private func resultMarkdown(_ text: String) -> some View {
+        Markdown(LocalFileLinker.linkify(text))
+            .markdownTheme(.chatBubble)
+            .environment(\.openURL, fileLinkOpenAction)
+    }
+
+    private var fileLinkOpenAction: OpenURLAction {
+        OpenURLAction { url in
+            if url.scheme == "tbd-file" {
+                let p = (url.path as NSString).removingPercentEncoding ?? url.path
+                overlayCoordinator.pushFile(path: p)
+                return .handled
+            }
+            if url.isFileURL {
+                overlayCoordinator.pushFile(path: url.path)
+                return .handled
+            }
+            return .systemAction
         }
     }
 }
