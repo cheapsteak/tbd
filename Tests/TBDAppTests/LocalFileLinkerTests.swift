@@ -47,6 +47,16 @@ struct LocalFileLinkerTests {
         #expect(link(input) == want)
     }
 
+    @Test func barePath_afterEquals_noSpace_isLinkified() {
+        // `output_file=/tmp/foo.md` is a common shell-style assignment some
+        // tool wrappers emit (no space after `=`). `=` must count as a path
+        // predecessor for this to linkify.
+        let link = linker(existing: ["/tmp/foo.md"])
+        let input = "output_file=/tmp/foo.md"
+        let want  = "output_file=[/tmp/foo.md](tbd-file:/tmp/foo.md)"
+        #expect(link(input) == want)
+    }
+
     @Test func barePath_insideParens_isLinkified_parensOutside() {
         let link = linker(existing: ["/tmp/foo.md"])
         let input = "(see /tmp/foo.md)"

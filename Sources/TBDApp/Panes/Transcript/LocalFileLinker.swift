@@ -63,6 +63,12 @@ enum LocalFileLinker {
         while i < chars.count {
             // Fenced code block: ``` at start of line, consume through the
             // matching ``` on its own line (or end of input).
+            // NOTE: only 3-backtick fences are recognized here. 4+-backtick
+            // fences and tilde (~~~) fences fall through and any paths
+            // inside them would be linkified. Not a real-world issue for
+            // Claude output (which uses standard ``` fences) but worth
+            // knowing if you see a false-positive inside an alternative
+            // fence style.
             if isAtLineStart(chars, i), startsWith(chars, i, "```") {
                 flushEligible()
                 let start = i
@@ -281,8 +287,10 @@ enum LocalFileLinker {
         if i == 0 { return true }
         let prev = chars[i - 1]
         if prev.isWhitespace { return true }
-        // Allow when preceded by typical sentence punctuation.
-        return "(\"'<[,;".contains(prev) || prev == "\n"
+        // Allow when preceded by typical sentence punctuation. `=` covers
+        // `output_file=/tmp/foo` shell-style assignments emitted by some
+        // tool wrappers (no space after `=`).
+        return "(\"'<[,;=".contains(prev) || prev == "\n"
     }
 
     private static func isPathChar(_ c: Character) -> Bool {
