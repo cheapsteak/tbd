@@ -109,27 +109,14 @@ struct AgentCardBody: View {
     private func promptMarkdown(_ text: String) -> some View {
         Markdown(LocalFileLinker.linkify(text))
             .markdownTheme(.chatBubble)
-            .environment(\.openURL, fileLinkOpenAction)
+            .environment(\.openURL, overlayFileLinkAction(overlayCoordinator))
     }
 
     @ViewBuilder
     private func resultMarkdown(_ text: String) -> some View {
         Markdown(LocalFileLinker.linkify(text))
             .markdownTheme(.chatBubble)
-            .environment(\.openURL, fileLinkOpenAction)
+            .environment(\.openURL, overlayFileLinkAction(overlayCoordinator))
     }
 
-    private var fileLinkOpenAction: OpenURLAction {
-        OpenURLAction { url in
-            if url.scheme == "tbd-file" {
-                overlayCoordinator.pushFile(path: url.path)
-                return .handled
-            }
-            if url.isFileURL {
-                overlayCoordinator.pushFile(path: url.path)
-                return .handled
-            }
-            return .systemAction
-        }
-    }
 }

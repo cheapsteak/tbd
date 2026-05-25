@@ -49,17 +49,7 @@ struct OverlayFileView: View {
                 Markdown(content, baseURL: URL(fileURLWithPath: path))
                     .markdownTheme(.chatBubble)
                     .textSelection(.enabled)
-                    .environment(\.openURL, OpenURLAction { url in
-                        if url.scheme == "tbd-file" {
-                            overlayCoordinator.pushFile(path: url.path)
-                            return .handled
-                        }
-                        if url.isFileURL {
-                            overlayCoordinator.pushFile(path: url.path)
-                            return .handled
-                        }
-                        return .systemAction
-                    })
+                    .environment(\.openURL, overlayFileLinkAction(overlayCoordinator))
             } else {
                 Text(content)
                     .font(.system(.body, design: .monospaced))
