@@ -110,6 +110,17 @@ struct LocalFileLinkerTests {
         #expect(link(input) == want)
     }
 
+    @Test func spaceExtendedCandidate_trimsBackToShortestExisting() {
+        // The linker's space-aware extension peeks past whitespace to find
+        // paths-with-spaces. If the full extended candidate doesn't exist
+        // but a shorter prefix does, it trims one word at a time until
+        // fileExists. Regression guard for the trim-back branch.
+        let link = linker(existing: ["/tmp/a/b"])
+        let input = "look at /tmp/a/b c/d"
+        let want  = "look at [/tmp/a/b](tbd-file:/tmp/a/b) c/d"
+        #expect(link(input) == want)
+    }
+
     @Test func percentEncodingInURL_isReversible() {
         // A real file with a space — escaping must round-trip via URL decoding
         // at click time. We verify the link target form here.
