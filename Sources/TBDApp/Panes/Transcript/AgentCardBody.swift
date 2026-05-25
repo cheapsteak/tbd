@@ -122,8 +122,7 @@ struct AgentCardBody: View {
     private var fileLinkOpenAction: OpenURLAction {
         OpenURLAction { url in
             if url.scheme == "tbd-file" {
-                let p = (url.path as NSString).removingPercentEncoding ?? url.path
-                overlayCoordinator.pushFile(path: p)
+                overlayCoordinator.pushFile(path: url.path)
                 return .handled
             }
             if url.isFileURL {
