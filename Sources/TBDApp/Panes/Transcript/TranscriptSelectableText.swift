@@ -10,12 +10,9 @@ import SwiftUI
 /// env propagation. Layout passes go super-linear and the main thread stalls
 /// (confirmed via spindumps showing ~17 s hangs).
 ///
-/// `TranscriptItemsView` normally flips this env to `true` only on the most-
-/// recently hovered row (latched, not live-hovered), so non-hovered rows render
-/// plain `Text` and skip the `NSTextField` materialization entirely. (Currently
-/// forced `false` for every row while the #129 hover-trigger falsification test
-/// in PR #140 is live — `ChatBubbleView` overrides to `true` in its subtree, so
-/// user/assistant text stays selectable.)
+/// `TranscriptItemsView` flips this env to `true` only on the most-recently
+/// hovered row (latched, not live-hovered), so non-hovered rows render plain
+/// `Text` and skip the `NSTextField` materialization entirely.
 private struct TranscriptTextSelectionKey: EnvironmentKey {
     static let defaultValue: Bool = false
 }
