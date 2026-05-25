@@ -4,8 +4,22 @@ import TBDShared
 // MARK: - Overlay helpers
 
 @MainActor
-private func isOverlayItemFor(terminalID: UUID, coordinator: TranscriptOverlayCoordinator) -> Bool {
+func isOverlayItemFor(terminalID: UUID, coordinator: TranscriptOverlayCoordinator) -> Bool {
     if case .item(let f)? = coordinator.current, f.terminalID == terminalID { return true }
+    return false
+}
+
+/// True when the overlay should suppress key/mouse events from reaching
+/// the given terminal's underlying NSView.
+///
+/// Two cases trigger suppression:
+/// - An item frame for THIS terminal (the overlay sits over this terminal).
+/// - Any file frame (file frames always render at the window root over
+///   every terminal, so they must suppress every terminal's events).
+@MainActor
+func shouldSuppressEvents(in coordinator: TranscriptOverlayCoordinator, forTerminalID terminalID: UUID) -> Bool {
+    if isOverlayItemFor(terminalID: terminalID, coordinator: coordinator) { return true }
+    if case .file? = coordinator.current { return true }
     return false
 }
 
@@ -294,9 +308,7 @@ struct PanePlaceholder: View {
                     initialSnapshot: terminal.suspendedSnapshot,
                     isSuspendedSnapshot: terminal.suspendedAt != nil,
                     shouldSuppressEvents: { [overlayCoordinator] in
-                        if case .item(let f)? = overlayCoordinator.current,
-                           f.terminalID == terminalID { return true }
-                        return false
+                        shouldSuppressEvents(in: overlayCoordinator, forTerminalID: terminalID)
                     }
                 )
                 .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
