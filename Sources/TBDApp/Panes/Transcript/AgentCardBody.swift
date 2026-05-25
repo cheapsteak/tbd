@@ -69,7 +69,7 @@ struct AgentCardBody: View {
                 // these IDs — see #129.
                 TranscriptItemsView(items: subagent.items, terminalID: nil)
                     .environment(\.openTranscriptOverlay) { itemID in
-                        overlayCoordinator.pushAndOpen(itemID: itemID)
+                        overlayCoordinator.pushItem(itemID: itemID)
                     }
             }
 

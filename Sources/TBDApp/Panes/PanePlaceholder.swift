@@ -1,6 +1,14 @@
 import SwiftUI
 import TBDShared
 
+// MARK: - Overlay helpers
+
+@MainActor
+private func isOverlayItemFor(terminalID: UUID, coordinator: TranscriptOverlayCoordinator) -> Bool {
+    if case .item(let f)? = coordinator.current, f.terminalID == terminalID { return true }
+    return false
+}
+
 // MARK: - PanePlaceholder
 
 /// Universal leaf wrapper that renders the appropriate pane content
@@ -286,7 +294,9 @@ struct PanePlaceholder: View {
                     initialSnapshot: terminal.suspendedSnapshot,
                     isSuspendedSnapshot: terminal.suspendedAt != nil,
                     shouldSuppressEvents: { [overlayCoordinator] in
-                        overlayCoordinator.openOverlay?.terminalID == terminalID
+                        if case .item(let f)? = overlayCoordinator.current,
+                           f.terminalID == terminalID { return true }
+                        return false
                     }
                 )
                 .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
@@ -314,12 +324,12 @@ struct PanePlaceholder: View {
                     }
                 }
                 .overlay {
-                    if let frame = overlayCoordinator.openOverlay,
-                       let tid = frame.terminalID, tid == terminalID {
+                    if let frame = overlayCoordinator.current,
+                       isOverlayItemFor(terminalID: terminalID, coordinator: overlayCoordinator) {
                         TranscriptOverlayView(
                             frame: frame,
-                            hasBack: overlayCoordinator.parentFrame != nil,
-                            onBack: { overlayCoordinator.popOverlay() },
+                            hasBack: overlayCoordinator.hasBack,
+                            onBack: { overlayCoordinator.pop() },
                             onClose: { overlayCoordinator.close() }
                         )
                         .environment(\.openFilePreview, { path in
@@ -330,7 +340,7 @@ struct PanePlaceholder: View {
                     }
                 }
                 .onDisappear {
-                    if overlayCoordinator.openOverlay?.terminalID == terminalID {
+                    if isOverlayItemFor(terminalID: terminalID, coordinator: overlayCoordinator) {
                         overlayCoordinator.close()
                     }
                     appState.snapshotProviders.removeValue(forKey: terminalID)

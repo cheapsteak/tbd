@@ -2,16 +2,10 @@
 import Combine
 import Foundation
 
-/// One frame of the transcript overlay state machine. Identifies the
-/// transcript item to display and the terminal pane region the overlay
-/// should render over. `terminalID` is nil when opened from the History
-/// pane (no bound terminal — uses the window-root centered-modal fallback);
-/// in that case `historySessionID` carries the session whose transcript is
-/// being viewed so the overlay can resolve items via
-/// `AppState.sessionTranscripts[sessionID]` without depending on SwiftUI
-/// environment propagation (the fallback overlay is a sibling of the
-/// History view, not a descendant — see #129).
-struct TranscriptOverlayFrame: Equatable {
+/// Identifies a transcript item the overlay should render. `terminalID` is
+/// nil when opened from the History pane; in that case `historySessionID`
+/// carries the session whose transcript is being viewed.
+struct ItemFrame: Equatable {
     let terminalID: UUID?
     let itemID: String
     let historySessionID: String?
@@ -23,64 +17,71 @@ struct TranscriptOverlayFrame: Equatable {
     }
 }
 
-/// At most one overlay open per window. Holds an optional one-step back
-/// stack used by AgentCard's nested-transcript recursion: opening a row
-/// inside an AgentCard overlay pushes the current frame and replaces it;
-/// the back button pops.
+/// One frame of the overlay navigation stack: either a transcript item
+/// or a local file. The overlay view branches on this to choose between
+/// the existing tool-body renderer and the new `OverlayFileView`.
+enum OverlayFrame: Equatable {
+    case item(ItemFrame)
+    case file(path: String)
+}
+
+/// At most one overlay open per window. Maintains a navigation stack so
+/// the user can drill from an Agent tool call into a subagent item, and
+/// from either into a referenced local file (and from that file into
+/// further linked files).
+///
+/// Tapping the same item frame currently at the top toggles the overlay
+/// closed — preserves the existing "click same row to dismiss" behaviour.
+/// File frames always push (you cannot toggle-close a file frame by
+/// reopening the same link).
 @MainActor
 final class TranscriptOverlayCoordinator: ObservableObject {
-    @Published private(set) var openOverlay: TranscriptOverlayFrame?
-    @Published private(set) var parentFrame: TranscriptOverlayFrame?
+    @Published private(set) var stack: [OverlayFrame] = []
 
-    /// Open or swap. If the requested frame matches what's already open,
-    /// close instead (modal-ish toggle: same row click = dismiss).
-    /// Swap clears any parent back-stack — the user has navigated away
-    /// from the AgentCard context.
-    ///
-    /// `historySessionID` is set by the History pane so the overlay can
-    /// look the item up directly in `AppState.sessionTranscripts` instead
-    /// of relying on environment propagation (the fallback overlay lives
-    /// outside the History subtree). For terminal-bound opens it stays nil.
+    var current: OverlayFrame? { stack.last }
+    var hasBack: Bool { stack.count > 1 }
+    var isOpen: Bool { !stack.isEmpty }
+
+    /// Top-level open. Clears any prior stack. If the same item is already
+    /// at the top of the stack, toggles closed.
     func open(terminalID: UUID?, itemID: String, historySessionID: String? = nil) {
-        let next = TranscriptOverlayFrame(
+        let frame = ItemFrame(
             terminalID: terminalID,
             itemID: itemID,
             historySessionID: historySessionID
         )
-        if openOverlay == next {
-            openOverlay = nil
-            parentFrame = nil
+        if case .item(let top)? = current, top == frame {
+            stack.removeAll()
             return
         }
-        openOverlay = next
-        parentFrame = nil
+        stack = [.item(frame)]
     }
 
-    /// Push current frame to back-stack and open the new one over the
-    /// same terminal. No-op if nothing is currently open. Called by row
-    /// clicks INSIDE an AgentCard's overlay nested transcript.
-    func pushAndOpen(itemID: String) {
-        guard let current = openOverlay else { return }
-        parentFrame = current
-        openOverlay = TranscriptOverlayFrame(
-            terminalID: current.terminalID,
+    /// Push another transcript item, inheriting the current frame's
+    /// terminal/session context. No-op if nothing is open or if the
+    /// current top is not an item frame.
+    func pushItem(itemID: String) {
+        guard let top = current, case .item(let frame) = top else { return }
+        stack.append(.item(ItemFrame(
+            terminalID: frame.terminalID,
             itemID: itemID,
-            historySessionID: current.historySessionID
-        )
+            historySessionID: frame.historySessionID
+        )))
     }
 
-    /// Restore the back-stack frame. If no parent, close the overlay.
-    func popOverlay() {
-        if let parent = parentFrame {
-            openOverlay = parent
-            parentFrame = nil
-        } else {
-            close()
-        }
+    /// Push a local file frame. No-op if nothing is open.
+    func pushFile(path: String) {
+        guard isOpen else { return }
+        stack.append(.file(path: path))
+    }
+
+    /// Pop one frame. Closes the overlay when the stack empties.
+    func pop() {
+        guard !stack.isEmpty else { return }
+        stack.removeLast()
     }
 
     func close() {
-        openOverlay = nil
-        parentFrame = nil
+        stack.removeAll()
     }
 }
