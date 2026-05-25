@@ -1,6 +1,28 @@
 import SwiftUI
 import TBDShared
 
+// MARK: - Overlay helpers
+
+@MainActor
+func isOverlayItemFor(terminalID: UUID, coordinator: TranscriptOverlayCoordinator) -> Bool {
+    if case .item(let f)? = coordinator.current, f.terminalID == terminalID { return true }
+    return false
+}
+
+/// True when the overlay should suppress key/mouse events from reaching
+/// the given terminal's underlying NSView.
+///
+/// Two cases trigger suppression:
+/// - An item frame for THIS terminal (the overlay sits over this terminal).
+/// - Any file frame (file frames always render at the window root over
+///   every terminal, so they must suppress every terminal's events).
+@MainActor
+func shouldSuppressEvents(in coordinator: TranscriptOverlayCoordinator, forTerminalID terminalID: UUID) -> Bool {
+    if isOverlayItemFor(terminalID: terminalID, coordinator: coordinator) { return true }
+    if case .file? = coordinator.current { return true }
+    return false
+}
+
 // MARK: - PanePlaceholder
 
 /// Universal leaf wrapper that renders the appropriate pane content
@@ -286,7 +308,7 @@ struct PanePlaceholder: View {
                     initialSnapshot: terminal.suspendedSnapshot,
                     isSuspendedSnapshot: terminal.suspendedAt != nil,
                     shouldSuppressEvents: { [overlayCoordinator] in
-                        overlayCoordinator.openOverlay?.terminalID == terminalID
+                        shouldSuppressEvents(in: overlayCoordinator, forTerminalID: terminalID)
                     }
                 )
                 .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
@@ -314,12 +336,12 @@ struct PanePlaceholder: View {
                     }
                 }
                 .overlay {
-                    if let frame = overlayCoordinator.openOverlay,
-                       let tid = frame.terminalID, tid == terminalID {
+                    if let frame = overlayCoordinator.current,
+                       isOverlayItemFor(terminalID: terminalID, coordinator: overlayCoordinator) {
                         TranscriptOverlayView(
                             frame: frame,
-                            hasBack: overlayCoordinator.parentFrame != nil,
-                            onBack: { overlayCoordinator.popOverlay() },
+                            hasBack: overlayCoordinator.hasBack,
+                            onBack: { overlayCoordinator.pop() },
                             onClose: { overlayCoordinator.close() }
                         )
                         .environment(\.openFilePreview, { path in
@@ -330,7 +352,7 @@ struct PanePlaceholder: View {
                     }
                 }
                 .onDisappear {
-                    if overlayCoordinator.openOverlay?.terminalID == terminalID {
+                    if isOverlayItemFor(terminalID: terminalID, coordinator: overlayCoordinator) {
                         overlayCoordinator.close()
                     }
                     appState.snapshotProviders.removeValue(forKey: terminalID)

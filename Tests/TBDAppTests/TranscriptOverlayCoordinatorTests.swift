@@ -8,126 +8,164 @@ struct TranscriptOverlayCoordinatorTests {
     private let t1 = UUID()
     private let t2 = UUID()
 
-    @Test func open_fromNil_setsOpenOverlay() {
-        let c = TranscriptOverlayCoordinator()
-        #expect(c.openOverlay == nil)
-        c.open(terminalID: t1, itemID: "a")
-        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: t1, itemID: "a"))
-        #expect(c.parentFrame == nil)
+    private func itemFrame(_ tid: UUID?, _ id: String, _ session: String? = nil) -> OverlayFrame {
+        .item(ItemFrame(terminalID: tid, itemID: id, historySessionID: session))
     }
 
-    @Test func open_sameFrame_togglesClosed() {
+    @Test func open_fromEmpty_setsCurrent() {
+        let c = TranscriptOverlayCoordinator()
+        #expect(c.current == nil)
+        c.open(terminalID: t1, itemID: "a")
+        #expect(c.current == itemFrame(t1, "a"))
+        #expect(!c.hasBack)
+    }
+
+    @Test func open_sameItem_togglesClosed() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: t1, itemID: "a")
         c.open(terminalID: t1, itemID: "a")
-        #expect(c.openOverlay == nil)
-        #expect(c.parentFrame == nil)
+        #expect(c.current == nil)
+        #expect(!c.isOpen)
     }
 
-    @Test func open_differentItem_swapsContent_keepsOpen() {
+    @Test func open_differentItem_swapsStack() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: t1, itemID: "a")
         c.open(terminalID: t1, itemID: "b")
-        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: t1, itemID: "b"))
-        #expect(c.parentFrame == nil)
+        #expect(c.current == itemFrame(t1, "b"))
+        #expect(!c.hasBack) // open always resets the stack
     }
 
-    @Test func open_differentTerminal_swapsContent_keepsOpen() {
+    @Test func open_differentTerminal_swapsStack() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: t1, itemID: "a")
         c.open(terminalID: t2, itemID: "a")
-        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: t2, itemID: "a"))
-        #expect(c.parentFrame == nil)
+        #expect(c.current == itemFrame(t2, "a"))
     }
 
-    @Test func pushAndOpen_savesParent_replacesCurrent() {
+    @Test func pushItem_appendsWithSameTerminal() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: t1, itemID: "parent")
-        c.pushAndOpen(itemID: "child")
-        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: t1, itemID: "child"))
-        #expect(c.parentFrame == TranscriptOverlayFrame(terminalID: t1, itemID: "parent"))
+        c.pushItem(itemID: "child")
+        #expect(c.current == itemFrame(t1, "child"))
+        #expect(c.hasBack)
     }
 
-    @Test func pushAndOpen_withoutCurrent_isNoOp() {
+    @Test func pushItem_withoutCurrent_isNoOp() {
         let c = TranscriptOverlayCoordinator()
-        c.pushAndOpen(itemID: "child")
-        #expect(c.openOverlay == nil)
-        #expect(c.parentFrame == nil)
+        c.pushItem(itemID: "child")
+        #expect(c.current == nil)
     }
 
-    @Test func popOverlay_withParent_restoresParent() {
+    @Test func pop_oneLevel_restoresPrevious() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: t1, itemID: "parent")
-        c.pushAndOpen(itemID: "child")
-        c.popOverlay()
-        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: t1, itemID: "parent"))
-        #expect(c.parentFrame == nil)
+        c.pushItem(itemID: "child")
+        c.pop()
+        #expect(c.current == itemFrame(t1, "parent"))
+        #expect(!c.hasBack)
     }
 
-    @Test func popOverlay_withoutParent_closes() {
+    @Test func pop_lastFrame_closesOverlay() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: t1, itemID: "a")
-        c.popOverlay()
-        #expect(c.openOverlay == nil)
-        #expect(c.parentFrame == nil)
+        c.pop()
+        #expect(c.current == nil)
+        #expect(!c.isOpen)
     }
 
-    @Test func close_clearsAll() {
+    @Test func close_clearsStack() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: t1, itemID: "a")
-        c.pushAndOpen(itemID: "b")
+        c.pushItem(itemID: "b")
         c.close()
-        #expect(c.openOverlay == nil)
-        #expect(c.parentFrame == nil)
+        #expect(c.current == nil)
+        #expect(!c.isOpen)
     }
 
-    @Test func open_whileParentFrameSet_clearsBackStack() {
+    @Test func open_resetsExistingStack() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: t1, itemID: "parent")
-        c.pushAndOpen(itemID: "child")          // parentFrame is now set
-        c.open(terminalID: t1, itemID: "other") // swap — should clear parentFrame
-        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: t1, itemID: "other"))
-        #expect(c.parentFrame == nil)
+        c.pushItem(itemID: "child")
+        c.open(terminalID: t1, itemID: "other")
+        #expect(c.current == itemFrame(t1, "other"))
+        #expect(!c.hasBack)
     }
 
-    // The historySessionID branch — set when the History pane opens an
-    // overlay so the lookup can resolve via AppState.sessionTranscripts
-    // without depending on SwiftUI environment scope (#129 follow-up).
+    // History-pane branch
 
     @Test func open_withHistorySessionID_storesIt() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: nil, itemID: "a", historySessionID: "sess-1")
-        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: nil, itemID: "a", historySessionID: "sess-1"))
+        #expect(c.current == itemFrame(nil, "a", "sess-1"))
     }
 
-    @Test func open_terminalBound_defaultsHistorySessionIDToNil() {
-        let c = TranscriptOverlayCoordinator()
-        c.open(terminalID: t1, itemID: "a")
-        #expect(c.openOverlay?.historySessionID == nil)
-    }
-
-    @Test func pushAndOpen_propagatesHistorySessionID() {
+    @Test func pushItem_propagatesHistorySessionID() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: nil, itemID: "parent", historySessionID: "sess-1")
-        c.pushAndOpen(itemID: "child")
-        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: nil, itemID: "child", historySessionID: "sess-1"))
-        #expect(c.parentFrame == TranscriptOverlayFrame(terminalID: nil, itemID: "parent", historySessionID: "sess-1"))
+        c.pushItem(itemID: "child")
+        #expect(c.current == itemFrame(nil, "child", "sess-1"))
     }
 
-    @Test func open_sameHistoryFrame_togglesClosed() {
-        let c = TranscriptOverlayCoordinator()
-        c.open(terminalID: nil, itemID: "a", historySessionID: "sess-1")
-        c.open(terminalID: nil, itemID: "a", historySessionID: "sess-1")
-        #expect(c.openOverlay == nil)
-    }
-
-    @Test func open_sameItemDifferentHistorySession_swapsContent() {
-        // Same itemID across different sessions must NOT be treated as the
-        // same frame — Equatable now includes historySessionID, so this
-        // opens (swaps) rather than toggling closed.
+    @Test func open_sameItemDifferentHistorySession_swaps() {
         let c = TranscriptOverlayCoordinator()
         c.open(terminalID: nil, itemID: "a", historySessionID: "sess-1")
         c.open(terminalID: nil, itemID: "a", historySessionID: "sess-2")
-        #expect(c.openOverlay == TranscriptOverlayFrame(terminalID: nil, itemID: "a", historySessionID: "sess-2"))
+        #expect(c.current == itemFrame(nil, "a", "sess-2"))
+    }
+
+    // File frames
+
+    @Test func pushFile_appendsFileFrame() {
+        let c = TranscriptOverlayCoordinator()
+        c.open(terminalID: t1, itemID: "a")
+        c.pushFile(path: "/tmp/foo.md")
+        #expect(c.current == .file(path: "/tmp/foo.md"))
+        #expect(c.hasBack)
+    }
+
+    @Test func pushFile_withoutOpenOverlay_isNoOp() {
+        let c = TranscriptOverlayCoordinator()
+        c.pushFile(path: "/tmp/foo.md")
+        #expect(c.current == nil)
+    }
+
+    @Test func pop_fromFile_returnsToItem() {
+        let c = TranscriptOverlayCoordinator()
+        c.open(terminalID: t1, itemID: "agent")
+        c.pushFile(path: "/tmp/foo.md")
+        c.pop()
+        #expect(c.current == itemFrame(t1, "agent"))
+        #expect(!c.hasBack)
+    }
+
+    @Test func pushFile_thenPushFile_thenPopTwice_returnsToItem() {
+        let c = TranscriptOverlayCoordinator()
+        c.open(terminalID: t1, itemID: "agent")
+        c.pushFile(path: "/tmp/a.md")
+        c.pushFile(path: "/tmp/b.md")
+        #expect(c.current == .file(path: "/tmp/b.md"))
+        #expect(c.hasBack)
+        c.pop()
+        #expect(c.current == .file(path: "/tmp/a.md"))
+        #expect(c.hasBack)
+        c.pop()
+        #expect(c.current == itemFrame(t1, "agent"))
+        #expect(!c.hasBack)
+    }
+
+    @Test func mixedSequence_itemThenFileThenItem_popsCorrectly() {
+        // agent → subagent-item → file → back → back → back
+        let c = TranscriptOverlayCoordinator()
+        c.open(terminalID: t1, itemID: "agent")
+        c.pushItem(itemID: "subitem")
+        c.pushFile(path: "/tmp/foo.md")
+        #expect(c.hasBack)
+        c.pop()
+        #expect(c.current == itemFrame(t1, "subitem"))
+        c.pop()
+        #expect(c.current == itemFrame(t1, "agent"))
+        c.pop()
+        #expect(c.current == nil)
     }
 }

@@ -60,12 +60,12 @@ struct ContentView: View {
                     })
                     .onPreferenceChange(ContentHeightKey.self) { contentAreaHeight = $0 }
                     .overlay {
-                        if let frame = overlayCoordinator.openOverlay,
-                           frame.terminalID.map({ !visibleTerminalIDs.contains($0) }) ?? true {
+                        if let frame = overlayCoordinator.current,
+                           overlayFrameIsWindowRoot(frame, visibleTerminalIDs: visibleTerminalIDs) {
                             TranscriptOverlayView(
                                 frame: frame,
-                                hasBack: overlayCoordinator.parentFrame != nil,
-                                onBack: { overlayCoordinator.popOverlay() },
+                                hasBack: overlayCoordinator.hasBack,
+                                onBack: { overlayCoordinator.pop() },
                                 onClose: { overlayCoordinator.close() }
                             )
                             .frame(maxWidth: 900, maxHeight: 700)
@@ -76,7 +76,7 @@ struct ContentView: View {
                         // Window-wide click-outside catcher. Renders transparently behind
                         // the entire detail area; only consumes taps when an overlay is
                         // currently open, so it doesn't interfere with normal interaction.
-                        if overlayCoordinator.openOverlay != nil {
+                        if overlayCoordinator.isOpen {
                             Color.black.opacity(0.001)
                                 .onTapGesture { overlayCoordinator.close() }
                                 .allowsHitTesting(true)
@@ -282,6 +282,23 @@ struct ContentView: View {
         }
     }
 
+}
+
+// MARK: - Overlay helpers
+
+/// Returns true when the overlay's current frame should render in the
+/// window-root fallback (i.e. NOT in a terminal-pane `.overlay`).
+/// Item frames are window-root when their terminal is not currently
+/// visible (closed, in History pane, single-pane mode, etc.).
+/// File frames and nil-terminal frames always use the window-root.
+private func overlayFrameIsWindowRoot(
+    _ frame: OverlayFrame,
+    visibleTerminalIDs: Set<UUID>
+) -> Bool {
+    if case .item(let f) = frame {
+        return f.terminalID.map { !visibleTerminalIDs.contains($0) } ?? true
+    }
+    return true
 }
 
 // MARK: - PRButtonLabel

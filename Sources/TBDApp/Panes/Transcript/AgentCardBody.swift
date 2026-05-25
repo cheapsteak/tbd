@@ -1,3 +1,4 @@
+import MarkdownUI
 import SwiftUI
 import TBDShared
 
@@ -43,9 +44,7 @@ struct AgentCardBody: View {
             if let prompt = parsed?.prompt, !prompt.isEmpty {
                 Text("Prompt")
                     .font(.caption2).foregroundStyle(.tertiary).textCase(.uppercase)
-                Text(prompt)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                promptMarkdown(prompt)
                     .transcriptSelectableText()
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -69,7 +68,7 @@ struct AgentCardBody: View {
                 // these IDs — see #129.
                 TranscriptItemsView(items: subagent.items, terminalID: nil)
                     .environment(\.openTranscriptOverlay) { itemID in
-                        overlayCoordinator.pushAndOpen(itemID: itemID)
+                        overlayCoordinator.pushItem(itemID: itemID)
                     }
             }
 
@@ -77,9 +76,7 @@ struct AgentCardBody: View {
                 Divider().padding(.vertical, 4)
                 Text("Result")
                     .font(.caption2).foregroundStyle(.tertiary).textCase(.uppercase)
-                Text(fullResultText ?? result.text)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                resultMarkdown(fullResultText ?? result.text)
                     .transcriptSelectableText()
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -107,4 +104,19 @@ struct AgentCardBody: View {
             await MainActor.run { fullInputJSON = r.text }
         }
     }
+
+    @ViewBuilder
+    private func promptMarkdown(_ text: String) -> some View {
+        Markdown(LocalFileLinker.linkify(text))
+            .markdownTheme(.chatBubble)
+            .environment(\.openURL, overlayFileLinkAction(overlayCoordinator))
+    }
+
+    @ViewBuilder
+    private func resultMarkdown(_ text: String) -> some View {
+        Markdown(LocalFileLinker.linkify(text))
+            .markdownTheme(.chatBubble)
+            .environment(\.openURL, overlayFileLinkAction(overlayCoordinator))
+    }
+
 }

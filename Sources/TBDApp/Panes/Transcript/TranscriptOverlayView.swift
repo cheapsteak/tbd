@@ -10,7 +10,7 @@ import TBDShared
 /// the transcript pane's LazyVStack — no `_FlexFrameLayout`/
 /// `ScrollViewLayoutComputer` measure-then-clamp trap. See issue #129.
 struct TranscriptOverlayView: View {
-    let frame: TranscriptOverlayFrame
+    let frame: OverlayFrame
     let hasBack: Bool
     let onBack: () -> Void
     let onClose: () -> Void
@@ -20,6 +20,15 @@ struct TranscriptOverlayView: View {
     private static let decoder = JSONDecoder()
 
     var body: some View {
+        switch frame {
+        case .item:
+            itemBody
+        case .file(let path):
+            fileBody(path: path)
+        }
+    }
+
+    @ViewBuilder private var itemBody: some View {
         let item = lookupItem()
         VStack(spacing: 0) {
             header(item: item)
@@ -33,6 +42,51 @@ struct TranscriptOverlayView: View {
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .shadow(color: .black.opacity(0.18), radius: 12, x: 0, y: 4)
+    }
+
+    @ViewBuilder private func fileBody(path: String) -> some View {
+        VStack(spacing: 0) {
+            fileHeader(path: path)
+            Divider()
+            OverlayFileView(path: path)
+        }
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .shadow(color: .black.opacity(0.18), radius: 12, x: 0, y: 4)
+    }
+
+    @ViewBuilder
+    private func fileHeader(path: String) -> some View {
+        HStack(spacing: 8) {
+            if hasBack {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left").font(.caption)
+                }
+                .buttonStyle(.plain).help("Back")
+            }
+            Image(systemName: fileIcon(path: path))
+                .font(.caption).foregroundStyle(.secondary)
+            Text((path as NSString).lastPathComponent)
+                .font(.subheadline).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+            Spacer()
+            Button(action: onClose) {
+                Image(systemName: "xmark").font(.caption)
+            }
+            .buttonStyle(.plain).help("Close")
+            .keyboardShortcut(.cancelAction)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private func fileIcon(path: String) -> String {
+        let ext = (path as NSString).pathExtension.lowercased()
+        if ext == "md" || ext == "markdown" || ext == "txt" { return "doc.text" }
+        return "doc.plaintext"
+    }
+
+    private func currentItemFrame() -> ItemFrame? {
+        if case .item(let f) = frame { return f } else { return nil }
     }
 
     @ViewBuilder
@@ -155,6 +209,7 @@ struct TranscriptOverlayView: View {
 
     @ViewBuilder
     private func bodyContent(item: TranscriptItem?) -> some View {
+        let f = currentItemFrame()
         if let item {
             Group {
                 switch item {
@@ -164,21 +219,21 @@ struct TranscriptOverlayView: View {
                         inputJSON: inputJSON,
                         inputTruncatedTo: inputTruncatedTo,
                         result: toolResult,
-                        terminalID: frame.terminalID
+                        terminalID: f?.terminalID
                     )
                 case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, _, _, _, _) where name == "Write":
                     WriteCardBody(
                         id: toolID,
                         inputJSON: inputJSON,
                         inputTruncatedTo: inputTruncatedTo,
-                        terminalID: frame.terminalID
+                        terminalID: f?.terminalID
                     )
                 case .toolCall(let toolID, let name, let inputJSON, _, let toolResult, _, _, _) where name == "Read":
                     ReadCardBody(
                         id: toolID,
                         inputJSON: inputJSON,
                         result: toolResult,
-                        terminalID: frame.terminalID
+                        terminalID: f?.terminalID
                     )
                 case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _) where name == "Edit" || name == "MultiEdit":
                     EditCardBody(
@@ -187,19 +242,19 @@ struct TranscriptOverlayView: View {
                         inputJSON: inputJSON,
                         inputTruncatedTo: inputTruncatedTo,
                         result: toolResult,
-                        terminalID: frame.terminalID
+                        terminalID: f?.terminalID
                     )
                 case .toolCall(let toolID, let name, _, _, let toolResult, _, _, _) where name == "Grep":
                     GrepCardBody(
                         id: toolID,
                         result: toolResult,
-                        terminalID: frame.terminalID
+                        terminalID: f?.terminalID
                     )
                 case .toolCall(let toolID, let name, _, _, let toolResult, _, _, _) where name == "Glob":
                     GlobCardBody(
                         id: toolID,
                         result: toolResult,
-                        terminalID: frame.terminalID
+                        terminalID: f?.terminalID
                     )
                 case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, let subagent, _, _) where name == "Task" || name == "Agent":
                     AgentCardBody(
@@ -208,7 +263,7 @@ struct TranscriptOverlayView: View {
                         inputTruncatedTo: inputTruncatedTo,
                         result: toolResult,
                         subagent: subagent,
-                        terminalID: frame.terminalID
+                        terminalID: f?.terminalID
                     )
                 case .toolCall(let toolID, _, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _):
                     GenericToolCardBody(
@@ -216,7 +271,7 @@ struct TranscriptOverlayView: View {
                         inputJSON: inputJSON,
                         inputTruncatedTo: inputTruncatedTo,
                         result: toolResult,
-                        terminalID: frame.terminalID
+                        terminalID: f?.terminalID
                     )
                 case .systemReminder(_, let kind, let text, _) where kind == .skillBody:
                     SkillBodyRowBody(text: text)
@@ -231,7 +286,7 @@ struct TranscriptOverlayView: View {
                         .textSelection(.enabled)
                 }
             }
-            .id(frame.itemID)
+            .id(f?.itemID ?? "no-item")
         } else {
             Text("Item not found.")
                 .font(.caption)
@@ -248,15 +303,16 @@ struct TranscriptOverlayView: View {
     /// see issue #129):
     ///
     /// - Terminal-bound: `terminalID → Terminal.claudeSessionID → items`.
-    /// - History pane (no bound terminal): `frame.historySessionID → items`,
+    /// - History pane (no bound terminal): `f.historySessionID → items`,
     ///   set by `SessionTranscriptView` when it requests an overlay open.
     ///
     /// Returns nil if the terminal isn't found, has no active session,
     /// the session isn't in the transcript store, or the item has been
     /// removed.
     private func lookupItem() -> TranscriptItem? {
+        guard let f = currentItemFrame() else { return nil }
         let items: [TranscriptItem]
-        if let terminalID = frame.terminalID {
+        if let terminalID = f.terminalID {
             guard let terminal = appState.terminals.values
                     .flatMap({ $0 })
                     .first(where: { $0.id == terminalID }),
@@ -264,13 +320,13 @@ struct TranscriptOverlayView: View {
                   let stored = appState.sessionTranscripts[sessionID]
             else { return nil }
             items = stored
-        } else if let sessionID = frame.historySessionID,
+        } else if let sessionID = f.historySessionID,
                   let stored = appState.sessionTranscripts[sessionID] {
             items = stored
         } else {
             return nil
         }
-        return deepFind(frame.itemID, in: items)
+        return deepFind(f.itemID, in: items)
     }
 
     private func deepFind(_ targetID: String, in items: [TranscriptItem]) -> TranscriptItem? {
