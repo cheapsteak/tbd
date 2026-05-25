@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Darwin
 import ObjectiveC.runtime
+import TBDAppIcon
 import TBDShared
 import os
 

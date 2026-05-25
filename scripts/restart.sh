@@ -71,6 +71,20 @@ if [ ! -f "$BUNDLE_PLIST" ] || [ "$SOURCE_PLIST" -nt "$BUNDLE_PLIST" ]; then
     cp "$SOURCE_PLIST" "$BUNDLE_PLIST"
 fi
 
+# Copy the on-disk AppIcon.icns into the bundle. macOS reads this for
+# Notification Center banners, System Settings → Notifications, and Finder —
+# none of those paths look at NSApp.applicationIconImage (which still drives
+# the per-worktree Dock icon at runtime). Bake a new one with
+# `swift run IconBaker Resources/AppIcon.icns` after changing
+# Sources/TBDAppIcon/AppIcon.swift.
+BUNDLE_RESOURCES="$BUNDLE_DIR/Contents/Resources"
+SOURCE_ICON="$REPO_ROOT/Resources/AppIcon.icns"
+BUNDLE_ICON="$BUNDLE_RESOURCES/AppIcon.icns"
+mkdir -p "$BUNDLE_RESOURCES"
+if [ ! -f "$BUNDLE_ICON" ] || [ "$SOURCE_ICON" -nt "$BUNDLE_ICON" ]; then
+    cp "$SOURCE_ICON" "$BUNDLE_ICON"
+fi
+
 # Stash the source worktree path inside the bundle so the running app can
 # show it in the status bar — it can no longer infer this from its own
 # exec path now that it runs from /Applications instead of .build/.
@@ -96,6 +110,11 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Framewo
 if [ -x "$LSREGISTER" ]; then
     "$LSREGISTER" -f "$INSTALLED_BUNDLE" >/dev/null 2>&1 || true
 fi
+
+# Bump the installed bundle's mtime so Notification Center / System Settings
+# pick up an updated AppIcon.icns instead of serving a stale icon-cache entry.
+# `lsregister -f` alone doesn't always invalidate those caches; `touch` does.
+touch "$INSTALLED_BUNDLE"
 
 # The running TBDApp's command line is the installed bundle's binary, since
 # we launch from /Applications below. Match against that for pgrep/pkill so
