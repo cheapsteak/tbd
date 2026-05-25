@@ -85,26 +85,25 @@ struct OverlayFileView: View {
     }
 
     private func load() async {
-        await MainActor.run {
-            content = nil
-            loadError = nil
-            tooLarge = nil
-        }
+        // OverlayFileView is @MainActor so `load()` already runs on the
+        // main actor — no MainActor.run hops needed.
+        content = nil
+        loadError = nil
+        tooLarge = nil
         let fm = FileManager.default
         guard fm.fileExists(atPath: path) else {
-            await MainActor.run { loadError = "File not found: \(path)" }
+            loadError = "File not found: \(path)"
             return
         }
         if let attrs = try? fm.attributesOfItem(atPath: path),
            let size = attrs[.size] as? UInt64, size > Self.maxBytes {
-            await MainActor.run { tooLarge = size }
+            tooLarge = size
             return
         }
         do {
-            let text = try String(contentsOfFile: path, encoding: .utf8)
-            await MainActor.run { content = text }
+            content = try String(contentsOfFile: path, encoding: .utf8)
         } catch {
-            await MainActor.run { loadError = "Not readable as UTF-8" }
+            loadError = "Not readable as UTF-8"
         }
     }
 }
