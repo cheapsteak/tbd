@@ -172,8 +172,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         tv.onFilePathClicked = onFilePathClicked
         tv.onNotification = onTerminalNotification
         tv.onCloseTab = {
-            guard let tabCloseContext else { return }
-            appState.focusedTabCloseContext = tabCloseContext
+            guard tabCloseContext != nil else { return }
             appState.closeFocusedTab()
         }
 

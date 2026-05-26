@@ -51,6 +51,7 @@ struct TBDCommands: Commands {
                     appState.closeFocusedTab()
                 }
             }
+            .keyboardShortcut("w", modifiers: .command)
             .disabled(!appState.canCloseFocusedTab)
 
             Divider()
