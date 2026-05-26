@@ -208,6 +208,9 @@ final class AppState: ObservableObject {
     /// Closures registered by live TerminalPanelView instances to capture a screenshot.
     /// Keyed by terminal UUID. Populated in makeNSView, cleared on view disappear.
     var snapshotProviders: [UUID: () -> NSImage?] = [:]
+    /// Weak terminal views keyed by terminal UUID, used to restore AppKit first
+    /// responder after worktree navigation.
+    var terminalFocusTargets: [UUID: TerminalFocusTarget] = [:]
     /// Visual screenshots taken at suspend-click time, shown while daemon works.
     /// Keyed by terminal UUID. Cleared when suspend completes.
     @Published var suspendingSnapshots: [UUID: NSImage] = [:]

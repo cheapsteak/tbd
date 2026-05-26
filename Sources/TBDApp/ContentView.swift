@@ -181,6 +181,7 @@ struct ContentView: View {
             // Keep-alive: track most-recently-visited worktree for view-tree preservation.
             if newSelection.count == 1, let id = newSelection.first {
                 appState.touchVisitedWorktree(id)
+                appState.focusTerminalAfterSelectionChange(worktreeID: id)
             }
         }
         .alert(
@@ -199,6 +200,7 @@ struct ContentView: View {
             // selection so the ZStack renders the right SingleWorktreeView on first frame.
             if appState.selectedWorktreeIDs.count == 1, let id = appState.selectedWorktreeIDs.first {
                 appState.touchVisitedWorktree(id)
+                appState.focusTerminalAfterSelectionChange(worktreeID: id)
             }
         }
     }
