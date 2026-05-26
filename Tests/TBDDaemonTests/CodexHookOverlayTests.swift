@@ -34,6 +34,22 @@ import TBDShared
         })
     }
 
+    @Test func stopHooksRunRenameCheckBeforeResponseComplete() throws {
+        let data = try CodexHookOverlay.generateBody()
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let hooks = parsed?["hooks"] as? [String: Any]
+        let stop = hooks?["Stop"] as? [[String: Any]]
+
+        let stopCommands: [String] = (stop ?? []).flatMap { entry -> [String] in
+            let inner = entry["hooks"] as? [[String: Any]] ?? []
+            return inner.compactMap { $0["command"] as? String }
+        }
+
+        #expect(stopCommands.count == 2)
+        #expect(stopCommands.first?.contains("stop-rename-check") == true)
+        #expect(stopCommands.last?.contains("tbd notify --type response_complete") == true)
+    }
+
     @Test func roundtripsAsValidJSON() throws {
         let data = try CodexHookOverlay.generateBody()
         _ = try JSONSerialization.jsonObject(with: data, options: [])

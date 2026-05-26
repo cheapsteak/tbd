@@ -81,12 +81,14 @@ enum CodexHookOverlay {
                 "Stop": [
                     [
                         "hooks": [
-                            ["type": "command", "command": stopCommand]
+                            ["type": "command", "command": stopRenameCheckCommand]
                         ]
                     ],
                     [
                         "hooks": [
-                            ["type": "command", "command": stopRenameCheckCommand]
+                            // Run response_complete only after any rename prompt
+                            // has finished blocking and Codex is ready again.
+                            ["type": "command", "command": stopCommand]
                         ]
                     ]
                 ]
