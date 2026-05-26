@@ -171,16 +171,16 @@ public actor PRStatusManager {
         """
         let args = ["api", "graphql", "-f", "query=\(query)"]
         guard let result = await runGHResult(args: args, repoPath: repoPath),
-              let data = Self.graphQLOutputData(stdout: result.stdout, exitStatus: result.exitStatus) else {
+              let data = Self.graphQLOutputData(stdout: result.stdout) else {
             return nil
         }
 
         if result.exitStatus != 0 {
             let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             if errSuffix.isEmpty {
-                logger.debug("gh graphql exited \(result.exitStatus) with partial stdout")
+                logger.debug("gh graphql exited \(result.exitStatus, privacy: .public) with partial stdout")
             } else {
-                logger.debug("gh graphql exited \(result.exitStatus) with partial stdout: \(errSuffix)")
+                logger.debug("gh graphql exited \(result.exitStatus, privacy: .public) with partial stdout: \(errSuffix, privacy: .public)")
             }
         }
 
@@ -194,16 +194,15 @@ public actor PRStatusManager {
 
         guard result.exitStatus == 0 else {
             let errStr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.debug("gh exited \(result.exitStatus): \(errStr)")
+            logger.debug("gh exited \(result.exitStatus, privacy: .public): \(errStr, privacy: .public)")
             return nil
         }
 
         return result.stdout
     }
 
-    static func graphQLOutputData(stdout: String, exitStatus: Int32) -> Data? {
+    static func graphQLOutputData(stdout: String) -> Data? {
         let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard exitStatus == 0 || !trimmed.isEmpty else { return nil }
         guard !trimmed.isEmpty else { return nil }
         return stdout.data(using: .utf8)
     }

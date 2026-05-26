@@ -153,20 +153,20 @@ struct PRStatusManagerTests {
         #expect(nodes[1].headRefName == "tbd/old-feature")
     }
 
-    @Test("graphQLOutputData keeps stdout from partial GraphQL failures")
-    func graphQLOutputDataUsesStdoutOnNonZeroExit() {
+    @Test("graphQLOutputData keeps non-empty stdout")
+    func graphQLOutputDataUsesNonEmptyStdout() {
         let stdout = """
         {"data":{"viewer":{"pullRequests":{"nodes":[]}}}}
         """
 
-        let data = PRStatusManager.graphQLOutputData(stdout: stdout, exitStatus: 1)
+        let data = PRStatusManager.graphQLOutputData(stdout: stdout)
 
         #expect(data == stdout.data(using: .utf8))
     }
 
-    @Test("graphQLOutputData returns nil when GraphQL failure has no stdout")
-    func graphQLOutputDataRejectsEmptyStdoutOnNonZeroExit() {
-        let data = PRStatusManager.graphQLOutputData(stdout: " \n", exitStatus: 1)
+    @Test("graphQLOutputData returns nil when stdout is empty")
+    func graphQLOutputDataRejectsEmptyStdout() {
+        let data = PRStatusManager.graphQLOutputData(stdout: " \n")
 
         #expect(data == nil)
     }
