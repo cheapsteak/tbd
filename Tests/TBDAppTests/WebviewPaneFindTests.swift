@@ -84,6 +84,22 @@ struct WebviewPaneFindTests {
         #expect(host.validateUserInterfaceItem(TestValidatedItem(tag: NSTextFinder.Action.hideFindInterface.rawValue)))
         #expect(!host.validateUserInterfaceItem(TestValidatedItem(tag: NSTextFinder.Action.replaceAll.rawValue)))
     }
+
+    @Test("escape command closes the find bar through the text editing delegate")
+    func escapeCommandClosesTheFindBarThroughTheTextEditingDelegate() {
+        let host = WebviewPaneHostView(url: URL(string: "https://example.com")!)
+        let delegate: NSControlTextEditingDelegate = host.findBar
+
+        host.showFindBar()
+        let handled = delegate.control?(
+            host.findBar.searchField,
+            textView: NSTextView(),
+            doCommandBy: #selector(NSResponder.cancelOperation(_:))
+        )
+
+        #expect(handled == true)
+        #expect(host.findBar.isHidden)
+    }
 }
 
 private struct FindRequest: Equatable {

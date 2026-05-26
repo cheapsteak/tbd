@@ -214,6 +214,12 @@ final class WebviewFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
         onQueryChanged?(searchField.stringValue)
     }
 
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        onClose?()
+        return true
+    }
+
     func submit(backwards: Bool) {
         onSubmit?(backwards)
     }
