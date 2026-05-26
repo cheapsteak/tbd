@@ -44,8 +44,10 @@ extension WorktreeLifecycle {
 
         // Collect Claude session IDs before archiving so they survive terminal deletion
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
-        let sortedTerminals = terminals.sorted(by: { $0.createdAt < $1.createdAt })
-        let claudeSessionIDs = sortedTerminals.compactMap { $0.claudeSessionID }
+        let claudeSessionIDs = terminals
+            .sorted(by: { $0.createdAt < $1.createdAt })
+            .filter(\.isClaudeResumable)
+            .compactMap(\.claudeSessionID)
 
         // Sync the branch in DB with what git reports for the worktree path,
         // so a rename done inside the worktree (e.g. `git branch -m`) is

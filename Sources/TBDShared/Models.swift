@@ -240,6 +240,20 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+public extension Terminal {
+    var isCodexTerminal: Bool {
+        kind == .codex || label == "Codex"
+    }
+
+    /// True only for Claude terminals whose session can be resumed through
+    /// Claude-specific lifecycle flows like suspend/resume and dead-window
+    /// preservation.
+    var isClaudeResumable: Bool {
+        guard claudeSessionID != nil, !isCodexTerminal else { return false }
+        return kind == .claude || kind == nil
+    }
+}
+
 public enum CredentialKind: String, Codable, Sendable {
     case oauth
     case apiKey

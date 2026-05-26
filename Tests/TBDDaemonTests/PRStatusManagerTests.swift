@@ -172,6 +172,23 @@ struct PRStatusManagerTests {
         #expect(data == nil)
     }
 
+    @Test("branchCandidates keeps only the local branch when no upstream is configured")
+    func branchCandidatesWithoutUpstream() {
+        let candidates = PRStatusManager.branchCandidates(localBranch: "feature/local", upstreamBranch: nil)
+
+        #expect(candidates == ["feature/local"])
+    }
+
+    @Test("branchCandidates includes a distinct upstream branch for PR matching")
+    func branchCandidatesWithDistinctUpstream() {
+        let candidates = PRStatusManager.branchCandidates(
+            localBranch: "feature/local",
+            upstreamBranch: "tbd/upstream-feature"
+        )
+
+        #expect(candidates == ["feature/local", "tbd/upstream-feature"])
+    }
+
     @Test("allStatuses reflects cache after manual seed")
     func cacheRoundTrip() async {
         let manager = PRStatusManager()

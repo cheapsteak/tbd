@@ -67,6 +67,17 @@ struct GitManagerTests {
         cleanup()
     }
 
+    @Test func upstreamBranchNameReturnsConfiguredMergeBranch() async throws {
+        try await GitManagerTests.shell("git checkout -b local-feature", at: repoDir)
+        try await GitManagerTests.shell("git config branch.local-feature.remote origin", at: repoDir)
+        try await GitManagerTests.shell("git config branch.local-feature.merge refs/heads/tbd/upstream-feature", at: repoDir)
+
+        let upstream = await git.upstreamBranchName(worktreePath: repoDir.path, branch: "local-feature")
+
+        #expect(upstream == "tbd/upstream-feature")
+        cleanup()
+    }
+
     /// Regression test for a race in `GitManager.run()` where the readability handler
     /// did `availableData` and `accumulator.append` in two non-atomic steps,
     /// allowing `terminationHandler` to snapshot between them and drop the chunk.
