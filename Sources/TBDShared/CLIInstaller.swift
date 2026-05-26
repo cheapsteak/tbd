@@ -139,8 +139,8 @@ public struct CLIInstaller: Sendable {
     /// st_ino)` mean the kernel sees them as the same file.
     ///
     /// Legacy symlinks (installed by versions of TBD before this PR) are
-    /// reported as `.stale` so the launch-time prompt self-heals them into
-    /// hard links on the next refresh.
+    /// reported as `.stale` so the launch-time `CLIInstallerCoordinator`
+    /// prompt re-installs them as hard links on the next refresh.
     public func currentState(expectedTarget: String?) -> CLIInstallState {
         var st = stat()
         guard lstat(installPath, &st) == 0 else {
@@ -150,9 +150,9 @@ public struct CLIInstaller: Sendable {
         let mode = st.st_mode & S_IFMT
         if mode == S_IFLNK {
             // Legacy install from before hard-link migration (or someone
-            // replaced our hard link). Surface as stale so the prompt
-            // re-installs as a hard link on the next refresh — intentional
-            // self-healing path for users upgrading across the rename.
+            // replaced our hard link). Surface as stale so the launch-time
+            // prompt re-installs as a hard link on the next refresh —
+            // intentional upgrade path for users crossing the migration.
             let dest = (try? FileManager.default.destinationOfSymbolicLink(atPath: installPath)) ?? installPath
             let resolved = Self.absolutize(
                 dest,
@@ -236,65 +236,6 @@ public struct CLIInstaller: Sendable {
             suggestedShellRC: pathInfo.onPath ? nil : pathInfo.shellRC,
             exportLine: pathInfo.onPath ? nil : pathInfo.exportLine
         )
-    }
-
-    /// Outcome of `repairIfDangling(daemonExecutablePath:)`.
-    public enum RepairOutcome: Equatable, Sendable {
-        /// No install present — nothing to repair.
-        case notInstalled
-        /// Install target exists — no repair needed. With hard links this is
-        /// the common post-archive outcome since the inode survives the
-        /// worktree removal.
-        case healthy(target: String)
-        /// Daemon's sibling TBDCLI does not exist, can't repair.
-        case noDaemonSibling(path: String)
-        /// Path existed but dangled (legacy symlink → missing target);
-        /// re-installed as a hard link to `target`.
-        case repaired(target: String)
-        /// Path exists but is a directory or other unexpected file type;
-        /// left untouched.
-        case unexpectedFileType
-    }
-
-    /// Self-heal hook for daemon-side archive/cleanup. Hard-link installs
-    /// can't actually dangle (the inode survives source removal), so this
-    /// is now mostly a backward-compatibility path for any legacy symlink
-    /// install that's still around.
-    public func repairIfDangling(daemonExecutablePath: String) async throws -> RepairOutcome {
-        var st = stat()
-        guard lstat(installPath, &st) == 0 else {
-            return .notInstalled
-        }
-        let mode = st.st_mode & S_IFMT
-        if mode == S_IFDIR {
-            return .unexpectedFileType
-        }
-        if mode == S_IFLNK {
-            // Legacy symlink. If it still resolves, leave it (caller can
-            // upgrade it via the launch prompt). If it dangles, re-install.
-            let dest = (try? FileManager.default.destinationOfSymbolicLink(atPath: installPath)) ?? ""
-            let resolvedDest = Self.absolutize(
-                dest,
-                relativeTo: (installPath as NSString).deletingLastPathComponent,
-                homeDir: homeDir
-            )
-            if FileManager.default.fileExists(atPath: resolvedDest) {
-                return .healthy(target: resolvedDest)
-            }
-        } else if mode == S_IFREG {
-            // Hard link — the file is its own data; nothing to dangle.
-            return .healthy(target: installPath)
-        } else {
-            return .unexpectedFileType
-        }
-
-        // Falls through only for a dangling legacy symlink.
-        let newTarget = Self.cliPath(forDaemonExecutable: daemonExecutablePath)
-        guard FileManager.default.fileExists(atPath: newTarget) else {
-            return .noDaemonSibling(path: newTarget)
-        }
-        _ = try await install(target: newTarget)
-        return .repaired(target: newTarget)
     }
 
     /// Compute current path status (whether the install path's parent dir is

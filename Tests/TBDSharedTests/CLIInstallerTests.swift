@@ -97,10 +97,10 @@ private func inodeOf(_ path: String) -> (dev: Int32, ino: UInt64)? {
     #expect(state == .unexpectedFileType)
 }
 
-@Test func currentStateStaleForLegacySymlinkSoSelfHealRuns() throws {
+@Test func currentStateStaleForLegacySymlinkTriggersLaunchTimeRefresh() throws {
     // Pre-PR installs created a symlink. Detecting that as `.stale` lets
-    // the launch-time prompt re-install as a hard link — intentional
-    // self-healing path.
+    // the launch-time CLIInstallerCoordinator prompt re-install as a hard
+    // link on the next refresh.
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli-target"

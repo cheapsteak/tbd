@@ -826,15 +826,6 @@ extension RPCRouter {
             }
         }
 
-        // Self-heal a dangling ~/.local/bin/tbd symlink (e.g. a worktree was
-        // archived from outside TBD, then pruned here). No need to check the
-        // prior target — cleanup runs broadly, so any dangling state warrants
-        // a repair attempt.
-        await WorktreeLifecycle.repairDanglingCLISymlink(
-            installer: CLIInstaller(),
-            reason: "tbd cleanup"
-        )
-
         let result = CleanupResult(
             reposProcessed: repos.count,
             worktreesReconciled: worktreesReconciled,
