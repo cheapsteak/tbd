@@ -143,3 +143,35 @@ import TBDShared
     state.setActiveTab(worktreeID: worktreeID, tabIndex: 99)
     #expect(state.activeTabIndices[worktreeID] == 99)
 }
+
+@MainActor
+@Test func closeTerminalTabRemovesActiveTabAndLayout() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let ids = [UUID(), UUID(), UUID()]
+    state.selectedWorktreeIDs = [worktreeID]
+    state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
+    state.layouts[ids[1]] = .pane(.terminal(terminalID: ids[1]))
+    state.activeTabIndices[worktreeID] = 1
+
+    state.closeTerminalTab()
+
+    #expect(state.tabs[worktreeID]?.map(\.id) == [ids[0], ids[2]])
+    #expect(state.layouts[ids[1]] == nil)
+    #expect(state.activeTabIndices[worktreeID] == 1)
+}
+
+@MainActor
+@Test func closeTerminalTabClampsOutOfBoundsActiveIndex() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let ids = [UUID(), UUID()]
+    state.selectedWorktreeIDs = [worktreeID]
+    state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
+    state.activeTabIndices[worktreeID] = 99
+
+    state.closeTerminalTab()
+
+    #expect(state.tabs[worktreeID]?.map(\.id) == [ids[0]])
+    #expect(state.activeTabIndices[worktreeID] == 0)
+}

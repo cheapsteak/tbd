@@ -427,9 +427,13 @@ extension AppState {
         }
     }
 
-    /// Placeholder: close terminal tab.
+    /// Close the active tab in the selected worktree.
     func closeTerminalTab() {
-        // TODO: implement terminal tab close
+        guard let worktreeID = selectedWorktreeIDs.first else { return }
+        guard let arr = tabs[worktreeID], !arr.isEmpty else { return }
+        let activeIndex = activeTabIndices[worktreeID] ?? 0
+        let index = min(max(activeIndex, 0), arr.count - 1)
+        closeTab(worktreeID: worktreeID, index: index)
     }
 
     /// Placeholder: split terminal horizontally.

@@ -168,6 +168,9 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         tv.remoteURL = remoteURL
         tv.onFilePathClicked = onFilePathClicked
         tv.onNotification = onTerminalNotification
+        tv.onCloseTab = {
+            appState.closeTerminalTab()
+        }
 
         // Set delegate for terminal events
         tv.terminalDelegate = context.coordinator

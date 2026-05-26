@@ -124,6 +124,49 @@ extension AppState {
         }
     }
 
+    // MARK: - Close
+
+    /// Close one tab and clean up resources owned by that tab. This is shared
+    /// by the tab bar close button and the Cmd-W menu shortcut.
+    func closeTab(worktreeID: UUID, index: Int) {
+        guard var arr = tabs[worktreeID],
+              arr.indices.contains(index) else { return }
+
+        let tab = arr[index]
+        let layout = layouts[tab.id] ?? .pane(tab.content)
+        let terminalIDsInTab = Set(layout.allTerminalIDs())
+
+        layouts.removeValue(forKey: tab.id)
+        arr.remove(at: index)
+        tabs[worktreeID] = arr
+        worktreeTabOrders[worktreeID] = arr.map(\.id)
+
+        for terminalID in terminalIDsInTab {
+            Task {
+                await deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
+            }
+        }
+
+        if case .note(let noteID) = tab.content {
+            Task {
+                await deleteNote(noteID: noteID, worktreeID: worktreeID)
+            }
+        }
+
+        let remaining = arr.count
+        activeTabIndices[worktreeID] = remaining > 0 ? min(index, remaining - 1) : 0
+
+        let snapshot = arr.map(\.id)
+        Task {
+            do {
+                try await daemonClient.setTabOrder(worktreeID: worktreeID, tabIDs: snapshot)
+            } catch {
+                logger.error("closeTab persist order failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+                handleConnectionError(error)
+            }
+        }
+    }
+
     // MARK: - Reorder
 
     /// Move `draggedID` to land next to `targetID`. `edge == .leading` inserts

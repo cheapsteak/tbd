@@ -298,37 +298,7 @@ struct SingleWorktreeView: View {
     }
 
     private func closeTab(at index: Int) {
-        let tabs = worktreeTabs
-        guard index >= 0, index < tabs.count else { return }
-        let tab = tabs[index]
-
-        // Find all terminal IDs in this tab's layout (including splits)
-        let layout = appState.layouts[tab.id] ?? .pane(tab.content)
-        let terminalIDsInTab = Set(layout.allTerminalIDs())
-
-        // Remove layout
-        appState.layouts.removeValue(forKey: tab.id)
-
-        // Remove tab
-        appState.tabs[worktreeID]?.remove(at: index)
-
-        // Delete ALL terminals in this tab's layout from daemon (kills tmux windows + removes DB records + local state)
-        for terminalID in terminalIDsInTab {
-            Task {
-                await appState.deleteTerminal(terminalID: terminalID, worktreeID: worktreeID)
-            }
-        }
-
-        // Delete note if this is a note tab
-        if case .note(let noteID) = tab.content {
-            Task {
-                await appState.deleteNote(noteID: noteID, worktreeID: worktreeID)
-            }
-        }
-
-        // Adjust active tab index
-        let remaining = appState.tabs[worktreeID]?.count ?? 0
-        activeTabIndex = remaining > 0 ? min(activeTabIndex, remaining - 1) : 0
+        appState.closeTab(worktreeID: worktreeID, index: index)
     }
 }
 
