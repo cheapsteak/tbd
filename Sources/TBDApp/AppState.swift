@@ -372,8 +372,11 @@ final class AppState: ObservableObject {
             guard let self else { return }
             // Dismiss banners for any worktree that is already visible so
             // stale Notification Center entries are cleared when TBD comes
-            // to the foreground.
-            self.macNotificationManager.dismissDelivered(worktreeIDs: self.visibleWorktreeIDs)
+            // to the foreground. The observer runs on .main, but the closure
+            // is Sendable from Swift 6's view — hop via assumeIsolated.
+            MainActor.assumeIsolated {
+                self.macNotificationManager.dismissDelivered(worktreeIDs: self.visibleWorktreeIDs)
+            }
             Task { [weak self] in
                 guard let self else { return }
                 do {
