@@ -2,14 +2,14 @@ import SwiftUI
 import TBDShared
 
 enum WorktreeRowConflictFallback {
-    static let iconName = "hand.raised.slash.fill"
+    static let iconName = "git-merge-conflict"
 
     static func shouldShow(
         prStatus: PRStatus?,
         hasConflicts: Bool,
         hasNotification: Bool
     ) -> Bool {
-        prStatus == nil && hasConflicts && !hasNotification
+        prStatus != nil && hasConflicts && !hasNotification
     }
 }
 
@@ -87,9 +87,12 @@ struct WorktreeRowView: View {
             Circle()
                 .fill(color)
                 .frame(width: 8, height: 8)
-        } else if showsConflictFallback {
-            Image(systemName: WorktreeRowConflictFallback.iconName)
-                .font(.system(size: 10, weight: .semibold))
+        } else if showsConflictFallback, let nsImage = loadIcon(WorktreeRowConflictFallback.iconName) {
+            Image(nsImage: nsImage)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 12, height: 12)
                 .foregroundStyle(.red)
         }
         if let presentation = prPresentation, let nsImage = loadIcon(presentation.iconName) {

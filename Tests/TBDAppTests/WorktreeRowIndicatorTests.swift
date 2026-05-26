@@ -4,12 +4,12 @@ import Testing
 
 @Suite("Worktree row conflict fallback")
 struct WorktreeRowConflictFallbackTests {
-    @Test("uses the hand-raised slash icon for conflict fallback")
+    @Test("uses the git-merge-conflict icon for conflict fallback")
     func usesConflictFallbackIcon() {
-        #expect(WorktreeRowConflictFallback.iconName == "hand.raised.slash.fill")
+        #expect(WorktreeRowConflictFallback.iconName == "git-merge-conflict")
     }
 
-    @Test("conflict fallback appears when there is no PR and no notification")
+    @Test("conflict fallback does NOT appear when there is no PR")
     func conflictFallbackWithoutPR() {
         let showsFallback = WorktreeRowConflictFallback.shouldShow(
             prStatus: nil,
@@ -17,13 +17,13 @@ struct WorktreeRowConflictFallbackTests {
             hasNotification: false
         )
 
-        #expect(showsFallback)
+        #expect(!showsFallback)
     }
 
     @Test("notification badge takes precedence over conflict fallback")
     func notificationWinsOverConflictFallback() {
         let showsFallback = WorktreeRowConflictFallback.shouldShow(
-            prStatus: nil,
+            prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .pending),
             hasConflicts: true,
             hasNotification: true
         )
@@ -31,7 +31,7 @@ struct WorktreeRowConflictFallbackTests {
         #expect(!showsFallback)
     }
 
-    @Test("PR status suppresses conflict fallback")
+    @Test("conflict fallback appears when a PR is present and the branch has conflicts")
     func prStatusSuppressesConflictFallback() {
         let showsFallback = WorktreeRowConflictFallback.shouldShow(
             prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .pending),
@@ -39,6 +39,6 @@ struct WorktreeRowConflictFallbackTests {
             hasNotification: false
         )
 
-        #expect(!showsFallback)
+        #expect(showsFallback)
     }
 }
