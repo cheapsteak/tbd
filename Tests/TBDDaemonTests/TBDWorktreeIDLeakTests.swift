@@ -183,7 +183,7 @@ func testRecreateAfterRebootCodexBranchSetsWorktreeID() async throws {
     #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
             "codex-branch must still export CODEX_HOME; got bodies: \(bodies)")
     #expect(bodies.contains {
-        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox")
+        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
     }, "codex-branch must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "codex-branch must not use removed --full-auto flag; got bodies: \(bodies)")
@@ -328,7 +328,7 @@ func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
 
     let bodies = newWindowBodies(recorded.snapshot())
     #expect(bodies.contains {
-        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox")
+        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
     }, "recreated codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "recreated codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
@@ -503,7 +503,7 @@ func testHandleTerminalCreateCodexLaunchCommand() async throws {
     #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
             "created codex tab must export CODEX_HOME; got bodies: \(bodies)")
     #expect(bodies.contains {
-        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox")
+        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
     }, "created codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "created codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
