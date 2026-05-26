@@ -84,7 +84,7 @@ public actor SuspendResumeCoordinator {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
-        guard let sessionID = terminal.claudeSessionID else {
+        guard terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID else {
             return .notClaudeTerminal
         }
         guard terminal.suspendedAt == nil else {
@@ -189,7 +189,7 @@ public actor SuspendResumeCoordinator {
         guard terminal.suspendedAt != nil else {
             return .notSuspended
         }
-        guard terminal.claudeSessionID != nil else {
+        guard terminal.isClaudeResumable else {
             return .noSessionID
         }
         guard await worktreeServer(for: terminal.worktreeID) != nil else {
@@ -228,7 +228,7 @@ public actor SuspendResumeCoordinator {
         Task {
             guard let terminals = try? await db.terminals.list(worktreeID: worktreeID) else { return }
             for terminal in terminals {
-                guard terminal.claudeSessionID != nil,
+                guard terminal.isClaudeResumable,
                       terminal.pinnedAt == nil,
                       terminal.suspendedAt == nil else { continue }
 
@@ -319,6 +319,7 @@ public actor SuspendResumeCoordinator {
         Task {
             guard let terminals = try? await db.terminals.list(worktreeID: worktreeID) else { return }
             for terminal in terminals where terminal.suspendedAt != nil {
+                guard terminal.isClaudeResumable else { continue }
                 inFlight[terminal.id]?.cancel()
                 let task = Task<Void, Never> { await resumeTerminal(terminal) }
                 inFlight[terminal.id] = task
@@ -482,7 +483,7 @@ public actor SuspendResumeCoordinator {
         // This handles the case where the daemon restarts while Claude is sitting idle —
         // without this, the in-memory flag would be empty and suspend would never trigger.
         for terminal in allTerminals {
-            guard terminal.claudeSessionID != nil,
+            guard terminal.isClaudeResumable,
                   terminal.suspendedAt == nil else { continue }
             guard let server = await worktreeServer(for: terminal.worktreeID) else { continue }
             if await detector.isIdle(server: server, paneID: terminal.tmuxPaneID) {

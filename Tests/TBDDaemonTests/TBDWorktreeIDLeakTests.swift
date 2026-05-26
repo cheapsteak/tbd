@@ -230,6 +230,53 @@ func testRecreateAfterRebootShellBranchSetsWorktreeID() async throws {
             "shell-branch recreation must export TBD_WORKTREE_ID; got bodies: \(bodies)")
 }
 
+@Test("recreateAfterReboot — codex kind wins over captured session ID")
+func testRecreateAfterRebootCodexKindWinsOverCapturedSessionID() async throws {
+    installCodexTestHomeOverride()
+    defer { unsetenv("TBD_TEST_CODEX_HOME") }
+
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = RecordedCommands()
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: tmux,
+        hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-codex-session", displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-codex-session",
+        branch: "tbd/wt-codex-session",
+        path: "/tmp/fake-repo-codex-session/wt-codex-session",
+        tmuxServer: "tbd-c0dexsid"
+    )
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@stale-codex-session",
+        tmuxPaneID: "%stale-codex-session",
+        label: "Codex",
+        claudeSessionID: "codex-session-id-captured-by-hook",
+        kind: .codex
+    )
+
+    try await lifecycle.recreateAfterReboot(terminal: terminal, worktree: wt)
+
+    let bodies = newWindowBodies(recorded.snapshot())
+    #expect(bodies.contains {
+        $0.contains("unset CODEX_CI CODEX_THREAD_ID;") && $0.contains("codex ")
+    }, "codex terminal with a captured session ID must still launch codex; got bodies: \(bodies)")
+    #expect(!bodies.contains {
+        $0.contains("claude") && $0.contains("--resume codex-session-id-captured-by-hook")
+    }, "codex terminal must not be misclassified as a Claude resume; got bodies: \(bodies)")
+}
+
 // MARK: - Fix 2b: handleTerminalRecreateWindow sets TBD_WORKTREE_ID
 
 @Test("handleTerminalRecreateWindow sets TBD_WORKTREE_ID on the recreated pane")

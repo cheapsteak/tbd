@@ -28,10 +28,10 @@ struct SidebarContextMenu: View {
 
                 let terminals = appState.terminals[worktree.id] ?? []
                 let hasUnsuspendedClaude = terminals.contains {
-                    $0.claudeSessionID != nil && $0.suspendedAt == nil
+                    $0.isClaudeResumable && $0.suspendedAt == nil
                 }
                 let hasSuspendedClaude = terminals.contains {
-                    $0.claudeSessionID != nil && $0.suspendedAt != nil
+                    $0.isClaudeResumable && $0.suspendedAt != nil
                 }
                 let hasActiveChildren = !appState.children(of: worktree.id).isEmpty
 
@@ -39,7 +39,7 @@ struct SidebarContextMenu: View {
                     Button("Suspend Claude") {
                         let wtID = worktree.id
                         let claudeTerminalIDs = terminals
-                            .filter { $0.claudeSessionID != nil && $0.suspendedAt == nil }
+                            .filter { $0.isClaudeResumable && $0.suspendedAt == nil }
                             .map { $0.id }
                         // Capture screenshot synchronously before any state change
                         for id in claudeTerminalIDs {

@@ -106,6 +106,35 @@ struct SuspendResumeCoordinatorTests {
         #expect(result == .notSuspended)
     }
 
+    @Test func autoResumeSkipsSuspendedCodexTerminalWithSessionMetadata() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test-repo-codex", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt-codex",
+            branch: "main", path: "/tmp/test-repo-codex",
+            tmuxServer: "tbd-codex"
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id,
+            tmuxWindowID: "@0",
+            tmuxPaneID: "%0",
+            label: "Codex",
+            claudeSessionID: "session-abc",
+            kind: .codex
+        )
+        try await db.terminals.setSuspended(
+            id: terminal.id, sessionID: "session-abc", snapshot: "fake snapshot"
+        )
+        let tmux = TmuxManager(dryRun: true)
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: tmux)
+
+        await coordinator.selectionChanged(to: [wt.id], suspendEnabled: true)
+        try await Task.sleep(for: .milliseconds(250))
+
+        let after = try await db.terminals.get(id: terminal.id)
+        #expect(after?.suspendedAt != nil)
+    }
+
     @Test func resumeInjectsTokenWhenResolverProvided() async throws {
         // Build DB with a token row + suspended terminal referencing it.
         let db = try TBDDatabase(inMemory: true)

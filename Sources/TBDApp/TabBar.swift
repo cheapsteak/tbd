@@ -368,11 +368,11 @@ private struct TabBarItem: View {
     }
 
     private var isClaudeTerminal: Bool {
-        terminal?.claudeSessionID != nil
+        terminal?.isClaudeResumable == true
     }
 
     private var isCodexTerminal: Bool {
-        terminal?.kind == .codex || terminal?.label == "Codex"
+        terminal?.isCodexTerminal == true
     }
 
     private var isSuspended: Bool {
@@ -752,4 +752,3 @@ private struct HistoryTabButton: View {
         .help("Session History")
     }
 }
-
