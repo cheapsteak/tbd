@@ -301,7 +301,7 @@ public struct ModelProfileSetGlobalDefaultParams: Codable, Sendable {
     public init(id: UUID?) { self.id = id }
 }
 
-public struct ModelProfileSetPrimaryAgentPreferenceParams: Codable, Sendable {
+public struct ModelProfileSetAgentPreferenceParams: Codable, Sendable {
     public let preference: PrimaryAgentPreference
     public init(preference: PrimaryAgentPreference) { self.preference = preference }
 }

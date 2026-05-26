@@ -262,7 +262,7 @@ extension RPCRouter {
     }
 
     func handleModelProfileSetPrimaryAgentPreference(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(ModelProfileSetPrimaryAgentPreferenceParams.self, from: paramsData)
+        let params = try decoder.decode(ModelProfileSetAgentPreferenceParams.self, from: paramsData)
         try await db.config.setPrimaryAgentPreference(params.preference)
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

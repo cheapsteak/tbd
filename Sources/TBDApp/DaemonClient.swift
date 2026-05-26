@@ -860,7 +860,7 @@ actor DaemonClient {
     func setPrimaryAgentPreference(_ preference: PrimaryAgentPreference) async throws {
         try await callVoidAsync(
             method: RPCMethod.modelProfileSetPrimaryAgentPreference,
-            params: ModelProfileSetPrimaryAgentPreferenceParams(preference: preference)
+            params: ModelProfileSetAgentPreferenceParams(preference: preference)
         )
     }
 

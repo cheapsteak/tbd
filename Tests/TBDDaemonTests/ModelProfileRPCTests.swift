@@ -544,7 +544,7 @@ struct ModelProfileRPCTests {
         let (router, db, _) = makeRouter()
         let setResp = await router.handle(try RPCRequest(
             method: RPCMethod.modelProfileSetPrimaryAgentPreference,
-            params: ModelProfileSetPrimaryAgentPreferenceParams(preference: .codex)
+            params: ModelProfileSetAgentPreferenceParams(preference: .codex)
         ))
         #expect(setResp.success)
         #expect(try await db.config.get().primaryAgentPreference == .codex)
