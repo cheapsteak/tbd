@@ -132,7 +132,9 @@ public actor PRStatusManager {
             switch mergeStateStatus {
             case "CLEAN", "HAS_HOOKS":
                 return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
-            case "BLOCKED", "DIRTY", "BEHIND":
+            case "BLOCKED":
+                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .blocked
+            case "DIRTY", "BEHIND":
                 return .blocked
             case "UNSTABLE":
                 return .checksFailed

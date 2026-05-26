@@ -58,6 +58,16 @@ struct PRStatusManagerTests {
         #expect(status == .pending)
     }
 
+    @Test("maps OPEN + BLOCKED + pending status checks to .pending")
+    func mapsPendingChecksOverBlocked() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            statusCheckRollupState: "PENDING"
+        )
+        #expect(status == .pending)
+    }
+
     @Test("maps HAS_HOOKS to .mergeable")
     func mapsHasHooks() {
         let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "HAS_HOOKS")
