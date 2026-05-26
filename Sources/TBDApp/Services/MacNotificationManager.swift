@@ -91,6 +91,16 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         handler([.banner])
     }
 
+    /// Remove delivered banners for the given worktrees from Notification Center.
+    /// Safe to call on unbundled executables — guarded by `isAvailable`.
+    /// Empty sequences are a no-op.
+    func dismissDelivered(worktreeIDs: some Sequence<UUID>) {
+        guard isAvailable else { return }
+        let identifiers = worktreeIDs.map(\.uuidString)
+        guard !identifiers.isEmpty else { return }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
+    }
+
     /// Parse a notification request identifier and navigate to the matching worktree.
     /// Factored out of the delegate method so it's testable without faking
     /// `UNNotificationResponse` (which has no public initializer).

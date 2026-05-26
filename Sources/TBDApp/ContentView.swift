@@ -282,6 +282,7 @@ struct ContentView: View {
                 await appState.markNotificationsRead(worktreeID: worktreeID)
             }
         }
+        appState.macNotificationManager.dismissDelivered(worktreeIDs: selection)
     }
 
 }

@@ -370,6 +370,10 @@ final class AppState: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
+            // Dismiss banners for any worktree that is already visible so
+            // stale Notification Center entries are cleared when TBD comes
+            // to the foreground.
+            self.macNotificationManager.dismissDelivered(worktreeIDs: self.visibleWorktreeIDs)
             Task { [weak self] in
                 guard let self else { return }
                 do {
