@@ -12,6 +12,13 @@ struct WebviewPaneFindTests {
         #expect(host.findBar.isHidden)
     }
 
+    @Test("find bar uses a plain search field")
+    func findBarUsesAPlainSearchField() {
+        let host = WebviewPaneHostView(url: URL(string: "https://example.com")!)
+
+        #expect(type(of: host.findBar.searchField) == NSSearchField.self)
+    }
+
     @Test("text finder command locates enclosing webview host from focused descendant")
     func textFinderCommandLocatesEnclosingWebviewHost() {
         let host = WebviewPaneHostView(url: URL(string: "https://example.com")!)

@@ -142,7 +142,7 @@ final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
 }
 
 final class WebviewFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
-    let searchField = WebviewFindSearchField()
+    let searchField = NSSearchField()
 
     var onQueryChanged: ((String) -> Void)?
     var onSubmit: ((Bool) -> Void)?
@@ -160,17 +160,12 @@ final class WebviewFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
         state = .active
         wantsLayer = true
         layer?.cornerRadius = 8
+        layer?.masksToBounds = true
 
         searchField.placeholderString = "Find"
         searchField.delegate = self
         searchField.target = self
         searchField.action = #selector(searchFieldSubmitted)
-        searchField.onSubmit = { [weak self] backwards in
-            self?.submit(backwards: backwards)
-        }
-        searchField.onEscape = { [weak self] in
-            self?.onClose?()
-        }
 
         configureButton(previousButton, symbolName: "chevron.up", action: #selector(previous))
         configureButton(nextButton, symbolName: "chevron.down", action: #selector(next))
@@ -250,21 +245,5 @@ final class WebviewFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
 
     @objc private func searchFieldSubmitted() {
         submit(backwards: false)
-    }
-}
-
-final class WebviewFindSearchField: NSSearchField {
-    var onSubmit: ((Bool) -> Void)?
-    var onEscape: (() -> Void)?
-
-    override func keyDown(with event: NSEvent) {
-        switch event.charactersIgnoringModifiers {
-        case "\r", "\n":
-            onSubmit?(event.modifierFlags.contains(.shift))
-        case "\u{1b}":
-            onEscape?()
-        default:
-            super.keyDown(with: event)
-        }
     }
 }
