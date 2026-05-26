@@ -3,7 +3,7 @@ import AppKit
 
 enum TextFinderCommand {
     static let action = #selector(NSResponder.performTextFinderAction(_:))
-    
+
     static func tag(for action: NSTextFinder.Action) -> Int {
         action.rawValue
     }
