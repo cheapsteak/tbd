@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 @MainActor
@@ -14,9 +15,31 @@ extension AppState {
         terminalFocusTargets[terminalID] = TerminalFocusTarget(view)
     }
 
+    func registerTerminalCloseContext(_ context: TabCloseContext?, for terminalID: UUID) {
+        if let context {
+            terminalTabCloseContexts[terminalID] = context
+        } else {
+            terminalTabCloseContexts.removeValue(forKey: terminalID)
+        }
+    }
+
     func unregisterTerminalView(_ view: TBDTerminalView, for terminalID: UUID) {
         guard terminalFocusTargets[terminalID]?.view === view else { return }
         terminalFocusTargets.removeValue(forKey: terminalID)
+        terminalTabCloseContexts.removeValue(forKey: terminalID)
+    }
+
+    func resolvedFocusedTabCloseContext() -> TabCloseContext? {
+        if terminalFocusTargets.isEmpty {
+            return focusedTabCloseContext
+        }
+        guard let terminalView = NSApp.keyWindow?.firstResponder as? TBDTerminalView else {
+            return nil
+        }
+        guard let terminalID = terminalFocusTargets.first(where: { $0.value.view === terminalView })?.key else {
+            return nil
+        }
+        return terminalTabCloseContexts[terminalID]
     }
 
     func terminalIDForAutofocus(worktreeID: UUID) -> UUID? {
@@ -47,6 +70,7 @@ extension AppState {
             }
 
             terminalView.window?.makeFirstResponder(terminalView)
+            self.focusedTabCloseContext = self.terminalTabCloseContexts[terminalID]
         }
     }
 }

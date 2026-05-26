@@ -13,11 +13,15 @@ private extension CharacterSet {
 /// When enabled, macOS-native shortcuts (Cmd+Arrow, Cmd/Opt+Delete) are translated
 /// to the escape sequences that shells expect.
 class TBDTerminalView: TerminalView {
+    enum KeyEquivalentAction: Equatable {
+        case closeTab
+    }
     var naturalTextEditing: Bool = true
     var onFilePathClicked: ((String) -> Void)?
     var worktreePath: String = ""
     var remoteURL: String?
     var onNotification: ((String, String) -> Void)?
+    var onCloseTab: (() -> Void)?
 
     /// Global appearance settings (font, color scheme, cursor style). The Combine
     /// subscription set up in `init` reapplies these whenever the user edits
@@ -489,12 +493,29 @@ class TBDTerminalView: TerminalView {
         guard window?.firstResponder === self else {
             return super.performKeyEquivalent(with: event)
         }
+        if event.type == .keyDown, let action = Self.keyEquivalentAction(for: event) {
+            performKeyEquivalentAction(action)
+            return true
+        }
         if naturalTextEditing, event.type == .keyDown, handleNaturalTextEditing(event) {
             return true
         }
         return super.performKeyEquivalent(with: event)
     }
 
+    nonisolated static func keyEquivalentAction(for event: NSEvent) -> KeyEquivalentAction? {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard flags == .command else { return nil }
+        guard event.charactersIgnoringModifiers?.lowercased() == "w" else { return nil }
+        return .closeTab
+    }
+
+    func performKeyEquivalentAction(_ action: KeyEquivalentAction) {
+        switch action {
+        case .closeTab:
+            onCloseTab?()
+        }
+    }
     private func handleNaturalTextEditing(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags
         let hasCmd = flags.contains(.command)

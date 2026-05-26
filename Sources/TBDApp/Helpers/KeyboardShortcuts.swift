@@ -119,11 +119,11 @@ struct TBDCommands: Commands {
 
             Button("Close Tab") {
                 Task { @MainActor in
-                    appState.closeTerminalTab()
+                    appState.closeFocusedTab()
                 }
             }
             .keyboardShortcut("w", modifiers: .command)
-            .disabled(appState.selectedWorktreeIDs.isEmpty)
+            .disabled(!appState.canCloseFocusedTab)
 
             Divider()
 

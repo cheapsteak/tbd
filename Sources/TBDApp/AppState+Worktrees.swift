@@ -427,9 +427,10 @@ extension AppState {
         }
     }
 
-    /// Placeholder: close terminal tab.
+    /// Backward-compatible wrapper for callers that still ask to close the
+    /// current terminal tab. The close target now comes only from focus.
     func closeTerminalTab() {
-        // TODO: implement terminal tab close
+        closeFocusedTab()
     }
 
     /// Placeholder: split terminal horizontally.

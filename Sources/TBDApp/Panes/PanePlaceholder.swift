@@ -30,6 +30,7 @@ func shouldSuppressEvents(in coordinator: TranscriptOverlayCoordinator, forTermi
 struct PanePlaceholder: View {
     let content: PaneContent
     let worktree: Worktree
+    let tabID: UUID?
     @Binding var layout: LayoutNode
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
@@ -294,6 +295,7 @@ struct PanePlaceholder: View {
                     tmuxServer: worktree.tmuxServer,
                     tmuxWindowID: terminal.tmuxWindowID,
                     tmuxBridge: appState.tmuxBridge,
+                    tabCloseContext: tabID.map { TabCloseContext(worktreeID: worktree.id, tabID: $0) },
                     worktreePath: worktree.path,
                     remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
                     onFilePathClicked: { path in
