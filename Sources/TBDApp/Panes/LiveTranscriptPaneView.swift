@@ -126,7 +126,7 @@ struct LiveTranscriptPaneView: View {
                 TranscriptItemsView(items: messages, terminalID: terminalID, atBottom: $atBottom)
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .overlay(alignment: .bottomTrailing) {
+            .overlay(alignment: .bottomLeading) {
                 jumpToBottomButton(proxy: proxy)
                     .animation(.easeInOut(duration: 0.2), value: atBottom)
             }
