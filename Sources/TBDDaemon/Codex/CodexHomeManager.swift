@@ -57,7 +57,10 @@ enum CodexHookOverlay {
         #"tbd session-event 2>/dev/null || true"#
 
     static let stopCommand =
-        #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true; tbd hooks stop-rename-check 2>/dev/null || true"#
+        #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
+
+    static let stopRenameCheckCommand =
+        #"tbd hooks stop-rename-check 2>/dev/null || true"#
 
     static func hookPath(in pluginRoot: URL) -> URL {
         pluginRoot.appendingPathComponent(relativePath, isDirectory: false)
@@ -78,6 +81,11 @@ enum CodexHookOverlay {
                     [
                         "hooks": [
                             ["type": "command", "command": stopCommand]
+                        ]
+                    ],
+                    [
+                        "hooks": [
+                            ["type": "command", "command": stopRenameCheckCommand]
                         ]
                     ]
                 ]
