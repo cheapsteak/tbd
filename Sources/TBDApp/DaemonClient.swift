@@ -856,6 +856,14 @@ actor DaemonClient {
         )
     }
 
+    /// Set the default primary agent used for newly-created worktrees.
+    func setPrimaryAgentPreference(_ preference: PrimaryAgentPreference) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileSetPrimaryAgentPreference,
+            params: ModelProfileSetAgentPreferenceParams(preference: preference)
+        )
+    }
+
     /// Set or clear a per-repo model profile override.
     func setRepoProfileOverride(repoID: UUID, profileID: UUID?) async throws {
         try await callVoidAsync(

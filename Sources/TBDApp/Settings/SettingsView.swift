@@ -31,6 +31,7 @@ struct SettingsView: View {
 // MARK: - General Tab
 
 struct GeneralSettingsTab: View {
+    @EnvironmentObject var appState: AppState
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
@@ -82,6 +83,15 @@ struct GeneralSettingsTab: View {
                 }
             }
 
+            Section("Agents") {
+                Picker("Default primary agent", selection: primaryAgentPreferenceBinding) {
+                    Text("Claude Code").tag(PrimaryAgentPreference.claude)
+                    Text("Codex").tag(PrimaryAgentPreference.codex)
+                }
+                .pickerStyle(.segmented)
+                .help("Used when TBD needs to choose the primary agent for a worktree and there is no prior agent state to restore.")
+            }
+
             Section("Claude") {
                 Toggle("Launch claude with --dangerously-skip-permissions", isOn: $skipPermissions)
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
@@ -94,6 +104,15 @@ struct GeneralSettingsTab: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private var primaryAgentPreferenceBinding: Binding<PrimaryAgentPreference> {
+        Binding(
+            get: { appState.primaryAgentPreference },
+            set: { newValue in
+                Task { await appState.setPrimaryAgentPreference(newValue) }
+            }
+        )
     }
 
     private func pickCustomSound() {

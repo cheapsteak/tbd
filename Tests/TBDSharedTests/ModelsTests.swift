@@ -6,6 +6,10 @@ import Testing
     #expect(TBDConstants.version == "0.1.0")
 }
 
+@Test func testPrimaryAgentPreferenceDefault() {
+    #expect(PrimaryAgentPreference.defaultValue == .claude)
+}
+
 // MARK: - Model Codable Round-Trips
 
 @Test func testRepoRoundTrip() throws {
@@ -105,6 +109,17 @@ import Testing
     #expect(decoded.name == "old-worktree")
     #expect(decoded.hasConflicts == false)
     #expect(decoded.archivedAt == nil)
+}
+
+@Test func modelProfileListResultDecodesWithoutPrimaryAgentPreference() throws {
+    let json = """
+    {
+      "profiles": [],
+      "defaultID": null
+    }
+    """.data(using: .utf8)!
+    let decoded = try JSONDecoder().decode(ModelProfileListResult.self, from: json)
+    #expect(decoded.primaryAgentPreference == .claude)
 }
 
 // MARK: - NotificationType Severity Ordering

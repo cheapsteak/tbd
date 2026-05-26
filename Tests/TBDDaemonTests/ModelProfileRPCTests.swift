@@ -539,6 +539,21 @@ struct ModelProfileRPCTests {
         #expect(try await db.config.get().defaultProfileID == nil)
     }
 
+    @Test("setPrimaryAgentPreference round-trip and list reports value")
+    func setPrimaryAgentPreference() async throws {
+        let (router, db, _) = makeRouter()
+        let setResp = await router.handle(try RPCRequest(
+            method: RPCMethod.modelProfileSetPrimaryAgentPreference,
+            params: ModelProfileSetAgentPreferenceParams(preference: .codex)
+        ))
+        #expect(setResp.success)
+        #expect(try await db.config.get().primaryAgentPreference == .codex)
+
+        let listResp = await router.handle(RPCRequest(method: RPCMethod.modelProfileList))
+        let result = try listResp.decodeResult(ModelProfileListResult.self)
+        #expect(result.primaryAgentPreference == .codex)
+    }
+
     @Test("setRepoOverride round-trip")
     func setRepoOverride() async throws {
         let (router, db, _) = makeRouter()

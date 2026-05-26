@@ -201,6 +201,20 @@ extension WorktreeLifecycle {
         )
     }
 
+    private func resolvePrimaryTerminalKind(
+        skipClaude: Bool,
+        archivedClaudeSessions: [String]?,
+        configuredPreference: PrimaryAgentPreference
+    ) -> TerminalKind {
+        if skipClaude {
+            return .shell
+        }
+        if let archivedClaudeSessions, !archivedClaudeSessions.isEmpty {
+            return .claude
+        }
+        return configuredPreference.terminalKind
+    }
+
     /// Wraps a command so the user's shell takes over when it exits,
     /// preventing tmux from destroying the window and jumping to another.
     /// If the command is already the user's shell, returns it unchanged.
@@ -214,7 +228,7 @@ extension WorktreeLifecycle {
     /// Shared by `finishCreate` and `reviveWorktree`.
     ///
     /// When `archivedClaudeSessions` is provided (revive path), the first session ID
-    /// is reused for the main Claude terminal to restore the conversation, and any
+    /// is reused for the primary Claude terminal to restore the conversation, and any
     /// additional sessions get their own terminal windows.
     func setupTerminals(
         worktree: Worktree, repo: Repo,
@@ -227,7 +241,14 @@ extension WorktreeLifecycle {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
         let worktreePath = worktreePath ?? worktree.path
-        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
+        let config = try await db.config.get()
+        let claudeEnvOverrides = config.envSettingOverrides
+        let primaryTerminalKind = resolvePrimaryTerminalKind(
+            skipClaude: skipClaude,
+            archivedClaudeSessions: archivedClaudeSessions,
+            configuredPreference: config.primaryAgentPreference
+        )
+        let archivedSessions = archivedClaudeSessions ?? []
         // Resolve a usable size: prefer caller's value, otherwise fall back to
         // TmuxManager's defaults. tmux's own 80x24 default would let Claude
         // render into hard-wrapped scrollback that can never be reflowed when
@@ -245,8 +266,11 @@ extension WorktreeLifecycle {
 
         // Resolve model profile (repo override → global default → none).
         // Failures here must NOT break worktree creation — fall back to keychain login.
+        let needsResolvedClaudeProfile = !skipClaude && (
+            primaryTerminalKind == .claude || !archivedSessions.isEmpty
+        )
         var resolvedProfile: ResolvedModelProfile? = nil
-        if !skipClaude, let resolver = modelProfileResolver {
+        if needsResolvedClaudeProfile, let resolver = modelProfileResolver {
             do {
                 resolvedProfile = try await resolver.resolve(repoID: repo.id)
             } catch {
@@ -255,21 +279,41 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Create terminal 1: claude (or shell if skipClaude)
+        // Create terminal 1: primary agent (or shell if skipped).
         let plannedTerminalID1 = UUID()
-        let claudeCommand: String
-        let claudeSensitiveEnv: [String: String]
-        let claudeSessionID: String?
-        let pinnedProfileID: UUID?
-        if skipClaude {
-            claudeCommand = defaultShell
-            claudeSensitiveEnv = [:]
-            claudeSessionID = nil
-            pinnedProfileID = nil
-        } else {
-            let archivedSession = archivedClaudeSessions?.first
+        let primaryCommand: String
+        let primaryEnv: [String: String]
+        let primarySensitiveEnv: [String: String]
+        let primarySessionID: String?
+        let primaryProfileID: UUID?
+        let primaryLabel: String
+        switch primaryTerminalKind {
+        case .shell:
+            primaryCommand = defaultShell
+            primaryEnv = [
+                "TBD_WORKTREE_ID": worktreeID.uuidString,
+                "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
+            ]
+            primarySensitiveEnv = [:]
+            primarySessionID = nil
+            primaryProfileID = nil
+            primaryLabel = "shell"
+        case .codex:
+            let codexHome = try CodexHomeManager().ensureProfilePlugin()
+            primaryCommand = CodexSpawnCommandBuilder.build(initialPrompt: initialPrompt)
+            primaryEnv = [
+                "TBD_WORKTREE_ID": worktreeID.uuidString,
+                "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
+                "CODEX_HOME": codexHome.path,
+            ]
+            primarySensitiveEnv = [:]
+            primarySessionID = nil
+            primaryProfileID = nil
+            primaryLabel = "Codex"
+        case .claude:
+            let archivedSession = archivedSessions.first
             let sessionUUID = archivedSession ?? UUID().uuidString
-            claudeSessionID = sessionUUID
+            primarySessionID = sessionUUID
             let isResume = archivedSession != nil
             // `--resume` is what actually restores the prior conversation;
             // `--session-id` is for starting a NEW session with a pre-chosen
@@ -296,23 +340,22 @@ extension WorktreeLifecycle {
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
             )
-            claudeCommand = spawn.command
-            claudeSensitiveEnv = spawn.sensitiveEnv
-            pinnedProfileID = resolvedProfile?.profileID
+            primaryCommand = spawn.command
+            primaryEnv = [
+                "TBD_WORKTREE_ID": worktreeID.uuidString,
+                "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
+            ]
+            primarySensitiveEnv = spawn.sensitiveEnv
+            primaryProfileID = resolvedProfile?.profileID
+            primaryLabel = "Claude Code"
         }
-        // Inject TBD_TERMINAL_ID + TBD_WORKTREE_ID so the SessionStart hook
-        // bridge can route session events to the right terminal.
-        let claudeEnv: [String: String] = [
-            "TBD_WORKTREE_ID": worktreeID.uuidString,
-            "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
-        ]
         let window1 = try await tmux.createWindow(
             server: tmuxServer,
             session: "main",
             cwd: worktreePath,
-            shellCommand: claudeCommand,
-            env: claudeEnv,
-            sensitiveEnv: claudeSensitiveEnv,
+            shellCommand: primaryCommand,
+            env: primaryEnv,
+            sensitiveEnv: primarySensitiveEnv,
             cols: resolvedCols,
             rows: resolvedRows
         )
@@ -321,10 +364,10 @@ extension WorktreeLifecycle {
             worktreeID: worktreeID,
             tmuxWindowID: window1.windowID,
             tmuxPaneID: window1.paneID,
-            label: skipClaude ? "shell" : "Claude Code",
-            claudeSessionID: claudeSessionID,
-            profileID: pinnedProfileID,
-            kind: skipClaude ? .shell : .claude
+            label: primaryLabel,
+            claudeSessionID: primarySessionID,
+            profileID: primaryProfileID,
+            kind: primaryTerminalKind
         )
 
         // Create terminal 2: setup hook
@@ -359,9 +402,19 @@ extension WorktreeLifecycle {
             kind: .shell
         )
 
-        // Restore additional archived Claude sessions (beyond the first which was used above)
-        if !skipClaude, let sessions = archivedClaudeSessions, sessions.count > 1 {
-            for sessionID in sessions.dropFirst() {
+        // Restore any archived Claude sessions that were not consumed by the
+        // primary terminal.
+        let additionalArchivedClaudeSessions: [String]
+        switch primaryTerminalKind {
+        case .claude:
+            additionalArchivedClaudeSessions = Array(archivedSessions.dropFirst())
+        case .codex:
+            additionalArchivedClaudeSessions = archivedSessions
+        case .shell:
+            additionalArchivedClaudeSessions = []
+        }
+        if !skipClaude {
+            for sessionID in additionalArchivedClaudeSessions {
                 let plannedID = UUID()
                 let spawn = ClaudeSpawnCommandBuilder.build(
                     resumeID: sessionID,

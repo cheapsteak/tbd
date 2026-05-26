@@ -38,7 +38,7 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Repository path or ID")
     var repo: String?
 
-    @Option(name: .long, help: "Initial prompt for the auto-created Claude session")
+    @Option(name: .long, help: "Initial prompt for the auto-created primary agent session")
     var prompt: String?
 
     @Option(name: .long, help: "Read initial prompt from a file (use - for stdin)")

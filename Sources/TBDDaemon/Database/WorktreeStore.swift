@@ -351,8 +351,9 @@ public struct WorktreeStore: Sendable {
     }
 
     /// Revive an archived worktree (set status back to active, clear archivedAt).
-    /// When `clearSessions` is true (default), also clears archivedClaudeSessions.
-    /// Pass false to preserve sessions when Claude wasn't restored (e.g. skipClaude).
+    /// When `clearSessions` is true (default), also clears archived Claude
+    /// sessions. Pass false to preserve them when the primary agent wasn't
+    /// restored (e.g. skipClaude).
     public func revive(id: UUID, clearSessions: Bool = true) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {

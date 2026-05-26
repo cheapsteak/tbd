@@ -125,6 +125,7 @@ public enum RPCMethod {
     public static let modelProfileUpdateEndpoint = "modelProfile.updateEndpoint"
     public static let modelProfileUpdateBedrock = "modelProfile.updateBedrock"
     public static let modelProfileSetGlobalDefault = "modelProfile.setGlobalDefault"
+    public static let modelProfileSetPrimaryAgentPreference = "modelProfile.setPrimaryAgentPreference"
     public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
@@ -300,6 +301,11 @@ public struct ModelProfileSetGlobalDefaultParams: Codable, Sendable {
     public init(id: UUID?) { self.id = id }
 }
 
+public struct ModelProfileSetAgentPreferenceParams: Codable, Sendable {
+    public let preference: PrimaryAgentPreference
+    public init(preference: PrimaryAgentPreference) { self.preference = preference }
+}
+
 public struct ModelProfileSetRepoOverrideParams: Codable, Sendable {
     public let repoID: UUID
     public let profileID: UUID?
@@ -316,15 +322,25 @@ public struct ModelProfileFetchUsageParams: Codable, Sendable {
 public struct ModelProfileListResult: Codable, Sendable {
     public let profiles: [ModelProfileWithUsage]
     public let defaultID: UUID?
-    public init(profiles: [ModelProfileWithUsage], defaultID: UUID? = nil) {
+    public let primaryAgentPreference: PrimaryAgentPreference
+    public init(
+        profiles: [ModelProfileWithUsage],
+        defaultID: UUID? = nil,
+        primaryAgentPreference: PrimaryAgentPreference = .defaultValue
+    ) {
         self.profiles = profiles
         self.defaultID = defaultID
+        self.primaryAgentPreference = primaryAgentPreference
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         profiles = try c.decode([ModelProfileWithUsage].self, forKey: .profiles)
         defaultID = try c.decodeIfPresent(UUID.self, forKey: .defaultID)
+        primaryAgentPreference = try c.decodeIfPresent(
+            PrimaryAgentPreference.self,
+            forKey: .primaryAgentPreference
+        ) ?? .defaultValue
     }
 }
 

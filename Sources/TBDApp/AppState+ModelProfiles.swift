@@ -22,6 +22,9 @@ extension AppState {
             if result.defaultID != defaultProfileID {
                 defaultProfileID = result.defaultID
             }
+            if result.primaryAgentPreference != primaryAgentPreference {
+                primaryAgentPreference = result.primaryAgentPreference
+            }
         } catch {
             logger.error("Failed to list model profiles: \(error, privacy: .public)")
             handleConnectionError(error)
@@ -126,6 +129,17 @@ extension AppState {
         } catch {
             logger.error("Failed to set default model profile: \(error, privacy: .public)")
             showAlert("Failed to set default profile: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set the default primary agent used for new worktrees.
+    func setPrimaryAgentPreference(_ preference: PrimaryAgentPreference) async {
+        do {
+            try await daemonClient.setPrimaryAgentPreference(preference)
+            primaryAgentPreference = preference
+        } catch {
+            logger.error("Failed to set primary agent preference: \(error, privacy: .public)")
+            showAlert("Failed to set primary agent: \(error.localizedDescription)", isError: true)
         }
     }
 

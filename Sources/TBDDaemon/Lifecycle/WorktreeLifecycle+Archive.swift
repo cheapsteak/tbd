@@ -154,7 +154,7 @@ extension WorktreeLifecycle {
     ///
     /// - Parameters:
     ///   - worktreeID: The archived worktree to revive.
-    ///   - skipClaude: If true, skip launching claude in the first terminal window.
+    ///   - skipClaude: If true, skip launching the primary agent in the first terminal window.
     /// - Returns: The revived worktree.
     public func reviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> Worktree {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
