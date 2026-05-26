@@ -47,15 +47,18 @@ extension WorktreeLifecycle {
     /// Returns nil if git commands fail (leaves status unchanged).
     private func checkHasConflicts(repoPath: String, defaultBranch: String, branch: String) async -> Bool? {
         guard let isAncestor = await git.isMergeBaseAncestor(
-            repoPath: repoPath, base: defaultBranch, branch: branch
+            repoPath: repoPath, base: "origin/\(defaultBranch)", branch: branch
         ) else {
-            return nil  // git error — leave status unchanged
+            // git error or origin/<defaultBranch> doesn't exist yet —
+            // leave hasConflicts at its previous value. For purely local repos
+            // (no origin remote) this is a permanent no-op, which is acceptable.
+            return nil
         }
         if isAncestor { return false }
 
         // Branches have diverged — check for conflicts
         let (hasConflicts, _) = await git.checkMergeConflicts(
-            repoPath: repoPath, branch: branch, targetBranch: defaultBranch
+            repoPath: repoPath, branch: branch, targetBranch: "origin/\(defaultBranch)"
         )
         return hasConflicts
     }

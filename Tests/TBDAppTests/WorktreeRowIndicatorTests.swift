@@ -4,12 +4,12 @@ import Testing
 
 @Suite("Worktree row conflict fallback")
 struct WorktreeRowConflictFallbackTests {
-    @Test("uses the hand-raised slash icon for conflict fallback")
+    @Test("uses the git-merge-conflict icon for conflict fallback")
     func usesConflictFallbackIcon() {
-        #expect(WorktreeRowConflictFallback.iconName == "hand.raised.slash.fill")
+        #expect(WorktreeRowConflictFallback.iconName == "git-merge-conflict")
     }
 
-    @Test("conflict fallback appears when there is no PR and no notification")
+    @Test("conflict fallback does NOT appear when there is no PR")
     func conflictFallbackWithoutPR() {
         let showsFallback = WorktreeRowConflictFallback.shouldShow(
             prStatus: nil,
@@ -17,13 +17,13 @@ struct WorktreeRowConflictFallbackTests {
             hasNotification: false
         )
 
-        #expect(showsFallback)
+        #expect(!showsFallback)
     }
 
     @Test("notification badge takes precedence over conflict fallback")
     func notificationWinsOverConflictFallback() {
         let showsFallback = WorktreeRowConflictFallback.shouldShow(
-            prStatus: nil,
+            prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .pending),
             hasConflicts: true,
             hasNotification: true
         )
@@ -31,14 +31,34 @@ struct WorktreeRowConflictFallbackTests {
         #expect(!showsFallback)
     }
 
-    @Test("PR status suppresses conflict fallback")
-    func prStatusSuppressesConflictFallback() {
+    @Test("conflict fallback appears when a PR is present and the branch has conflicts")
+    func conflictFallbackAppearsWithPR() {
         let showsFallback = WorktreeRowConflictFallback.shouldShow(
             prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .pending),
             hasConflicts: true,
             hasNotification: false
         )
 
+        #expect(showsFallback)
+    }
+
+    @Test("merged PR icon wins over conflict fallback (squash-merge produces false-positive conflicts)")
+    func mergedPRSuppressesConflictFallback() {
+        let showsFallback = WorktreeRowConflictFallback.shouldShow(
+            prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .merged),
+            hasConflicts: true,
+            hasNotification: false
+        )
+        #expect(!showsFallback)
+    }
+
+    @Test("closed PR icon wins over conflict fallback (no pending merge action)")
+    func closedPRSuppressesConflictFallback() {
+        let showsFallback = WorktreeRowConflictFallback.shouldShow(
+            prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .closed),
+            hasConflicts: true,
+            hasNotification: false
+        )
         #expect(!showsFallback)
     }
 }
