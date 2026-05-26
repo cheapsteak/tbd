@@ -70,25 +70,33 @@ public actor PRStatusManager {
     }
 
     /// Refresh a single worktree using `gh pr view`. Used for on-select refresh.
-    public func refresh(worktreeID: UUID, branch: String, repoPath: String) async -> PRStatus? {
-        let args = ["pr", "view", branch,
-                    "--json", "number,url,state,mergeStateStatus,reviewDecision"]
-        guard let output = await runGH(args: args, repoPath: repoPath),
-              let data = output.data(using: .utf8),
-              let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
-            // gh exited non-zero or parse failed — leave cache unchanged
-            return cache[worktreeID]
+    public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, repoPath: String) async -> PRStatus? {
+        let candidates = Self.branchCandidates(
+            localBranch: branch,
+            upstreamBranch: upstreamBranch
+        )
+        for candidate in candidates {
+            let args = ["pr", "view", candidate,
+                        "--json", "number,url,state,mergeStateStatus,reviewDecision"]
+            guard let output = await runGH(args: args, repoPath: repoPath),
+                  let data = output.data(using: .utf8),
+                  let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
+                continue
+            }
+
+            let status = PRStatus(
+                number: obj.number,
+                url: obj.url,
+                state: Self.mapState(ghState: obj.state,
+                                     mergeStateStatus: obj.mergeStateStatus,
+                                     reviewDecision: obj.reviewDecision ?? "")
+            )
+            cache[worktreeID] = status
+            return status
         }
 
-        let status = PRStatus(
-            number: obj.number,
-            url: obj.url,
-            state: Self.mapState(ghState: obj.state,
-                                 mergeStateStatus: obj.mergeStateStatus,
-                                 reviewDecision: obj.reviewDecision ?? "")
-        )
-        cache[worktreeID] = status
-        return status
+        // gh exited non-zero or parse failed for every candidate — leave cache unchanged.
+        return cache[worktreeID]
     }
 
     /// For tests only: seed a cache entry directly.

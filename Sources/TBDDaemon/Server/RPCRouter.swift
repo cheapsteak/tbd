@@ -255,14 +255,19 @@ public final class RPCRouter: Sendable {
     private func handlePRRefresh(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PRRefreshParams.self, from: paramsData)
 
-        // Run targeted refresh in the worktree so gh can see worktree-local branch config.
+        // Run targeted refresh in the worktree and try the tracked upstream branch when needed.
         guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
             return try RPCResponse(result: PRRefreshResult(status: nil))
         }
+        let upstreamBranch = await git.upstreamBranchName(
+            worktreePath: wt.path,
+            branch: wt.branch
+        )
 
         let status = await prManager.refresh(
             worktreeID: wt.id,
             branch: wt.branch,
+            upstreamBranch: upstreamBranch,
             repoPath: wt.path
         )
         return try RPCResponse(result: PRRefreshResult(status: status))
