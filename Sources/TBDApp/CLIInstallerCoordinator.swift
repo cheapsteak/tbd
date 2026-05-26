@@ -216,7 +216,7 @@ final class CLIInstallerCoordinator {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "tbd is already installed"
-        alert.informativeText = "\(installer.installPath) → \(target)"
+        alert.informativeText = "\(installer.installPath) is a hard link to \(target)"
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Reinstall")
         if alert.runModal() == .alertSecondButtonReturn {
