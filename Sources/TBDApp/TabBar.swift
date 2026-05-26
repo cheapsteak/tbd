@@ -686,31 +686,13 @@ private struct TabBarItem: View {
         }
         switch tab.content {
         case .terminal:
-            if isClaudeTerminal, let terminal, let profileID = terminal.profileID,
-               let entry = appState.modelProfiles.first(where: { $0.profile.id == profileID }) {
-                let name = entry.profile.tabDisplayName
-                let worktreeID = terminal.worktreeID
-                let allTabs = appState.tabs[worktreeID] ?? []
-                let allTerminals = appState.terminals[worktreeID] ?? []
-                let sameTokenTerminalIDs = Set(
-                    allTerminals
-                        .filter { $0.profileID == profileID }
-                        .map { $0.id }
-                )
-                let sameTokenTabs = allTabs.filter { tab in
-                    if case .terminal(let tID) = tab.content {
-                        return sameTokenTerminalIDs.contains(tID)
-                    }
-                    return false
-                }
-                let myTerminalID = terminal.id
-                let position = (sameTokenTabs.firstIndex { tab in
-                    if case .terminal(let tID) = tab.content { return tID == myTerminalID }
-                    return false
-                } ?? 0) + 1
-                return "\(name) \(position)"
-            }
-            return isClaudeTerminal ? "Claude" : "Terminal \(index + 1)"
+            return AutoTabLabelResolver.terminalLabel(
+                terminal: terminal,
+                fallbackIndex: index,
+                modelProfiles: appState.modelProfiles,
+                worktreeTabs: appState.tabs[worktreeID] ?? [],
+                worktreeTerminals: appState.terminals[worktreeID] ?? []
+            )
         case .webview(_, let url):
             return url.host ?? "Web"
         case .codeViewer(_, let path):
