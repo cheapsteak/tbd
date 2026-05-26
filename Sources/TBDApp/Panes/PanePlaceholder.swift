@@ -188,7 +188,7 @@ struct PanePlaceholder: View {
             }
             .buttonStyle(.borderless)
 
-            if terminal(for: terminalID)?.claudeSessionID != nil {
+            if terminal(for: terminalID)?.isClaudeResumable == true {
                 Button(action: { openTranscript(terminalID: terminalID) }) {
                     HStack(spacing: 2) {
                         Image(systemName: "text.bubble")
@@ -500,4 +500,3 @@ struct EditableNoteTitle: View {
         }
     }
 }
-

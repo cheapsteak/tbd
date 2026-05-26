@@ -37,9 +37,7 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found")
         }
 
-        let claudeTerminals = terminals.filter {
-            $0.claudeSessionID != nil && $0.suspendedAt == nil
-        }
+        let claudeTerminals = terminals.filter { $0.isClaudeResumable && $0.suspendedAt == nil }
 
         // Fire in background — RPC returns immediately so the app can show
         // the suspending overlay while the daemon does its work.
@@ -58,9 +56,7 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found")
         }
 
-        let suspendedTerminals = terminals.filter {
-            $0.claudeSessionID != nil && $0.suspendedAt != nil
-        }
+        let suspendedTerminals = terminals.filter { $0.isClaudeResumable && $0.suspendedAt != nil }
 
         // Sequential — the coordinator is an actor so calls serialize anyway
         for terminal in suspendedTerminals {

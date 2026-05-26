@@ -163,7 +163,7 @@ extension WorktreeLifecycle {
                 if serverAlive {
                     let alive = await tmux.windowExists(server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
                     if !alive {
-                        if let sessionID = terminal.claudeSessionID {
+                        if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
                             // Window is gone but a resumable session exists.
                             // Suspend the terminal instead of deleting it — the
                             // suspend/resume machinery rebuilds a window from the
@@ -276,7 +276,22 @@ extension WorktreeLifecycle {
         // rollovers without depending on cwd-based heuristics.
         env["TBD_TERMINAL_ID"] = terminal.id.uuidString
 
-        if let sessionID = terminal.claudeSessionID {
+        if terminal.isCodexTerminal {
+            // Codex's SessionStart hook records session metadata into the
+            // shared Claude fields, so terminal kind must win over the
+            // presence of a captured session ID during reboot recovery.
+            let codexHome = try CodexHomeManager().ensureProfilePlugin()
+            env["CODEX_HOME"] = codexHome.path
+            spawn = ClaudeSpawnCommandBuilder.build(
+                resumeID: nil,
+                freshSessionID: nil,
+                appendSystemPrompt: nil,
+                initialPrompt: nil,
+                profileSecret: nil,
+                cmd: CodexSpawnCommandBuilder.command,
+                shellFallback: defaultShell
+            )
+        } else if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
             // Claude terminal — resume existing session with persisted profile
             var resolvedProfile: ResolvedModelProfile? = nil
             if let profileID = terminal.profileID, let resolver = modelProfileResolver {
@@ -299,24 +314,6 @@ extension WorktreeLifecycle {
                 settingsOverlayPath: ClaudeHookOverlay.overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
-            )
-        } else if terminal.kind == .codex || terminal.label == "Codex" {
-            // Codex terminal — detected by kind (primary signal) or legacy label fallback.
-            // kind is the primary discriminator; label is checked for backward compatibility.
-            let codexHome = try CodexHomeManager().ensureProfilePlugin()
-            // Explicitly export the global Codex home. This is intentional —
-            // the design's allowed "set the global path" option — not leftover
-            // per-repo isolation: it pins deterministic behavior and lets the
-            // TBD_TEST_CODEX_HOME test-isolation override flow through.
-            env["CODEX_HOME"] = codexHome.path
-            spawn = ClaudeSpawnCommandBuilder.build(
-                resumeID: nil,
-                freshSessionID: nil,
-                appendSystemPrompt: nil,
-                initialPrompt: nil,
-                profileSecret: nil,
-                cmd: CodexSpawnCommandBuilder.command,
-                shellFallback: defaultShell
             )
         } else {
             // Shell or custom-cmd terminal. Plain shell terminals have label nil or "shell";

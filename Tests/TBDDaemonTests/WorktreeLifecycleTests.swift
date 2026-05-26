@@ -350,6 +350,44 @@ import Testing
             "Should not save empty session list")
 }
 
+@Test func testArchiveIgnoresCodexSessionMetadata() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+
+    _ = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@codex-1",
+        tmuxPaneID: "%codex-1",
+        label: "Codex",
+        claudeSessionID: "codex-session-id",
+        kind: .codex
+    )
+    _ = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@claude-1",
+        tmuxPaneID: "%claude-1",
+        label: "Claude Code",
+        claudeSessionID: "claude-session-id",
+        kind: .claude
+    )
+
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+
+    let archived = try await db.worktrees.get(id: wt.id)
+    #expect(archived?.archivedClaudeSessions == ["claude-session-id"])
+}
+
 @Test func testReviveWithSkipClaudePreservesSessions() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -824,6 +862,45 @@ import Testing
     try? await realTmux.killServer(server: serverName)
 
     #expect(after == nil, "shell terminal with no session must still be deleted")
+}
+
+@Test func testReconcileDeadWindowCodexTerminalWithSessionMetadataDeleted() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let realTmux = TmuxManager()
+    let lifecycle = WorktreeLifecycle(
+        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
+    )
+
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
+    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
+
+    let wt = try await db.worktrees.create(
+        repoID: repo.id, name: "wt", branch: "main",
+        path: repoDir.path, tmuxServer: serverName
+    )
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@stale-codex", tmuxPaneID: "%stale-codex",
+        label: "Codex", claudeSessionID: UUID().uuidString, kind: .codex
+    )
+
+    do {
+        try await lifecycle.reconcile(repoID: repo.id)
+    } catch {
+        try? await realTmux.killServer(server: serverName)
+        throw error
+    }
+
+    let after = try await db.terminals.get(id: terminal.id)
+    try? await realTmux.killServer(server: serverName)
+
+    #expect(after == nil, "stale codex terminal must be deleted, not suspended via Claude semantics")
 }
 
 // MARK: - Helpers
