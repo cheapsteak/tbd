@@ -1,4 +1,56 @@
 import SwiftUI
+import AppKit
+
+enum TextFinderCommand {
+    static let action = #selector(NSResponder.performTextFinderAction(_:))
+
+    static func tag(for action: NSTextFinder.Action) -> Int {
+        action.rawValue
+    }
+
+    @MainActor
+    static func perform(_ finderAction: NSTextFinder.Action = .showFindInterface) {
+        let sender = NSMenuItem()
+        sender.tag = tag(for: finderAction)
+
+        if let host = webviewHost(from: NSApp.keyWindow?.firstResponder) {
+            host.performTextFinderAction(sender)
+            return
+        }
+
+        NSApp.sendAction(action, to: nil, from: sender)
+    }
+
+    @MainActor
+    static func webviewHost(from responder: NSResponder?) -> WebviewPaneHostView? {
+        var current = responder
+        var visited = Set<ObjectIdentifier>()
+
+        while let responder = current {
+            let id = ObjectIdentifier(responder)
+            guard !visited.contains(id) else { return nil }
+            visited.insert(id)
+
+            if let host = responder as? WebviewPaneHostView {
+                return host
+            }
+
+            if let view = responder as? NSView {
+                var superview = view.superview
+                while let candidate = superview {
+                    if let host = candidate as? WebviewPaneHostView {
+                        return host
+                    }
+                    superview = candidate.superview
+                }
+            }
+
+            current = responder.nextResponder
+        }
+
+        return nil
+    }
+}
 
 /// Menu commands providing keyboard shortcuts for the app.
 struct TBDCommands: Commands {
@@ -16,6 +68,25 @@ struct TBDCommands: Commands {
                     await appState.migrateClaudeHooks()
                 }
             }
+        }
+
+        CommandGroup(after: .pasteboard) {
+            Divider()
+
+            Button("Find…") {
+                TextFinderCommand.perform()
+            }
+            .keyboardShortcut("f", modifiers: .command)
+
+            Button("Find Next") {
+                TextFinderCommand.perform(.nextMatch)
+            }
+            .keyboardShortcut("g", modifiers: .command)
+
+            Button("Find Previous") {
+                TextFinderCommand.perform(.previousMatch)
+            }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
         }
 
         // Worktree commands
