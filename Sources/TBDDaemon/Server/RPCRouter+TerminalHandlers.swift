@@ -853,7 +853,7 @@ extension RPCRouter {
     /// Symlinks are followed so we return the real binary path — `cliPath()`
     /// looks for `TBDCLI` next to the actual TBDDaemon binary, not next to
     /// a symlink that points at it.
-    static let resolvedExecutablePath: String? = {
+    private static let resolvedExecutablePath: String? = {
         guard let argv0 = CommandLine.arguments.first, !argv0.isEmpty else { return nil }
         let url: URL
         if argv0.hasPrefix("/") {
