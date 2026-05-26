@@ -48,6 +48,16 @@ struct PRStatusManagerTests {
         #expect(status == .pending)
     }
 
+    @Test("maps OPEN + CLEAN + pending status checks to .pending")
+    func mapsPendingChecksOverClean() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            statusCheckRollupState: "PENDING"
+        )
+        #expect(status == .pending)
+    }
+
     @Test("maps HAS_HOOKS to .mergeable")
     func mapsHasHooks() {
         let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "HAS_HOOKS")
@@ -58,6 +68,22 @@ struct PRStatusManagerTests {
     func mapsUnstable() {
         let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNSTABLE")
         #expect(status == .checksFailed)
+    }
+
+    @Test("maps unknown future merge state to .blocked")
+    func mapsUnknownFutureMergeState() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "SOME_FUTURE_STATE")
+        #expect(status == .blocked)
+    }
+
+    @Test("maps unknown future merge state with pending checks to .pending")
+    func mapsPendingUnknownFutureMergeState() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "SOME_FUTURE_STATE",
+            statusCheckRollupState: "EXPECTED"
+        )
+        #expect(status == .pending)
     }
 
     @Test("maps MERGED to .merged")

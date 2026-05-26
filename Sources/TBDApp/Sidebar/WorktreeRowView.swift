@@ -1,16 +1,15 @@
 import SwiftUI
 import TBDShared
 
-enum WorktreeRowIndicator: Equatable {
-    case conflict
+enum WorktreeRowConflictFallback {
+    static let iconName = "hand.raised.slash.fill"
 
-    static func make(
+    static func shouldShow(
         prStatus: PRStatus?,
         hasConflicts: Bool,
         hasNotification: Bool
-    ) -> WorktreeRowIndicator? {
-        guard prStatus == nil, hasConflicts, !hasNotification else { return nil }
-        return .conflict
+    ) -> Bool {
+        prStatus == nil && hasConflicts && !hasNotification
     }
 }
 
@@ -29,6 +28,10 @@ struct WorktreeRowView: View {
 
     private var notification: NotificationType? {
         appState.unreadByWorktree[worktree.id]?.type
+    }
+
+    private var prStatus: PRStatus? {
+        appState.prStatuses[worktree.id]
     }
 
     private var hasBoldNotification: Bool {
@@ -52,22 +55,17 @@ struct WorktreeRowView: View {
         }
     }
 
-    private var fallbackIndicator: WorktreeRowIndicator? {
-        WorktreeRowIndicator.make(
-            prStatus: appState.prStatuses[worktree.id],
+    private var showsConflictFallback: Bool {
+        WorktreeRowConflictFallback.shouldShow(
+            prStatus: prStatus,
             hasConflicts: worktree.hasConflicts,
             hasNotification: notification != nil
         )
     }
 
-    private var worktreeIcon: String? {
+    private var prPresentation: PRStatusPresentation? {
         guard !isMain else { return nil }
-        return PRStatusPresentation.make(for: appState.prStatuses[worktree.id])?.iconName
-    }
-
-    private var worktreeIconColor: Color {
-        guard !isMain else { return .secondary }
-        return PRStatusPresentation.make(for: appState.prStatuses[worktree.id])?.color ?? .secondary
+        return PRStatusPresentation.make(for: prStatus)
     }
 
     private var hasSuspendedTerminal: Bool {
@@ -89,18 +87,18 @@ struct WorktreeRowView: View {
             Circle()
                 .fill(color)
                 .frame(width: 8, height: 8)
-        } else if fallbackIndicator == .conflict {
-            Image(systemName: "xmark")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.yellow)
+        } else if showsConflictFallback {
+            Image(systemName: WorktreeRowConflictFallback.iconName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.red)
         }
-        if let icon = worktreeIcon, let nsImage = loadIcon(icon) {
+        if let presentation = prPresentation, let nsImage = loadIcon(presentation.iconName) {
             Image(nsImage: nsImage)
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
                 .frame(width: 12, height: 12)
-                .foregroundStyle(worktreeIconColor)
+                .foregroundStyle(presentation.color)
         }
     }
 
