@@ -10,7 +10,9 @@ enum WorktreeRowConflictFallback {
         hasNotification: Bool
     ) -> Bool {
         guard let prStatus, hasConflicts, !hasNotification else { return false }
-        return prStatus.state != .merged
+        // Closed and merged PRs have no pending merge action, so a conflict warning is noise.
+        // The PR-icon slot is mutually exclusive with the conflict glyph; suppress here to keep .closed/.merged visible.
+        return prStatus.state != .merged && prStatus.state != .closed
     }
 }
 

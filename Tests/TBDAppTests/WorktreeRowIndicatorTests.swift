@@ -51,4 +51,14 @@ struct WorktreeRowConflictFallbackTests {
         )
         #expect(!showsFallback)
     }
+
+    @Test("closed PR icon wins over conflict fallback (no pending merge action)")
+    func closedPRSuppressesConflictFallback() {
+        let showsFallback = WorktreeRowConflictFallback.shouldShow(
+            prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .closed),
+            hasConflicts: true,
+            hasNotification: false
+        )
+        #expect(!showsFallback)
+    }
 }
