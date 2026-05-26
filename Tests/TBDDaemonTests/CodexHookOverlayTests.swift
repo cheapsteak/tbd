@@ -18,36 +18,32 @@ import TBDShared
         #expect(sessionCommand?.contains("tbd session-event") == true)
 
         let stop = hooks?["Stop"] as? [[String: Any]]
-        #expect(stop?.count == 2)
-        let stopCommands: [String] = (stop ?? []).flatMap { entry -> [String] in
-            let inner = entry["hooks"] as? [[String: Any]] ?? []
-            return inner.compactMap { $0["command"] as? String }
-        }
-        #expect(stopCommands.contains {
-            $0.contains("tbd notify --type response_complete")
-                && $0.contains("last_assistant_message")
-                && !$0.contains("stop-rename-check")
-        })
-        #expect(stopCommands.contains {
-            $0.contains("stop-rename-check")
-                && !$0.contains("tbd notify --type response_complete")
-        })
+        #expect(stop?.count == 1)
+        let stopHooks = stop?.first?["hooks"] as? [[String: Any]]
+        #expect(stopHooks?.count == 1)
+        let stopCommand = stopHooks?.first?["command"] as? String
+        #expect(stopCommand?.contains("tbd hooks stop-rename-check") == true)
+        #expect(stopCommand?.contains("tbd notify --type response_complete") == true)
+        #expect(stopCommand?.contains("last_assistant_message") == true)
     }
 
-    @Test func stopHooksRunRenameCheckBeforeResponseComplete() throws {
+    @Test func stopHookRunsRenameCheckBeforeResponseComplete() throws {
         let data = try CodexHookOverlay.generateBody()
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         let hooks = parsed?["hooks"] as? [String: Any]
         let stop = hooks?["Stop"] as? [[String: Any]]
+        let stopHooks = stop?.first?["hooks"] as? [[String: Any]]
+        let stopCommand = stopHooks?.first?["command"] as? String
 
-        let stopCommands: [String] = (stop ?? []).flatMap { entry -> [String] in
-            let inner = entry["hooks"] as? [[String: Any]] ?? []
-            return inner.compactMap { $0["command"] as? String }
+        let renameIndex = stopCommand?.range(of: "tbd hooks stop-rename-check")?.lowerBound
+        let notifyIndex = stopCommand?.range(of: "tbd notify --type response_complete")?.lowerBound
+
+        #expect(renameIndex != nil)
+        #expect(notifyIndex != nil)
+        if let renameIndex, let notifyIndex {
+            #expect(renameIndex < notifyIndex)
         }
-
-        #expect(stopCommands.count == 2)
-        #expect(stopCommands.first?.contains("stop-rename-check") == true)
-        #expect(stopCommands.last?.contains("tbd notify --type response_complete") == true)
+        #expect(stopCommand?.contains("if [ -n \"$RENAME_RESULT\" ]") == true)
     }
 
     @Test func roundtripsAsValidJSON() throws {

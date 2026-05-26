@@ -57,11 +57,14 @@ enum CodexHookOverlay {
     static let sessionStartCommand =
         #"tbd session-event 2>/dev/null || true"#
 
-    static let stopCommand =
-        #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
+    static let responseCompleteCommand =
+        #"MSG=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
 
     static let stopRenameCheckCommand =
         #"tbd hooks stop-rename-check 2>/dev/null || true"#
+
+    static let stopCommand =
+        #"PAYLOAD=$(cat); RENAME_RESULT=$(printf '%s' "$PAYLOAD" | \#(stopRenameCheckCommand)); if [ -n "$RENAME_RESULT" ]; then printf '%s\n' "$RENAME_RESULT"; else \#(responseCompleteCommand); fi"#
 
     static func hookPath(in pluginRoot: URL) -> URL {
         pluginRoot.appendingPathComponent(relativePath, isDirectory: false)
@@ -81,13 +84,6 @@ enum CodexHookOverlay {
                 "Stop": [
                     [
                         "hooks": [
-                            ["type": "command", "command": stopRenameCheckCommand]
-                        ]
-                    ],
-                    [
-                        "hooks": [
-                            // Run response_complete only after any rename prompt
-                            // has finished blocking and Codex is ready again.
                             ["type": "command", "command": stopCommand]
                         ]
                     ]
