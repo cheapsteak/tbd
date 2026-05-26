@@ -64,11 +64,41 @@ struct WebviewPaneFindTests {
 
         #expect(client.requests == [FindRequest(query: "needle", backwards: false)])
     }
+
+    @Test("unsupported text finder actions do not open the find bar")
+    func unsupportedTextFinderActionsDoNotOpenTheFindBar() {
+        let host = WebviewPaneHostView(url: URL(string: "https://example.com")!)
+
+        host.performTextFinderAction(TestValidatedItem(tag: NSTextFinder.Action.replaceAll.rawValue))
+
+        #expect(host.findBar.isHidden)
+    }
+
+    @Test("validation only enables supported text finder actions")
+    func validationOnlyEnablesSupportedTextFinderActions() {
+        let host = WebviewPaneHostView(url: URL(string: "https://example.com")!)
+
+        #expect(host.validateUserInterfaceItem(TestValidatedItem(tag: NSTextFinder.Action.showFindInterface.rawValue)))
+        #expect(host.validateUserInterfaceItem(TestValidatedItem(tag: NSTextFinder.Action.nextMatch.rawValue)))
+        #expect(host.validateUserInterfaceItem(TestValidatedItem(tag: NSTextFinder.Action.previousMatch.rawValue)))
+        #expect(host.validateUserInterfaceItem(TestValidatedItem(tag: NSTextFinder.Action.hideFindInterface.rawValue)))
+        #expect(!host.validateUserInterfaceItem(TestValidatedItem(tag: NSTextFinder.Action.replaceAll.rawValue)))
+    }
 }
 
 private struct FindRequest: Equatable {
     let query: String
     let backwards: Bool
+}
+
+private final class TestValidatedItem: NSObject, NSValidatedUserInterfaceItem {
+    let action: Selector?
+    let tag: Int
+
+    init(tag: Int, action: Selector? = #selector(NSResponder.performTextFinderAction(_:))) {
+        self.tag = tag
+        self.action = action
+    }
 }
 
 @MainActor

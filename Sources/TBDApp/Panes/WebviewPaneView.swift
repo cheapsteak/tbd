@@ -39,6 +39,13 @@ final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
     let webView: WKWebView
     let findBar = WebviewFindBarView()
 
+    private static let supportedTextFinderActions: Set<NSTextFinder.Action> = [
+        .showFindInterface,
+        .hideFindInterface,
+        .nextMatch,
+        .previousMatch,
+    ]
+
     private let findClient: WebviewFindClient
 
     init(url: URL, findClient: WebviewFindClient? = nil) {
@@ -73,7 +80,7 @@ final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
     override var acceptsFirstResponder: Bool { true }
 
     override func performTextFinderAction(_ sender: Any?) {
-        let action = textFinderAction(from: sender)
+        guard let action = textFinderAction(from: sender) else { return }
         switch action {
         case .showFindInterface:
             showFindBar()
@@ -84,12 +91,13 @@ final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
         case .hideFindInterface:
             hideFindBar()
         default:
-            showFindBar()
+            return
         }
     }
 
     func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        true
+        guard let action = textFinderAction(from: item) else { return false }
+        return Self.supportedTextFinderActions.contains(action)
     }
 
     func showFindBar() {
@@ -120,9 +128,9 @@ final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
         )
     }
 
-    private func textFinderAction(from sender: Any?) -> NSTextFinder.Action {
+    private func textFinderAction(from sender: Any?) -> NSTextFinder.Action? {
         let tag = (sender as? NSValidatedUserInterfaceItem)?.tag ?? NSTextFinder.Action.showFindInterface.rawValue
-        return NSTextFinder.Action(rawValue: tag) ?? .showFindInterface
+        return NSTextFinder.Action(rawValue: tag)
     }
 
     private func search(_ query: String, backwards: Bool) {

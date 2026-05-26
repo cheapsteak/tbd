@@ -3,12 +3,15 @@ import AppKit
 
 enum TextFinderCommand {
     static let action = #selector(NSResponder.performTextFinderAction(_:))
-    static let tag = NSTextFinder.Action.showFindInterface.rawValue
+    
+    static func tag(for action: NSTextFinder.Action) -> Int {
+        action.rawValue
+    }
 
     @MainActor
-    static func perform() {
+    static func perform(_ finderAction: NSTextFinder.Action = .showFindInterface) {
         let sender = NSMenuItem()
-        sender.tag = tag
+        sender.tag = tag(for: finderAction)
 
         if let host = webviewHost(from: NSApp.keyWindow?.firstResponder) {
             host.performTextFinderAction(sender)
@@ -74,6 +77,16 @@ struct TBDCommands: Commands {
                 TextFinderCommand.perform()
             }
             .keyboardShortcut("f", modifiers: .command)
+
+            Button("Find Next") {
+                TextFinderCommand.perform(.nextMatch)
+            }
+            .keyboardShortcut("g", modifiers: .command)
+
+            Button("Find Previous") {
+                TextFinderCommand.perform(.previousMatch)
+            }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
         }
 
         // Worktree commands
