@@ -50,6 +50,33 @@ struct PRStatusManagerTests {
         #expect(status == .changesRequested)
     }
 
+    @Test("maps draft PRs to .draft")
+    func mapsDraft() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "CLEAN", isDraft: true)
+        #expect(status == .draft)
+    }
+
+    @Test("maps failing status checks to .checksFailed")
+    func mapsFailingChecks() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            statusCheckRollupState: "FAILURE"
+        )
+        #expect(status == .checksFailed)
+    }
+
+    @Test("draft wins over failing status checks")
+    func mapsDraftOverFailingChecks() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            isDraft: true,
+            statusCheckRollupState: "FAILURE"
+        )
+        #expect(status == .draft)
+    }
+
     // MARK: - JSON parsing
 
     @Test("parseGraphQLResponse keeps all branch names")
@@ -65,6 +92,8 @@ struct PRStatusManagerTests {
                     "url": "https://github.com/owner/repo/pull/42",
                     "state": "OPEN",
                     "mergeStateStatus": "CLEAN",
+                    "isDraft": true,
+                    "statusCheckRollup": { "state": "FAILURE" },
                     "reviewDecision": null,
                     "headRefName": "tbd/cool-feature",
                     "createdAt": "2026-03-24T10:00:00Z"
@@ -99,6 +128,8 @@ struct PRStatusManagerTests {
         #expect(nodes[0].headRefName == "tbd/cool-feature")
         #expect(nodes[0].state == "OPEN")
         #expect(nodes[0].mergeStateStatus == "CLEAN")
+        #expect(nodes[0].isDraft == true)
+        #expect(nodes[0].statusCheckRollupState == "FAILURE")
         #expect(nodes[1].headRefName == "tbd/old-feature")
         #expect(nodes[2].headRefName == "feature/not-tbd")
     }

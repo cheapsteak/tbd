@@ -63,7 +63,13 @@ public actor PRStatusManager {
                 cache[wt.id] = PRStatus(
                     number: node.number,
                     url: node.url,
-                    state: Self.mapState(ghState: node.state, mergeStateStatus: node.mergeStateStatus, reviewDecision: node.reviewDecision)
+                    state: Self.mapState(
+                        ghState: node.state,
+                        mergeStateStatus: node.mergeStateStatus,
+                        reviewDecision: node.reviewDecision,
+                        isDraft: node.isDraft,
+                        statusCheckRollupState: node.statusCheckRollupState
+                    )
                 )
             }
         }
@@ -77,7 +83,7 @@ public actor PRStatusManager {
         )
         for candidate in candidates {
             let args = ["pr", "view", candidate,
-                        "--json", "number,url,state,mergeStateStatus,reviewDecision"]
+                        "--json", "number,url,state,mergeStateStatus,reviewDecision,isDraft,statusCheckRollup"]
             guard let output = await runGH(args: args, repoPath: repoPath),
                   let data = output.data(using: .utf8),
                   let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
@@ -89,7 +95,9 @@ public actor PRStatusManager {
                 url: obj.url,
                 state: Self.mapState(ghState: obj.state,
                                      mergeStateStatus: obj.mergeStateStatus,
-                                     reviewDecision: obj.reviewDecision ?? "")
+                                     reviewDecision: obj.reviewDecision ?? "",
+                                     isDraft: obj.isDraft,
+                                     statusCheckRollupState: obj.statusCheckRollup?.state)
             )
             cache[worktreeID] = status
             return status
@@ -106,14 +114,27 @@ public actor PRStatusManager {
 
     // MARK: - State mapping (internal but static for testability)
 
-    public static func mapState(ghState: String, mergeStateStatus: String, reviewDecision: String = "") -> PRMergeableState {
+    public static func mapState(
+        ghState: String,
+        mergeStateStatus: String,
+        reviewDecision: String = "",
+        isDraft: Bool = false,
+        statusCheckRollupState: String? = nil
+    ) -> PRMergeableState {
         switch ghState {
         case "MERGED": return .merged
         case "CLOSED": return .closed
         default:
+            if isDraft { return .draft }
+            if Self.isFailingStatusCheckRollup(statusCheckRollupState) { return .checksFailed }
             if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
             return mergeStateStatus == "CLEAN" ? .mergeable : .open
         }
+    }
+
+    private static func isFailingStatusCheckRollup(_ state: String?) -> Bool {
+        guard let state else { return false }
+        return ["ERROR", "FAILURE"].contains(state)
     }
 
     /// Priority for choosing between multiple PRs on the same branch.
@@ -144,6 +165,8 @@ public actor PRStatusManager {
         public let reviewDecision: String   // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or ""
         public let headRefName: String
         public let createdAt: String        // ISO 8601, e.g. "2026-03-24T15:58:27Z"
+        public let isDraft: Bool
+        public let statusCheckRollupState: String?
     }
 
     public static func parsePRNodes(from data: Data) throws -> [PRNode] {
@@ -163,11 +186,16 @@ public actor PRStatusManager {
                   let headRefName = node["headRefName"] as? String,
                   let createdAt = node["createdAt"] as? String else { return nil }
             let reviewDecision = node["reviewDecision"] as? String ?? ""
+            let isDraft = node["isDraft"] as? Bool ?? false
+            let statusCheckRollup = node["statusCheckRollup"] as? [String: Any]
+            let statusCheckRollupState = statusCheckRollup?["state"] as? String
             return PRNode(number: number, url: url, state: state,
                           mergeStateStatus: mergeStateStatus,
                           reviewDecision: reviewDecision,
                           headRefName: headRefName,
-                          createdAt: createdAt)
+                          createdAt: createdAt,
+                          isDraft: isDraft,
+                          statusCheckRollupState: statusCheckRollupState)
         }
     }
 
@@ -180,7 +208,8 @@ public actor PRStatusManager {
             pullRequests(first: 100, states: [OPEN, MERGED, CLOSED],
                          orderBy: {field: CREATED_AT, direction: DESC}) {
               nodes {
-                number url state mergeStateStatus reviewDecision headRefName createdAt
+                number url state mergeStateStatus reviewDecision headRefName createdAt isDraft
+                statusCheckRollup { state }
               }
             }
           }
@@ -290,6 +319,12 @@ private struct GHPRViewResult: Codable {
     let state: String
     let mergeStateStatus: String
     let reviewDecision: String?
+    let isDraft: Bool
+    let statusCheckRollup: GHStatusCheckRollup?
+}
+
+private struct GHStatusCheckRollup: Codable {
+    let state: String?
 }
 
 public enum PRStatusError: Error {

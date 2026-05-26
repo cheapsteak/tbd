@@ -309,33 +309,16 @@ private func overlayFrameIsWindowRoot(
 private struct PRButtonLabel: View {
     let prStatus: PRStatus
 
-    private var iconName: String {
-        switch prStatus.state {
-        case .open, .changesRequested, .mergeable: return "git-pull-request"
-        case .merged:                              return "git-merge"
-        case .closed:                              return "git-pull-request-closed"
-        }
-    }
-
-    private var iconColor: Color {
-        switch prStatus.state {
-        case .open:             return .secondary
-        case .changesRequested: return .red
-        case .mergeable:        return .green
-        case .merged:           return .purple
-        case .closed:           return .secondary
-        }
-    }
-
     var body: some View {
         HStack(spacing: 3) {
-            if let nsImage = loadIcon(iconName) {
+            if let presentation = PRStatusPresentation.make(for: prStatus),
+               let nsImage = loadIcon(presentation.iconName) {
                 Image(nsImage: nsImage)
                     .renderingMode(.template)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 12, height: 12)
-                    .foregroundStyle(iconColor)
+                    .foregroundStyle(presentation.color)
             }
             Text("#\(prStatus.number)")
                 .font(.caption)
