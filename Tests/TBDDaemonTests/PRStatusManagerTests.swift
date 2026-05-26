@@ -103,6 +103,74 @@ struct PRStatusManagerTests {
         #expect(nodes[1].headRefName == "tbd/old-feature")
     }
 
+    @Test("parseGraphQLResponse ignores null nodes in partial results")
+    func parsesResponseWithNullNodes() throws {
+        let json = """
+        {
+          "data": {
+            "viewer": {
+              "pullRequests": {
+                "nodes": [
+                  null,
+                  {
+                    "number": 42,
+                    "url": "https://github.com/owner/repo/pull/42",
+                    "state": "OPEN",
+                    "mergeStateStatus": "CLEAN",
+                    "reviewDecision": null,
+                    "headRefName": "tbd/cool-feature",
+                    "createdAt": "2026-03-24T10:00:00Z"
+                  },
+                  null,
+                  {
+                    "number": 7,
+                    "url": "https://github.com/owner/repo/pull/7",
+                    "state": "MERGED",
+                    "mergeStateStatus": "UNKNOWN",
+                    "reviewDecision": null,
+                    "headRefName": "tbd/old-feature",
+                    "createdAt": "2026-03-20T10:00:00Z"
+                  },
+                  {
+                    "number": 99,
+                    "url": "https://github.com/owner/repo/pull/99",
+                    "state": "OPEN",
+                    "mergeStateStatus": "CLEAN",
+                    "reviewDecision": null,
+                    "headRefName": "feature/not-tbd",
+                    "createdAt": "2026-03-24T12:00:00Z"
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let nodes = try PRStatusManager.parsePRNodes(from: json)
+        #expect(nodes.count == 2)
+        #expect(nodes[0].headRefName == "tbd/cool-feature")
+        #expect(nodes[1].headRefName == "tbd/old-feature")
+    }
+
+    @Test("graphQLOutputData keeps stdout from partial GraphQL failures")
+    func graphQLOutputDataUsesStdoutOnNonZeroExit() {
+        let stdout = """
+        {"data":{"viewer":{"pullRequests":{"nodes":[]}}}}
+        """
+
+        let data = PRStatusManager.graphQLOutputData(stdout: stdout, exitStatus: 1)
+
+        #expect(data == stdout.data(using: .utf8))
+    }
+
+    @Test("graphQLOutputData returns nil when GraphQL failure has no stdout")
+    func graphQLOutputDataRejectsEmptyStdoutOnNonZeroExit() {
+        let data = PRStatusManager.graphQLOutputData(stdout: " \n", exitStatus: 1)
+
+        #expect(data == nil)
+    }
+
     @Test("allStatuses reflects cache after manual seed")
     func cacheRoundTrip() async {
         let manager = PRStatusManager()

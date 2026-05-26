@@ -133,11 +133,11 @@ public actor PRStatusManager {
               let dataObj = root["data"] as? [String: Any],
               let viewer = dataObj["viewer"] as? [String: Any],
               let prs = viewer["pullRequests"] as? [String: Any],
-              let nodes = prs["nodes"] as? [[String: Any]] else {
+              let nodes = prs["nodes"] as? [Any] else {
             throw PRStatusError.invalidJSON
         }
 
-        return nodes.compactMap { node -> PRNode? in
+        return nodes.compactMap { $0 as? [String: Any] }.compactMap { node -> PRNode? in
             guard let number = node["number"] as? Int,
                   let url = node["url"] as? String,
                   let state = node["state"] as? String,
@@ -170,11 +170,45 @@ public actor PRStatusManager {
         }
         """
         let args = ["api", "graphql", "-f", "query=\(query)"]
-        guard let output = await runGH(args: args, repoPath: repoPath) else { return nil }
-        return output.data(using: .utf8)
+        guard let result = await runGHResult(args: args, repoPath: repoPath),
+              let data = Self.graphQLOutputData(stdout: result.stdout, exitStatus: result.exitStatus) else {
+            return nil
+        }
+
+        if result.exitStatus != 0 {
+            let errSuffix = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            if errSuffix.isEmpty {
+                logger.debug("gh graphql exited \(result.exitStatus) with partial stdout")
+            } else {
+                logger.debug("gh graphql exited \(result.exitStatus) with partial stdout: \(errSuffix)")
+            }
+        }
+
+        return data
     }
 
     private func runGH(args: [String], repoPath: String) async -> String? {
+        guard let result = await runGHResult(args: args, repoPath: repoPath) else {
+            return nil
+        }
+
+        guard result.exitStatus == 0 else {
+            let errStr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.debug("gh exited \(result.exitStatus): \(errStr)")
+            return nil
+        }
+
+        return result.stdout
+    }
+
+    static func graphQLOutputData(stdout: String, exitStatus: Int32) -> Data? {
+        let trimmed = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard exitStatus == 0 || !trimmed.isEmpty else { return nil }
+        guard !trimmed.isEmpty else { return nil }
+        return stdout.data(using: .utf8)
+    }
+
+    private func runGHResult(args: [String], repoPath: String) async -> GHCommandResult? {
         guard let ghPath = findGH() else {
             logger.debug("gh CLI not found in PATH")
             return nil
@@ -192,15 +226,13 @@ public actor PRStatusManager {
             process.standardError = stderr
 
             process.terminationHandler = { p in
-                if p.terminationStatus != 0 {
-                    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                    let errStr = String(data: errData, encoding: .utf8) ?? ""
-                    logger.debug("gh exited \(p.terminationStatus): \(errStr)")
-                    continuation.resume(returning: nil)
-                    return
-                }
-                let data = stdout.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: String(data: data, encoding: .utf8))
+                let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+                let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+                continuation.resume(returning: GHCommandResult(
+                    stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+                    stderr: String(data: stderrData, encoding: .utf8) ?? "",
+                    exitStatus: p.terminationStatus
+                ))
             }
 
             do {
@@ -226,6 +258,12 @@ public actor PRStatusManager {
         }
         return nil
     }
+}
+
+private struct GHCommandResult {
+    let stdout: String
+    let stderr: String
+    let exitStatus: Int32
 }
 
 // MARK: - Supporting types
