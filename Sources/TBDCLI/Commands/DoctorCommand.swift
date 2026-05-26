@@ -59,7 +59,13 @@ struct DoctorCommand: AsyncParsableCommand {
         case .stale(let current):
             print("Status:              STALE (current -> \(current))")
         case .unexpectedFileType:
-            print("Status:              UNEXPECTED FILE TYPE (a directory or other non-file occupies the path)")
+            // install() refuses to recursively delete a directory, and other
+            // non-file entries (sockets, devices) are unsafe to clobber blind.
+            // Surface a clear next step instead of letting install() throw a
+            // low-level error that looks like a partial repair.
+            print("Status:              UNEXPECTED FILE TYPE — a directory or other non-file occupies \(installer.installPath)")
+            print("                     Remove it manually and re-run `tbd doctor`.")
+            throw ExitCode(5)
         }
 
         if dryRun {
