@@ -233,7 +233,20 @@ public final class RPCRouter: Sendable {
         // Fetch fresh PR data for all active worktrees before returning the cache.
         // This is called every ~30s by the app, so one GraphQL call per poll is acceptable.
         let worktrees = try await db.worktrees.list(status: .active)
-        let infos = worktrees.map { (id: $0.id, branch: $0.branch, repoPath: $0.path) }
+        var infos: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String)] = []
+        infos.reserveCapacity(worktrees.count)
+        for wt in worktrees {
+            let upstreamBranch = await git.upstreamBranchName(
+                worktreePath: wt.path,
+                branch: wt.branch
+            )
+            infos.append((
+                id: wt.id,
+                branch: wt.branch,
+                upstreamBranch: upstreamBranch,
+                worktreePath: wt.path
+            ))
+        }
         await prManager.fetchAll(worktrees: infos)
         let statuses = await prManager.allStatuses()
         return try RPCResponse(result: PRListResult(statuses: statuses))
@@ -242,16 +255,15 @@ public final class RPCRouter: Sendable {
     private func handlePRRefresh(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PRRefreshParams.self, from: paramsData)
 
-        // Look up worktree and repo to get branch and repoPath
-        guard let wt = try await db.worktrees.get(id: params.worktreeID),
-              let repo = try await db.repos.get(id: wt.repoID) else {
+        // Run targeted refresh in the worktree so gh can see worktree-local branch config.
+        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
             return try RPCResponse(result: PRRefreshResult(status: nil))
         }
 
         let status = await prManager.refresh(
             worktreeID: wt.id,
             branch: wt.branch,
-            repoPath: repo.path
+            repoPath: wt.path
         )
         return try RPCResponse(result: PRRefreshResult(status: status))
     }

@@ -67,6 +67,25 @@ public struct GitManager: Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Returns the upstream head branch name configured for the current worktree branch.
+    public func upstreamBranchName(worktreePath: String, branch: String) async -> String? {
+        guard let mergeRef = try? await run(
+            arguments: ["config", "--get", "branch.\(branch).merge"],
+            at: worktreePath
+        ) else {
+            return nil
+        }
+
+        let trimmed = mergeRef.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "refs/heads/"
+        if trimmed.hasPrefix(prefix) {
+            let branchName = String(trimmed.dropFirst(prefix.count))
+            return branchName.isEmpty ? nil : branchName
+        }
+
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     /// Fetches from origin for the given branch.
     public func fetch(repoPath: String, branch: String) async throws {
         _ = try await run(arguments: ["fetch", "origin", branch], at: repoPath)
