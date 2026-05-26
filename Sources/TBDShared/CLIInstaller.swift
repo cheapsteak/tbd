@@ -1,6 +1,31 @@
 import Foundation
 import os
 
+// MARK: - Why hard links, not symlinks
+//
+// `~/.local/bin/tbd` is installed as a **hard link** to the daemon's sibling
+// TBDCLI binary. The TBDCLI binary lives inside an ephemeral worktree's
+// `.build/.../TBDCLI` — when that worktree is archived (`git worktree remove`)
+// or pruned (`git worktree prune`), a *symlink* installed at `~/.local/bin/tbd`
+// would dangle and the user's `tbd` command would 404 until the next TBDApp
+// launch re-installed it.
+//
+// A hard link shares the inode with `.build/.../TBDCLI`. When the worktree's
+// `.build` dir is removed, the file's link count drops by 1 but
+// `~/.local/bin/tbd` keeps a reference, so the on-disk binary stays alive and
+// `tbd` keeps working.
+//
+// Trade-off: a subsequent `swift build` in any worktree writes a *new* inode
+// at its `.build/.../TBDCLI`. Our existing install path still points at the
+// older inode (an older version of TBDCLI, but still runs). The launch-time
+// `CLIInstallerCoordinator` notices the inode mismatch and offers to
+// "Refresh" — same UX the symlink-staleness check already provided.
+//
+// This is the same trick `scripts/restart.sh` applies to the `.app` bundle
+// binary (see lines 57–67 of that file) for the same fragility reason:
+// worktrees come and go but the kernel-reported exec path must stay stable.
+// Precedent: PR #195 ("Fix: Make macOS notification banners actually fire").
+
 // CLIInstaller is currently only invoked from TBDApp; using com.tbd.app keeps
 // the established subsystem taxonomy from docs/diagnostics-strategy.md intact.
 private let logger = Logger(subsystem: "com.tbd.app", category: "cli-installer")
@@ -9,16 +34,17 @@ public enum CLIInstallState: Equatable, Sendable {
     case notInstalled
     case installed(target: String)
     case stale(currentTarget: String)
-    /// A non-symlink (regular file or directory) exists at `symlinkPath`.
-    /// `install()` will overwrite it, but the UI should warn before doing so.
-    case nonSymlink
+    /// A directory (or other non-regular-file) occupies `installPath`.
+    /// `install()` will refuse to overwrite a directory; the UI surfaces a
+    /// manual-removal prompt instead.
+    case unexpectedFileType
 }
 
 /// What the launch-time check should prompt the user about, if anything.
 public enum CLILaunchPromptKind: Equatable, Sendable {
     case missing
     case stale(current: String)
-    case nonSymlink
+    case unexpectedFileType
 }
 
 public extension CLIInstallState {
@@ -26,9 +52,10 @@ public extension CLIInstallState {
     ///
     /// `userPreviouslyDismissed` should be true if the user clicked "Not Now"
     /// on a previous `.notInstalled` prompt — in which case we suppress the
-    /// re-prompt to avoid nagging. `.stale` and `.nonSymlink` are always
-    /// surfaced because they represent a broken install the user likely wants
-    /// fixed (and they explicitly opted in by installing once before).
+    /// re-prompt to avoid nagging. `.stale` and `.unexpectedFileType` are
+    /// always surfaced because they represent a broken install the user
+    /// likely wants fixed (and they explicitly opted in by installing once
+    /// before).
     func launchPromptKind(userPreviouslyDismissed: Bool) -> CLILaunchPromptKind? {
         switch self {
         case .installed:
@@ -37,27 +64,27 @@ public extension CLIInstallState {
             return userPreviouslyDismissed ? nil : .missing
         case .stale(let current):
             return .stale(current: current)
-        case .nonSymlink:
-            return .nonSymlink
+        case .unexpectedFileType:
+            return .unexpectedFileType
         }
     }
 }
 
 public struct CLIInstallResult: Equatable, Sendable {
-    public let symlinkPath: String
+    public let installPath: String
     public let target: String
     public let onPath: Bool
     public let suggestedShellRC: String?
     public let exportLine: String?
 
     public init(
-        symlinkPath: String,
+        installPath: String,
         target: String,
         onPath: Bool,
         suggestedShellRC: String?,
         exportLine: String?
     ) {
-        self.symlinkPath = symlinkPath
+        self.installPath = installPath
         self.target = target
         self.onPath = onPath
         self.suggestedShellRC = suggestedShellRC
@@ -66,7 +93,11 @@ public struct CLIInstallResult: Equatable, Sendable {
 }
 
 public enum CLIInstallerError: Error, Equatable {
-    case symlinkCreationFailed(String)
+    case linkCreationFailed(String)
+    /// link(2) returned EXDEV — source and install path are on different
+    /// filesystems. Hard links can't span volumes, so the only fixes are
+    /// moving the project or changing the install location.
+    case crossDeviceLink(target: String, installPath: String)
 }
 
 extension CLIInstallerError: LocalizedError {
@@ -76,28 +107,38 @@ extension CLIInstallerError: LocalizedError {
     // user-facing alert and the os.Logger error line.
     public var errorDescription: String? {
         switch self {
-        case .symlinkCreationFailed(let reason):
-            return "Symlink creation failed: \(reason)"
+        case .linkCreationFailed(let reason):
+            return "Link creation failed: \(reason)"
+        case .crossDeviceLink(let target, let installPath):
+            return "Can't hard-link \(installPath) → \(target): they're on different filesystems. TBD installs the CLI as a hard link, which only works within a single volume. Move your project to the same volume as your home directory, or pick a different install location on the same volume as your project."
         }
     }
 }
 
 public struct CLIInstaller: Sendable {
-    public let symlinkPath: String
+    public let installPath: String
     public let pathProbe: @Sendable () async -> String?
     public let homeDir: String
     public let shellPath: String
+    /// Injectable hook around link(2). Returns 0 on success, or the errno
+    /// value on failure — lets tests simulate EXDEV / EACCES without touching
+    /// real filesystems on different volumes.
+    public let linkFunc: @Sendable (String, String) -> Int32
 
     public init(
-        symlinkPath: String? = nil,
+        installPath: String? = nil,
         homeDir: String = NSHomeDirectory(),
         shellPath: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
-        pathProbe: (@Sendable () async -> String?)? = nil
+        pathProbe: (@Sendable () async -> String?)? = nil,
+        linkFunc: (@Sendable (String, String) -> Int32)? = nil
     ) {
         self.homeDir = homeDir
-        self.symlinkPath = symlinkPath ?? (homeDir as NSString).appendingPathComponent(".local/bin/tbd")
+        self.installPath = installPath ?? (homeDir as NSString).appendingPathComponent(".local/bin/tbd")
         self.shellPath = shellPath
         self.pathProbe = pathProbe ?? { await Self.defaultLoginShellPathProbe(shellPath: shellPath) }
+        self.linkFunc = linkFunc ?? { src, dst in
+            link(src, dst) == 0 ? 0 : errno
+        }
     }
 
     /// Compute the TBDCLI path given the daemon's executable path.
@@ -106,94 +147,109 @@ public struct CLIInstaller: Sendable {
         return (dir as NSString).appendingPathComponent("TBDCLI")
     }
 
-    /// Inspect the symlink. Pass the expected target (resolved daemon-sibling
-    /// path) to determine staleness. If `expectedTarget` is nil, only checks
-    /// that the symlink exists and points at a real file.
+    /// Inspect the install path. Pass the expected target (resolved
+    /// daemon-sibling path) to determine staleness by **inode comparison** —
+    /// our install is a hard link, so two paths sharing the same `(st_dev,
+    /// st_ino)` mean the kernel sees them as the same file.
+    ///
+    /// Legacy symlinks (installed by versions of TBD before this PR) are
+    /// reported as `.stale` so the launch-time `CLIInstallerCoordinator`
+    /// prompt re-installs them as hard links on the next refresh.
     public func currentState(expectedTarget: String?) -> CLIInstallState {
-        let fm = FileManager.default
-        let attrs = try? fm.attributesOfItem(atPath: symlinkPath)
-        guard let attrs, attrs[.type] as? FileAttributeType == .typeSymbolicLink else {
-            if (attrs?[.type] as? FileAttributeType) != nil {
-                return .nonSymlink
-            }
+        var st = stat()
+        guard lstat(installPath, &st) == 0 else {
             return .notInstalled
         }
-        let destination: String
-        do {
-            destination = try fm.destinationOfSymbolicLink(atPath: symlinkPath)
-        } catch {
-            // Symlink confirmed present but unreadable (exotic permission
-            // failure). Treat as stale so the prompt still fires even when
-            // the user has previously dismissed the .notInstalled prompt —
-            // .notInstalled would be silently swallowed by the dismissal flag.
-            return .stale(currentTarget: symlinkPath)
+
+        let mode = st.st_mode & S_IFMT
+        if mode == S_IFLNK {
+            // Legacy install from before hard-link migration (or someone
+            // replaced our hard link). Surface as stale so the launch-time
+            // prompt re-installs as a hard link on the next refresh —
+            // intentional upgrade path for users crossing the migration.
+            let dest = (try? FileManager.default.destinationOfSymbolicLink(atPath: installPath)) ?? installPath
+            let resolved = Self.absolutize(
+                dest,
+                relativeTo: (installPath as NSString).deletingLastPathComponent,
+                homeDir: homeDir
+            )
+            return .stale(currentTarget: resolved)
+        }
+        if mode == S_IFDIR {
+            return .unexpectedFileType
+        }
+        guard mode == S_IFREG else {
+            return .unexpectedFileType
         }
 
-        let resolvedDest = Self.absolutize(
-            destination,
-            relativeTo: (symlinkPath as NSString).deletingLastPathComponent,
-            homeDir: homeDir
-        )
-
-        if let expectedTarget {
-            // expectedTarget is always absolute (callers pass an absolute
-            // path resolved from the daemon's executable). `relativeTo`
-            // is therefore inert — pass `homeDir` only because absolutize
-            // requires the parameter.
-            let expectedAbs = Self.absolutize(expectedTarget, relativeTo: homeDir, homeDir: homeDir)
-            if resolvedDest == expectedAbs && fm.fileExists(atPath: resolvedDest) {
-                return .installed(target: resolvedDest)
-            }
-            return .stale(currentTarget: resolvedDest)
-        } else {
-            if fm.fileExists(atPath: resolvedDest) {
-                return .installed(target: resolvedDest)
-            }
-            return .stale(currentTarget: resolvedDest)
+        guard let expectedTarget else {
+            // Without a reference target we can only confirm "something is
+            // here". Treat as installed-pointing-at-self.
+            return .installed(target: installPath)
         }
+
+        var expectedStat = stat()
+        guard stat(expectedTarget, &expectedStat) == 0 else {
+            // Expected target gone — our install path still works (hard
+            // link keeps the inode alive) but it's structurally stale.
+            return .stale(currentTarget: installPath)
+        }
+        if st.st_dev == expectedStat.st_dev && st.st_ino == expectedStat.st_ino {
+            return .installed(target: expectedTarget)
+        }
+        return .stale(currentTarget: installPath)
     }
 
-    /// Create or replace the symlink to point at `target`. Idempotent.
+    /// Create or replace the install path as a hard link to `target`.
+    /// Idempotent.
     public func install(target: String) async throws -> CLIInstallResult {
         let fm = FileManager.default
-        let parent = (symlinkPath as NSString).deletingLastPathComponent
+        let parent = (installPath as NSString).deletingLastPathComponent
         if !fm.fileExists(atPath: parent) {
             do {
                 try fm.createDirectory(atPath: parent, withIntermediateDirectories: true)
             } catch {
-                throw CLIInstallerError.symlinkCreationFailed("create parent: \(error.localizedDescription)")
+                throw CLIInstallerError.linkCreationFailed("create parent: \(error.localizedDescription)")
             }
         }
 
-        // Remove any existing entry (symlink or file). Use lstat so we don't
-        // follow a broken symlink and miss the removal. Refuse to recurse
-        // into a directory: FileManager.removeItem deletes directories
-        // recursively, and the "Replace the file at …" alert doesn't signal
-        // that scope. A directory at this path is improbable in practice,
-        // but the safer behavior is to surface the situation to the user.
+        // Remove any existing entry (symlink, hard link, or file). Use lstat
+        // so we don't follow a broken symlink and miss the removal. Refuse
+        // to recurse into a directory: FileManager.removeItem deletes
+        // directories recursively, and the "Replace the file at …" alert
+        // doesn't signal that scope. A directory at this path is improbable
+        // in practice, but the safer behavior is to surface the situation to
+        // the user.
         var st = stat()
-        if lstat(symlinkPath, &st) == 0 {
+        if lstat(installPath, &st) == 0 {
             if (st.st_mode & S_IFMT) == S_IFDIR {
-                throw CLIInstallerError.symlinkCreationFailed(
-                    "a directory exists at \(symlinkPath); remove it manually before installing"
+                throw CLIInstallerError.linkCreationFailed(
+                    "a directory exists at \(installPath); remove it manually before installing"
                 )
             }
             do {
-                try fm.removeItem(atPath: symlinkPath)
+                try fm.removeItem(atPath: installPath)
             } catch {
-                throw CLIInstallerError.symlinkCreationFailed("remove existing: \(error.localizedDescription)")
+                throw CLIInstallerError.linkCreationFailed("remove existing: \(error.localizedDescription)")
             }
         }
 
-        do {
-            try fm.createSymbolicLink(atPath: symlinkPath, withDestinationPath: target)
-        } catch {
-            throw CLIInstallerError.symlinkCreationFailed(error.localizedDescription)
+        // Direct link(2) instead of FileManager.linkItem so we can read errno
+        // cleanly and distinguish EXDEV (cross-filesystem) from generic
+        // failures. Argument order matches link(2): first is the **existing**
+        // source, second is the new name.
+        let linkErr = linkFunc(target, installPath)
+        if linkErr != 0 {
+            if linkErr == EXDEV {
+                throw CLIInstallerError.crossDeviceLink(target: target, installPath: installPath)
+            }
+            let msg = String(cString: strerror(linkErr))
+            throw CLIInstallerError.linkCreationFailed(msg)
         }
 
         let pathInfo = await pathStatus()
         return CLIInstallResult(
-            symlinkPath: symlinkPath,
+            installPath: installPath,
             target: target,
             onPath: pathInfo.onPath,
             suggestedShellRC: pathInfo.onPath ? nil : pathInfo.shellRC,
@@ -201,10 +257,11 @@ public struct CLIInstaller: Sendable {
         )
     }
 
-    /// Compute current path status (whether the symlink's parent dir is on the
-    /// user's login-shell PATH, plus suggested rc / export line if not).
+    /// Compute current path status (whether the install path's parent dir is
+    /// on the user's login-shell PATH, plus suggested rc / export line if
+    /// not).
     public func pathStatus() async -> (onPath: Bool, shellRC: String, exportLine: String) {
-        let binDir = (symlinkPath as NSString).deletingLastPathComponent
+        let binDir = (installPath as NSString).deletingLastPathComponent
         let probed = await pathProbe()
         let onPath = Self.directoryIsOnPath(binDir, pathString: probed, homeDir: homeDir)
         let (rc, line) = Self.shellRCAndExport(forShellPath: shellPath, binDir: binDir, homeDir: homeDir)
@@ -337,4 +394,3 @@ private final class OnceFlag: @unchecked Sendable {
         return old
     }
 }
-

@@ -12,7 +12,7 @@ final class CLIInstallerCoordinator {
     private let installer = CLIInstaller()
 
     /// Set after `checkOnLaunch` runs, so daemon reconnects within the same
-    /// app session don't keep re-prompting for stale/nonSymlink states.
+    /// app session don't keep re-prompting for stale/unexpectedFileType states.
     private var hasCheckedThisSession = false
 
     /// Persists across launches. Set when the user clicks "Not Now" on the
@@ -31,10 +31,10 @@ final class CLIInstallerCoordinator {
     }
 
     /// Called once at end of `connectAndLoadInitialState`. Surfaces a one-click
-    /// prompt if the symlink is missing or stale. Silent if everything's healthy
+    /// prompt if the CLI install is missing or stale. Silent if everything's healthy
     /// or if the user previously dismissed the missing-CLI prompt. No-op on
     /// subsequent calls within the same app session — daemon reconnects
-    /// shouldn't re-prompt for stale/nonSymlink.
+    /// shouldn't re-prompt for stale/unexpectedFileType.
     func checkOnLaunch() async {
         guard !hasCheckedThisSession else { return }
         guard let target = await fetchExpectedTarget() else {
@@ -46,9 +46,9 @@ final class CLIInstallerCoordinator {
         let state = installer.currentState(expectedTarget: target)
 
         if case .installed = state {
-            logger.debug("CLI symlink installed and current at \(self.installer.symlinkPath, privacy: .public)")
+            logger.debug("CLI installed and current at \(self.installer.installPath, privacy: .public)")
             if notInstalledDismissed {
-                logger.info("CLI symlink healthy — clearing prior dismissal")
+                logger.info("CLI install healthy — clearing prior dismissal")
                 notInstalledDismissed = false
             }
             return
@@ -61,11 +61,11 @@ final class CLIInstallerCoordinator {
 
         switch kind {
         case .missing:
-            logger.info("CLI symlink missing — prompting to install")
+            logger.info("CLI install missing — prompting to install")
         case .stale(let current):
-            logger.info("CLI symlink stale: current=\(current, privacy: .public) expected=\(target, privacy: .public) — prompting to refresh")
-        case .nonSymlink:
-            logger.info("Non-symlink at \(self.installer.symlinkPath, privacy: .public) — prompting to replace")
+            logger.info("CLI install stale: current=\(current, privacy: .public) expected=\(target, privacy: .public) — prompting to refresh")
+        case .unexpectedFileType:
+            logger.info("Unexpected file at \(self.installer.installPath, privacy: .public) — prompting to replace")
         }
         await presentLaunchPrompt(target: target, kind: kind, recordDismissalOnDecline: true)
     }
@@ -88,8 +88,8 @@ final class CLIInstallerCoordinator {
             kind = .missing
         case .stale(let current):
             kind = .stale(current: current)
-        case .nonSymlink:
-            kind = .nonSymlink
+        case .unexpectedFileType:
+            kind = .unexpectedFileType
         }
         await presentLaunchPrompt(target: target, kind: kind, recordDismissalOnDecline: false)
     }
@@ -117,12 +117,12 @@ final class CLIInstallerCoordinator {
     }
 
     private func presentLaunchPrompt(target: String, kind: CLILaunchPromptKind, recordDismissalOnDecline: Bool) async {
-        let symlinkPath = installer.symlinkPath
-        // Directory at the symlink path needs different copy and a single
+        let installPath = installer.installPath
+        // Directory at the install path needs different copy and a single
         // button: install() refuses to recursively delete a directory, so
         // there's no "Replace" path to offer.
-        if case .nonSymlink = kind, Self.isDirectory(at: symlinkPath) {
-            presentDirectoryAtSymlinkPathAlert(symlinkPath: symlinkPath)
+        if case .unexpectedFileType = kind, Self.isDirectory(at: installPath) {
+            presentDirectoryAtInstallPathAlert(installPath: installPath)
             return
         }
 
@@ -132,15 +132,15 @@ final class CLIInstallerCoordinator {
         switch kind {
         case .missing:
             alert.messageText = "Install the tbd command-line tool?"
-            alert.informativeText = "TBD can add a `tbd` command at \(symlinkPath) so you can launch and control TBD from the terminal. No sudo required."
+            alert.informativeText = "TBD can add a `tbd` command at \(installPath) so you can launch and control TBD from the terminal. No sudo required."
             primaryButton = "Install"
-        case .stale(let current):
+        case .stale:
             alert.messageText = "Refresh the tbd command-line tool?"
-            alert.informativeText = "Your `tbd` symlink at \(symlinkPath) points at \(current), which doesn't match this TBD's CLI. Update it?"
+            alert.informativeText = "Your `tbd` at \(installPath) is an older version of TBD's CLI. Update it to match this TBD?"
             primaryButton = "Refresh"
-        case .nonSymlink:
-            alert.messageText = "Replace the file at \(symlinkPath)?"
-            alert.informativeText = "A file already exists at \(symlinkPath). TBD can replace it with a symlink to this TBD's CLI."
+        case .unexpectedFileType:
+            alert.messageText = "Replace the file at \(installPath)?"
+            alert.informativeText = "A file already exists at \(installPath). TBD can replace it with a link to this TBD's CLI."
             primaryButton = "Replace"
         }
         alert.addButton(withTitle: primaryButton)
@@ -152,7 +152,7 @@ final class CLIInstallerCoordinator {
         } else if recordDismissalOnDecline, case .missing = kind {
             // User declined the auto-launch missing-CLI prompt. Suppress on
             // future launches until they install — manually, via menu, or
-            // after we observe a healthy `.installed` state. Stale/nonSymlink
+            // after we observe a healthy `.installed` state. Stale/unexpectedFileType
             // dismissals are NOT remembered: those are broken-install states
             // they opted into. Menu-invoked declines also aren't remembered
             // (the user explicitly opened the dialog themselves).
@@ -162,7 +162,7 @@ final class CLIInstallerCoordinator {
     }
 
     private func performInstall(target: String) async {
-        let symlinkDir = (installer.symlinkPath as NSString).deletingLastPathComponent
+        let installDir = (installer.installPath as NSString).deletingLastPathComponent
         let result: CLIInstallResult
         do {
             // install() is async — its PATH probe bridges Process termination
@@ -180,7 +180,7 @@ final class CLIInstallerCoordinator {
             return
         }
 
-        logger.info("CLI symlink installed: \(result.symlinkPath, privacy: .public) -> \(result.target, privacy: .public) onPath=\(result.onPath, privacy: .public)")
+        logger.info("CLI installed: \(result.installPath, privacy: .public) -> \(result.target, privacy: .public) onPath=\(result.onPath, privacy: .public)")
         // Re-arm the launch prompt for any future unintended deletion.
         notInstalledDismissed = false
 
@@ -188,16 +188,16 @@ final class CLIInstallerCoordinator {
         alert.alertStyle = .informational
         if result.onPath {
             alert.messageText = "tbd installed"
-            alert.informativeText = "Symlink created at \(result.symlinkPath). You can now run `tbd` from any terminal."
+            alert.informativeText = "`tbd` is now available at \(result.installPath). You can run it from any terminal."
             alert.addButton(withTitle: "OK")
         } else {
             alert.messageText = "tbd installed — one more step"
             let rc = result.suggestedShellRC ?? "your shell rc file"
             let line = result.exportLine ?? ""
             alert.informativeText = """
-            Symlink created at \(result.symlinkPath).
+            `tbd` is now available at \(result.installPath).
 
-            \(symlinkDir) is not on your shell's PATH. Add this line to \(rc) and restart your shell:
+            \(installDir) is not on your shell's PATH. Add this line to \(rc) and restart your shell:
 
             \(line)
             """
@@ -216,7 +216,7 @@ final class CLIInstallerCoordinator {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "tbd is already installed"
-        alert.informativeText = "\(installer.symlinkPath) → \(target)"
+        alert.informativeText = "\(installer.installPath) is a hard link to \(target)"
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Reinstall")
         if alert.runModal() == .alertSecondButtonReturn {
@@ -224,11 +224,11 @@ final class CLIInstallerCoordinator {
         }
     }
 
-    private func presentDirectoryAtSymlinkPathAlert(symlinkPath: String) {
-        logger.info("Directory at \(symlinkPath, privacy: .public) — surfacing manual-removal alert instead of Replace prompt")
+    private func presentDirectoryAtInstallPathAlert(installPath: String) {
+        logger.info("Directory at \(installPath, privacy: .public) — surfacing manual-removal alert instead of Replace prompt")
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "A directory exists at \(symlinkPath)"
+        alert.messageText = "A directory exists at \(installPath)"
         alert.informativeText = "TBD won't replace a directory automatically. Remove it manually (along with anything you want to keep) and try installing again from the menu."
         alert.addButton(withTitle: "OK")
         alert.runModal()
