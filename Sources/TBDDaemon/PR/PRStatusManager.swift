@@ -19,11 +19,11 @@ public actor PRStatusManager {
     public func invalidate(worktreeID: UUID) { cache.removeValue(forKey: worktreeID) }
 
     /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
-    /// worktrees: list of (id, branch, repoPath) for active non-main worktrees.
-    public func fetchAll(worktrees: [(id: UUID, branch: String, repoPath: String)]) async {
+    /// worktrees: list of (id, branch, upstreamBranch, worktreePath) for active non-main worktrees.
+    public func fetchAll(worktrees: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String)]) async {
         guard !worktrees.isEmpty else { return }
         // All worktrees share one repo; any path works as gh's working directory for auth.
-        let repoPath = worktrees[0].repoPath
+        let repoPath = worktrees[0].worktreePath
 
         guard let jsonData = await runGHGraphQL(repoPath: repoPath) else { return }
 
@@ -55,7 +55,11 @@ public actor PRStatusManager {
         // limited to 100 PRs across all repos, so older PRs may not appear.
         // Those entries may have been populated by a targeted `refresh` call.
         for wt in worktrees {
-            if let node = byBranch[wt.branch] {
+            let candidates = Self.branchCandidates(
+                localBranch: wt.branch,
+                upstreamBranch: wt.upstreamBranch
+            )
+            if let node = candidates.compactMap({ byBranch[$0] }).first {
                 cache[wt.id] = PRStatus(
                     number: node.number,
                     url: node.url,
@@ -66,25 +70,33 @@ public actor PRStatusManager {
     }
 
     /// Refresh a single worktree using `gh pr view`. Used for on-select refresh.
-    public func refresh(worktreeID: UUID, branch: String, repoPath: String) async -> PRStatus? {
-        let args = ["pr", "view", branch,
-                    "--json", "number,url,state,mergeStateStatus,reviewDecision"]
-        guard let output = await runGH(args: args, repoPath: repoPath),
-              let data = output.data(using: .utf8),
-              let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
-            // gh exited non-zero or parse failed — leave cache unchanged
-            return cache[worktreeID]
+    public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, repoPath: String) async -> PRStatus? {
+        let candidates = Self.branchCandidates(
+            localBranch: branch,
+            upstreamBranch: upstreamBranch
+        )
+        for candidate in candidates {
+            let args = ["pr", "view", candidate,
+                        "--json", "number,url,state,mergeStateStatus,reviewDecision"]
+            guard let output = await runGH(args: args, repoPath: repoPath),
+                  let data = output.data(using: .utf8),
+                  let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
+                continue
+            }
+
+            let status = PRStatus(
+                number: obj.number,
+                url: obj.url,
+                state: Self.mapState(ghState: obj.state,
+                                     mergeStateStatus: obj.mergeStateStatus,
+                                     reviewDecision: obj.reviewDecision ?? "")
+            )
+            cache[worktreeID] = status
+            return status
         }
 
-        let status = PRStatus(
-            number: obj.number,
-            url: obj.url,
-            state: Self.mapState(ghState: obj.state,
-                                 mergeStateStatus: obj.mergeStateStatus,
-                                 reviewDecision: obj.reviewDecision ?? "")
-        )
-        cache[worktreeID] = status
-        return status
+        // gh exited non-zero or parse failed for every candidate — leave cache unchanged.
+        return cache[worktreeID]
     }
 
     /// For tests only: seed a cache entry directly.
@@ -113,6 +125,13 @@ public actor PRStatusManager {
         case "CLOSED": return 1
         default: return 0
         }
+    }
+
+    static func branchCandidates(localBranch: String, upstreamBranch: String?) -> [String] {
+        guard let upstreamBranch, upstreamBranch != localBranch else {
+            return [localBranch]
+        }
+        return [localBranch, upstreamBranch]
     }
 
     // MARK: - JSON parsing (internal but static for testability)
