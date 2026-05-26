@@ -254,4 +254,11 @@ enum CodexProfileWriter {
 
 enum CodexSpawnCommandBuilder {
     static let command = "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox"
+
+    static func build(initialPrompt: String?) -> String {
+        guard let initialPrompt, !initialPrompt.isEmpty else {
+            return command
+        }
+        return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
+    }
 }

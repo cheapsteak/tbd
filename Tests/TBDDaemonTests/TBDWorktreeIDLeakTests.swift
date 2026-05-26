@@ -508,3 +508,52 @@ func testHandleTerminalCreateCodexLaunchCommand() async throws {
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "created codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
 }
+
+@Test("handleTerminalCreate passes initial prompt to fresh Codex sessions")
+func testHandleTerminalCreateCodexInitialPrompt() async throws {
+    installCodexTestHomeOverride()
+    defer { unsetenv("TBD_TEST_CODEX_HOME") }
+
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = RecordedCommands()
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in
+        recorded.append(args)
+    })
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: tmux,
+            hooks: HookResolver()
+        ),
+        tmux: tmux
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-create-codex-prompt", displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-create-codex-prompt",
+        branch: "tbd/wt-create-codex-prompt",
+        path: "/tmp/fake-repo-create-codex-prompt/wt-create-codex-prompt",
+        tmuxServer: "tbd-c0de9876"
+    )
+
+    let request = try RPCRequest(
+        method: RPCMethod.terminalCreate,
+        params: TerminalCreateParams(
+            worktreeID: wt.id,
+            type: .codex,
+            prompt: "don't ship regressions"
+        )
+    )
+    let response = await router.handle(request)
+    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+    let bodies = newWindowBodies(recorded.snapshot())
+    #expect(bodies.contains {
+        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox 'don'\\''t ship regressions'")
+    }, "fresh codex tab must append the initial prompt as a shell-escaped positional argument; got bodies: \(bodies)")
+}
