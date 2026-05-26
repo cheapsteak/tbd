@@ -32,7 +32,7 @@ struct WorktreeRowConflictFallbackTests {
     }
 
     @Test("conflict fallback appears when a PR is present and the branch has conflicts")
-    func prStatusSuppressesConflictFallback() {
+    func conflictFallbackAppearsWithPR() {
         let showsFallback = WorktreeRowConflictFallback.shouldShow(
             prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .pending),
             hasConflicts: true,
