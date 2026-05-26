@@ -395,6 +395,55 @@ private func inodeOf(_ path: String) -> (dev: Int32, ino: UInt64)? {
     #expect(line == "export PATH=\"/opt/tbd/bin:$PATH\"")
 }
 
+// MARK: - link(2) error routing
+
+@Test func installThrowsCrossDeviceLinkOnEXDEV() async throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("binary".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+
+    let installer = CLIInstaller(
+        installPath: installPath,
+        homeDir: home.path,
+        pathProbe: { nil },
+        linkFunc: { _, _ in EXDEV }
+    )
+    do {
+        _ = try await installer.install(target: target)
+        Issue.record("expected crossDeviceLink to throw")
+    } catch CLIInstallerError.crossDeviceLink(let t, let i) {
+        #expect(t == target)
+        #expect(i == installPath)
+        // Sanity-check the user-facing message mentions the actionable bit.
+        let desc = (CLIInstallerError.crossDeviceLink(target: t, installPath: i) as LocalizedError).errorDescription ?? ""
+        #expect(desc.contains("different filesystems"))
+    }
+}
+
+@Test func installThrowsLinkCreationFailedOnNonEXDEVError() async throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    try makeFile(target, contents: Data("binary".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
+
+    let installer = CLIInstaller(
+        installPath: installPath,
+        homeDir: home.path,
+        pathProbe: { nil },
+        linkFunc: { _, _ in EACCES }
+    )
+    do {
+        _ = try await installer.install(target: target)
+        Issue.record("expected linkCreationFailed to throw")
+    } catch CLIInstallerError.linkCreationFailed(let msg) {
+        let lower = msg.lowercased()
+        #expect(lower.contains("permission") || lower.contains("denied"))
+    }
+}
+
 @Test func pathProbeReturningNilTreatedAsOffPath() async throws {
     let home = try TempHome()
     defer { home.cleanup() }

@@ -10,6 +10,11 @@ struct DoctorCommand: AsyncParsableCommand {
         Verifies that ~/.local/bin/tbd is a hard link to the TBDCLI binary
         sibling to the running daemon. Repairs a missing, stale, or legacy
         symlink install in place. Use --dry-run to inspect without writing.
+
+        Hard links require the install path and the source binary to be on the
+        same filesystem. If they aren't (e.g. your project lives on a separate
+        volume from your home directory), repair will fail with a cross-device
+        error and you'll need to move the project or change the install location.
         """
     )
 

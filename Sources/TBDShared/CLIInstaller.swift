@@ -94,6 +94,10 @@ public struct CLIInstallResult: Equatable, Sendable {
 
 public enum CLIInstallerError: Error, Equatable {
     case linkCreationFailed(String)
+    /// link(2) returned EXDEV — source and install path are on different
+    /// filesystems. Hard links can't span volumes, so the only fixes are
+    /// moving the project or changing the install location.
+    case crossDeviceLink(target: String, installPath: String)
 }
 
 extension CLIInstallerError: LocalizedError {
@@ -105,6 +109,8 @@ extension CLIInstallerError: LocalizedError {
         switch self {
         case .linkCreationFailed(let reason):
             return "Link creation failed: \(reason)"
+        case .crossDeviceLink(let target, let installPath):
+            return "Can't hard-link \(installPath) → \(target): they're on different filesystems. TBD installs the CLI as a hard link, which only works within a single volume. Move your project to the same volume as your home directory, or pick a different install location on the same volume as your project."
         }
     }
 }
@@ -114,17 +120,25 @@ public struct CLIInstaller: Sendable {
     public let pathProbe: @Sendable () async -> String?
     public let homeDir: String
     public let shellPath: String
+    /// Injectable hook around link(2). Returns 0 on success, or the errno
+    /// value on failure — lets tests simulate EXDEV / EACCES without touching
+    /// real filesystems on different volumes.
+    public let linkFunc: @Sendable (String, String) -> Int32
 
     public init(
         installPath: String? = nil,
         homeDir: String = NSHomeDirectory(),
         shellPath: String = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
-        pathProbe: (@Sendable () async -> String?)? = nil
+        pathProbe: (@Sendable () async -> String?)? = nil,
+        linkFunc: (@Sendable (String, String) -> Int32)? = nil
     ) {
         self.homeDir = homeDir
         self.installPath = installPath ?? (homeDir as NSString).appendingPathComponent(".local/bin/tbd")
         self.shellPath = shellPath
         self.pathProbe = pathProbe ?? { await Self.defaultLoginShellPathProbe(shellPath: shellPath) }
+        self.linkFunc = linkFunc ?? { src, dst in
+            link(src, dst) == 0 ? 0 : errno
+        }
     }
 
     /// Compute the TBDCLI path given the daemon's executable path.
@@ -220,12 +234,17 @@ public struct CLIInstaller: Sendable {
             }
         }
 
-        do {
-            // FileManager.linkItem(atPath:toPath:) wraps link(2): first
-            // argument is the **existing** source, second is the new name.
-            try fm.linkItem(atPath: target, toPath: installPath)
-        } catch {
-            throw CLIInstallerError.linkCreationFailed(error.localizedDescription)
+        // Direct link(2) instead of FileManager.linkItem so we can read errno
+        // cleanly and distinguish EXDEV (cross-filesystem) from generic
+        // failures. Argument order matches link(2): first is the **existing**
+        // source, second is the new name.
+        let linkErr = linkFunc(target, installPath)
+        if linkErr != 0 {
+            if linkErr == EXDEV {
+                throw CLIInstallerError.crossDeviceLink(target: target, installPath: installPath)
+            }
+            let msg = String(cString: strerror(linkErr))
+            throw CLIInstallerError.linkCreationFailed(msg)
         }
 
         let pathInfo = await pathStatus()
