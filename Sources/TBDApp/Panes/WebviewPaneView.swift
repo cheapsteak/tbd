@@ -1,23 +1,256 @@
 import SwiftUI
 import WebKit
 
+@MainActor
+protocol WebviewFindClient: AnyObject {
+    func find(_ string: String, backwards: Bool, completionHandler: @escaping (Bool) -> Void)
+}
+
+extension WKWebView: WebviewFindClient {
+    func find(_ string: String, backwards: Bool, completionHandler: @escaping (Bool) -> Void) {
+        let config = WKFindConfiguration()
+        config.backwards = backwards
+        config.wraps = true
+        find(string, configuration: config) { result in
+            completionHandler(result.matchFound)
+        }
+    }
+}
+
 struct WebviewPaneView: NSViewRepresentable {
     let url: URL
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.navigationDelegate = context.coordinator
-        webView.load(URLRequest(url: url))
-        return webView
+    func makeNSView(context: Context) -> WebviewPaneHostView {
+        let host = WebviewPaneHostView(url: url)
+        host.webView.navigationDelegate = context.coordinator
+        return host
     }
 
-    func updateNSView(_ webView: WKWebView, context: Context) {
+    func updateNSView(_ host: WebviewPaneHostView, context: Context) {
         // Don't reload on SwiftUI updates — only initial load matters
     }
 
     class Coordinator: NSObject, WKNavigationDelegate {}
+}
+
+final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
+    let webView: WKWebView
+    let findBar = WebviewFindBarView()
+
+    private let findClient: WebviewFindClient
+
+    init(url: URL, findClient: WebviewFindClient? = nil) {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+
+        webView = WKWebView(frame: .zero, configuration: config)
+        self.findClient = findClient ?? webView
+
+        super.init(frame: .zero)
+
+        addSubview(webView)
+        addSubview(findBar)
+        findBar.isHidden = true
+        findBar.onQueryChanged = { [weak self] query in
+            self?.search(query, backwards: false)
+        }
+        findBar.onSubmit = { [weak self] backwards in
+            self?.search(self?.findBar.searchField.stringValue ?? "", backwards: backwards)
+        }
+        findBar.onClose = { [weak self] in
+            self?.hideFindBar()
+        }
+        webView.load(URLRequest(url: url))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func performTextFinderAction(_ sender: Any?) {
+        let action = textFinderAction(from: sender)
+        switch action {
+        case .showFindInterface:
+            showFindBar()
+        case .nextMatch:
+            search(findBar.searchField.stringValue, backwards: false)
+        case .previousMatch:
+            search(findBar.searchField.stringValue, backwards: true)
+        case .hideFindInterface:
+            hideFindBar()
+        default:
+            showFindBar()
+        }
+    }
+
+    func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        true
+    }
+
+    func showFindBar() {
+        findBar.isHidden = false
+        needsLayout = true
+        window?.makeFirstResponder(findBar.searchField)
+        findBar.searchField.selectText(nil)
+    }
+
+    func hideFindBar() {
+        findBar.isHidden = true
+        needsLayout = true
+        window?.makeFirstResponder(webView)
+    }
+
+    override func layout() {
+        super.layout()
+
+        webView.frame = bounds
+
+        let margin: CGFloat = 10
+        let barSize = findBar.fittingSize
+        findBar.frame = CGRect(
+            x: max(margin, bounds.maxX - barSize.width - margin),
+            y: max(margin, bounds.maxY - barSize.height - margin),
+            width: barSize.width,
+            height: barSize.height
+        )
+    }
+
+    private func textFinderAction(from sender: Any?) -> NSTextFinder.Action {
+        let tag = (sender as? NSValidatedUserInterfaceItem)?.tag ?? NSTextFinder.Action.showFindInterface.rawValue
+        return NSTextFinder.Action(rawValue: tag) ?? .showFindInterface
+    }
+
+    private func search(_ query: String, backwards: Bool) {
+        guard !query.isEmpty else { return }
+        findClient.find(query, backwards: backwards) { [weak self] matchFound in
+            self?.findBar.setMatchFound(matchFound)
+        }
+    }
+}
+
+final class WebviewFindBarView: NSVisualEffectView, NSSearchFieldDelegate {
+    let searchField = WebviewFindSearchField()
+
+    var onQueryChanged: ((String) -> Void)?
+    var onSubmit: ((Bool) -> Void)?
+    var onClose: (() -> Void)?
+
+    private let previousButton = NSButton()
+    private let nextButton = NSButton()
+    private let closeButton = NSButton()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+
+        material = .popover
+        blendingMode = .withinWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 8
+
+        searchField.placeholderString = "Find"
+        searchField.delegate = self
+        searchField.target = self
+        searchField.action = #selector(searchFieldSubmitted)
+        searchField.onSubmit = { [weak self] backwards in
+            self?.submit(backwards: backwards)
+        }
+        searchField.onEscape = { [weak self] in
+            self?.onClose?()
+        }
+
+        configureButton(previousButton, symbolName: "chevron.up", action: #selector(previous))
+        configureButton(nextButton, symbolName: "chevron.down", action: #selector(next))
+        configureButton(closeButton, symbolName: "xmark", action: #selector(close))
+
+        [searchField, previousButton, nextButton, closeButton].forEach(addSubview)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var fittingSize: NSSize {
+        NSSize(width: 330, height: 38)
+    }
+
+    override func layout() {
+        super.layout()
+
+        let height: CGFloat = 28
+        let buttonSize = NSSize(width: 28, height: height)
+        let padding: CGFloat = 6
+        let y = (bounds.height - height) / 2
+        let closeX = bounds.maxX - padding - buttonSize.width
+        let nextX = closeX - buttonSize.width
+        let previousX = nextX - buttonSize.width
+
+        closeButton.frame = CGRect(origin: CGPoint(x: closeX, y: y), size: buttonSize)
+        nextButton.frame = CGRect(origin: CGPoint(x: nextX, y: y), size: buttonSize)
+        previousButton.frame = CGRect(origin: CGPoint(x: previousX, y: y), size: buttonSize)
+        searchField.frame = CGRect(
+            x: padding,
+            y: y,
+            width: max(80, previousX - padding - 6),
+            height: height
+        )
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        onQueryChanged?(searchField.stringValue)
+    }
+
+    func submit(backwards: Bool) {
+        onSubmit?(backwards)
+    }
+
+    func setMatchFound(_ matchFound: Bool) {
+        searchField.textColor = matchFound ? .labelColor : .systemRed
+    }
+
+    private func configureButton(_ button: NSButton, symbolName: String, action: Selector) {
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+        button.bezelStyle = .texturedRounded
+        button.isBordered = false
+        button.target = self
+        button.action = action
+    }
+
+    @objc private func previous() {
+        submit(backwards: true)
+    }
+
+    @objc private func next() {
+        submit(backwards: false)
+    }
+
+    @objc private func close() {
+        onClose?()
+    }
+
+    @objc private func searchFieldSubmitted() {
+        submit(backwards: false)
+    }
+}
+
+final class WebviewFindSearchField: NSSearchField {
+    var onSubmit: ((Bool) -> Void)?
+    var onEscape: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        switch event.charactersIgnoringModifiers {
+        case "\r", "\n":
+            onSubmit?(event.modifierFlags.contains(.shift))
+        case "\u{1b}":
+            onEscape?()
+        default:
+            super.keyDown(with: event)
+        }
+    }
 }
