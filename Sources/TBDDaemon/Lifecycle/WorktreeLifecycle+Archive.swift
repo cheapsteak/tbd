@@ -44,9 +44,8 @@ extension WorktreeLifecycle {
 
         // Collect Claude session IDs before archiving so they survive terminal deletion
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
-        let claudeSessionIDs = terminals
-            .sorted(by: { $0.createdAt < $1.createdAt })
-            .compactMap { $0.claudeSessionID }
+        let sortedTerminals = terminals.sorted(by: { $0.createdAt < $1.createdAt })
+        let claudeSessionIDs = sortedTerminals.compactMap { $0.claudeSessionID }
 
         // Sync the branch in DB with what git reports for the worktree path,
         // so a rename done inside the worktree (e.g. `git branch -m`) is
@@ -153,7 +152,7 @@ extension WorktreeLifecycle {
     ///
     /// - Parameters:
     ///   - worktreeID: The archived worktree to revive.
-    ///   - skipClaude: If true, skip launching claude in the first terminal window.
+    ///   - skipClaude: If true, skip launching the primary agent in the first terminal window.
     /// - Returns: The revived worktree.
     public func reviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> Worktree {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {

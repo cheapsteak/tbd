@@ -15,7 +15,11 @@ extension RPCRouter {
             ModelProfileWithUsage(profile: profile, usage: usageByID[profile.id])
         }
         let config = try await db.config.get()
-        return try RPCResponse(result: ModelProfileListResult(profiles: result, defaultID: config.defaultProfileID))
+        return try RPCResponse(result: ModelProfileListResult(
+            profiles: result,
+            defaultID: config.defaultProfileID,
+            primaryAgentPreference: config.primaryAgentPreference
+        ))
     }
 
     // MARK: - Add
@@ -253,6 +257,13 @@ extension RPCRouter {
     func handleModelProfileSetGlobalDefault(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileSetGlobalDefaultParams.self, from: paramsData)
         try await db.config.setDefaultProfileID(params.id)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    func handleModelProfileSetPrimaryAgentPreference(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfileSetPrimaryAgentPreferenceParams.self, from: paramsData)
+        try await db.config.setPrimaryAgentPreference(params.preference)
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }

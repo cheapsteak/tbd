@@ -13,6 +13,7 @@ import TBDShared
     let state = AppState()
     #expect(state.modelProfiles.isEmpty)
     #expect(state.defaultProfileID == nil)
+    #expect(state.primaryAgentPreference == .claude)
 }
 
 @MainActor

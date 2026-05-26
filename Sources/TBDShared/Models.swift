@@ -76,6 +76,26 @@ public enum WorktreeStatus: String, Codable, Sendable {
     case active, archived, main, creating, failed
 }
 
+public enum TerminalKind: String, Codable, Sendable {
+    case shell
+    case claude
+    case codex
+}
+
+public enum PrimaryAgentPreference: String, Codable, Sendable, Equatable, CaseIterable {
+    case claude
+    case codex
+
+    public static let defaultValue: Self = .claude
+
+    public var terminalKind: TerminalKind {
+        switch self {
+        case .claude: return .claude
+        case .codex: return .codex
+        }
+    }
+}
+
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var repoID: UUID
@@ -153,12 +173,6 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
         parentWorktreeID = try c.decodeIfPresent(UUID.self, forKey: .parentWorktreeID)
     }
-}
-
-public enum TerminalKind: String, Codable, Sendable {
-    case shell
-    case claude
-    case codex
 }
 
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
@@ -346,18 +360,25 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
 
 public struct Config: Codable, Sendable, Equatable {
     public var defaultProfileID: UUID?
+    public var primaryAgentPreference: PrimaryAgentPreference
     /// Claude spawn-env setting overrides, keyed by `ClaudeEnvSetting.id`.
     public var envSettingOverrides: [String: ClaudeEnvValue]
 
     public init(defaultProfileID: UUID? = nil,
+                primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
                 envSettingOverrides: [String: ClaudeEnvValue] = [:]) {
         self.defaultProfileID = defaultProfileID
+        self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         defaultProfileID = try c.decodeIfPresent(UUID.self, forKey: .defaultProfileID)
+        primaryAgentPreference = try c.decodeIfPresent(
+            PrimaryAgentPreference.self,
+            forKey: .primaryAgentPreference
+        ) ?? .defaultValue
         envSettingOverrides = try c.decodeIfPresent(
             [String: ClaudeEnvValue].self, forKey: .envSettingOverrides) ?? [:]
     }

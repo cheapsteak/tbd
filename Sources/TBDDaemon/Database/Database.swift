@@ -505,6 +505,10 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "config", column: "claude_env_settings", type: .text)
         }
 
+        migrator.registerMigration("v27_primary_agent_preference") { db in
+            try db.addColumnIfMissing(table: "config", column: "primary_agent_preference", type: .text)
+        }
+
         return migrator
     }
 }

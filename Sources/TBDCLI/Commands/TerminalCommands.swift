@@ -28,10 +28,10 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Command to run in the terminal")
     var cmd: String?
 
-    @Option(name: .long, help: "Terminal type (shell or claude)")
+    @Option(name: .long, help: "Terminal type (shell, claude, or codex)")
     var type: TerminalCreateType?
 
-    @Option(name: .long, help: "Initial prompt to send to the Claude session (requires --type claude)")
+    @Option(name: .long, help: "Initial prompt to send to the spawned agent session (requires --type claude or --type codex)")
     var prompt: String?
 
     @Option(name: .long, help: "Read initial prompt from a file (use - for stdin)")

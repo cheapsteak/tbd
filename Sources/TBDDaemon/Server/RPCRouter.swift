@@ -188,6 +188,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileUpdateBedrock(request.paramsData)
             case RPCMethod.modelProfileSetGlobalDefault:
                 return try await handleModelProfileSetGlobalDefault(request.paramsData)
+            case RPCMethod.modelProfileSetPrimaryAgentPreference:
+                return try await handleModelProfileSetPrimaryAgentPreference(request.paramsData)
             case RPCMethod.modelProfileSetRepoOverride:
                 return try await handleModelProfileSetRepoOverride(request.paramsData)
             case RPCMethod.modelProfileFetchUsage:

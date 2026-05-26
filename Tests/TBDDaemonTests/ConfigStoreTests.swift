@@ -9,6 +9,7 @@ struct ConfigStoreTests {
         let db = try TBDDatabase(inMemory: true)
         let cfg = try await db.config.get()
         #expect(cfg.defaultProfileID == nil)
+        #expect(cfg.primaryAgentPreference == .claude)
     }
 
     @Test func setAndGetDefaultClaudeTokenID() async throws {
@@ -47,5 +48,12 @@ struct ConfigStoreTests {
         try await db.config.setEnvSettingOverrides([:])
         let cfg = try await db.config.get()
         #expect(cfg.envSettingOverrides.isEmpty)
+    }
+
+    @Test func setAndGetPrimaryAgentPreference() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPrimaryAgentPreference(.codex)
+        let cfg = try await db.config.get()
+        #expect(cfg.primaryAgentPreference == .codex)
     }
 }

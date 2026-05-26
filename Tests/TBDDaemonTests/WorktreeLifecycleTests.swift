@@ -29,6 +29,68 @@ import Testing
     #expect(terminals.count == 2)
 }
 
+@Test func testCreateWorktreeUsesCodexPrimaryAgentPreference() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    try await db.config.setPrimaryAgentPreference(.codex)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let result = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+
+    let terminals = try await db.terminals.list(worktreeID: result.id)
+    #expect(terminals.count == 2)
+    #expect(terminals.contains { $0.kind == .codex && $0.label == "Codex" })
+    #expect(!terminals.contains { $0.kind == .claude || $0.label == "Claude Code" })
+}
+
+@Test func testCreateWorktreeWithCodexPreferenceDoesNotResolveClaudeProfile() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    try await db.config.setPrimaryAgentPreference(.codex)
+
+    let profile = try await db.modelProfiles.create(name: "Test", kind: .apiKey)
+    try await db.config.setDefaultProfileID(profile.id)
+
+    let keychainLookups = LockedInt()
+    let resolver = ModelProfileResolver(
+        profiles: db.modelProfiles,
+        repos: db.repos,
+        config: db.config,
+        keychain: { id in
+            keychainLookups.increment()
+            if id == profile.id.uuidString {
+                return "sk-ant-api03-FAKETOKEN_value"
+            }
+            return nil
+        }
+    )
+
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver(),
+        modelProfileResolver: resolver
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let result = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+
+    let terminals = try await db.terminals.list(worktreeID: result.id)
+    #expect(terminals.contains { $0.kind == .codex && $0.profileID == nil })
+    #expect(keychainLookups.value == 0)
+}
+
 @Test func testCreateWorktreeRepoNotFound() async throws {
     let db = try TBDDatabase(inMemory: true)
     let lifecycle = WorktreeLifecycle(
@@ -348,6 +410,53 @@ import Testing
     let archived = try await db.worktrees.get(id: wt.id)
     #expect(archived?.archivedClaudeSessions == nil,
             "Should not save empty session list")
+}
+
+@Test func testReviveWithArchivedClaudeSessionsPrefersClaudeOverCurrentSetting() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+    try await db.config.setPrimaryAgentPreference(.codex)
+
+    let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)
+    let terminals = try await db.terminals.list(worktreeID: revived.id)
+    #expect(terminals.contains { $0.kind == .claude && $0.label == "Claude Code" })
+}
+
+@Test func testReviveWithoutPriorPrimaryAgentFallsBackToConfiguredPreference() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+    try await db.config.setPrimaryAgentPreference(.codex)
+
+    let archived = try await db.worktrees.get(id: wt.id)
+    #expect(archived?.archivedClaudeSessions == nil)
+
+    let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: false)
+    let terminals = try await db.terminals.list(worktreeID: revived.id)
+    #expect(terminals.contains { $0.kind == .codex && $0.label == "Codex" })
 }
 
 @Test func testReviveWithSkipClaudePreservesSessions() async throws {
@@ -841,5 +950,20 @@ private final class LifecycleRecordedCommands: @unchecked Sendable {
     func snapshot() -> [[String]] {
         lock.lock(); defer { lock.unlock() }
         return commands
+    }
+}
+
+private final class LockedInt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    func increment() {
+        lock.lock(); defer { lock.unlock() }
+        storage += 1
+    }
+
+    var value: Int {
+        lock.lock(); defer { lock.unlock() }
+        return storage
     }
 }

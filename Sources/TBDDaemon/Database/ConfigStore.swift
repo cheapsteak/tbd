@@ -10,6 +10,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 
     var id: String
     var default_profile_id: String?
+    var primary_agent_preference: String?
     /// JSON-encoded `[String: ClaudeEnvValue]` overrides map. Nil/absent
     /// means no overrides — every setting falls back to its registry default.
     var claude_env_settings: String?
@@ -17,6 +18,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     func toModel() -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
+            primaryAgentPreference: primary_agent_preference
+                .flatMap(PrimaryAgentPreference.init(rawValue:)) ?? .defaultValue,
             envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings)
         )
     }
@@ -58,6 +61,15 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET default_profile_id = ? WHERE id = ?",
                 arguments: [id?.uuidString, Self.singletonID]
+            )
+        }
+    }
+
+    public func setPrimaryAgentPreference(_ preference: PrimaryAgentPreference) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET primary_agent_preference = ? WHERE id = ?",
+                arguments: [preference.rawValue, Self.singletonID]
             )
         }
     }
