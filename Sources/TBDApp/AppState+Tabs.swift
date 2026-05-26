@@ -136,6 +136,11 @@ extension AppState {
         let layout = layouts[tab.id] ?? .pane(tab.content)
         let terminalIDsInTab = Set(layout.allTerminalIDs())
 
+        if focusedTabCloseContext?.worktreeID == worktreeID,
+           focusedTabCloseContext?.tabID == tab.id {
+            focusedTabCloseContext = nil
+        }
+
         layouts.removeValue(forKey: tab.id)
         arr.remove(at: index)
         tabs[worktreeID] = arr
@@ -165,6 +170,29 @@ extension AppState {
                 handleConnectionError(error)
             }
         }
+    }
+
+    func closeTab(worktreeID: UUID, tabID: UUID) {
+        guard let arr = tabs[worktreeID],
+              let index = arr.firstIndex(where: { $0.id == tabID }) else {
+            if focusedTabCloseContext?.worktreeID == worktreeID,
+               focusedTabCloseContext?.tabID == tabID {
+                focusedTabCloseContext = nil
+            }
+            return
+        }
+        closeTab(worktreeID: worktreeID, index: index)
+    }
+
+    var canCloseFocusedTab: Bool {
+        guard let context = resolvedFocusedTabCloseContext(),
+              let arr = tabs[context.worktreeID] else { return false }
+        return arr.contains(where: { $0.id == context.tabID })
+    }
+
+    func closeFocusedTab() {
+        guard let context = resolvedFocusedTabCloseContext() else { return }
+        closeTab(worktreeID: context.worktreeID, tabID: context.tabID)
     }
 
     // MARK: - Reorder

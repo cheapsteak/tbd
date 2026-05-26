@@ -259,6 +259,7 @@ struct SingleWorktreeView: View {
             SplitLayoutView(
                 node: layoutBinding.wrappedValue,
                 worktree: worktree,
+                tabID: tab.id,
                 layout: layoutBinding
             )
             .id(tab.id) // Force new view hierarchy when switching tabs
@@ -390,6 +391,13 @@ private struct MultiWorktreeCell: View {
         return appState.terminals[worktreeID]?.first { $0.id == firstID }
     }
 
+    private var activeTab: Tab? {
+        let tabs = appState.tabs[worktreeID] ?? []
+        guard !tabs.isEmpty else { return nil }
+        let activeIndex = appState.activeTabIndices[worktreeID] ?? 0
+        return tabs[min(activeIndex, tabs.count - 1)]
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header with worktree name
@@ -448,6 +456,7 @@ private struct MultiWorktreeCell: View {
             PanePlaceholder(
                 content: .terminal(terminalID: terminal.id),
                 worktree: worktree,
+                tabID: activeTab?.id,
                 layout: layoutBinding
             )
         } else {

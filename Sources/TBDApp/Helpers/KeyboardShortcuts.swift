@@ -18,18 +18,6 @@ struct TBDCommands: Commands {
             }
         }
 
-        // Replaces the default File > Close Window Cmd-W command. TBD is a
-        // tabbed workspace; Cmd-W should close the active tab instead.
-        CommandGroup(replacing: .saveItem) {
-            Button("Close Tab") {
-                Task { @MainActor in
-                    appState.closeTerminalTab()
-                }
-            }
-            .keyboardShortcut("w", modifiers: .command)
-            .disabled(appState.selectedWorktreeIDs.isEmpty)
-        }
-
         // Worktree commands
         CommandMenu("Worktree") {
             Button("New Worktree") {
@@ -60,10 +48,10 @@ struct TBDCommands: Commands {
 
             Button("Close Tab") {
                 Task { @MainActor in
-                    appState.closeTerminalTab()
+                    appState.closeFocusedTab()
                 }
             }
-            .disabled(appState.selectedWorktreeIDs.isEmpty)
+            .disabled(!appState.canCloseFocusedTab)
 
             Divider()
 

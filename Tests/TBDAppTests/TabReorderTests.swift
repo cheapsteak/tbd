@@ -145,33 +145,52 @@ import TBDShared
 }
 
 @MainActor
-@Test func closeTerminalTabRemovesActiveTabAndLayout() {
+@Test func closeFocusedTabRemovesFocusedTabAndLayout() {
     let state = AppState()
     let worktreeID = UUID()
     let ids = [UUID(), UUID(), UUID()]
-    state.selectedWorktreeIDs = [worktreeID]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
     state.layouts[ids[1]] = .pane(.terminal(terminalID: ids[1]))
-    state.activeTabIndices[worktreeID] = 1
+    state.focusedTabCloseContext = .init(worktreeID: worktreeID, tabID: ids[1])
 
-    state.closeTerminalTab()
+    state.closeFocusedTab()
 
     #expect(state.tabs[worktreeID]?.map(\.id) == [ids[0], ids[2]])
     #expect(state.layouts[ids[1]] == nil)
     #expect(state.activeTabIndices[worktreeID] == 1)
+    #expect(state.focusedTabCloseContext == nil)
 }
 
 @MainActor
-@Test func closeTerminalTabClampsOutOfBoundsActiveIndex() {
+@Test func closeFocusedTabUsesFocusedContextInsteadOfSelectedWorktree() {
+    let state = AppState()
+    let selectedWorktreeID = UUID()
+    let focusedWorktreeID = UUID()
+    let selectedTabID = UUID()
+    let focusedTabIDs = [UUID(), UUID()]
+    state.selectedWorktreeIDs = [selectedWorktreeID]
+    state.tabs[selectedWorktreeID] = [Tab(id: selectedTabID, content: .terminal(terminalID: selectedTabID), label: nil)]
+    state.tabs[focusedWorktreeID] = focusedTabIDs.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
+    state.focusedTabCloseContext = .init(worktreeID: focusedWorktreeID, tabID: focusedTabIDs[1])
+
+    state.closeFocusedTab()
+
+    #expect(state.tabs[selectedWorktreeID]?.map(\.id) == [selectedTabID])
+    #expect(state.tabs[focusedWorktreeID]?.map(\.id) == [focusedTabIDs[0]])
+}
+
+@MainActor
+@Test func canCloseFocusedTabRequiresLiveFocusedContext() {
     let state = AppState()
     let worktreeID = UUID()
-    let ids = [UUID(), UUID()]
-    state.selectedWorktreeIDs = [worktreeID]
-    state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
-    state.activeTabIndices[worktreeID] = 99
+    let tabID = UUID()
+    state.tabs[worktreeID] = [Tab(id: tabID, content: .terminal(terminalID: tabID), label: nil)]
 
-    state.closeTerminalTab()
+    #expect(state.canCloseFocusedTab == false)
 
-    #expect(state.tabs[worktreeID]?.map(\.id) == [ids[0]])
-    #expect(state.activeTabIndices[worktreeID] == 0)
+    state.focusedTabCloseContext = .init(worktreeID: worktreeID, tabID: tabID)
+    #expect(state.canCloseFocusedTab == true)
+
+    state.focusedTabCloseContext = .init(worktreeID: worktreeID, tabID: UUID())
+    #expect(state.canCloseFocusedTab == false)
 }

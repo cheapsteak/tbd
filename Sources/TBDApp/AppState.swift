@@ -20,6 +20,11 @@ enum ReviveState: Equatable {
     }
 }
 
+struct TabCloseContext: Equatable {
+    let worktreeID: UUID
+    let tabID: UUID
+}
+
 @MainActor
 final class AppState: ObservableObject {
     /// Reference to the global appearance settings, wired by `TBDAppMain`
@@ -34,6 +39,7 @@ final class AppState: ObservableObject {
     @Published var worktrees: [UUID: [Worktree]] = [:]
     @Published var terminals: [UUID: [Terminal]] = [:]
     @Published var notes: [UUID: [Note]] = [:]
+    @Published var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
     /// severity dot. Worktrees the user is currently viewing are excluded
@@ -211,6 +217,9 @@ final class AppState: ObservableObject {
     /// Weak terminal views keyed by terminal UUID, used to restore AppKit first
     /// responder after worktree navigation.
     var terminalFocusTargets: [UUID: TerminalFocusTarget] = [:]
+    /// Tab-close ownership keyed by terminal UUID for views that belong to a
+    /// visible tab, used to resolve the currently focused closable tab.
+    var terminalTabCloseContexts: [UUID: TabCloseContext] = [:]
     /// Visual screenshots taken at suspend-click time, shown while daemon works.
     /// Keyed by terminal UUID. Cleared when suspend completes.
     @Published var suspendingSnapshots: [UUID: NSImage] = [:]

@@ -22,6 +22,7 @@ struct TerminalPanelView: View {
     let tmuxServer: String
     let tmuxWindowID: String
     let tmuxBridge: TmuxBridge
+    var tabCloseContext: TabCloseContext? = nil
     var worktreePath: String = ""
     var remoteURL: String?
     var onFilePathClicked: ((String) -> Void)?
@@ -83,6 +84,7 @@ struct TerminalPanelView: View {
                 tmuxServer: tmuxServer,
                 tmuxWindowID: tmuxWindowID,
                 tmuxBridge: tmuxBridge,
+                tabCloseContext: tabCloseContext,
                 worktreePath: worktreePath,
                 remoteURL: remoteURL,
                 onFilePathClicked: onFilePathClicked,
@@ -141,6 +143,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
     let tmuxServer: String
     let tmuxWindowID: String
     let tmuxBridge: TmuxBridge
+    var tabCloseContext: TabCloseContext? = nil
     var worktreePath: String = ""
     var remoteURL: String?
     var onFilePathClicked: ((String) -> Void)?
@@ -169,7 +172,9 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         tv.onFilePathClicked = onFilePathClicked
         tv.onNotification = onTerminalNotification
         tv.onCloseTab = {
-            appState.closeTerminalTab()
+            guard let tabCloseContext else { return }
+            appState.focusedTabCloseContext = tabCloseContext
+            appState.closeFocusedTab()
         }
 
         // Set delegate for terminal events
@@ -179,6 +184,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
         context.coordinator.appState = appState
+        context.coordinator.tabCloseContext = tabCloseContext
         context.coordinator.onDeadWindow = onDeadWindow
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
 
@@ -220,6 +226,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         appState.snapshotProviders[captureID] = { [weak tv] in
             tv?.captureScreenshot()
         }
+        appState.registerTerminalCloseContext(tabCloseContext, for: terminalID)
         appState.registerTerminalView(tv, for: terminalID)
 
         return tv
@@ -246,6 +253,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         var tmuxBridge: TmuxBridge?
         var tmuxServer: String = ""
         var panelID: UUID = UUID()
+        var tabCloseContext: TabCloseContext?
         var onDeadWindow: (() -> Void)?
         /// Returns `true` when a SwiftUI overlay (e.g. transcript card) is open
         /// over this terminal and should receive scroll/click events instead of
@@ -326,6 +334,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
             // Focus on next run loop iteration (needs main actor for window access)
             DispatchQueue.main.async {
                 terminalView.window?.makeFirstResponder(terminalView)
+                self.appState?.focusedTabCloseContext = self.tabCloseContext
             }
 
             // Intercept scroll wheel events before they reach TerminalView.
@@ -402,7 +411,14 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
                     // receives key and click events.
                     if self.shouldSuppressEvents() { return }
                     let point = tv.convert(location, from: nil)
-                    guard tv.bounds.contains(point) else { return }
+                    if !tv.bounds.contains(point) {
+                        if self.appState?.focusedTabCloseContext == self.tabCloseContext,
+                           tv.window?.firstResponder === tv {
+                            self.appState?.focusedTabCloseContext = nil
+                        }
+                        return
+                    }
+                    self.appState?.focusedTabCloseContext = self.tabCloseContext
                     tv.window?.makeFirstResponder(tv)
                 }
 
