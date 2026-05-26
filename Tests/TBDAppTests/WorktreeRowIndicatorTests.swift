@@ -41,4 +41,14 @@ struct WorktreeRowConflictFallbackTests {
 
         #expect(showsFallback)
     }
+
+    @Test("merged PR icon wins over conflict fallback (squash-merge produces false-positive conflicts)")
+    func mergedPRSuppressesConflictFallback() {
+        let showsFallback = WorktreeRowConflictFallback.shouldShow(
+            prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .merged),
+            hasConflicts: true,
+            hasNotification: false
+        )
+        #expect(!showsFallback)
+    }
 }

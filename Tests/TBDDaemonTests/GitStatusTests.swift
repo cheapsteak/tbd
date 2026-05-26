@@ -3,6 +3,18 @@ import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+private func runShell(_ cmd: String, at dir: URL) async throws {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    p.arguments = ["-c", cmd]
+    p.currentDirectoryURL = dir
+    try p.run()
+    p.waitUntilExit()
+    guard p.terminationStatus == 0 else {
+        throw NSError(domain: "shell", code: Int(p.terminationStatus))
+    }
+}
+
 @Suite("GitStatus Tests")
 struct GitStatusTests {
 
@@ -51,28 +63,16 @@ struct GitStatusTests {
         try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: repoDir) }
 
-        func shell(_ cmd: String, at dir: URL? = nil) async throws {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-c", cmd]
-            p.currentDirectoryURL = dir ?? repoDir
-            try p.run()
-            p.waitUntilExit()
-            guard p.terminationStatus == 0 else {
-                throw NSError(domain: "shell", code: Int(p.terminationStatus))
-            }
-        }
-
         // Init repo and make initial commit on main
-        try await shell("git init -b main")
-        try await shell("git config commit.gpgSign false")
-        try await shell("git config user.email 'test@test.com'")
-        try await shell("git config user.name 'Test'")
-        try await shell("touch README.md && git add . && git commit -m 'initial'")
+        try await runShell("git init -b main", at: repoDir)
+        try await runShell("git config commit.gpgSign false", at: repoDir)
+        try await runShell("git config user.email 'test@test.com'", at: repoDir)
+        try await runShell("git config user.name 'Test'", at: repoDir)
+        try await runShell("touch README.md && git add . && git commit -m 'initial'", at: repoDir)
 
         // Create feature branch with a commit
-        try await shell("git checkout -b feature")
-        try await shell("touch feature.txt && git add . && git commit -m 'feature commit'")
+        try await runShell("git checkout -b feature", at: repoDir)
+        try await runShell("touch feature.txt && git add . && git commit -m 'feature commit'", at: repoDir)
 
         // main IS an ancestor of feature
         let git = GitManager()
@@ -81,8 +81,8 @@ struct GitStatusTests {
         #expect(mainIsAncestor == true)
 
         // Now add a commit to main (diverge)
-        try await shell("git checkout main")
-        try await shell("touch main-extra.txt && git add . && git commit -m 'main diverges'")
+        try await runShell("git checkout main", at: repoDir)
+        try await runShell("touch main-extra.txt && git add . && git commit -m 'main diverges'", at: repoDir)
 
         // main is now NOT an ancestor of feature (main has diverged)
         let mainIsAncestorAfterDiverge = await git.isMergeBaseAncestor(repoPath: repoPath, base: "main", branch: "feature")
@@ -102,42 +102,30 @@ struct GitStatusTests {
             try? FileManager.default.removeItem(at: originDir)
         }
 
-        func shell(_ cmd: String, at dir: URL? = nil) async throws {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-c", cmd]
-            p.currentDirectoryURL = dir ?? repoDir
-            try p.run()
-            p.waitUntilExit()
-            guard p.terminationStatus == 0 else {
-                throw NSError(domain: "shell", code: Int(p.terminationStatus))
-            }
-        }
-
         // Init repo with a file
-        try await shell("git init -b main")
-        try await shell("git config commit.gpgSign false")
-        try await shell("git config user.email 'test@test.com'")
-        try await shell("git config user.name 'Test'")
-        try await shell("echo 'line1' > shared.txt && git add . && git commit -m 'initial'")
+        try await runShell("git init -b main", at: repoDir)
+        try await runShell("git config commit.gpgSign false", at: repoDir)
+        try await runShell("git config user.email 'test@test.com'", at: repoDir)
+        try await runShell("git config user.name 'Test'", at: repoDir)
+        try await runShell("echo 'line1' > shared.txt && git add . && git commit -m 'initial'", at: repoDir)
 
         // Set up bare origin remote and push the pre-conflict main
-        try await shell("git init --bare '\(originDir.path)'")
-        try await shell("git remote add origin '\(originDir.path)'")
-        try await shell("git push -u origin main")
+        try await runShell("git init --bare '\(originDir.path)'", at: repoDir)
+        try await runShell("git remote add origin '\(originDir.path)'", at: repoDir)
+        try await runShell("git push -u origin main", at: repoDir)
 
         // Create feature branch with conflicting change (NOT pushed to origin)
-        try await shell("git checkout -b tbd/feature-wt")
-        try await shell("echo 'feature-change' > shared.txt && git add . && git commit -m 'feature change'")
+        try await runShell("git checkout -b tbd/feature-wt", at: repoDir)
+        try await runShell("echo 'feature-change' > shared.txt && git add . && git commit -m 'feature change'", at: repoDir)
 
         // Back to main with conflicting change to same file, then push so
         // origin/main reflects the diverged state. The feature branch is NOT
         // pushed — origin/main is ahead of where feature branched off, with a
         // conflicting edit to shared.txt, which is what makes the conflict
         // detectable under the origin-based reconcile semantics.
-        try await shell("git checkout main")
-        try await shell("echo 'main-change' > shared.txt && git add . && git commit -m 'main change'")
-        try await shell("git push origin main")
+        try await runShell("git checkout main", at: repoDir)
+        try await runShell("echo 'main-change' > shared.txt && git add . && git commit -m 'main change'", at: repoDir)
+        try await runShell("git push origin main", at: repoDir)
 
         // Set up DB
         let db = try TBDDatabase(inMemory: true)
@@ -170,32 +158,20 @@ struct GitStatusTests {
             try? FileManager.default.removeItem(at: originDir)
         }
 
-        func shell(_ cmd: String, at dir: URL? = nil) async throws {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-c", cmd]
-            p.currentDirectoryURL = dir ?? repoDir
-            try p.run()
-            p.waitUntilExit()
-            guard p.terminationStatus == 0 else {
-                throw NSError(domain: "shell", code: Int(p.terminationStatus))
-            }
-        }
-
         // Init repo with a file
-        try await shell("git init -b main")
-        try await shell("git config commit.gpgSign false")
-        try await shell("git config user.email 'test@test.com'")
-        try await shell("git config user.name 'Test'")
-        try await shell("echo 'line1' > shared.txt && git add . && git commit -m 'initial'")
+        try await runShell("git init -b main", at: repoDir)
+        try await runShell("git config commit.gpgSign false", at: repoDir)
+        try await runShell("git config user.email 'test@test.com'", at: repoDir)
+        try await runShell("git config user.name 'Test'", at: repoDir)
+        try await runShell("echo 'line1' > shared.txt && git add . && git commit -m 'initial'", at: repoDir)
 
         // Set up bare origin remote and push main
-        try await shell("git init --bare '\(originDir.path)'")
-        try await shell("git remote add origin '\(originDir.path)'")
-        try await shell("git push -u origin main")
+        try await runShell("git init --bare '\(originDir.path)'", at: repoDir)
+        try await runShell("git remote add origin '\(originDir.path)'", at: repoDir)
+        try await runShell("git push -u origin main", at: repoDir)
 
         // Create feature branch pointing at the same commit as origin/main (no extra commits)
-        try await shell("git checkout -b tbd/feature-wt")
+        try await runShell("git checkout -b tbd/feature-wt", at: repoDir)
 
         // Set up DB
         let db = try TBDDatabase(inMemory: true)

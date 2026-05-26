@@ -9,7 +9,8 @@ enum WorktreeRowConflictFallback {
         hasConflicts: Bool,
         hasNotification: Bool
     ) -> Bool {
-        prStatus != nil && hasConflicts && !hasNotification
+        guard let prStatus, hasConflicts, !hasNotification else { return false }
+        return prStatus.state != .merged
     }
 }
 
@@ -95,7 +96,9 @@ struct WorktreeRowView: View {
                 .frame(width: 12, height: 12)
                 .foregroundStyle(.red)
         }
-        if let presentation = prPresentation, let nsImage = loadIcon(presentation.iconName) {
+        if !showsConflictFallback,
+           let presentation = prPresentation,
+           let nsImage = loadIcon(presentation.iconName) {
             Image(nsImage: nsImage)
                 .renderingMode(.template)
                 .resizable()
