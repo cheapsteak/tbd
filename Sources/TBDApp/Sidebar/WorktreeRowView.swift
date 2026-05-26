@@ -1,6 +1,18 @@
 import SwiftUI
 import TBDShared
 
+enum WorktreeRowConflictFallback {
+    static let iconName = "hand.raised.slash.fill"
+
+    static func shouldShow(
+        prStatus: PRStatus?,
+        hasConflicts: Bool,
+        hasNotification: Bool
+    ) -> Bool {
+        prStatus == nil && hasConflicts && !hasNotification
+    }
+}
+
 struct WorktreeRowView: View {
     let worktree: Worktree
     var isMain: Bool = false
@@ -16,6 +28,10 @@ struct WorktreeRowView: View {
 
     private var notification: NotificationType? {
         appState.unreadByWorktree[worktree.id]?.type
+    }
+
+    private var prStatus: PRStatus? {
+        appState.prStatuses[worktree.id]
     }
 
     private var hasBoldNotification: Bool {
@@ -39,40 +55,17 @@ struct WorktreeRowView: View {
         }
     }
 
-    private var worktreeIcon: String? {
-        guard !isMain else { return nil }
-        let prState = appState.prStatuses[worktree.id]?.state
-        // PR state takes priority over local conflict detection —
-        // a merged PR means the branch is done regardless of local git status.
-        if let prState {
-            switch prState {
-            case .open, .changesRequested, .mergeable: return "git-pull-request"
-            case .merged:                              return "git-merge"
-            case .closed:                              return "git-pull-request-closed"
-            }
-        }
-        if worktree.hasConflicts {
-            return "git-merge-conflict"
-        }
-        return nil
+    private var showsConflictFallback: Bool {
+        WorktreeRowConflictFallback.shouldShow(
+            prStatus: prStatus,
+            hasConflicts: worktree.hasConflicts,
+            hasNotification: notification != nil
+        )
     }
 
-    private var worktreeIconColor: Color {
-        guard !isMain else { return .secondary }
-        let prState = appState.prStatuses[worktree.id]?.state
-        if let prState {
-            switch prState {
-            case .open:             return .secondary
-            case .changesRequested: return .red
-            case .mergeable:        return .green
-            case .merged:           return .purple
-            case .closed:           return .secondary
-            }
-        }
-        if worktree.hasConflicts {
-            return .orange
-        }
-        return .secondary
+    private var prPresentation: PRStatusPresentation? {
+        guard !isMain else { return nil }
+        return PRStatusPresentation.make(for: prStatus)
     }
 
     private var hasSuspendedTerminal: Bool {
@@ -94,14 +87,18 @@ struct WorktreeRowView: View {
             Circle()
                 .fill(color)
                 .frame(width: 8, height: 8)
+        } else if showsConflictFallback {
+            Image(systemName: WorktreeRowConflictFallback.iconName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.red)
         }
-        if let icon = worktreeIcon, let nsImage = loadIcon(icon) {
+        if let presentation = prPresentation, let nsImage = loadIcon(presentation.iconName) {
             Image(nsImage: nsImage)
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
                 .frame(width: 12, height: 12)
-                .foregroundStyle(worktreeIconColor)
+                .foregroundStyle(presentation.color)
         }
     }
 

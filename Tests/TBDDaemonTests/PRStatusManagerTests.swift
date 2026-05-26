@@ -14,16 +14,76 @@ struct PRStatusManagerTests {
         #expect(status == .mergeable)
     }
 
-    @Test("maps OPEN + BLOCKED to .open")
-    func mapsOpenBlocked() {
+    @Test("maps OPEN + BLOCKED to .blocked")
+    func mapsBlocked() {
         let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BLOCKED")
-        #expect(status == .open)
+        #expect(status == .blocked)
     }
 
-    @Test("maps OPEN + DIRTY to .open")
-    func mapsOpenDirty() {
+    @Test("maps OPEN + DIRTY to .blocked")
+    func mapsDirty() {
         let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "DIRTY")
-        #expect(status == .open)
+        #expect(status == .blocked)
+    }
+
+    @Test("maps OPEN + BEHIND to .blocked")
+    func mapsBehind() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BEHIND")
+        #expect(status == .blocked)
+    }
+
+    @Test("maps OPEN + UNKNOWN to .pending")
+    func mapsPendingUnknown() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNKNOWN")
+        #expect(status == .pending)
+    }
+
+    @Test("maps pending status checks to .pending")
+    func mapsPendingChecks() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "UNKNOWN",
+            statusCheckRollupState: "PENDING"
+        )
+        #expect(status == .pending)
+    }
+
+    @Test("maps OPEN + CLEAN + pending status checks to .pending")
+    func mapsPendingChecksOverClean() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            statusCheckRollupState: "PENDING"
+        )
+        #expect(status == .pending)
+    }
+
+    @Test("maps HAS_HOOKS to .mergeable")
+    func mapsHasHooks() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "HAS_HOOKS")
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps UNSTABLE to .checksFailed")
+    func mapsUnstable() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNSTABLE")
+        #expect(status == .checksFailed)
+    }
+
+    @Test("maps unknown future merge state to .blocked")
+    func mapsUnknownFutureMergeState() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "SOME_FUTURE_STATE")
+        #expect(status == .blocked)
+    }
+
+    @Test("maps unknown future merge state with pending checks to .pending")
+    func mapsPendingUnknownFutureMergeState() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "SOME_FUTURE_STATE",
+            statusCheckRollupState: "EXPECTED"
+        )
+        #expect(status == .pending)
     }
 
     @Test("maps MERGED to .merged")
@@ -50,6 +110,33 @@ struct PRStatusManagerTests {
         #expect(status == .changesRequested)
     }
 
+    @Test("maps draft PRs to .draft")
+    func mapsDraft() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "CLEAN", isDraft: true)
+        #expect(status == .draft)
+    }
+
+    @Test("maps failing status checks to .checksFailed")
+    func mapsFailingChecks() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            statusCheckRollupState: "FAILURE"
+        )
+        #expect(status == .checksFailed)
+    }
+
+    @Test("draft wins over failing status checks")
+    func mapsDraftOverFailingChecks() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            isDraft: true,
+            statusCheckRollupState: "FAILURE"
+        )
+        #expect(status == .draft)
+    }
+
     // MARK: - JSON parsing
 
     @Test("parseGraphQLResponse keeps all branch names")
@@ -65,6 +152,8 @@ struct PRStatusManagerTests {
                     "url": "https://github.com/owner/repo/pull/42",
                     "state": "OPEN",
                     "mergeStateStatus": "CLEAN",
+                    "isDraft": true,
+                    "statusCheckRollup": { "state": "FAILURE" },
                     "reviewDecision": null,
                     "headRefName": "tbd/cool-feature",
                     "createdAt": "2026-03-24T10:00:00Z"
@@ -99,6 +188,8 @@ struct PRStatusManagerTests {
         #expect(nodes[0].headRefName == "tbd/cool-feature")
         #expect(nodes[0].state == "OPEN")
         #expect(nodes[0].mergeStateStatus == "CLEAN")
+        #expect(nodes[0].isDraft == true)
+        #expect(nodes[0].statusCheckRollupState == "FAILURE")
         #expect(nodes[1].headRefName == "tbd/old-feature")
         #expect(nodes[2].headRefName == "feature/not-tbd")
     }
@@ -203,7 +294,7 @@ struct PRStatusManagerTests {
     func invalidate() async {
         let manager = PRStatusManager()
         let id = UUID()
-        let status = PRStatus(number: 2, url: "https://github.com/o/r/pull/2", state: .open)
+        let status = PRStatus(number: 2, url: "https://github.com/o/r/pull/2", state: .pending)
         await manager.seedForTesting(worktreeID: id, status: status)
         await manager.invalidate(worktreeID: id)
         let all = await manager.allStatuses()
