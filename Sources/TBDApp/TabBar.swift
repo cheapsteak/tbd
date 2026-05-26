@@ -435,6 +435,9 @@ private struct TabBarItem: View {
                             .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
                     }
                 }
+                .padding(.leading, 8)
+                .frame(minHeight: 28, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
@@ -458,7 +461,6 @@ private struct TabBarItem: View {
             .opacity(showClose ? 1 : 0)
             .animation(.easeInOut(duration: 0.12), value: showClose)
         }
-        .padding(.leading, 8)
         .frame(minHeight: 28)
         .background(
             isSelected
