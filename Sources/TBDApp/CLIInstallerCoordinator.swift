@@ -31,7 +31,7 @@ final class CLIInstallerCoordinator {
     }
 
     /// Called once at end of `connectAndLoadInitialState`. Surfaces a one-click
-    /// prompt if the symlink is missing or stale. Silent if everything's healthy
+    /// prompt if the CLI install is missing or stale. Silent if everything's healthy
     /// or if the user previously dismissed the missing-CLI prompt. No-op on
     /// subsequent calls within the same app session — daemon reconnects
     /// shouldn't re-prompt for stale/unexpectedFileType.
