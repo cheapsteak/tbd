@@ -68,8 +68,7 @@ public actor PRStatusManager {
     /// Refresh a single worktree using `gh pr view`. Used for on-select refresh.
     public func refresh(worktreeID: UUID, branch: String, repoPath: String) async -> PRStatus? {
         let args = ["pr", "view", branch,
-                    "--json", "number,url,state,mergeStateStatus,reviewDecision",
-                    "-R", "."]
+                    "--json", "number,url,state,mergeStateStatus,reviewDecision"]
         guard let output = await runGH(args: args, repoPath: repoPath),
               let data = output.data(using: .utf8),
               let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
