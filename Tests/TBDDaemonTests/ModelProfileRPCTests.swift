@@ -549,7 +549,7 @@ struct ModelProfileRPCTests {
         #expect(setResp.success)
         #expect(try await db.config.get().primaryAgentPreference == .codex)
 
-        let listResp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileList))
+        let listResp = await router.handle(RPCRequest(method: RPCMethod.modelProfileList))
         let result = try listResp.decodeResult(ModelProfileListResult.self)
         #expect(result.primaryAgentPreference == .codex)
     }
