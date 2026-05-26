@@ -29,7 +29,7 @@ struct WorktreeRowIndicatorTests {
     @Test("PR status suppresses conflict fallback")
     func prStatusSuppressesConflictFallback() {
         let indicator = WorktreeRowIndicator.make(
-            prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .open),
+            prStatus: PRStatus(number: 12, url: "https://example.com/12", state: .pending),
             hasConflicts: true,
             hasNotification: false
         )

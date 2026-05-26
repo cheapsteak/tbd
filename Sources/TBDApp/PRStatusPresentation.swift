@@ -3,8 +3,8 @@ import TBDShared
 
 struct PRStatusPresentation: Equatable {
     enum ColorSemantic: Equatable {
-        case neutral
-        case checksFailed
+        case pending
+        case nonMergeable
         case draft
         case mergeable
         case merged
@@ -15,8 +15,8 @@ struct PRStatusPresentation: Equatable {
 
     var color: Color {
         switch colorSemantic {
-        case .neutral:          return .secondary
-        case .checksFailed:     return .red
+        case .pending:          return .yellow
+        case .nonMergeable:     return .red
         case .draft:            return .secondary
         case .mergeable:        return .green
         case .merged:           return .purple
@@ -26,12 +26,14 @@ struct PRStatusPresentation: Equatable {
     static func make(for prStatus: PRStatus?) -> PRStatusPresentation? {
         guard let prStatus else { return nil }
         switch prStatus.state {
-        case .open:
-            return PRStatusPresentation(iconName: "git-pull-request", colorSemantic: .neutral)
+        case .pending:
+            return PRStatusPresentation(iconName: "git-pull-request", colorSemantic: .pending)
+        case .blocked:
+            return PRStatusPresentation(iconName: "git-pull-request", colorSemantic: .nonMergeable)
         case .changesRequested:
-            return PRStatusPresentation(iconName: "git-pull-request", colorSemantic: .neutral)
+            return PRStatusPresentation(iconName: "git-pull-request", colorSemantic: .nonMergeable)
         case .checksFailed:
-            return PRStatusPresentation(iconName: "git-pull-request", colorSemantic: .checksFailed)
+            return PRStatusPresentation(iconName: "git-pull-request", colorSemantic: .nonMergeable)
         case .draft:
             return PRStatusPresentation(iconName: "git-pull-request", colorSemantic: .draft)
         case .mergeable:
@@ -39,7 +41,7 @@ struct PRStatusPresentation: Equatable {
         case .merged:
             return PRStatusPresentation(iconName: "git-merge", colorSemantic: .merged)
         case .closed:
-            return PRStatusPresentation(iconName: "git-pull-request-closed", colorSemantic: .neutral)
+            return PRStatusPresentation(iconName: "git-pull-request-closed", colorSemantic: .nonMergeable)
         }
     }
 }

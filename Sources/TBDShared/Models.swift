@@ -432,7 +432,8 @@ public struct UnreadSummary: Codable, Sendable, Equatable {
 }
 
 public enum PRMergeableState: String, Codable, Sendable {
-    case open               // PR exists, no review decision yet
+    case pending            // PR exists, but mergeability/checks are still computing
+    case blocked            // PR is known to be not currently mergeable
     case changesRequested   // reviewer requested changes
     case draft              // PR exists, but is marked draft
     case checksFailed       // PR has failing CI/status checks

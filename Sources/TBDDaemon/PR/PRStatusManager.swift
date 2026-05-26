@@ -125,16 +125,33 @@ public actor PRStatusManager {
         case "MERGED": return .merged
         case "CLOSED": return .closed
         default:
-            if isDraft { return .draft }
-            if Self.isFailingStatusCheckRollup(statusCheckRollupState) { return .checksFailed }
+            if isDraft || mergeStateStatus == "DRAFT" { return .draft }
             if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
-            return mergeStateStatus == "CLEAN" ? .mergeable : .open
+            if Self.isFailingStatusCheckRollup(statusCheckRollupState) { return .checksFailed }
+
+            switch mergeStateStatus {
+            case "CLEAN", "HAS_HOOKS":
+                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
+            case "BLOCKED", "DIRTY", "BEHIND":
+                return .blocked
+            case "UNSTABLE":
+                return .checksFailed
+            case "UNKNOWN":
+                return .pending
+            default:
+                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .blocked
+            }
         }
     }
 
     private static func isFailingStatusCheckRollup(_ state: String?) -> Bool {
         guard let state else { return false }
         return ["ERROR", "FAILURE"].contains(state)
+    }
+
+    private static func isPendingStatusCheckRollup(_ state: String?) -> Bool {
+        guard let state else { return false }
+        return ["EXPECTED", "PENDING"].contains(state)
     }
 
     /// Priority for choosing between multiple PRs on the same branch.

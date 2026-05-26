@@ -14,16 +14,50 @@ struct PRStatusManagerTests {
         #expect(status == .mergeable)
     }
 
-    @Test("maps OPEN + BLOCKED to .open")
-    func mapsOpenBlocked() {
+    @Test("maps OPEN + BLOCKED to .blocked")
+    func mapsBlocked() {
         let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BLOCKED")
-        #expect(status == .open)
+        #expect(status == .blocked)
     }
 
-    @Test("maps OPEN + DIRTY to .open")
-    func mapsOpenDirty() {
+    @Test("maps OPEN + DIRTY to .blocked")
+    func mapsDirty() {
         let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "DIRTY")
-        #expect(status == .open)
+        #expect(status == .blocked)
+    }
+
+    @Test("maps OPEN + BEHIND to .blocked")
+    func mapsBehind() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "BEHIND")
+        #expect(status == .blocked)
+    }
+
+    @Test("maps OPEN + UNKNOWN to .pending")
+    func mapsPendingUnknown() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNKNOWN")
+        #expect(status == .pending)
+    }
+
+    @Test("maps pending status checks to .pending")
+    func mapsPendingChecks() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "UNKNOWN",
+            statusCheckRollupState: "PENDING"
+        )
+        #expect(status == .pending)
+    }
+
+    @Test("maps HAS_HOOKS to .mergeable")
+    func mapsHasHooks() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "HAS_HOOKS")
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps UNSTABLE to .checksFailed")
+    func mapsUnstable() {
+        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNSTABLE")
+        #expect(status == .checksFailed)
     }
 
     @Test("maps MERGED to .merged")
@@ -234,7 +268,7 @@ struct PRStatusManagerTests {
     func invalidate() async {
         let manager = PRStatusManager()
         let id = UUID()
-        let status = PRStatus(number: 2, url: "https://github.com/o/r/pull/2", state: .open)
+        let status = PRStatus(number: 2, url: "https://github.com/o/r/pull/2", state: .pending)
         await manager.seedForTesting(worktreeID: id, status: status)
         await manager.invalidate(worktreeID: id)
         let all = await manager.allStatuses()
