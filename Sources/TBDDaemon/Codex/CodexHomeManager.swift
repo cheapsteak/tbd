@@ -6,9 +6,10 @@ private let codexLogger = Logger(subsystem: "com.tbd.daemon", category: "codex-i
 
 /// Installs TBD's Codex integration into the user's global Codex home.
 ///
-/// TBD uses `codex --profile tbd` instead of an isolated per-repo
-/// `CODEX_HOME`, so user auth/config/plugins continue to merge with TBD's
-/// runtime integration while the TBD plugin remains profile-scoped.
+/// TBD uses the file-backed `codex --profile-v2 tbd` overlay instead of an
+/// isolated per-repo `CODEX_HOME`, so user auth/config/plugins continue to
+/// merge with TBD's runtime integration while the TBD plugin remains
+/// profile-scoped.
 struct CodexHomeManager: Sendable {
     let codexHome: URL
 
@@ -253,5 +254,5 @@ enum CodexProfileWriter {
 }
 
 enum CodexSpawnCommandBuilder {
-    static let command = "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox"
+    static let command = "unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
 }
