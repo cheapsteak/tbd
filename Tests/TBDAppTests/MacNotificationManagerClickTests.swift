@@ -66,3 +66,29 @@ private func tearDown(_ suiteName: String) {
 
     #expect(manager.appState == nil)
 }
+
+// MARK: - dismissDelivered tests
+
+@MainActor
+@Test func dismissDelivered_emptySequence_doesNotCrash() async {
+    // Empty input must be a no-op — no assertion, just verify no crash or
+    // precondition failure.
+    let manager = MacNotificationManager()
+    manager.dismissDelivered(worktreeIDs: [] as [UUID])
+}
+
+@MainActor
+@Test func dismissDelivered_nonEmptyOnUnbundled_doesNotCrash() async {
+    // In the unbundled test process, isAvailable is false, so the call
+    // returns early without touching UNUserNotificationCenter.
+    let manager = MacNotificationManager()
+    let ids = [UUID(), UUID(), UUID()]
+    manager.dismissDelivered(worktreeIDs: ids)
+    // If we reach here without crashing, the guard is working correctly.
+}
+
+@MainActor
+@Test func dismissDelivered_singleID_doesNotCrash() async {
+    let manager = MacNotificationManager()
+    manager.dismissDelivered(worktreeIDs: [UUID()])
+}

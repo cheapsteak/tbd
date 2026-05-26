@@ -142,8 +142,7 @@ public actor PRStatusManager {
                   let state = node["state"] as? String,
                   let mergeStateStatus = node["mergeStateStatus"] as? String,
                   let headRefName = node["headRefName"] as? String,
-                  let createdAt = node["createdAt"] as? String,
-                  headRefName.hasPrefix("tbd/") else { return nil }
+                  let createdAt = node["createdAt"] as? String else { return nil }
             let reviewDecision = node["reviewDecision"] as? String ?? ""
             return PRNode(number: number, url: url, state: state,
                           mergeStateStatus: mergeStateStatus,

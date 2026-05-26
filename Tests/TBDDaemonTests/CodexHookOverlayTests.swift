@@ -250,4 +250,9 @@ import TBDShared
         #expect(FileManager.default.fileExists(
             atPath: CodexProfileWriter.profilePath(in: codexHome).path))
     }
+
+    @Test func codexSpawnCommandUsesFileBackedProfileOverlay() {
+        #expect(CodexSpawnCommandBuilder.command.contains("codex --profile-v2 tbd"))
+        #expect(!CodexSpawnCommandBuilder.command.contains("codex --profile tbd"))
+    }
 }
