@@ -138,7 +138,7 @@ struct TerminalPanelView: View {
 /// 1. TmuxBridge creates a grouped session pointing at the right window
 /// 2. SwiftTerm spawns `tmux attach -t <grouped-session>` in a native PTY
 /// 3. All input, output, and resize handled natively by the terminal driver
-private struct TerminalPanelRepresentable: NSViewRepresentable {
+struct TerminalPanelRepresentable: NSViewRepresentable {
     let terminalID: UUID
     let tmuxServer: String
     let tmuxWindowID: String
@@ -172,7 +172,6 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         tv.onFilePathClicked = onFilePathClicked
         tv.onNotification = onTerminalNotification
         tv.onCloseTab = {
-            guard tabCloseContext != nil else { return }
             appState.closeFocusedTab()
         }
 
@@ -183,7 +182,7 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
         context.coordinator.appState = appState
-        context.coordinator.tabCloseContext = tabCloseContext
+        context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onDeadWindow = onDeadWindow
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
 
@@ -225,14 +224,13 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         appState.snapshotProviders[captureID] = { [weak tv] in
             tv?.captureScreenshot()
         }
-        appState.registerTerminalCloseContext(tabCloseContext, for: terminalID)
         appState.registerTerminalView(tv, for: terminalID)
 
         return tv
     }
 
     func updateNSView(_ nsView: TBDTerminalView, context: Context) {
-        // Resize is handled by sizeChanged delegate
+        context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
     }
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
@@ -263,6 +261,13 @@ private struct TerminalPanelRepresentable: NSViewRepresentable {
         private var clickMonitor: Any?
         private var recreationAttempts = 0
         private static let maxRecreationAttempts = 2
+
+        @MainActor
+        func syncTabCloseContext(_ context: TabCloseContext?, for terminalID: UUID) {
+            guard tabCloseContext != context else { return }
+            tabCloseContext = context
+            appState?.registerTerminalCloseContext(context, for: terminalID)
+        }
 
         @MainActor
         func startTmuxClient(
