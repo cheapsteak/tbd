@@ -52,7 +52,7 @@ struct PRStatusManagerTests {
 
     // MARK: - JSON parsing
 
-    @Test("parseGraphQLResponse extracts matching branches")
+    @Test("parseGraphQLResponse keeps all branch names")
     func parsesResponse() throws {
         let json = """
         {
@@ -95,12 +95,12 @@ struct PRStatusManagerTests {
         """.data(using: .utf8)!
 
         let nodes = try PRStatusManager.parsePRNodes(from: json)
-        // Only tbd/ branches
-        #expect(nodes.count == 2)
+        #expect(nodes.count == 3)
         #expect(nodes[0].headRefName == "tbd/cool-feature")
         #expect(nodes[0].state == "OPEN")
         #expect(nodes[0].mergeStateStatus == "CLEAN")
         #expect(nodes[1].headRefName == "tbd/old-feature")
+        #expect(nodes[2].headRefName == "feature/not-tbd")
     }
 
     @Test("parseGraphQLResponse ignores null nodes in partial results")
@@ -148,9 +148,10 @@ struct PRStatusManagerTests {
         """.data(using: .utf8)!
 
         let nodes = try PRStatusManager.parsePRNodes(from: json)
-        #expect(nodes.count == 2)
+        #expect(nodes.count == 3)
         #expect(nodes[0].headRefName == "tbd/cool-feature")
         #expect(nodes[1].headRefName == "tbd/old-feature")
+        #expect(nodes[2].headRefName == "feature/not-tbd")
     }
 
     @Test("graphQLOutputData keeps non-empty stdout")
