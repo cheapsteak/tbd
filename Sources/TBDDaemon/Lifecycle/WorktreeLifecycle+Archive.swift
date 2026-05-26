@@ -3,6 +3,7 @@ import os
 import TBDShared
 
 private let archiveLogger = Logger(subsystem: "com.tbd.daemon", category: "archive")
+private let cliInstallerLogger = Logger(subsystem: "com.tbd.daemon", category: "cli-installer")
 
 /// Reorders `stored` so `preferred` is first, preserving the relative order of
 /// the rest. Returns `stored` unchanged when `preferred` is nil, when `stored`
@@ -134,11 +135,55 @@ extension WorktreeLifecycle {
             }
         }
 
+        // Capture any legacy symlink target before remove so we can detect
+        // whether it pointed inside the worktree we're about to delete. Hard
+        // link installs (the current default) don't need this — the inode
+        // survives the worktree's `.build` removal — but legacy symlink
+        // installs still need the self-heal hook.
+        let installer = CLIInstaller()
+        let priorTarget = try? FileManager.default.destinationOfSymbolicLink(atPath: installer.installPath)
+
         // git worktree remove
         try? await git.worktreeRemove(
             repoPath: repo.path,
             worktreePath: worktree.path
         )
+
+        // Self-heal a legacy symlink that now dangles because it pointed at
+        // the just-removed worktree's TBDCLI binary. Append "/" before the
+        // hasPrefix check so a worktree at /Users/me/wt doesn't claim a
+        // sibling worktree's symlink at /Users/me/wt-2/...
+        let worktreePathWithSlash = worktree.path.hasSuffix("/") ? worktree.path : worktree.path + "/"
+        if let priorTarget, priorTarget.hasPrefix(worktreePathWithSlash) {
+            await Self.repairDanglingCLISymlink(installer: installer, reason: "archive of \(worktree.path)")
+        }
+    }
+
+    /// Re-point ~/.local/bin/tbd at the daemon's sibling TBDCLI when a
+    /// legacy symlink install dangles. Called after worktree removal/cleanup.
+    /// Best-effort: never throws back to the caller, only logs.
+    static func repairDanglingCLISymlink(installer: CLIInstaller, reason: String) async {
+        guard let daemonPath = RPCRouter.resolvedExecutablePath else {
+            cliInstallerLogger.warning("self-heal skipped (\(reason, privacy: .public)): daemon executablePath unknown")
+            return
+        }
+        do {
+            let outcome = try await installer.repairIfDangling(daemonExecutablePath: daemonPath)
+            switch outcome {
+            case .notInstalled:
+                cliInstallerLogger.debug("self-heal (\(reason, privacy: .public)): no install present — nothing to do")
+            case .healthy(let target):
+                cliInstallerLogger.debug("self-heal (\(reason, privacy: .public)): install healthy -> \(target, privacy: .public)")
+            case .unexpectedFileType:
+                cliInstallerLogger.warning("self-heal (\(reason, privacy: .public)): unexpected file type at install path — leaving untouched")
+            case .noDaemonSibling(let path):
+                cliInstallerLogger.warning("self-heal (\(reason, privacy: .public)): daemon's sibling TBDCLI missing at \(path, privacy: .public) — leaving dangling install in place")
+            case .repaired(let target):
+                cliInstallerLogger.info("self-heal (\(reason, privacy: .public)): re-installed CLI -> \(target, privacy: .public)")
+            }
+        } catch {
+            cliInstallerLogger.error("self-heal (\(reason, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Legacy all-in-one archive (used by CLI).

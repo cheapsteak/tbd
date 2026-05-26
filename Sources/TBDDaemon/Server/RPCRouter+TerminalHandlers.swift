@@ -826,6 +826,15 @@ extension RPCRouter {
             }
         }
 
+        // Self-heal a dangling ~/.local/bin/tbd symlink (e.g. a worktree was
+        // archived from outside TBD, then pruned here). No need to check the
+        // prior target — cleanup runs broadly, so any dangling state warrants
+        // a repair attempt.
+        await WorktreeLifecycle.repairDanglingCLISymlink(
+            installer: CLIInstaller(),
+            reason: "tbd cleanup"
+        )
+
         let result = CleanupResult(
             reposProcessed: repos.count,
             worktreesReconciled: worktreesReconciled,
@@ -853,7 +862,7 @@ extension RPCRouter {
     /// Symlinks are followed so we return the real binary path — `cliPath()`
     /// looks for `TBDCLI` next to the actual TBDDaemon binary, not next to
     /// a symlink that points at it.
-    private static let resolvedExecutablePath: String? = {
+    static let resolvedExecutablePath: String? = {
         guard let argv0 = CommandLine.arguments.first, !argv0.isEmpty else { return nil }
         let url: URL
         if argv0.hasPrefix("/") {

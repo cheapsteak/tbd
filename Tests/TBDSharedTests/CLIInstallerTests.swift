@@ -19,10 +19,16 @@ private struct TempHome {
     }
 }
 
-private func makeFile(_ path: String) throws {
+private func makeFile(_ path: String, contents: Data = Data()) throws {
     let dir = (path as NSString).deletingLastPathComponent
     try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    FileManager.default.createFile(atPath: path, contents: Data())
+    FileManager.default.createFile(atPath: path, contents: contents)
+}
+
+private func inodeOf(_ path: String) -> (dev: Int32, ino: UInt64)? {
+    var st = stat()
+    guard stat(path, &st) == 0 else { return nil }
+    return (st.st_dev, st.st_ino)
 }
 
 // MARK: - cliPath(forDaemonExecutable:)
@@ -39,7 +45,7 @@ private func makeFile(_ path: String) throws {
 
 // MARK: - currentState
 
-@Test func currentStateNotInstalledWhenSymlinkAbsent() throws {
+@Test func currentStateNotInstalledWhenPathAbsent() throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let installer = CLIInstaller(homeDir: home.path, pathProbe: { nil })
@@ -47,68 +53,93 @@ private func makeFile(_ path: String) throws {
     #expect(state == .notInstalled)
 }
 
-@Test func currentStateInstalledWhenSymlinkPointsAtExpectedExistingTarget() throws {
+@Test func currentStateInstalledWhenHardLinkMatchesTargetInode() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli-target"
-    try makeFile(target)
-    let symlink = home.path + "/.local/bin/tbd"
-    try FileManager.default.createDirectory(
-        atPath: (symlink as NSString).deletingLastPathComponent,
-        withIntermediateDirectories: true
-    )
-    try FileManager.default.createSymbolicLink(atPath: symlink, withDestinationPath: target)
+    try makeFile(target, contents: Data("hello".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
 
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { nil })
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    _ = try await installer.install(target: target)
     let state = installer.currentState(expectedTarget: target)
     #expect(state == .installed(target: target))
 }
 
-@Test func currentStateStaleWhenSymlinkPointsElsewhere() throws {
+@Test func currentStateStaleWhenInstallPathInodeDiffersFromExpected() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let expected = home.path + "/expected-cli"
     let other = home.path + "/other-cli"
-    try makeFile(expected)
-    try makeFile(other)
-    let symlink = home.path + "/.local/bin/tbd"
-    try FileManager.default.createDirectory(
-        atPath: (symlink as NSString).deletingLastPathComponent,
-        withIntermediateDirectories: true
-    )
-    try FileManager.default.createSymbolicLink(atPath: symlink, withDestinationPath: other)
+    try makeFile(expected, contents: Data("new".utf8))
+    try makeFile(other, contents: Data("old".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
 
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { nil })
+    // Install pointing at "other", then ask whether it matches "expected".
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    _ = try await installer.install(target: other)
     let state = installer.currentState(expectedTarget: expected)
-    #expect(state == .stale(currentTarget: other))
+    if case .stale = state {
+        // ok
+    } else {
+        Issue.record("Expected .stale, got \(state)")
+    }
 }
 
-@Test func currentStateNonSymlinkWhenRegularFileExistsAtPath() throws {
+@Test func currentStateUnexpectedFileTypeWhenDirectoryAtPath() throws {
     let home = try TempHome()
     defer { home.cleanup() }
-    let symlink = home.path + "/.local/bin/tbd"
-    try makeFile(symlink)
+    let installPath = home.path + "/.local/bin/tbd"
+    try FileManager.default.createDirectory(atPath: installPath, withIntermediateDirectories: true)
 
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { nil })
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
     let state = installer.currentState(expectedTarget: "/some/target")
-    #expect(state == .nonSymlink)
+    #expect(state == .unexpectedFileType)
 }
 
-@Test func currentStateStaleWhenSymlinkTargetMissing() throws {
+@Test func currentStateStaleForLegacySymlinkSoSelfHealRuns() throws {
+    // Pre-PR installs created a symlink. Detecting that as `.stale` lets
+    // the launch-time prompt re-install as a hard link — intentional
+    // self-healing path.
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/cli-target"
-    // Note: do NOT create the file — the symlink will dangle.
-    let symlink = home.path + "/.local/bin/tbd"
+    try makeFile(target)
+    let installPath = home.path + "/.local/bin/tbd"
     try FileManager.default.createDirectory(
-        atPath: (symlink as NSString).deletingLastPathComponent,
+        atPath: (installPath as NSString).deletingLastPathComponent,
         withIntermediateDirectories: true
     )
-    try FileManager.default.createSymbolicLink(atPath: symlink, withDestinationPath: target)
+    try FileManager.default.createSymbolicLink(atPath: installPath, withDestinationPath: target)
 
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { nil })
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
     let state = installer.currentState(expectedTarget: target)
-    #expect(state == .stale(currentTarget: target))
+    if case .stale = state {
+        // ok — even though the symlink points at the right target, it's
+        // a legacy install and should be upgraded to a hard link.
+    } else {
+        Issue.record("Expected .stale for legacy symlink, got \(state)")
+    }
+}
+
+@Test func currentStateStaleWhenExpectedTargetMissing() async throws {
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/cli-target"
+    try makeFile(target)
+    let installPath = home.path + "/.local/bin/tbd"
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    _ = try await installer.install(target: target)
+
+    // Delete the source. Hard link keeps the data alive, but caller asks
+    // about an expected target that no longer exists → stale.
+    try FileManager.default.removeItem(atPath: target)
+    let state = installer.currentState(expectedTarget: target)
+    if case .stale = state {
+        // ok
+    } else {
+        Issue.record("Expected .stale, got \(state)")
+    }
 }
 
 // MARK: - launchPromptKind
@@ -135,28 +166,40 @@ private func makeFile(_ path: String) throws {
     #expect(state.launchPromptKind(userPreviouslyDismissed: true) == .stale(current: "/old/tbd"))
 }
 
-@Test func launchPromptKindNonSymlinkAlwaysSurfacedRegardlessOfDismissal() {
-    let state: CLIInstallState = .nonSymlink
-    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == .nonSymlink)
-    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == .nonSymlink)
+@Test func launchPromptKindUnexpectedFileTypeAlwaysSurfacedRegardlessOfDismissal() {
+    let state: CLIInstallState = .unexpectedFileType
+    #expect(state.launchPromptKind(userPreviouslyDismissed: false) == .unexpectedFileType)
+    #expect(state.launchPromptKind(userPreviouslyDismissed: true) == .unexpectedFileType)
 }
 
 // MARK: - install
 
-@Test func installCreatesParentDirectoryAndSymlink() async throws {
+@Test func installCreatesParentDirectoryAndHardLink() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let target = home.path + "/build/TBDCLI"
-    try makeFile(target)
-    let symlink = home.path + "/.local/bin/tbd"
+    try makeFile(target, contents: Data("binary".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
 
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { "/usr/bin:/bin" })
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { "/usr/bin:/bin" })
     let result = try await installer.install(target: target)
-    #expect(result.symlinkPath == symlink)
+    #expect(result.installPath == installPath)
     #expect(result.target == target)
 
-    let dest = try FileManager.default.destinationOfSymbolicLink(atPath: symlink)
-    #expect(dest == target)
+    // It's a regular file, not a symlink…
+    var st = stat()
+    #expect(lstat(installPath, &st) == 0)
+    #expect((st.st_mode & S_IFMT) == S_IFREG)
+
+    // …and shares the source's inode.
+    let srcInode = inodeOf(target)
+    let dstInode = inodeOf(installPath)
+    #expect(srcInode != nil && dstInode != nil)
+    #expect(srcInode?.ino == dstInode?.ino)
+    #expect(srcInode?.dev == dstInode?.dev)
+
+    // Link count should be ≥ 2 (source + install path).
+    #expect(st.st_nlink >= 2)
 }
 
 @Test func installRefusesToReplaceDirectory() async throws {
@@ -167,45 +210,71 @@ private func makeFile(_ path: String) throws {
     defer { home.cleanup() }
     let target = home.path + "/cli"
     try makeFile(target)
-    let symlink = home.path + "/.local/bin/tbd"
-    // Create a directory at the symlink path with a file inside (to verify
+    let installPath = home.path + "/.local/bin/tbd"
+    // Create a directory at the install path with a file inside (to verify
     // we wouldn't have silently lost it).
-    try FileManager.default.createDirectory(atPath: symlink, withIntermediateDirectories: true)
-    try makeFile(symlink + "/important.txt")
+    try FileManager.default.createDirectory(atPath: installPath, withIntermediateDirectories: true)
+    try makeFile(installPath + "/important.txt")
 
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { nil })
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
     do {
         _ = try await installer.install(target: target)
         Issue.record("Expected install to throw when a directory exists at the path")
     } catch let error as CLIInstallerError {
-        if case .symlinkCreationFailed(let reason) = error {
+        if case .linkCreationFailed(let reason) = error {
             #expect(reason.contains("directory"))
         } else {
             Issue.record("Wrong CLIInstallerError case: \(error)")
         }
     }
     // The directory and its contents must still be there.
-    #expect(FileManager.default.fileExists(atPath: symlink + "/important.txt"))
+    #expect(FileManager.default.fileExists(atPath: installPath + "/important.txt"))
 }
 
-@Test func installReplacesExistingSymlink() async throws {
+@Test func installReplacesExistingLegacySymlink() async throws {
     let home = try TempHome()
     defer { home.cleanup() }
     let oldTarget = home.path + "/old-cli"
     let newTarget = home.path + "/new-cli"
     try makeFile(oldTarget)
-    try makeFile(newTarget)
-    let symlink = home.path + "/.local/bin/tbd"
+    try makeFile(newTarget, contents: Data("new".utf8))
+    let installPath = home.path + "/.local/bin/tbd"
     try FileManager.default.createDirectory(
-        atPath: (symlink as NSString).deletingLastPathComponent,
+        atPath: (installPath as NSString).deletingLastPathComponent,
         withIntermediateDirectories: true
     )
-    try FileManager.default.createSymbolicLink(atPath: symlink, withDestinationPath: oldTarget)
+    try FileManager.default.createSymbolicLink(atPath: installPath, withDestinationPath: oldTarget)
 
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { "/usr/bin" })
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { "/usr/bin" })
     _ = try await installer.install(target: newTarget)
-    let dest = try FileManager.default.destinationOfSymbolicLink(atPath: symlink)
-    #expect(dest == newTarget)
+
+    // Now a hard link to newTarget, not a symlink.
+    var st = stat()
+    #expect(lstat(installPath, &st) == 0)
+    #expect((st.st_mode & S_IFMT) == S_IFREG)
+    #expect(inodeOf(installPath)?.ino == inodeOf(newTarget)?.ino)
+}
+
+@Test func hardLinkInstallSurvivesSourceDeletion() async throws {
+    // Core property of the fix: removing the source `.build/.../TBDCLI`
+    // (as `git worktree remove` does) does NOT brick `~/.local/bin/tbd`.
+    let home = try TempHome()
+    defer { home.cleanup() }
+    let target = home.path + "/build/TBDCLI"
+    let contents = Data("#!/bin/sh\necho hi\n".utf8)
+    try makeFile(target, contents: contents)
+    let installPath = home.path + "/.local/bin/tbd"
+
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
+    _ = try await installer.install(target: target)
+
+    // Simulate worktree archive — wipe the source build dir.
+    try FileManager.default.removeItem(atPath: home.path + "/build")
+
+    // Install path still exists and still has the original contents.
+    #expect(FileManager.default.fileExists(atPath: installPath))
+    let recovered = try Data(contentsOf: URL(fileURLWithPath: installPath))
+    #expect(recovered == contents)
 }
 
 // MARK: - PATH detection / on-PATH branch
@@ -215,13 +284,13 @@ private func makeFile(_ path: String) throws {
     defer { home.cleanup() }
     let target = home.path + "/cli"
     try makeFile(target)
-    let symlink = home.path + "/.local/bin/tbd"
+    let installPath = home.path + "/.local/bin/tbd"
 
     let homePath = home.path
     let probe: @Sendable () async -> String? = {
         "/usr/bin:\(homePath)/.local/bin:/sbin"
     }
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: probe)
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: probe)
     let result = try await installer.install(target: target)
     #expect(result.onPath == true)
     #expect(result.suggestedShellRC == nil)
@@ -233,11 +302,11 @@ private func makeFile(_ path: String) throws {
     defer { home.cleanup() }
     let target = home.path + "/cli"
     try makeFile(target)
-    let symlink = home.path + "/.local/bin/tbd"
+    let installPath = home.path + "/.local/bin/tbd"
 
     // Path string contains the tilde-prefixed form — should still match.
     let probe: @Sendable () async -> String? = { "/usr/bin:~/.local/bin:/sbin" }
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: probe)
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: probe)
     let result = try await installer.install(target: target)
     #expect(result.onPath == true)
 }
@@ -249,10 +318,10 @@ private func makeFile(_ path: String) throws {
     defer { home.cleanup() }
     let target = home.path + "/cli"
     try makeFile(target)
-    let symlink = home.path + "/.local/bin/tbd"
+    let installPath = home.path + "/.local/bin/tbd"
 
     let installer = CLIInstaller(
-        symlinkPath: symlink,
+        installPath: installPath,
         homeDir: home.path,
         shellPath: "/bin/zsh",
         pathProbe: { "/usr/bin:/bin" }
@@ -268,10 +337,10 @@ private func makeFile(_ path: String) throws {
     defer { home.cleanup() }
     let target = home.path + "/cli"
     try makeFile(target)
-    let symlink = home.path + "/.local/bin/tbd"
+    let installPath = home.path + "/.local/bin/tbd"
 
     let installer = CLIInstaller(
-        symlinkPath: symlink,
+        installPath: installPath,
         homeDir: home.path,
         shellPath: "/bin/bash",
         pathProbe: { "/usr/bin:/bin" }
@@ -287,10 +356,10 @@ private func makeFile(_ path: String) throws {
     defer { home.cleanup() }
     let target = home.path + "/cli"
     try makeFile(target)
-    let symlink = home.path + "/.local/bin/tbd"
+    let installPath = home.path + "/.local/bin/tbd"
 
     let installer = CLIInstaller(
-        symlinkPath: symlink,
+        installPath: installPath,
         homeDir: home.path,
         shellPath: "/usr/local/bin/fish",
         pathProbe: { "/usr/bin:/bin" }
@@ -331,9 +400,9 @@ private func makeFile(_ path: String) throws {
     defer { home.cleanup() }
     let target = home.path + "/cli"
     try makeFile(target)
-    let symlink = home.path + "/.local/bin/tbd"
+    let installPath = home.path + "/.local/bin/tbd"
 
-    let installer = CLIInstaller(symlinkPath: symlink, homeDir: home.path, pathProbe: { nil })
+    let installer = CLIInstaller(installPath: installPath, homeDir: home.path, pathProbe: { nil })
     let result = try await installer.install(target: target)
     #expect(result.onPath == false)
     #expect(result.exportLine != nil)
