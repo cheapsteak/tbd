@@ -568,7 +568,7 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let type: TerminalCreateType?
     /// Session ID to resume from (for forking a Claude session).
     public let resumeSessionID: String?
-    /// Initial prompt to send to the Claude session (only used with type: .claude).
+    /// Initial prompt for a fresh Claude or Codex session.
     public let prompt: String?
     /// Pin a specific profile ID for this terminal, bypassing resolve(repoID:).
     public let overrideProfileID: UUID?

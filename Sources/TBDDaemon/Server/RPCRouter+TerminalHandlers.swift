@@ -124,7 +124,7 @@ extension RPCRouter {
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
-                shellCommand: CodexSpawnCommandBuilder.command,
+                shellCommand: CodexSpawnCommandBuilder.build(initialPrompt: params.prompt),
                 env: codexEnv,
                 cols: resolvedCols,
                 rows: resolvedRows
