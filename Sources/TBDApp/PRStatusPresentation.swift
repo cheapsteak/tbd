@@ -1,5 +1,12 @@
+import AppKit
 import SwiftUI
 import TBDShared
+
+private func adaptive(light: NSColor, dark: NSColor) -> Color {
+    Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+    })
+}
 
 struct PRStatusPresentation: Equatable {
     enum ColorSemantic: Equatable {
@@ -15,10 +22,22 @@ struct PRStatusPresentation: Equatable {
 
     var color: Color {
         switch colorSemantic {
-        case .pending:          return .yellow
+        case .pending:
+            // Light: GitHub WIP olive #936921 — readable on light sidebar (~#F1F1F1).
+            // Dark:  GitHub attention.fg #D29922 — readable on dark sidebar (~#1E1E1E).
+            return adaptive(
+                light: NSColor(srgbRed: 147 / 255, green: 105 / 255, blue: 33 / 255, alpha: 1),
+                dark: NSColor(srgbRed: 210 / 255, green: 153 / 255, blue: 34 / 255, alpha: 1)
+            )
         case .nonMergeable:     return .red
         case .draft:            return .secondary
-        case .mergeable:        return .green
+        case .mergeable:
+            // Light: muted forest #3D7D40.
+            // Dark:  GitHub success.fg #3FB950.
+            return adaptive(
+                light: NSColor(srgbRed: 61 / 255, green: 125 / 255, blue: 64 / 255, alpha: 1),
+                dark: NSColor(srgbRed: 63 / 255, green: 185 / 255, blue: 80 / 255, alpha: 1)
+            )
         case .merged:           return .purple
         }
     }
