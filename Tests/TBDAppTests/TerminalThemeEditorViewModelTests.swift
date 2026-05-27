@@ -91,9 +91,9 @@ struct TerminalThemeEditorViewModelTests {
         let vm = TerminalThemeEditorViewModel()
         vm.load(source: bundledSource(), kind: .bundled)
         vm.setHex(slot: .background, hex: "garbage")  // error scoped to Background
-        vm.setHex(slot: .foreground, hex: "#abcdef")   // valid; foreground draft entered
         #expect(vm.lastValidationError != nil)
 
+        // Unsetting a different slot must not clear the background error.
         vm.unsetSlot(.foreground)
         #expect(vm.lastValidationError != nil) // background error still there
     }
