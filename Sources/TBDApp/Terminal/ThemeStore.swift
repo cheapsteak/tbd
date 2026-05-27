@@ -59,3 +59,12 @@ final class ThemeStore: ObservableObject {
         self.loadErrors = errors
     }
 }
+
+#if DEBUG
+extension ThemeStore {
+    /// Test seam: inject user themes without touching disk.
+    func injectForTest(userThemes: [TerminalColorScheme]) {
+        self.userThemes = userThemes
+    }
+}
+#endif

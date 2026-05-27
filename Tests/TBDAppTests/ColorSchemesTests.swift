@@ -1,6 +1,8 @@
 import Testing
+import SwiftTerm
 @testable import TBDApp
 
+@MainActor
 @Suite("ColorSchemes")
 struct ColorSchemesTests {
     @Test("bundled list is non-empty and contains tbd-default and tango")
@@ -51,5 +53,43 @@ struct ColorSchemesTests {
             "rose-pine-dawn", "flexoki-light", "tokyo-night-day",
         ]
         #expect(ids == expected)
+    }
+
+    @Test("scheme(forID:) returns a user theme when bundled has no match")
+    func resolvesUserTheme() {
+        let store = ThemeStore()
+        let userScheme = TerminalColorScheme(
+            id: "my-user-theme", displayName: "Mine",
+            ansi: Array(repeating: SwiftTerm.Color(red: 0, green: 0, blue: 0), count: 16),
+            foreground: SwiftTerm.Color(red: 65535, green: 65535, blue: 65535),
+            background: SwiftTerm.Color(red: 0, green: 0, blue: 0),
+            cursor: SwiftTerm.Color(red: 65535, green: 65535, blue: 65535),
+            selection: SwiftTerm.Color(red: 20000, green: 20000, blue: 20000)
+        )
+        store.injectForTest(userThemes: [userScheme])
+        let resolved = ColorSchemes.scheme(forID: "my-user-theme", store: store)
+        #expect(resolved.id == "my-user-theme")
+    }
+
+    @Test("bundled wins on id collision with a user theme")
+    func bundledWinsOnCollision() {
+        let store = ThemeStore()
+        let conflicting = TerminalColorScheme(
+            id: "gruvbox-dark", displayName: "Hijack",
+            ansi: Array(repeating: SwiftTerm.Color(red: 65535, green: 0, blue: 0), count: 16),
+            foreground: SwiftTerm.Color(red: 65535, green: 0, blue: 0),
+            background: SwiftTerm.Color(red: 65535, green: 0, blue: 0),
+            cursor: SwiftTerm.Color(red: 65535, green: 0, blue: 0),
+            selection: SwiftTerm.Color(red: 65535, green: 0, blue: 0)
+        )
+        store.injectForTest(userThemes: [conflicting])
+        let resolved = ColorSchemes.scheme(forID: "gruvbox-dark", store: store)
+        #expect(resolved.displayName == "Gruvbox Dark")
+    }
+
+    @Test("scheme(forID:) falls back to default when neither bundled nor user has a match")
+    func fallsBackToDefault() {
+        let resolved = ColorSchemes.scheme(forID: "nonexistent-9999")
+        #expect(resolved.id == ColorSchemes.defaultScheme.id)
     }
 }
