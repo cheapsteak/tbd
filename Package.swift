@@ -131,6 +131,9 @@ let package = Package(
             name: "TBDAppTests",
             dependencies: [
                 "TBDApp",
+            ],
+            resources: [
+                .copy("Fixtures")
             ]
         ),
         .testTarget(
