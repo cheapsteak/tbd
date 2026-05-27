@@ -44,4 +44,17 @@ struct AlacrittyImporterTests {
         #expect(theme.background == "#e1e2e7")
         #expect(theme.ansi.count == 16)
     }
+
+    @Test("missing [colors.normal] throws missingSection with the section name in the error")
+    func missingNormalSection() throws {
+        let url = try fixtureURL("malformed-no-normal")
+        do {
+            _ = try AlacrittyImporter().importFile(url)
+            Issue.record("expected import to throw")
+        } catch let AlacrittyImporter.ImportError.missingSection(section) {
+            #expect(section == "colors.normal")
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
 }
