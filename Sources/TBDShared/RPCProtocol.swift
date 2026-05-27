@@ -147,6 +147,7 @@ public enum RPCMethod {
     public static let tabSetOrder = "tab.setOrder"
     public static let tabList     = "tab.list"
     public static let worktreeSetActiveTab = "worktree.setActiveTab"
+    public static let appearanceUpdateColorFgBg = "appearance.updateColorFgBg"
 }
 
 // MARK: - Legacy Hook Detection / Removal
@@ -200,6 +201,15 @@ public struct SetMainAreaSizeParams: Codable, Sendable {
 public struct AppSetForegroundStateParams: Codable, Sendable {
     public let isForeground: Bool
     public init(isForeground: Bool) { self.isForeground = isForeground }
+}
+
+// MARK: - Appearance RPC
+
+public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
+    /// COLORFGBG environment variable value computed from terminal color scheme's
+    /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
+    public let value: String
+    public init(value: String) { self.value = value }
 }
 
 // MARK: - Terminal Swap Profile
@@ -591,9 +601,12 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) {
+    /// COLORFGBG environment variable value computed from active terminal color scheme's
+    /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
+    public let colorFgBg: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
-        self.cols = cols; self.rows = rows
+        self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
     }
 }
 

@@ -473,10 +473,10 @@ actor DaemonClient {
     }
 
     /// Create a terminal in a worktree.
-    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideProfileID: overrideProfileID, cols: cols, rows: rows),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideProfileID: overrideProfileID, cols: cols, rows: rows, colorFgBg: colorFgBg),
             resultType: Terminal.self
         )
     }
@@ -506,6 +506,16 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.setMainAreaSize,
             params: SetMainAreaSizeParams(cols: cols, rows: rows)
+        )
+    }
+
+    /// Update COLORFGBG environment variable in all known tmux servers.
+    /// This notifies running shells that the terminal color scheme has changed,
+    /// allowing tools like vim, less, fzf to auto-adjust their output.
+    func updateAppearanceColorFgBg(value: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.appearanceUpdateColorFgBg,
+            params: AppearanceUpdateColorFgBgParams(value: value)
         )
     }
 

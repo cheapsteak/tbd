@@ -91,6 +91,33 @@ final class AppearanceSettings: ObservableObject {
         NSFont(name: fontName, size: fontSize)
             ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
     }
+
+    /// Computes the COLORFGBG environment variable value based on a color scheme's
+    /// background luminance. Returns "0;15" (black fg, white bg) for light backgrounds
+    /// (luminance > 0.5), or "15;0" (white fg, black bg) for dark backgrounds.
+    /// Uses an approximate luminance — the WCAG coefficients applied to raw sRGB values,
+    /// skipping the gamma-linearization step. Sufficient for a binary light/dark
+    /// threshold on near-black / near-white terminal backgrounds; do not use this
+    /// helper as a general-purpose accessibility-contrast check.
+    nonisolated static func colorFgBg(for scheme: TerminalColorScheme) -> String {
+        // Convert SwiftTerm.Color channels (0–65535 scale) to 0–1 range.
+        // Bundled scheme values are sRGB hex codes; use sRGB so wide-gamut
+        // displays (Display P3) don't drift from the spec.
+        let red = CGFloat(scheme.background.red) / 65535.0
+        let green = CGFloat(scheme.background.green) / 65535.0
+        let blue = CGFloat(scheme.background.blue) / 65535.0
+
+        let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        // Light background (luminance > 0.5) → use black foreground, white background hint
+        // Dark background (luminance ≤ 0.5) → use white foreground, black background hint
+        return luminance > 0.5 ? "0;15" : "15;0"
+    }
+
+    /// Computes COLORFGBG for the currently active terminal color scheme.
+    var currentColorFgBg: String {
+        let scheme = ColorSchemes.scheme(forID: schemeID)
+        return Self.colorFgBg(for: scheme)
+    }
 }
 
 // MARK: - CursorStyle <-> String

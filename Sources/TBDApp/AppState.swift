@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 import TBDShared
@@ -33,7 +34,15 @@ final class AppState: ObservableObject {
     /// from the user's current font, before any `TBDTerminalView` exists.
     /// Plain (non-weak) optional — `AppState` and `AppearanceSettings` share
     /// the app's lifetime, so this reference cannot outlive its target.
-    var appearance: AppearanceSettings?
+    var appearance: AppearanceSettings? {
+        didSet {
+            if let appearance {
+                setupAppearanceSubscriptions(appearance)
+            }
+        }
+    }
+    /// Subscription to appearance.$schemeID changes for pushing COLORFGBG updates to running tmux servers.
+    private var appearanceSubscription: AnyCancellable?
 
     @Published var repos: [Repo] = []
     @Published var worktrees: [UUID: [Worktree]] = [:]
@@ -441,6 +450,46 @@ final class AppState: ObservableObject {
         // Store must happen on MainActor
         Task { @MainActor in
             self.memoryPressureSource = source
+        }
+    }
+
+    // MARK: - Appearance Subscriptions
+
+    /// Subscribe to appearance setting changes and push updates to running tmux servers.
+    /// Called when `appearance` is set via didSet.
+    @MainActor
+    private func setupAppearanceSubscriptions(_ appearance: AppearanceSettings) {
+        // Subscribe to schemeID changes to push COLORFGBG updates to all running tmux servers.
+        // When the user changes the color scheme, this notifies all shells so tools like vim,
+        // less, fzf can auto-adjust to the new scheme.
+        // Debounce rapid changes (e.g., scrubbing through the scheme picker) to coalesce
+        // multiple RPCs into a single request. The 200ms window is long enough to capture
+        // rapid picker changes but short enough to feel responsive.
+        appearanceSubscription = appearance.$schemeID
+            // `@Published` delivers the current value at subscription time. Without
+            // `dropFirst()`, broadcastAppearanceColorFgBg runs on app launch before
+            // the daemon connection is even established — the RPC fails, the error
+            // gets logged and swallowed. Drop that subscriber-time emission so we
+            // only react to actual user-driven scheme changes.
+            .dropFirst()
+            .removeDuplicates()
+            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.broadcastAppearanceColorFgBg(appearance)
+            }
+    }
+
+    /// Compute the new COLORFGBG value and push it to all running tmux servers.
+    @MainActor
+    private func broadcastAppearanceColorFgBg(_ appearance: AppearanceSettings) {
+        let newValue = appearance.currentColorFgBg
+        Task {
+            do {
+                try await daemonClient.updateAppearanceColorFgBg(value: newValue)
+            } catch {
+                logger.error("Failed to broadcast COLORFGBG update: \(error, privacy: .public)")
+                // Fire-and-forget: don't block on RPC failure
+            }
         }
     }
 

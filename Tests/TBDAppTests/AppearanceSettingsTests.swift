@@ -101,4 +101,56 @@ struct AppearanceSettingsTests {
                     settings.font.fontName.lowercased().contains("sf"))
         }
     }
+
+    @Test("colorFgBg for light schemes returns 0;15 (black fg, white bg)")
+    func colorFgBgLight() {
+        // Test with solarized-light which has a light background
+        let scheme = ColorSchemes.scheme(forID: "solarized-light")
+        let colorFgBg = AppearanceSettings.colorFgBg(for: scheme)
+        #expect(colorFgBg == "0;15")
+    }
+
+    @Test("colorFgBg for dark schemes returns 15;0 (white fg, black bg)")
+    func colorFgBgDark() {
+        // Test with solarized-dark which has a dark background
+        let scheme = ColorSchemes.scheme(forID: "solarized-dark")
+        let colorFgBg = AppearanceSettings.colorFgBg(for: scheme)
+        #expect(colorFgBg == "15;0")
+    }
+
+    @Test("colorFgBg for default tango scheme returns 15;0 (dark bg)")
+    func colorFgBgDefaultTango() {
+        // Tango has rgb(0,0,0) background (luminance 0)
+        let scheme = ColorSchemes.defaultScheme
+        let colorFgBg = AppearanceSettings.colorFgBg(for: scheme)
+        #expect(colorFgBg == "15;0")
+    }
+
+    @Test("colorFgBg for github-light returns 0;15 (light bg)")
+    func colorFgBgGithubLight() {
+        let scheme = ColorSchemes.scheme(forID: "github-light")
+        let colorFgBg = AppearanceSettings.colorFgBg(for: scheme)
+        #expect(colorFgBg == "0;15")
+    }
+
+    @Test("colorFgBg for nord returns 15;0 (dark bg)")
+    func colorFgBgNord() {
+        let scheme = ColorSchemes.scheme(forID: "nord")
+        let colorFgBg = AppearanceSettings.colorFgBg(for: scheme)
+        #expect(colorFgBg == "15;0")
+    }
+
+    @Test("currentColorFgBg property returns correct value for current scheme")
+    func currentColorFgBgProperty() {
+        withIsolatedDefaults { defaults in
+            let settings = AppearanceSettings(defaults: defaults)
+            settings.schemeID = "github-light"
+            let value = settings.currentColorFgBg
+            #expect(value == "0;15")
+
+            settings.schemeID = "nord"
+            let darkValue = settings.currentColorFgBg
+            #expect(darkValue == "15;0")
+        }
+    }
 }

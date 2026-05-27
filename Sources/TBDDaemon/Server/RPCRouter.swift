@@ -200,6 +200,8 @@ public final class RPCRouter: Sendable {
                 let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
                 await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)
                 return .ok()
+            case RPCMethod.appearanceUpdateColorFgBg:
+                return try await handleAppearanceUpdateColorFgBg(request.paramsData)
             case RPCMethod.setMainAreaSize:
                 return try await handleSetMainAreaSize(request.paramsData)
             case RPCMethod.sessionList:
