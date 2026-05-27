@@ -189,54 +189,55 @@ struct ClaudeSessionScannerTests {
 
     // MARK: - isSessionBlank with transcriptFilePath
 
-    @Test("isSessionBlank: transcriptFilePath bypasses stale cache and finds content")
-    func transcriptPathBypassesCache() throws {
+    @Test("isSessionBlank: transcriptFilePath bypasses project dir resolution")
+    func transcriptPathBypassesResolve() throws {
+        // Scenario: resolve() cannot find the project dir (simulates the
+        // stale-nil-cache bug where the dir exists but the cache says it
+        // doesn't). transcriptFilePath lets the caller side-step resolve().
         let wt = "/Users/test/cache-bypass-\(UUID().uuidString.prefix(8))"
-        let layout = try makeProjectDir(worktreePath: wt)
-        defer { try? FileManager.default.removeItem(at: layout.base) }
-        ClaudeProjectDirectory.clearCache()
+        let emptyBase = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: emptyBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: emptyBase) }
 
-        // First call: project dir not yet created, cache records miss
-        #expect(ClaudeSessionScanner.isSessionBlank(
-            sessionID: "test", worktreePath: wt, projectsBase: layout.base
-        ) == true)
-        // Cache now holds a nil entry for this worktree path
-
-        // Now create a session file outside the project dir
-        let tmpDir = FileManager.default.temporaryDirectory
+        // Write real session content to a separate location (mirrors how the
+        // SessionStart hook records the actual transcript path independently
+        // of the project-dir resolution).
+        let transcriptDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
-        let sessionFile = tmpDir.appendingPathComponent("external-session.jsonl")
-        let lines = """
+        try FileManager.default.createDirectory(at: transcriptDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: transcriptDir) }
+        let sessionFile = transcriptDir.appendingPathComponent("test.jsonl")
+        try """
         {"type":"user","message":{"role":"user","content":"Hello!"},"sessionId":"test"}
-        """
-        try lines.data(using: .utf8)!.write(to: sessionFile)
+        """.data(using: .utf8)!.write(to: sessionFile)
 
-        // Without transcriptFilePath, the stale cache returns true (blank)
+        // Without transcriptFilePath: resolve() uses emptyBase which has no
+        // encoded dir → returns nil → blank.
         #expect(ClaudeSessionScanner.isSessionBlank(
-            sessionID: "test", worktreePath: wt, projectsBase: layout.base
+            sessionID: "test", worktreePath: wt, projectsBase: emptyBase
         ) == true)
 
-        // With transcriptFilePath, it finds the actual content and returns false
+        // With transcriptFilePath: bypasses resolve() entirely → finds content.
         #expect(ClaudeSessionScanner.isSessionBlank(
-            sessionID: "test", worktreePath: wt, transcriptFilePath: sessionFile.path, projectsBase: layout.base
+            sessionID: "test", worktreePath: wt, transcriptFilePath: sessionFile.path, projectsBase: emptyBase
         ) == false)
     }
 
-    @Test("isSessionBlank: transcriptFilePath for missing file falls back to cache")
+    @Test("isSessionBlank: transcriptFilePath for missing file falls back to project dir")
     func transcriptPathFallback() throws {
         let wt = "/Users/test/cache-fallback-\(UUID().uuidString.prefix(8))"
         let layout = try makeProjectDir(worktreePath: wt)
         defer { try? FileManager.default.removeItem(at: layout.base) }
         ClaudeProjectDirectory.clearCache()
 
-        // Cache a miss for this worktree
+        // Project dir exists (via makeProjectDir) but session file doesn't →
+        // isSessionBlank returns true regardless of path used.
         #expect(ClaudeSessionScanner.isSessionBlank(
             sessionID: "test", worktreePath: wt, projectsBase: layout.base
         ) == true)
 
-        // Call with a non-existent transcriptFilePath: should fall back and return true
+        // Non-existent transcriptFilePath: falls back to project dir resolution,
+        // which also finds no session file → true.
         #expect(ClaudeSessionScanner.isSessionBlank(
             sessionID: "test", worktreePath: wt, transcriptFilePath: "/nonexistent/path.jsonl", projectsBase: layout.base
         ) == true)
@@ -282,10 +283,7 @@ struct ClaudeSessionScannerTests {
         defer { try? FileManager.default.removeItem(at: layout.base) }
         ClaudeProjectDirectory.clearCache()
 
-        // Create the directory up-front
-        try FileManager.default.createDirectory(at: layout.dir, withIntermediateDirectories: true)
-
-        // First call: hit, cache records it
+        // First call: hit, cache records it (makeProjectDir already created the dir)
         let first = ClaudeProjectDirectory.resolve(worktreePath: wt, projectsBase: layout.base)
         #expect(first != nil)
 
