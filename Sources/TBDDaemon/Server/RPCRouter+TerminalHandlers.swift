@@ -345,6 +345,7 @@ extension RPCRouter {
                 windowID: window.windowID,
                 paneID: window.paneID
             )
+            try await db.terminals.setActivityState(id: params.terminalID, activityState: .unknown)
 
             // Return updated terminal
             guard let updated = try await db.terminals.get(id: params.terminalID) else {
@@ -929,6 +930,9 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath
         )
+        if terminal.kind == .codex || terminal.label == "Codex" {
+            try await db.terminals.setActivityState(id: terminal.id, activityState: .idle)
+        }
 
         // Invalidate cached transcript parse for the OLD session file (if any)
         // so a quick re-poll doesn't return stale entries.
@@ -944,9 +948,36 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath
         )))
+        if terminal.kind == .codex || terminal.label == "Codex" {
+            subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
+                terminalID: terminal.id,
+                worktreeID: terminal.worktreeID,
+                activityState: .idle
+            )))
+        }
         return .ok()
     }
 
+    func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalActivityEventParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            logger.debug("activityEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
+            return .ok()
+        }
+
+        guard terminal.activityState != params.activityState else {
+            return .ok()
+        }
+
+        try await db.terminals.setActivityState(id: terminal.id, activityState: params.activityState)
+        subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
+            terminalID: terminal.id,
+            worktreeID: terminal.worktreeID,
+            activityState: params.activityState
+        )))
+        return .ok()
+    }
     func handleTerminalTranscript(_ paramsData: Data) async throws -> RPCResponse {
         perfTranscriptLog.debug("rpc.handle.start method=terminalTranscript")
         let start = ContinuousClock.now

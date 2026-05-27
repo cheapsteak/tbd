@@ -19,6 +19,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var profile_id: String?
     var transcriptPath: String?
     var kind: String?
+    var activityState: String?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -34,6 +35,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.profile_id = terminal.profileID?.uuidString
         self.transcriptPath = terminal.transcriptPath
         self.kind = terminal.kind?.rawValue
+        self.activityState = terminal.activityState.rawValue
     }
 
     func toModel() -> Terminal {
@@ -50,7 +52,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             suspendedSnapshot: suspendedSnapshot,
             profileID: profile_id.flatMap(UUID.init(uuidString:)),
             transcriptPath: transcriptPath,
-            kind: kind.flatMap(TerminalKind.init(rawValue:))
+            kind: kind.flatMap(TerminalKind.init(rawValue:)),
+            activityState: activityState.flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown
         )
     }
 }
@@ -214,6 +217,7 @@ public struct TerminalStore: Sendable {
             record.suspendedSnapshot = nil
             record.label = "shell"
             record.kind = TerminalKind.shell.rawValue
+            record.activityState = TerminalActivityState.unknown.rawValue
             try record.update(db)
         }
     }
@@ -236,6 +240,17 @@ public struct TerminalStore: Sendable {
             }
             record.tmuxWindowID = windowID
             record.tmuxPaneID = paneID
+            try record.update(db)
+        }
+    }
+
+    /// Update the current activity state for a terminal.
+    public func setActivityState(id: UUID, activityState: TerminalActivityState) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.activityState = activityState.rawValue
             try record.update(db)
         }
     }

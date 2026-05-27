@@ -22,6 +22,7 @@ public enum StateDelta: Codable, Sendable {
     case modelProfileUsageUpdated(ModelProfileUsage)
     case modelProfilesChanged
     case terminalSessionUpdated(TerminalSessionDelta)
+    case terminalActivityUpdated(TerminalActivityDelta)
     case worktreeMoved(WorktreeMovedDelta)
 }
 
@@ -38,6 +39,17 @@ public struct TerminalSessionDelta: Codable, Sendable {
         self.worktreeID = worktreeID
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
+    }
+}
+
+public struct TerminalActivityDelta: Codable, Sendable {
+    public let terminalID: UUID
+    public let worktreeID: UUID
+    public let activityState: TerminalActivityState
+    public init(terminalID: UUID, worktreeID: UUID, activityState: TerminalActivityState) {
+        self.terminalID = terminalID
+        self.worktreeID = worktreeID
+        self.activityState = activityState
     }
 }
 

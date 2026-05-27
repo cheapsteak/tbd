@@ -175,6 +175,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+public enum TerminalActivityState: String, Codable, Sendable {
+    case unknown
+    case working
+    case idle
+    case waitingForUser = "waiting_for_user"
+}
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var worktreeID: UUID
@@ -194,6 +200,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// `~/.claude/projects/` subdirectory than cwd would suggest).
     public var transcriptPath: String?
     public var kind: TerminalKind?
+    public var activityState: TerminalActivityState
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
@@ -201,7 +208,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 suspendedAt: Date? = nil, suspendedSnapshot: String? = nil,
                 profileID: UUID? = nil,
                 transcriptPath: String? = nil,
-                kind: TerminalKind? = nil) {
+                kind: TerminalKind? = nil,
+                activityState: TerminalActivityState = .unknown) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -215,11 +223,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.profileID = profileID
         self.transcriptPath = transcriptPath
         self.kind = kind
+        self.activityState = activityState
     }
 
     enum CodingKeys: String, CodingKey {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
+        case activityState
     }
 
     public init(from decoder: Decoder) throws {
@@ -237,6 +247,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID)
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
         kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
+        activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
     }
 }
 
