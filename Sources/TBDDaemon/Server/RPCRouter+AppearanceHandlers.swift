@@ -14,23 +14,38 @@ extension RPCRouter {
         // Discover all known tmux servers from worktrees.
         let worktrees = try await db.worktrees.list()
         var attemptedServers = Set<String>()
-        var failureCount = 0
 
+        // Build the deduplicated set of servers first (single pass).
         for worktree in worktrees {
             let server = worktree.tmuxServer
             // Only attempt each server once (multiple worktrees may share a server).
-            guard !attemptedServers.contains(server) else { continue }
             attemptedServers.insert(server)
+        }
 
-            do {
-                // Use the public setGlobalEnv method to set the variable.
-                // This notifies all running shells that the color scheme has changed.
-                try await tmux.setGlobalEnv(server: server, name: "COLORFGBG", value: params.value)
-                logger.debug("Set COLORFGBG=\(params.value, privacy: .public) on server \(server, privacy: .public)")
-            } catch {
-                failureCount += 1
-                logger.warning("Failed to set COLORFGBG on server \(server, privacy: .public): \(error, privacy: .public)")
-                // Continue to next server on failure — best-effort fan-out.
+        // Parallelize the fan-out across servers using a TaskGroup.
+        var failureCount = 0
+        try await withThrowingTaskGroup(of: Bool.self) { group in
+            for server in attemptedServers {
+                group.addTask {
+                    do {
+                        // Use the public setGlobalEnv method to set the variable.
+                        // This notifies all running shells that the color scheme has changed.
+                        try await self.tmux.setGlobalEnv(server: server, name: "COLORFGBG", value: params.value)
+                        logger.debug("Set COLORFGBG=\(params.value, privacy: .public) on server \(server, privacy: .public)")
+                        return true
+                    } catch {
+                        logger.warning("Failed to set COLORFGBG on server \(server, privacy: .public): \(error, privacy: .public)")
+                        // Return false on failure — best-effort fan-out.
+                        return false
+                    }
+                }
+            }
+
+            // Collect results and count failures.
+            for try await result in group {
+                if !result {
+                    failureCount += 1
+                }
             }
         }
 
