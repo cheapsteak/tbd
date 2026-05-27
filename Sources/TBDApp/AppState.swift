@@ -466,9 +466,15 @@ final class AppState: ObservableObject {
         // multiple RPCs into a single request. The 200ms window is long enough to capture
         // rapid picker changes but short enough to feel responsive.
         appearanceSubscription = appearance.$schemeID
+            // `@Published` delivers the current value at subscription time. Without
+            // `dropFirst()`, broadcastAppearanceColorFgBg runs on app launch before
+            // the daemon connection is even established — the RPC fails, the error
+            // gets logged and swallowed. Drop that subscriber-time emission so we
+            // only react to actual user-driven scheme changes.
+            .dropFirst()
             .removeDuplicates()
             .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
-            .sink { [weak self] schemeID in
+            .sink { [weak self] _ in
                 self?.broadcastAppearanceColorFgBg(appearance)
             }
     }
