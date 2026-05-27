@@ -15,10 +15,10 @@ struct PRStatusPresentation: Equatable {
 
     var color: Color {
         switch colorSemantic {
-        case .pending:          return .yellow
+        case .pending:          return Color(red: 147 / 255, green: 105 / 255, blue: 33 / 255)
         case .nonMergeable:     return .red
         case .draft:            return .secondary
-        case .mergeable:        return .green
+        case .mergeable:        return Color(red: 61 / 255, green: 125 / 255, blue: 64 / 255)
         case .merged:           return .purple
         }
     }
