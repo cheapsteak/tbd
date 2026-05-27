@@ -36,8 +36,10 @@ struct AppearanceDebounceTests {
         appearance.schemeID = "scheme-b"
         appearance.schemeID = "scheme-c"
 
-        // Give the debounce timer time to fire (300ms > 200ms window).
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // Give the debounce timer time to fire. 600ms vs the 200ms window leaves
+        // a 3x safety margin — `Task.sleep` has no lower-bound guarantee on
+        // constrained CI runners, and a tighter margin would risk flakes.
+        try? await Task.sleep(nanoseconds: 600_000_000)
 
         // The debounce should coalesce the three changes into just one emission of the final value.
         // Note: the initial value (default scheme) may also emit depending on timing, but we're
@@ -66,12 +68,12 @@ struct AppearanceDebounceTests {
 
         // First scheme change and wait for debounce to complete.
         appearance.schemeID = "scheme-a"
-        try? await Task.sleep(nanoseconds: 300_000_000) // 300ms > 200ms debounce
+        try? await Task.sleep(nanoseconds: 600_000_000) // 3x the 200ms debounce window
         let countAfterFirst = debounceEmissions.count
 
         // Second scheme change after debounce fired — should emit again.
         appearance.schemeID = "scheme-b"
-        try? await Task.sleep(nanoseconds: 300_000_000) // Wait for second debounce window
+        try? await Task.sleep(nanoseconds: 600_000_000) // Wait for second debounce window
 
         // Should have more emissions now than before the second change.
         let countAfterSecond = debounceEmissions.count

@@ -95,7 +95,10 @@ final class AppearanceSettings: ObservableObject {
     /// Computes the COLORFGBG environment variable value based on a color scheme's
     /// background luminance. Returns "0;15" (black fg, white bg) for light backgrounds
     /// (luminance > 0.5), or "15;0" (white fg, black bg) for dark backgrounds.
-    /// Uses the WCAG luminance formula: 0.2126*R + 0.7152*G + 0.0722*B
+    /// Uses an approximate luminance — the WCAG coefficients applied to raw sRGB values,
+    /// skipping the gamma-linearization step. Sufficient for a binary light/dark
+    /// threshold on near-black / near-white terminal backgrounds; do not use this
+    /// helper as a general-purpose accessibility-contrast check.
     nonisolated static func colorFgBg(for scheme: TerminalColorScheme) -> String {
         // Convert SwiftTerm.Color channels (0–65535 scale) to 0–1 range.
         // Bundled scheme values are sRGB hex codes; use sRGB so wide-gamut
