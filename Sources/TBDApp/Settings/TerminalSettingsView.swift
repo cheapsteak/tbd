@@ -13,6 +13,7 @@ struct TerminalSettingsView: View {
     @State private var saveAsName = ""
     @State private var deleteConfirmation = false
     @State private var importError: String?
+    @State private var pendingSchemeSwitch: String?
 
     var body: some View {
         Form {
@@ -150,6 +151,33 @@ struct TerminalSettingsView: View {
             get: { importError != nil },
             set: { if !$0 { importError = nil } }
         )) { Button("OK") {} } message: { Text(importError ?? "") }
+        .confirmationDialog(
+            "Unsaved changes to \(editorVM.displayName)",
+            isPresented: Binding(
+                get: { pendingSchemeSwitch != nil },
+                set: { if !$0 { pendingSchemeSwitch = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if editorVM.canSave {
+                Button("Save") {
+                    performSave()
+                    commitPendingSwitch()
+                }
+            }
+            Button("Save as…") {
+                saveAsName = editorVM.displayName + " Copy"
+                showingSaveAsDialog = true
+                // pendingSchemeSwitch will be resolved when the save-as completes
+            }
+            Button("Discard", role: .destructive) {
+                editorVM.reset()
+                commitPendingSwitch()
+            }
+            Button("Cancel", role: .cancel) {
+                pendingSchemeSwitch = nil
+            }
+        }
     }
 
     // MARK: - Computed helpers
@@ -166,12 +194,23 @@ struct TerminalSettingsView: View {
         Binding(
             get: { appearance.schemeID },
             set: { newID in
-                // Unsaved-draft confirmation is added in Task 14 by overriding this setter.
-                appearance.schemeID = newID
-                appearance.draftSchemeOverride = nil
-                syncEditorWithScheme()
+                if editorVM.isDirty {
+                    pendingSchemeSwitch = newID
+                } else {
+                    appearance.schemeID = newID
+                    appearance.draftSchemeOverride = nil
+                    syncEditorWithScheme()
+                }
             }
         )
+    }
+
+    private func commitPendingSwitch() {
+        guard let target = pendingSchemeSwitch else { return }
+        pendingSchemeSwitch = nil
+        appearance.schemeID = target
+        appearance.draftSchemeOverride = nil
+        syncEditorWithScheme()
     }
 
     // MARK: - Editor sync
@@ -208,6 +247,7 @@ struct TerminalSettingsView: View {
             let newID = try appState.themeStore.saveAs(draft, suggestedDisplayName: name)
             appearance.schemeID = newID
             syncEditorWithScheme()
+            pendingSchemeSwitch = nil
         } catch {
             importError = "Save as failed: \(error)"
         }
