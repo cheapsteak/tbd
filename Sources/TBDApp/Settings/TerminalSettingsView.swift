@@ -16,6 +16,7 @@ struct TerminalSettingsView: View {
     @State private var deleteConfirmation = false
     @State private var importError: String?
     @State private var pendingSchemeSwitch: String?
+    @State private var showingPendingSwitchConfirm = false
 
     var body: some View {
         Form {
@@ -170,10 +171,7 @@ struct TerminalSettingsView: View {
         )) { Button("OK") {} } message: { Text(importError ?? "") }
         .confirmationDialog(
             "Unsaved changes to \(editorVM.displayName)",
-            isPresented: Binding(
-                get: { pendingSchemeSwitch != nil },
-                set: { if !$0 { pendingSchemeSwitch = nil } }
-            ),
+            isPresented: $showingPendingSwitchConfirm,
             titleVisibility: .visible
         ) {
             if editorVM.canSave {
@@ -185,7 +183,7 @@ struct TerminalSettingsView: View {
             Button("Save as…") {
                 saveAsName = editorVM.displayName + " Copy"
                 showingSaveAsDialog = true
-                // pendingSchemeSwitch will be resolved when the save-as completes
+                // pendingSchemeSwitch is intentionally left set — performSaveAs reads it.
             }
             Button("Discard", role: .destructive) {
                 editorVM.reset()
@@ -213,6 +211,7 @@ struct TerminalSettingsView: View {
             set: { newID in
                 if editorVM.isDirty {
                     pendingSchemeSwitch = newID
+                    showingPendingSwitchConfirm = true
                 } else {
                     appearance.schemeID = newID
                     appearance.draftSchemeOverride = nil
