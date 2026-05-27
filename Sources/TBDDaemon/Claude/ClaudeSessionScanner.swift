@@ -10,13 +10,17 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "session-scan
 /// Three-tier lookup: exact encoding → regex fallback → full content scan.
 /// Results are cached after first resolution.
 enum ClaudeProjectDirectory {
-    /// Cache entries: `.some(url)` for resolved hits, `.none` for confirmed
-    /// misses. Caching negatives is essential — the tier-3 fallback enumerates
-    /// every directory under `~/.claude/projects` and reads the first line of
-    /// every session JSONL. Without negative caching, every repeat call for a
-    /// worktree with no matching project dir re-runs that scan, which pegs the
-    /// daemon at ~95% CPU when the app's 2s poll lists archived worktrees.
-    private nonisolated(unsafe) static var cache: [String: URL?] = [:]
+    /// Cache entry stores the resolved URL (or nil for miss) and when it was cached.
+    /// Positive entries (resolved URLs) are re-validated against the filesystem,
+    /// while negative entries (misses) expire after 30 seconds to catch newly-created
+    /// project directories (e.g., when a Claude session first writes to disk after
+    /// worktree creation). Caching negatives with TTL avoids the tier-3 scan (which
+    /// reads the first line of every session JSONL) while staying fresh for new dirs.
+    private struct CacheEntry {
+        let url: URL?
+        let cachedAt: ContinuousClock.Instant
+    }
+    private nonisolated(unsafe) static var cache: [String: CacheEntry] = [:]
     private static let lock = NSLock()
 
     static func resolve(worktreePath: String, projectsBase: URL? = nil) -> URL? {
@@ -25,21 +29,29 @@ enum ClaudeProjectDirectory {
 
         lock.lock()
         if let cached = cache[worktreePath] {
-            lock.unlock()
-            // Re-validate hits against the filesystem so a deleted project
-            // directory doesn't leave stale results in the cache. Negative
-            // entries are returned as-is — a previously-missing dir reappearing
-            // is rare enough that we don't pay the fexist cost on every call.
-            if let url = cached {
+            let now = ContinuousClock.now
+            if let url = cached.url {
+                // Positive entry: re-validate against filesystem, then unlock + return
+                lock.unlock()
                 return FileManager.default.fileExists(atPath: url.path) ? url : nil
+            } else {
+                // Negative entry: check if still fresh
+                let age = now - cached.cachedAt
+                if age < .seconds(30) {
+                    // Still fresh, return nil without re-scanning
+                    lock.unlock()
+                    return nil
+                }
+                // Expired, fall through to re-resolve
+                cache.removeValue(forKey: worktreePath)
             }
-            return nil
         }
         lock.unlock()
 
         let result = resolveUncached(worktreePath: worktreePath, projectsBase: base)
+        let entry = CacheEntry(url: result, cachedAt: ContinuousClock.now)
         lock.lock()
-        cache[worktreePath] = result
+        cache[worktreePath] = entry
         lock.unlock()
         return result
     }
@@ -228,22 +240,33 @@ enum ClaudeSessionScanner {
     /// per-worktree project dir) is missing, empty, or contains no
     /// user/assistant entries with text content. Metadata-only files
     /// (permission-mode, file-history-snapshot, etc.) are considered blank.
+    ///
+    /// If `transcriptFilePath` is provided and the file exists, it takes
+    /// precedence over project directory resolution. This bypasses stale
+    /// cache entries and mirrors the pattern used by `handleTerminalTranscript`.
     static func isSessionBlank(
         sessionID: String,
         worktreePath: String,
+        transcriptFilePath: String? = nil,
         projectsBase: URL? = nil
     ) -> Bool {
-        guard let projectDir = ClaudeProjectDirectory.resolve(
-            worktreePath: worktreePath,
-            projectsBase: projectsBase
-        ) else {
-            logger.debug("isSessionBlank: project dir unresolved for \(worktreePath, privacy: .public) — treating as blank")
-            return true
-        }
-        let file = projectDir.appendingPathComponent("\(sessionID).jsonl")
-        guard FileManager.default.fileExists(atPath: file.path) else {
-            logger.debug("isSessionBlank: file missing \(file.path, privacy: .public)")
-            return true
+        let file: URL
+        if let path = transcriptFilePath,
+           FileManager.default.fileExists(atPath: path) {
+            file = URL(fileURLWithPath: path)
+        } else {
+            guard let projectDir = ClaudeProjectDirectory.resolve(
+                worktreePath: worktreePath,
+                projectsBase: projectsBase
+            ) else {
+                logger.debug("isSessionBlank: project dir unresolved for \(worktreePath, privacy: .public) — treating as blank")
+                return true
+            }
+            file = projectDir.appendingPathComponent("\(sessionID).jsonl")
+            guard FileManager.default.fileExists(atPath: file.path) else {
+                logger.debug("isSessionBlank: file missing \(file.path, privacy: .public)")
+                return true
+            }
         }
         guard let handle = FileHandle(forReadingAtPath: file.path) else { return true }
         defer { try? handle.close() }

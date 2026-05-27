@@ -583,7 +583,8 @@ extension RPCRouter {
 
         let blank = ClaudeSessionScanner.isSessionBlank(
             sessionID: sessionID,
-            worktreePath: worktree.path
+            worktreePath: worktree.path,
+            transcriptFilePath: oldTerminal.transcriptPath
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
 
