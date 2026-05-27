@@ -2,6 +2,7 @@ import AppKit
 import SwiftTerm
 import SwiftUI
 import TBDShared
+import UniformTypeIdentifiers
 
 private typealias SwiftUIColor = SwiftUI.Color
 
@@ -328,7 +329,9 @@ struct TerminalSettingsView: View {
 
     private func performImport() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.init(filenameExtension: "toml")!]
+        if let tomlType = UTType(filenameExtension: "toml") {
+            panel.allowedContentTypes = [tomlType]
+        }
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
