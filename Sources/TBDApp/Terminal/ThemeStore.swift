@@ -138,6 +138,13 @@ final class ThemeStore: ObservableObject {
 
     /// Overwrite an existing user theme by id. For new themes use `saveAs`.
     func save(_ theme: UserTerminalTheme) throws {
+        // Match `saveAs`'s precedent: don't overwrite a file whose id collides
+        // with a bundled scheme, even if a stray JSON happens to live under that
+        // name (manual cp, dotfiles sync, future import paths). UI keeps callers
+        // honest today, but the data layer shouldn't rely on caller discipline.
+        guard !ColorSchemes.bundled.contains(where: { $0.id == theme.id }) else {
+            throw SaveError.bundledIDCollision(theme.id)
+        }
         guard fileExists(forID: theme.id) else {
             throw SaveError.ioFailed("save called for unknown id \(theme.id); use saveAs for new themes")
         }

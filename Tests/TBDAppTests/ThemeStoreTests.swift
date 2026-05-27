@@ -234,6 +234,34 @@ struct ThemeStoreTests {
         }
     }
 
+    @Test("save refuses to overwrite a file whose id collides with a bundled scheme")
+    func saveRefusesBundledCollision() async throws {
+        let home = makeIsolatedHome()
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+
+        // Plant a stray JSON named after a bundled scheme (simulates a manual cp
+        // or a future import path) so the fileExists guard would otherwise pass.
+        let stray = UserTerminalTheme(
+            schemaVersion: 1, id: "gruvbox-dark", displayName: "Stray",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        try JSONEncoder().encode(stray)
+            .write(to: themesDir.appendingPathComponent("gruvbox-dark.json"))
+
+        let store = ThemeStore()
+        do {
+            try store.save(stray)
+            Issue.record("expected SaveError.bundledIDCollision")
+        } catch let ThemeStore.SaveError.bundledIDCollision(id) {
+            #expect(id == "gruvbox-dark")
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
     @Test("when the active theme file vanishes, the schemeID reverts to default")
     func activeThemeVanishesFallsBack() async throws {
         let home = makeIsolatedHome()
