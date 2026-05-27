@@ -204,6 +204,21 @@ struct ThemeStoreTests {
         store.stopWatching()
     }
 
+    @Test("saveAs rejects display names that slugify to empty")
+    func saveAsRejectsEmptySlug() async {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "!!!",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        #expect(throws: ThemeStore.SaveError.self) {
+            try store.saveAs(draft, suggestedDisplayName: "!!!")
+        }
+    }
+
     @Test("when the active theme file vanishes, the schemeID reverts to default")
     func activeThemeVanishesFallsBack() async throws {
         let home = makeIsolatedHome()

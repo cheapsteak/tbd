@@ -105,6 +105,9 @@ final class ThemeStore: ObservableObject {
     @discardableResult
     func saveAs(_ draft: UserTerminalTheme, suggestedDisplayName: String) throws -> String {
         let baseSlug = Self.slugify(suggestedDisplayName)
+        guard !baseSlug.isEmpty else {
+            throw SaveError.ioFailed("display name must contain at least one letter or number")
+        }
         let id = try uniqueID(basedOn: baseSlug)
         let theme = UserTerminalTheme(
             schemaVersion: draft.schemaVersion,
