@@ -75,4 +75,56 @@ struct ThemeStoreTests {
         #expect(store.userThemes.isEmpty)
         #expect(store.loadErrors.isEmpty)
     }
+
+    @Test("saveAs slugifies the display name and writes JSON")
+    func saveAsSlugifies() async throws {
+        let home = makeIsolatedHome()
+        let store = ThemeStore()
+
+        let id = try store.saveAs(
+            UserTerminalTheme(
+                schemaVersion: 1, id: "", displayName: "My Cool Theme!",
+                ansi: Array(repeating: "#000000", count: 16),
+                foreground: "#ffffff", background: "#000000",
+                cursor: "#ffffff", selection: "#505050"
+            ),
+            suggestedDisplayName: "My Cool Theme!"
+        )
+        #expect(id == "my-cool-theme")
+        let file = home.appendingPathComponent("terminal-themes/my-cool-theme.json")
+        #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    @Test("saveAs deduplicates by appending -2, -3 etc.")
+    func saveAsDedupes() async throws {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "Gruvbox Dark Copy",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        let id1 = try store.saveAs(draft, suggestedDisplayName: "Gruvbox Dark Copy")
+        let id2 = try store.saveAs(draft, suggestedDisplayName: "Gruvbox Dark Copy")
+        let id3 = try store.saveAs(draft, suggestedDisplayName: "Gruvbox Dark Copy")
+        #expect(id1 == "gruvbox-dark-copy")
+        #expect(id2 == "gruvbox-dark-copy-2")
+        #expect(id3 == "gruvbox-dark-copy-3")
+    }
+
+    @Test("saveAs refuses ids that collide with bundled schemes")
+    func saveAsRefusesBundledCollision() async {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "Gruvbox Dark",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        #expect(throws: ThemeStore.SaveError.self) {
+            try store.saveAs(draft, suggestedDisplayName: "Gruvbox Dark")
+        }
+    }
 }

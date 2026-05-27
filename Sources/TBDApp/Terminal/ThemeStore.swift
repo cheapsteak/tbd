@@ -58,6 +58,81 @@ final class ThemeStore: ObservableObject {
         self.userThemes = loaded.sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
         self.loadErrors = errors
     }
+
+    // MARK: - Save
+
+    enum SaveError: Error, Equatable {
+        case bundledIDCollision(String)
+        case ioFailed(String)
+    }
+
+    @discardableResult
+    func saveAs(_ draft: UserTerminalTheme, suggestedDisplayName: String) throws -> String {
+        let baseSlug = Self.slugify(suggestedDisplayName)
+        let id = try uniqueID(basedOn: baseSlug)
+        let theme = UserTerminalTheme(
+            schemaVersion: draft.schemaVersion,
+            id: id,
+            displayName: suggestedDisplayName,
+            ansi: draft.ansi,
+            foreground: draft.foreground,
+            background: draft.background,
+            cursor: draft.cursor,
+            selection: draft.selection
+        )
+        try persist(theme)
+        reloadFromDisk()
+        return id
+    }
+
+    private func uniqueID(basedOn slug: String) throws -> String {
+        if ColorSchemes.bundled.contains(where: { $0.id == slug }) {
+            throw SaveError.bundledIDCollision(slug)
+        }
+        if !fileExists(forID: slug) { return slug }
+        for n in 2...999 {
+            let candidate = "\(slug)-\(n)"
+            if ColorSchemes.bundled.contains(where: { $0.id == candidate }) { continue }
+            if !fileExists(forID: candidate) { return candidate }
+        }
+        throw SaveError.ioFailed("could not find a unique id for slug \(slug)")
+    }
+
+    private func fileExists(forID id: String) -> Bool {
+        let url = themesDirectory.appendingPathComponent("\(id).json")
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    private func persist(_ theme: UserTerminalTheme) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: themesDirectory, withIntermediateDirectories: true)
+        let url = themesDirectory.appendingPathComponent("\(theme.id).json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            try encoder.encode(theme).write(to: url, options: .atomic)
+        } catch {
+            throw SaveError.ioFailed(String(describing: error))
+        }
+    }
+
+    /// "My Cool Theme!" → "my-cool-theme"
+    static func slugify(_ name: String) -> String {
+        let lowered = name.lowercased()
+        var out = ""
+        var prevWasDash = true
+        for char in lowered {
+            if char.isLetter || char.isNumber {
+                out.append(char)
+                prevWasDash = false
+            } else if !prevWasDash {
+                out.append("-")
+                prevWasDash = true
+            }
+        }
+        while out.hasSuffix("-") { out.removeLast() }
+        return out
+    }
 }
 
 #if DEBUG
