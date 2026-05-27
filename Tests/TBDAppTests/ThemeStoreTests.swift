@@ -150,4 +150,27 @@ struct ThemeStoreTests {
         store.reloadFromDisk()
         #expect(store.userThemes.first?.ansi[0].red == UInt16(0xff) * 257)
     }
+
+    @Test("delete moves the file into .trash/ with a timestamp suffix")
+    func deleteSoftDeletes() async throws {
+        let home = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "Throwaway",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        let id = try store.saveAs(draft, suggestedDisplayName: "Throwaway")
+
+        try store.delete(id: id)
+
+        let originalPath = home.appendingPathComponent("terminal-themes/\(id).json")
+        #expect(!FileManager.default.fileExists(atPath: originalPath.path))
+
+        let trashDir = home.appendingPathComponent("terminal-themes/.trash")
+        let trashed = try FileManager.default.contentsOfDirectory(atPath: trashDir.path)
+        #expect(trashed.count == 1)
+        #expect(trashed[0].hasPrefix("\(id)-"))
+    }
 }

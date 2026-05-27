@@ -66,6 +66,11 @@ final class ThemeStore: ObservableObject {
         case ioFailed(String)
     }
 
+    enum DeleteError: Error, Equatable {
+        case notFound(String)
+        case ioFailed(String)
+    }
+
     @discardableResult
     func saveAs(_ draft: UserTerminalTheme, suggestedDisplayName: String) throws -> String {
         let baseSlug = Self.slugify(suggestedDisplayName)
@@ -123,6 +128,25 @@ final class ThemeStore: ObservableObject {
         } catch {
             throw SaveError.ioFailed(String(describing: error))
         }
+    }
+
+    // MARK: - Delete
+
+    func delete(id: String) throws {
+        let src = themesDirectory.appendingPathComponent("\(id).json")
+        guard FileManager.default.fileExists(atPath: src.path) else {
+            throw DeleteError.notFound(id)
+        }
+        let trashDir = themesDirectory.appendingPathComponent(".trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+        let ts = Int(Date().timeIntervalSince1970 * 1000)
+        let dst = trashDir.appendingPathComponent("\(id)-\(ts).json")
+        do {
+            try FileManager.default.moveItem(at: src, to: dst)
+        } catch {
+            throw DeleteError.ioFailed(String(describing: error))
+        }
+        reloadFromDisk()
     }
 
     /// "My Cool Theme!" → "my-cool-theme"
