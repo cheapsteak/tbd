@@ -88,23 +88,22 @@ struct TerminalThemeEditorView: View {
         }
     }
 
-    /// Per-slot ↺ button. Visible only when the slot has a draft override; the
-    /// container always reserves layout space (20×20 frame) so the row doesn't
-    /// shift as slots dirty/clean.
+    /// Per-slot ↺ button. Always rendered at opacity 0 when clean to avoid
+    /// insertion animation. The container always reserves layout space (20×20 frame)
+    /// so the row doesn't shift as slots dirty/clean.
     @ViewBuilder
     private func resetCell(for slot: TerminalThemeEditorViewModel.Slot) -> some View {
-        Group {
-            if viewModel.isSlotDirty(slot) {
-                Button {
-                    viewModel.unsetSlot(slot)
-                } label: {
-                    Image(systemName: "arrow.uturn.backward")
-                        .font(.caption2)
-                }
-                .buttonStyle(.borderless)
-                .help("Revert this color to the source")
-            }
+        let dirty = viewModel.isSlotDirty(slot)
+        Button {
+            viewModel.unsetSlot(slot)
+        } label: {
+            Image(systemName: "arrow.uturn.backward")
+                .font(.caption2)
         }
+        .buttonStyle(.borderless)
+        .help("Revert this color to the source")
+        .opacity(dirty ? 1 : 0)
+        .allowsHitTesting(dirty)
         .frame(width: 20, height: 20)
     }
 
