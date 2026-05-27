@@ -164,6 +164,13 @@ final class AppState: ObservableObject {
     /// outside the AppState extension that consumes it.
     var pendingDeepLinkID: UUID?
 
+    /// Companion to `pendingDeepLinkID`: buffers the originating terminal so
+    /// cold-start clicks land on the right tab after the drain. Drained
+    /// alongside `pendingDeepLinkID` at the end of
+    /// `connectAndLoadInitialState()`. Internal-only — never written from
+    /// outside the AppState extension that consumes it.
+    var pendingDeepLinkTerminalID: UUID?
+
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
         guard let id = selectedWorktreeIDs.first else { return nil }
@@ -632,7 +639,8 @@ final class AppState: ObservableObject {
         macNotificationManager.postIfEnabled(
             worktreeID: notification.worktreeID,
             message: notification.message,
-            worktrees: allWorktrees
+            worktrees: allWorktrees,
+            terminalID: notification.terminalID
         )
     }
 
@@ -693,8 +701,10 @@ final class AppState: ObservableObject {
         }
         isInitialStateLoaded = true
         if let pendingID = pendingDeepLinkID {
+            let pendingTerminalID = pendingDeepLinkTerminalID
             pendingDeepLinkID = nil
-            navigateToWorktree(pendingID)
+            pendingDeepLinkTerminalID = nil
+            navigateToWorktree(pendingID, terminalID: pendingTerminalID)
         }
         if didConnect {
             Task { [weak self] in

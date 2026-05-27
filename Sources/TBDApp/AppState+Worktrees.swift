@@ -128,9 +128,12 @@ extension AppState {
     // MARK: - Archived Worktrees
 
     /// Active-worktree path for deep-link navigation. Caller is responsible
-    /// for verifying the id exists in `self.worktrees` first.
+    /// for verifying the id exists in `self.worktrees` first. When
+    /// `terminalID` is non-nil, also switches the worktree's active tab to
+    /// the one rendering that terminal (live transcript or terminal pane);
+    /// silently falls back to current selection when no tab matches.
     @MainActor
-    func navigateToActiveWorktree(_ id: UUID) {
+    func navigateToActiveWorktree(_ id: UUID, terminalID: UUID? = nil) {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = [id]
         // Expand the containing repo so the row is part of the rendered list
@@ -144,6 +147,23 @@ extension AppState {
             Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
         }
         pendingScrollToWorktreeID = id
+        // Switch to the originating terminal's tab when one matches. Both
+        // `.terminal` and `.liveTranscript` panes count as matches — clicking
+        // the banner should land the user on whichever surface the worktree
+        // currently exposes for that terminal. If neither match exists (e.g.
+        // the terminal was deleted, or surfaced only via the pinned dock),
+        // we silently keep whatever tab was active before.
+        if let terminalID, let arr = tabs[id] {
+            if let idx = arr.firstIndex(where: { tab in
+                switch tab.content {
+                case .terminal(let tid): return tid == terminalID
+                case .liveTranscript(_, let tid): return tid == terminalID
+                default: return false
+                }
+            }) {
+                setActiveTab(worktreeID: id, tabIndex: idx)
+            }
+        }
         // Only foreground when the AppKit run loop is live — `NSApp` is nil
         // under unit tests, which would crash on the implicit unwrap.
         if NSApplication.shared.isRunning {
@@ -186,15 +206,18 @@ extension AppState {
 
     /// Public entry point for deep-link navigation. Synchronous fast path
     /// for active worktrees; falls through to the async archived path on a
-    /// miss.
+    /// miss. When `terminalID` is non-nil, the active-worktree path also
+    /// switches to the originating tab. The archived path silently drops
+    /// `terminalID` — archived worktrees have no live terminals to focus.
     @MainActor
-    func navigateToWorktree(_ id: UUID) {
+    func navigateToWorktree(_ id: UUID, terminalID: UUID? = nil) {
         // Cold-start guard: a tbd:// click can arrive between AppState.init()
         // and the daemon RPC populating `worktrees`. If we fall through to
         // archived lookup now we'll miss real active worktrees. Buffer
         // instead and let connectAndLoadInitialState drain at the end.
         if !isInitialStateLoaded {
             pendingDeepLinkID = id
+            pendingDeepLinkTerminalID = terminalID
             return
         }
 
@@ -202,7 +225,7 @@ extension AppState {
             .flatMap { $0 }
             .contains(where: { $0.id == id })
         if activeMatch {
-            navigateToActiveWorktree(id)
+            navigateToActiveWorktree(id, terminalID: terminalID)
         } else {
             Task { await navigateToArchivedWorktree(id) }
         }

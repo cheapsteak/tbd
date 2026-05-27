@@ -48,7 +48,8 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    func postIfEnabled(worktreeID: UUID, message: String?, worktrees: [Worktree]) {
+    func postIfEnabled(worktreeID: UUID, message: String?, worktrees: [Worktree],
+                       terminalID: UUID? = nil) {
         guard enabled, isAvailable else { return }
         requestPermissionIfNeeded()
 
@@ -66,6 +67,13 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         content.title = worktreeName
         content.body = truncatedMessage
         content.sound = nil
+        // The request `identifier` must stay as worktreeID so re-posting
+        // collapses banners (one outstanding banner per worktree). Stash the
+        // originating terminal in userInfo so the click handler can route to
+        // the specific tab.
+        if let terminalID {
+            content.userInfo = ["terminalID": terminalID.uuidString]
+        }
 
         let request = UNNotificationRequest(
             identifier: worktreeID.uuidString,
@@ -105,15 +113,38 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
     /// Factored out of the delegate method so it's testable without faking
     /// `UNNotificationResponse` (which has no public initializer).
     func handleClick(identifier: String) {
+        handleClick(identifier: identifier, terminalIDString: nil)
+    }
+
+    /// Same as `handleClick(identifier:)` but also routes to a specific
+    /// terminal tab when `terminalIDString` is a valid UUID string. Both
+    /// parameters are strings to mirror the on-the-wire shapes the
+    /// `UNNotificationResponse` exposes (request identifier + userInfo dict).
+    func handleClick(identifier: String, terminalIDString: String?) {
         guard let worktreeID = UUID(uuidString: identifier) else {
             logger.error("Banner click identifier is not a UUID: \(identifier, privacy: .public)")
             return
         }
+        let terminalID: UUID?
+        if let terminalIDString {
+            terminalID = UUID(uuidString: terminalIDString)
+            if terminalID == nil {
+                logger.warning("Banner click userInfo terminalID is not a UUID: \(terminalIDString, privacy: .public)")
+            }
+        } else {
+            terminalID = nil
+        }
+        handleClick(worktreeID: worktreeID, terminalID: terminalID)
+    }
+
+    /// Strongly-typed entry point — used by tests to drive the click path
+    /// without faking string parsing.
+    func handleClick(worktreeID: UUID, terminalID: UUID?) {
         guard let appState else {
             logger.error("Banner click ignored: appState not configured")
             return
         }
-        appState.navigateToWorktree(worktreeID)
+        appState.navigateToWorktree(worktreeID, terminalID: terminalID)
     }
 
     /// Banner click → focus the worktree the notification was about.
@@ -125,11 +156,13 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let identifier = response.notification.request.identifier
+        let terminalIDString = response.notification.request.content
+            .userInfo["terminalID"] as? String
         // Call the completion handler synchronously to satisfy its
         // non-Sendable isolation, then hop to the main actor for navigation.
         completionHandler()
         Task { @MainActor in
-            self.handleClick(identifier: identifier)
+            self.handleClick(identifier: identifier, terminalIDString: terminalIDString)
         }
     }
 }

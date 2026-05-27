@@ -642,8 +642,15 @@ public struct NotifyParams: Codable, Sendable {
     public let worktreeID: UUID?
     public let type: NotificationType
     public let message: String?
-    public init(worktreeID: UUID? = nil, type: NotificationType, message: String? = nil) {
+    /// Originating terminal id. Optional for backwards compatibility — older
+    /// CLI callers and clients won't include it. The daemon persists it on
+    /// the notification row and forwards it on the broadcast delta so the
+    /// app's banner-click handler can switch to the right tab.
+    public let terminalID: UUID?
+    public init(worktreeID: UUID? = nil, type: NotificationType, message: String? = nil,
+                terminalID: UUID? = nil) {
         self.worktreeID = worktreeID; self.type = type; self.message = message
+        self.terminalID = terminalID
     }
 }
 

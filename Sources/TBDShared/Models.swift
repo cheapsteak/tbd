@@ -440,15 +440,37 @@ public struct TBDNotification: Codable, Sendable, Identifiable {
     public var message: String?
     public var read: Bool
     public var createdAt: Date
+    /// Optional terminal that triggered the notification. When present, the
+    /// app can route a banner click to the originating tab rather than just
+    /// selecting the worktree. Nil for older rows or for notifications that
+    /// don't originate from a specific terminal.
+    public var terminalID: UUID?
 
     public init(id: UUID = UUID(), worktreeID: UUID, type: NotificationType,
-                message: String? = nil, read: Bool = false, createdAt: Date = Date()) {
+                message: String? = nil, read: Bool = false, createdAt: Date = Date(),
+                terminalID: UUID? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.type = type
         self.message = message
         self.read = read
         self.createdAt = createdAt
+        self.terminalID = terminalID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, worktreeID, type, message, read, createdAt, terminalID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
+        type = try c.decode(NotificationType.self, forKey: .type)
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+        read = try c.decodeIfPresent(Bool.self, forKey: .read) ?? false
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        terminalID = try c.decodeIfPresent(UUID.self, forKey: .terminalID)
     }
 }
 
