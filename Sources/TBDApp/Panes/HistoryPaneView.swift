@@ -394,6 +394,26 @@ struct SessionTranscriptView: View {
                         .animation(.easeInOut(duration: 0.2), value: atBottom)
                     }
                 }
+                .onAppear {
+                    HangWatchdog.shared.recordContext { snap in
+                        snap.focusedTerminalIDShort = nil
+                        snap.transcriptItemCount = messages.count
+                        snap.paneLabel = "history"
+                    }
+                }
+                .onChange(of: messages.count) { _, newCount in
+                    HangWatchdog.shared.recordContext { snap in
+                        snap.transcriptItemCount = newCount
+                        snap.paneLabel = "history"
+                    }
+                }
+                .onDisappear {
+                    HangWatchdog.shared.recordContext { snap in
+                        snap.focusedTerminalIDShort = nil
+                        snap.transcriptItemCount = nil
+                        snap.paneLabel = nil
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
