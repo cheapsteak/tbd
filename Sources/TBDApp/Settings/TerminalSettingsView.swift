@@ -333,7 +333,10 @@ struct TerminalSettingsView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 240)
             HStack {
-                Button("Cancel") { showingSaveAsDialog = false }
+                Button("Cancel") {
+                    showingSaveAsDialog = false
+                    pendingSchemeSwitch = nil
+                }
                 Button("Save") {
                     if performSaveAs(name: saveAsName) {
                         showingSaveAsDialog = false
