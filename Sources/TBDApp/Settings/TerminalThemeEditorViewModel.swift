@@ -50,7 +50,7 @@ final class TerminalThemeEditorViewModel: ObservableObject {
 
     func setHex(slot: Slot, hex: String) {
         guard UserTerminalTheme.parseHex(hex) != nil else {
-            lastValidationError = .invalidHex(field: "\(slot)", value: hex)
+            lastValidationError = .invalidHex(field: slot.humanName, value: hex)
             return
         }
         lastValidationError = nil
@@ -99,5 +99,17 @@ final class TerminalThemeEditorViewModel: ObservableObject {
             cursor: hex(slot: .cursor),
             selection: hex(slot: .selection)
         )
+    }
+}
+
+extension TerminalThemeEditorViewModel.Slot {
+    var humanName: String {
+        switch self {
+        case .foreground: return "Foreground"
+        case .background: return "Background"
+        case .cursor: return "Cursor"
+        case .selection: return "Selection"
+        case .ansi(let i): return "ANSI \(i)"
+        }
     }
 }
