@@ -55,10 +55,10 @@ enum CodexHookOverlay {
     static let relativePath = "hooks/hooks.json"
 
     static let sessionStartCommand =
-        #"tbd session-event 2>/dev/null || true"#
+        #"tbd session-event 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
 
     static let responseCompleteCommand =
-        #"MSG=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
+        #"MSG=$(printf '%s' "$PAYLOAD" | jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
 
     static let stopRenameCheckCommand =
         #"tbd hooks stop-rename-check 2>/dev/null || true"#
@@ -66,6 +66,11 @@ enum CodexHookOverlay {
     static let stopCommand =
         #"PAYLOAD=$(cat); RENAME_RESULT=$(printf '%s' "$PAYLOAD" | \#(stopRenameCheckCommand)); if [ -n "$RENAME_RESULT" ]; then printf '%s\n' "$RENAME_RESULT"; else \#(responseCompleteCommand); fi"#
 
+    static let workingCommand =
+        #"tbd terminal-activity working 2>/dev/null || true"#
+
+    static let waitingForUserCommand =
+        #"tbd terminal-activity waiting_for_user 2>/dev/null || true"#
     static func hookPath(in pluginRoot: URL) -> URL {
         pluginRoot.appendingPathComponent(relativePath, isDirectory: false)
     }
@@ -84,7 +89,23 @@ enum CodexHookOverlay {
                 "Stop": [
                     [
                         "hooks": [
+                            // Run rename-check, and only publish
+                            // response_complete/idle when it does not block.
                             ["type": "command", "command": stopCommand]
+                        ]
+                    ]
+                ],
+                "UserPromptSubmit": [
+                    [
+                        "hooks": [
+                            ["type": "command", "command": workingCommand]
+                        ]
+                    ]
+                ],
+                "PermissionRequest": [
+                    [
+                        "hooks": [
+                            ["type": "command", "command": waitingForUserCommand]
                         ]
                     ]
                 ]
