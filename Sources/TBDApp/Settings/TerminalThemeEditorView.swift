@@ -138,6 +138,8 @@ struct TerminalThemeEditorView: View {
             return "Expected 16 ANSI colors, got \(count)."
         case .invalidID(let id):
             return "\"\(id)\" isn't a valid theme id (lowercase letters, digits, and hyphens only)."
+        case .unsupportedSchemaVersion(let v):
+            return "Theme file uses schema version \(v), which this version of TBD doesn't support."
         }
     }
 }
