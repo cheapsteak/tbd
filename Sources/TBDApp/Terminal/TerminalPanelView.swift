@@ -525,7 +525,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // MARK: - TerminalViewDelegate
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            handleOutgoingInput(data)
             localProcess?.send(data: data)
+        }
+
+        func handleOutgoingInput(_ data: ArraySlice<UInt8>) {
+            guard data.contains(0x03) else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.appState?.handleTerminalInterrupt(terminalID: self.panelID)
+            }
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
