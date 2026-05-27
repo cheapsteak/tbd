@@ -131,6 +131,7 @@ final class ThemeStore: ObservableObject {
             cursor: draft.cursor,
             selection: draft.selection
         )
+        _ = try theme.validated()
         try persist(theme)
         reloadFromDisk()
         return id
@@ -148,6 +149,7 @@ final class ThemeStore: ObservableObject {
         guard fileExists(forID: theme.id) else {
             throw SaveError.ioFailed("save called for unknown id \(theme.id); use saveAs for new themes")
         }
+        _ = try theme.validated()
         try persist(theme)
         reloadFromDisk()
     }
