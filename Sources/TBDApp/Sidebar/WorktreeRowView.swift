@@ -1,21 +1,6 @@
 import SwiftUI
 import TBDShared
 
-enum WorktreeRowConflictFallback {
-    static let iconName = "git-merge-conflict"
-
-    static func shouldShow(
-        prStatus: PRStatus?,
-        hasConflicts: Bool,
-        hasNotification: Bool
-    ) -> Bool {
-        guard let prStatus, hasConflicts, !hasNotification else { return false }
-        // Closed and merged PRs have no pending merge action, so a conflict warning is noise.
-        // The PR-icon slot is mutually exclusive with the conflict glyph; suppress here to keep .closed/.merged visible.
-        return prStatus.state != .merged && prStatus.state != .closed
-    }
-}
-
 struct WorktreeRowView: View {
     let worktree: Worktree
     var isMain: Bool = false
@@ -58,14 +43,6 @@ struct WorktreeRowView: View {
         }
     }
 
-    private var showsConflictFallback: Bool {
-        WorktreeRowConflictFallback.shouldShow(
-            prStatus: prStatus,
-            hasConflicts: worktree.hasConflicts,
-            hasNotification: notification != nil
-        )
-    }
-
     private var prPresentation: PRStatusPresentation? {
         guard !isMain else { return nil }
         return PRStatusPresentation.make(for: prStatus)
@@ -90,16 +67,8 @@ struct WorktreeRowView: View {
             Circle()
                 .fill(color)
                 .frame(width: 8, height: 8)
-        } else if showsConflictFallback, let nsImage = loadIcon(WorktreeRowConflictFallback.iconName) {
-            Image(nsImage: nsImage)
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 12, height: 12)
-                .foregroundStyle(.red)
         }
-        if !showsConflictFallback,
-           let presentation = prPresentation,
+        if let presentation = prPresentation,
            let nsImage = loadIcon(presentation.iconName) {
             Image(nsImage: nsImage)
                 .renderingMode(.template)
