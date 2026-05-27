@@ -50,7 +50,8 @@ struct TerminalSettingsView: View {
                 Picker("Scheme", selection: schemeBinding) {
                     Section("Bundled") {
                         ForEach(ColorSchemes.bundled, id: \.id) { scheme in
-                            Text(scheme.displayName).tag(scheme.id)
+                            Text(scheme.displayName + (editorVM.isDirty && scheme.id == appearance.schemeID ? " — Draft" : ""))
+                                .tag(scheme.id)
                         }
                     }
                     if !appState.themeStore.userThemes.isEmpty {
