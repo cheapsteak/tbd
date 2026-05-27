@@ -214,6 +214,13 @@ public struct TmuxManager: Sendable {
         }
     }
 
+    /// Set a global environment variable in a tmux server (all panes inherit it).
+    public func setGlobalEnv(server: String, name: String, value: String) async throws {
+        if dryRun { return }
+        logger.debug("setGlobalEnv: setting \(name, privacy: .public)=\(value, privacy: .public) on server \(server, privacy: .public)")
+        try await runTmux(["-L", server, "setenv", "-g", name, value])
+    }
+
     /// Kills an entire tmux server and all its sessions.
     public func killServer(server: String) async throws {
         if dryRun { return }

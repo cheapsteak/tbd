@@ -509,6 +509,16 @@ actor DaemonClient {
         )
     }
 
+    /// Update COLORFGBG environment variable in all known tmux servers.
+    /// This notifies running shells that the terminal color scheme has changed,
+    /// allowing tools like vim, less, fzf to auto-adjust their output.
+    func updateAppearanceColorFgBg(value: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.appearanceUpdateColorFgBg,
+            params: AppearanceUpdateColorFgBgParams(value: value)
+        )
+    }
+
     /// Delete a terminal (kills tmux window and removes DB record).
     func deleteTerminal(terminalID: UUID) async throws {
         try await callVoidAsync(

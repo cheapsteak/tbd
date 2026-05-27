@@ -139,4 +139,18 @@ struct AppearanceSettingsTests {
         let colorFgBg = AppearanceSettings.colorFgBg(for: scheme)
         #expect(colorFgBg == "15;0")
     }
+
+    @Test("currentColorFgBg property returns correct value for current scheme")
+    func currentColorFgBgProperty() {
+        withIsolatedDefaults { defaults in
+            let settings = AppearanceSettings(defaults: defaults)
+            settings.schemeID = "github-light"
+            let value = settings.currentColorFgBg
+            #expect(value == "0;15")
+
+            settings.schemeID = "nord"
+            let darkValue = settings.currentColorFgBg
+            #expect(darkValue == "15;0")
+        }
+    }
 }

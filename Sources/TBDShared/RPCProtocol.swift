@@ -147,6 +147,7 @@ public enum RPCMethod {
     public static let tabSetOrder = "tab.setOrder"
     public static let tabList     = "tab.list"
     public static let worktreeSetActiveTab = "worktree.setActiveTab"
+    public static let appearanceUpdateColorFgBg = "appearance.updateColorFgBg"
 }
 
 // MARK: - Legacy Hook Detection / Removal
@@ -200,6 +201,15 @@ public struct SetMainAreaSizeParams: Codable, Sendable {
 public struct AppSetForegroundStateParams: Codable, Sendable {
     public let isForeground: Bool
     public init(isForeground: Bool) { self.isForeground = isForeground }
+}
+
+// MARK: - Appearance RPC
+
+public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
+    /// COLORFGBG environment variable value computed from terminal color scheme's
+    /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
+    public let value: String
+    public init(value: String) { self.value = value }
 }
 
 // MARK: - Terminal Swap Profile
