@@ -154,6 +154,7 @@ final class AppearanceSettings: ObservableObject {
         let userHit = themeStore?.userThemes.contains { $0.id == schemeID } ?? false
         if !bundledHit && !userHit {
             schemeID = ColorSchemes.defaultScheme.id
+            draftSchemeOverride = nil
         }
     }
 }

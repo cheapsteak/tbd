@@ -243,6 +243,7 @@ struct ThemeStoreTests {
             .write(to: themesDir.appendingPathComponent("ephemeral.json"))
         store.reloadFromDisk()
         appearance.schemeID = "ephemeral"
+        appearance.draftSchemeOverride = ColorSchemes.scheme(forID: "tango")
 
         // Externally delete the file (simulates `rm`).
         try FileManager.default.removeItem(at: themesDir.appendingPathComponent("ephemeral.json"))
@@ -250,5 +251,6 @@ struct ThemeStoreTests {
         appearance.reconcileWithStore()
 
         #expect(appearance.schemeID == ColorSchemes.defaultScheme.id)
+        #expect(appearance.draftSchemeOverride == nil)
     }
 }
