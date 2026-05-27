@@ -53,12 +53,21 @@ struct WorktreeRowView: View {
         return terminals.contains { $0.suspendedAt != nil }
     }
 
+    private var hasWorkingTerminal: Bool {
+        let terminals = appState.terminals[worktree.id] ?? []
+        return terminals.contains { $0.activityState == .working }
+    }
+
     @ViewBuilder
     private func rowIcons() -> some View {
         if hasSuspendedTerminal {
             Image(systemName: "pause.circle.fill")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+        if hasWorkingTerminal {
+            ProgressView()
+                .controlSize(.small)
         }
         if isPending && !isEditing {
             ProgressView()

@@ -493,6 +493,8 @@ final class AppState: ObservableObject {
             Task { [weak self] in await self?.loadModelProfiles() }
         case .terminalSessionUpdated(let d):
             applyTerminalSessionDelta(d)
+        case .terminalActivityUpdated(let d):
+            applyTerminalActivityDelta(d)
         case .worktreeMoved(let d):
             applyWorktreeMovedDelta(d)
         case .worktreeArchived(let d):
@@ -545,6 +547,13 @@ final class AppState: ObservableObject {
         if let tp = delta.transcriptPath {
             terminals[delta.worktreeID]?[idx].transcriptPath = tp
         }
+    }
+
+    private func applyTerminalActivityDelta(_ delta: TerminalActivityDelta) {
+        guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
+            return
+        }
+        terminals[delta.worktreeID]?[idx].activityState = delta.activityState
     }
 
     /// Update the in-place usage entry for a single profile. If no match,
