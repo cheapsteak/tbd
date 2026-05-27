@@ -88,6 +88,25 @@ struct UserTerminalThemeTests {
         }
     }
 
+    @Test("rejects unsupported schemaVersion on validation")
+    func rejectsFutureSchemaVersion() {
+        let theme = UserTerminalTheme(
+            schemaVersion: 99,
+            id: "x", displayName: "X",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        do {
+            _ = try theme.validated()
+            Issue.record("expected unsupportedSchemaVersion error")
+        } catch UserTerminalTheme.ValidationError.unsupportedSchemaVersion(let v) {
+            #expect(v == 99)
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
     @Test("converts to a TerminalColorScheme with matching RGB")
     func convertsToScheme() throws {
         let theme = UserTerminalTheme(

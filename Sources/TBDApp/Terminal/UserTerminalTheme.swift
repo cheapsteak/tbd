@@ -19,9 +19,13 @@ struct UserTerminalTheme: Codable, Equatable, Hashable {
         case wrongAnsiCount(Int)
         case invalidHex(field: String, value: String)
         case invalidID(String)
+        case unsupportedSchemaVersion(Int)
     }
 
     func validated() throws -> UserTerminalTheme {
+        guard schemaVersion == 1 else {
+            throw ValidationError.unsupportedSchemaVersion(schemaVersion)
+        }
         guard ansi.count == 16 else { throw ValidationError.wrongAnsiCount(ansi.count) }
         for (i, hex) in ansi.enumerated() {
             guard Self.parseHex(hex) != nil else {
