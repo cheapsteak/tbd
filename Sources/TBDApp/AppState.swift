@@ -462,7 +462,12 @@ final class AppState: ObservableObject {
         // Subscribe to schemeID changes to push COLORFGBG updates to all running tmux servers.
         // When the user changes the color scheme, this notifies all shells so tools like vim,
         // less, fzf can auto-adjust to the new scheme.
+        // Debounce rapid changes (e.g., scrubbing through the scheme picker) to coalesce
+        // multiple RPCs into a single request. The 200ms window is long enough to capture
+        // rapid picker changes but short enough to feel responsive.
         appearanceSubscription = appearance.$schemeID
+            .removeDuplicates()
+            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
             .sink { [weak self] schemeID in
                 self?.broadcastAppearanceColorFgBg(appearance)
             }
