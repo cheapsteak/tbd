@@ -124,4 +124,30 @@ struct AlacrittyImporterTests {
         #expect(theme.background == "#ffffff")
         #expect(theme.foreground == "#000000")
     }
+
+    @Test("missing [colors.bright] falls back to [colors.normal] values")
+    func missingBrightFallsBackToNormal() throws {
+        let toml = """
+        [colors.primary]
+        background = "#000000"
+        foreground = "#ffffff"
+        [colors.normal]
+        black = "#111111"
+        red = "#220000"
+        green = "#002200"
+        yellow = "#222200"
+        blue = "#000022"
+        magenta = "#220022"
+        cyan = "#002222"
+        white = "#222222"
+        # No [colors.bright] section.
+        """
+        let theme = try AlacrittyImporter().importString(toml, suggestedDisplayName: "no-bright")
+        // Normal and bright slots should be identical.
+        for i in 0..<8 {
+            #expect(theme.ansi[i] == theme.ansi[i + 8])
+        }
+        #expect(theme.ansi[0] == "#111111")
+        #expect(theme.ansi[8] == "#111111")
+    }
 }

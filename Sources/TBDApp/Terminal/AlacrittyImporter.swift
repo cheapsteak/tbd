@@ -32,7 +32,11 @@ struct AlacrittyImporter {
         let colors = try requireTable(table, path: ["colors"])
         let primary = try requireSubtable(colors, name: "primary", path: "colors.primary")
         let normal = try requireSubtable(colors, name: "normal", path: "colors.normal")
-        let bright = try requireSubtable(colors, name: "bright", path: "colors.bright")
+        // Some real-world Alacritty themes omit [colors.bright] and rely on the
+        // terminal emulator to derive bright variants from normal. Match that
+        // behavior: when bright is absent, copy normal into the bright half of
+        // the ANSI array.
+        let bright: TOMLTable = colors["bright"]?.table ?? normal
 
         let foreground = try requireHex(primary, key: "foreground", section: "colors.primary")
         let background = try requireHex(primary, key: "background", section: "colors.primary")
