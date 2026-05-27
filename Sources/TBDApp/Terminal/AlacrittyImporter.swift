@@ -83,11 +83,13 @@ struct AlacrittyImporter {
         guard let raw = table[key]?.string else {
             throw ImportError.missingKey(section: section, key: key)
         }
-        let stripped = raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "0x", with: "")
-            .replacingOccurrences(of: "0X", with: "")
-            .lowercased()
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let stripped: String
+        if trimmed.hasPrefix("0x") {
+            stripped = String(trimmed.dropFirst(2))
+        } else {
+            stripped = trimmed
+        }
         let withHash = stripped.hasPrefix("#") ? stripped : "#" + stripped
         guard UserTerminalTheme.parseHex(withHash) != nil else {
             throw ImportError.invalidHex(section: section, key: key, value: raw)

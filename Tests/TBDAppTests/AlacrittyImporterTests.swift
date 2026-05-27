@@ -57,4 +57,71 @@ struct AlacrittyImporterTests {
             Issue.record("unexpected error: \(error)")
         }
     }
+
+    @Test("interior 0x substring in a hex value is NOT stripped")
+    func interior0xNotStripped() throws {
+        // "#a0xbcdef" is 9 chars — invalid hex regardless. The fix means the
+        // importer no longer collapses it to a valid-looking "#abcdef".
+        let toml = """
+        [colors.primary]
+        background = "#ffffff"
+        foreground = "#a0xbcdef"
+        [colors.normal]
+        black = "#000000"
+        red = "#ff0000"
+        green = "#00ff00"
+        yellow = "#ffff00"
+        blue = "#0000ff"
+        magenta = "#ff00ff"
+        cyan = "#00ffff"
+        white = "#cccccc"
+        [colors.bright]
+        black = "#666666"
+        red = "#ff6666"
+        green = "#66ff66"
+        yellow = "#ffff66"
+        blue = "#6666ff"
+        magenta = "#ff66ff"
+        cyan = "#66ffff"
+        white = "#ffffff"
+        """
+        do {
+            _ = try AlacrittyImporter().importString(toml, suggestedDisplayName: "x")
+            Issue.record("expected importString to throw on invalid hex")
+        } catch AlacrittyImporter.ImportError.invalidHex(_, let key, _) {
+            #expect(key == "foreground")
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
+    @Test("leading 0x prefix is still stripped correctly")
+    func leading0xStripped() throws {
+        let toml = """
+        [colors.primary]
+        background = "0xffffff"
+        foreground = "0x000000"
+        [colors.normal]
+        black = "#000000"
+        red = "#ff0000"
+        green = "#00ff00"
+        yellow = "#ffff00"
+        blue = "#0000ff"
+        magenta = "#ff00ff"
+        cyan = "#00ffff"
+        white = "#cccccc"
+        [colors.bright]
+        black = "#666666"
+        red = "#ff6666"
+        green = "#66ff66"
+        yellow = "#ffff66"
+        blue = "#6666ff"
+        magenta = "#ff66ff"
+        cyan = "#66ffff"
+        white = "#ffffff"
+        """
+        let theme = try AlacrittyImporter().importString(toml, suggestedDisplayName: "x")
+        #expect(theme.background == "#ffffff")
+        #expect(theme.foreground == "#000000")
+    }
 }
