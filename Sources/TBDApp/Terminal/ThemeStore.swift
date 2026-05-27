@@ -40,13 +40,25 @@ final class ThemeStore: ObservableObject {
         var errors: [LoadError] = []
 
         let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) else {
+        let entries: [URL]
+        do {
+            entries = try fm.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+        } catch let nsError as NSError where nsError.code == NSFileReadNoSuchFileError {
+            // Dir hasn't been created yet — expected on first launch. Silent.
             self.userThemes = []
             self.loadErrors = []
+            return
+        } catch {
+            logger.warning("Failed to enumerate themes dir \(directory.path, privacy: .public): \(error, privacy: .public)")
+            self.userThemes = []
+            self.loadErrors = [LoadError(
+                filename: directory.lastPathComponent + "/",
+                message: "directory unreadable: \(error.localizedDescription)"
+            )]
             return
         }
 
