@@ -16,7 +16,7 @@ struct ClaudeSessionScannerTests {
     @Test("counts all lines in fixture")
     func lineCount() throws {
         let dir = fixtureURL.deletingLastPathComponent()
-        let summaries = try ClaudeSessionScanner.listSessions(projectDir: dir)
+        let summaries = ClaudeSessionScanner.listSessions(projectDir: dir)
         let summary = try #require(summaries.first(where: { $0.filePath.hasSuffix("sample-session.jsonl") }))
         #expect(summary.lineCount == 11)
     }
@@ -24,7 +24,7 @@ struct ClaudeSessionScannerTests {
     @Test("first user message is the first real user turn")
     func firstUserMessage() throws {
         let dir = fixtureURL.deletingLastPathComponent()
-        let summaries = try ClaudeSessionScanner.listSessions(projectDir: dir)
+        let summaries = ClaudeSessionScanner.listSessions(projectDir: dir)
         let summary = try #require(summaries.first(where: { $0.filePath.hasSuffix("sample-session.jsonl") }))
         #expect(summary.firstUserMessage == "Hello, can you help me refactor this function?")
     }
@@ -32,7 +32,7 @@ struct ClaudeSessionScannerTests {
     @Test("last user message is the last real user turn")
     func lastUserMessage() throws {
         let dir = fixtureURL.deletingLastPathComponent()
-        let summaries = try ClaudeSessionScanner.listSessions(projectDir: dir)
+        let summaries = ClaudeSessionScanner.listSessions(projectDir: dir)
         let summary = try #require(summaries.first(where: { $0.filePath.hasSuffix("sample-session.jsonl") }))
         #expect(summary.lastUserMessage == "What does this error mean?")
     }
@@ -48,7 +48,7 @@ struct ClaudeSessionScannerTests {
         try lineStr.data(using: .utf8)!.write(to: file)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        let summaries = try ClaudeSessionScanner.listSessions(projectDir: tmp)
+        let summaries = ClaudeSessionScanner.listSessions(projectDir: tmp)
         let summary = try #require(summaries.first)
         #expect(summary.firstUserMessage?.count == 300)
         #expect(summary.lastUserMessage?.count == 300)
@@ -57,7 +57,7 @@ struct ClaudeSessionScannerTests {
     @Test("extracts session metadata from header line")
     func sessionMetadata() throws {
         let dir = fixtureURL.deletingLastPathComponent()
-        let summaries = try ClaudeSessionScanner.listSessions(projectDir: dir)
+        let summaries = ClaudeSessionScanner.listSessions(projectDir: dir)
         let summary = try #require(summaries.first(where: { $0.filePath.hasSuffix("sample-session.jsonl") }))
         #expect(summary.cwd == "/Users/test/project")
         #expect(summary.gitBranch == "main")
@@ -72,7 +72,7 @@ struct ClaudeSessionScannerTests {
         try Data().write(to: tmpFile)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let summaries = try ClaudeSessionScanner.listSessions(projectDir: tmpDir)
+        let summaries = ClaudeSessionScanner.listSessions(projectDir: tmpDir)
         let summary = summaries.first
         #expect(summary?.lineCount == 0)
         #expect(summary?.firstUserMessage == nil)
@@ -185,5 +185,119 @@ struct ClaudeSessionScannerTests {
         #expect(ClaudeSessionScanner.isSessionBlank(
             sessionID: sessionID, worktreePath: wt, projectsBase: layout.base
         ) == false)
+    }
+
+    // MARK: - isSessionBlank with transcriptFilePath
+
+    @Test("isSessionBlank: transcriptFilePath bypasses stale cache and finds content")
+    func transcriptPathBypassesCache() throws {
+        let wt = "/Users/test/cache-bypass-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+        ClaudeProjectDirectory.clearCache()
+
+        // First call: project dir not yet created, cache records miss
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: "test", worktreePath: wt, projectsBase: layout.base
+        ) == true)
+        // Cache now holds a nil entry for this worktree path
+
+        // Now create a session file outside the project dir
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let sessionFile = tmpDir.appendingPathComponent("external-session.jsonl")
+        let lines = """
+        {"type":"user","message":{"role":"user","content":"Hello!"},"sessionId":"test"}
+        """
+        try lines.data(using: .utf8)!.write(to: sessionFile)
+
+        // Without transcriptFilePath, the stale cache returns true (blank)
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: "test", worktreePath: wt, projectsBase: layout.base
+        ) == true)
+
+        // With transcriptFilePath, it finds the actual content and returns false
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: "test", worktreePath: wt, transcriptFilePath: sessionFile.path, projectsBase: layout.base
+        ) == false)
+    }
+
+    @Test("isSessionBlank: transcriptFilePath for missing file falls back to cache")
+    func transcriptPathFallback() throws {
+        let wt = "/Users/test/cache-fallback-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+        ClaudeProjectDirectory.clearCache()
+
+        // Cache a miss for this worktree
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: "test", worktreePath: wt, projectsBase: layout.base
+        ) == true)
+
+        // Call with a non-existent transcriptFilePath: should fall back and return true
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: "test", worktreePath: wt, transcriptFilePath: "/nonexistent/path.jsonl", projectsBase: layout.base
+        ) == true)
+    }
+
+    @Test("isSessionBlank: transcriptFilePath with empty file returns true")
+    func transcriptPathEmpty() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let sessionFile = tmpDir.appendingPathComponent("empty.jsonl")
+        try Data().write(to: sessionFile)
+
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: "test", worktreePath: "/any/path", transcriptFilePath: sessionFile.path
+        ) == true)
+    }
+
+    @Test("isSessionBlank: transcriptFilePath with content returns false")
+    func transcriptPathWithContent() throws {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let sessionFile = tmpDir.appendingPathComponent("content.jsonl")
+        let lines = """
+        {"type":"user","message":{"role":"user","content":"Hello, world!"},"sessionId":"test"}
+        """
+        try lines.data(using: .utf8)!.write(to: sessionFile)
+
+        #expect(ClaudeSessionScanner.isSessionBlank(
+            sessionID: "test", worktreePath: "/any/path", transcriptFilePath: sessionFile.path
+        ) == false)
+    }
+
+    // MARK: - Cache TTL tests
+
+    @Test("ClaudeProjectDirectory: positive entries are re-validated against filesystem")
+    func positiveEntryRevalidation() throws {
+        let wt = "/Users/test/revalidate-\(UUID().uuidString.prefix(8))"
+        let layout = try makeProjectDir(worktreePath: wt)
+        defer { try? FileManager.default.removeItem(at: layout.base) }
+        ClaudeProjectDirectory.clearCache()
+
+        // Create the directory up-front
+        try FileManager.default.createDirectory(at: layout.dir, withIntermediateDirectories: true)
+
+        // First call: hit, cache records it
+        let first = ClaudeProjectDirectory.resolve(worktreePath: wt, projectsBase: layout.base)
+        #expect(first != nil)
+
+        // Second call: should return cached result (re-validated as existing)
+        let second = ClaudeProjectDirectory.resolve(worktreePath: wt, projectsBase: layout.base)
+        #expect(second != nil)
+
+        // Delete the directory
+        try FileManager.default.removeItem(at: layout.dir)
+
+        // Third call: positive entry is re-validated, finds it missing, returns nil
+        let third = ClaudeProjectDirectory.resolve(worktreePath: wt, projectsBase: layout.base)
+        #expect(third == nil)
     }
 }
