@@ -3,6 +3,8 @@ import SwiftTerm
 import SwiftUI
 import TBDShared
 
+private typealias SwiftUIColor = SwiftUI.Color
+
 struct TerminalSettingsView: View {
     @EnvironmentObject var appearance: AppearanceSettings
     @EnvironmentObject var appState: AppState
@@ -86,8 +88,23 @@ struct TerminalSettingsView: View {
                 }
 
                 if !appState.themeStore.loadErrors.isEmpty {
-                    Text("\(appState.themeStore.loadErrors.count) theme(s) failed to load — see console")
-                        .font(.caption).foregroundStyle(.orange)
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("\(appState.themeStore.loadErrors.count) theme file(s) failed to load")
+                        Spacer()
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting(
+                                appState.themeStore.loadErrors.map {
+                                    appState.themeStore.themesDirectory.appendingPathComponent($0.filename)
+                                }
+                            )
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(8)
+                    .background(SwiftUIColor.orange.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .help(appState.themeStore.loadErrors.map { "\($0.filename): \($0.message)" }.joined(separator: "\n"))
                 }
 
                 TerminalThemeEditorView(viewModel: editorVM)
