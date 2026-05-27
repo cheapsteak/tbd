@@ -489,6 +489,7 @@ final class AppState: ObservableObject {
         // the active schemeID so a deleted theme falls back to the default rather
         // than leaving the UI pointing at an unknown id.
         themeStoreSubscription = themeStore.$userThemes
+            .dropFirst()  // skip subscriber-time emission, match appearanceSubscription pattern
             .sink { [weak appearance] _ in
                 appearance?.reconcileWithStore()
             }
