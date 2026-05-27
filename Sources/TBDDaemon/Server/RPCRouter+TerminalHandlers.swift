@@ -125,6 +125,12 @@ extension RPCRouter {
             // per-repo isolation: it pins deterministic behavior and lets the
             // TBD_TEST_CODEX_HOME test-isolation override flow through.
             codexEnv["CODEX_HOME"] = codexHome.path
+            // COLORFGBG isn't Claude-specific — Codex shells benefit from it too,
+            // so include it at spawn time. (Live updates also reach Codex via
+            // `tmux setenv -g COLORFGBG` fanned out by handleAppearanceUpdateColorFgBg.)
+            if let colorFgBg = params.colorFgBg {
+                codexEnv["COLORFGBG"] = colorFgBg
+            }
 
             let window = try await tmux.createWindow(
                 server: worktree.tmuxServer,
