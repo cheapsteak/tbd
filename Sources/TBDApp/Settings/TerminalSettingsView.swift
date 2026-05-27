@@ -286,7 +286,12 @@ struct TerminalSettingsView: View {
 
     private func performDelete() {
         let active = appearance.schemeID
-        try? appState.themeStore.delete(id: active)
+        do {
+            try appState.themeStore.delete(id: active)
+        } catch {
+            importError = "Delete failed: \(error)"
+            return
+        }
         appearance.schemeID = ColorSchemes.defaultScheme.id
         syncEditorWithScheme()
     }
