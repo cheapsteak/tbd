@@ -35,7 +35,7 @@ struct TerminalThemeEditorView: View {
             HStack(spacing: 6) { ForEach(8..<16, id: \.self) { i in ansiSwatch(i) } }
 
             if let err = viewModel.lastValidationError {
-                Text("Invalid hex: \(String(describing: err))")
+                Text(humanMessage(for: err))
                     .font(.caption).foregroundStyle(.red)
             }
         }
@@ -100,5 +100,16 @@ struct TerminalThemeEditorView: View {
                 viewModel.setHex(slot: slot, hex: String(format: "#%02x%02x%02x", r, g, b))
             }
         )
+    }
+
+    private func humanMessage(for error: UserTerminalTheme.ValidationError) -> String {
+        switch error {
+        case .invalidHex(let field, let value):
+            return "\"\(value)\" isn't a valid #rrggbb color for \(field)."
+        case .wrongAnsiCount(let count):
+            return "Expected 16 ANSI colors, got \(count)."
+        case .invalidID(let id):
+            return "\"\(id)\" isn't a valid theme id (lowercase letters, digits, and hyphens only)."
+        }
     }
 }
