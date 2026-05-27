@@ -75,6 +75,19 @@ final class TerminalThemeEditorViewModel: ObservableObject {
         lastValidationError = nil
     }
 
+    /// Revert a single slot's draft back to the source value. No-op if the slot
+    /// isn't currently drafted.
+    func unsetSlot(_ slot: Slot) {
+        draftHex.removeValue(forKey: slot)
+        // Don't touch displayNameDraft or lastValidationError — those are scoped
+        // to other affordances.
+    }
+
+    /// Whether the given slot currently has a draft override.
+    func isSlotDirty(_ slot: Slot) -> Bool {
+        draftHex[slot] != nil
+    }
+
     func snapshot(id: String) -> UserTerminalTheme {
         UserTerminalTheme(
             schemaVersion: 1,

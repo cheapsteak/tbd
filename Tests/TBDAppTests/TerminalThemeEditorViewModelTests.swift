@@ -55,4 +55,31 @@ struct TerminalThemeEditorViewModelTests {
         #expect(!vm.isDirty)
         #expect(vm.lastValidationError != nil)
     }
+
+    @Test("unsetSlot reverts only the named slot")
+    func unsetSlotRevertsOne() {
+        let vm = TerminalThemeEditorViewModel()
+        vm.load(source: bundledSource(), kind: .bundled)
+        vm.setHex(slot: .foreground, hex: "#111111")
+        vm.setHex(slot: .background, hex: "#222222")
+        #expect(vm.isSlotDirty(.foreground))
+        #expect(vm.isSlotDirty(.background))
+
+        vm.unsetSlot(.foreground)
+        #expect(!vm.isSlotDirty(.foreground))
+        #expect(vm.isSlotDirty(.background))
+        #expect(vm.hex(slot: .foreground) == UserTerminalTheme.hex(from: bundledSource().foreground))
+        #expect(vm.isDirty)  // background still dirty → whole editor still dirty
+
+        vm.unsetSlot(.background)
+        #expect(!vm.isDirty)  // last dirty slot cleared → editor clean again
+    }
+
+    @Test("isSlotDirty returns false for clean slots")
+    func isSlotDirtyFalseWhenClean() {
+        let vm = TerminalThemeEditorViewModel()
+        vm.load(source: bundledSource(), kind: .bundled)
+        #expect(!vm.isSlotDirty(.foreground))
+        #expect(!vm.isSlotDirty(.ansi(0)))
+    }
 }

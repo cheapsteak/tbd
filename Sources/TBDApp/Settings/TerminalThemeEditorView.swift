@@ -30,9 +30,29 @@ struct TerminalThemeEditorView: View {
             Divider().padding(.vertical, 4)
 
             Text("ANSI 0 – 7").font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 6) { ForEach(0..<8, id: \.self) { i in ansiSwatch(i) } }
+            HStack(spacing: 6) {
+                ForEach(0..<8, id: \.self) { i in
+                    VStack(spacing: 2) {
+                        let slot = TerminalThemeEditorViewModel.Slot.ansi(i)
+                        ColorPicker("", selection: colorBinding(for: slot), supportsOpacity: false)
+                            .labelsHidden()
+                            .help("ANSI \(i) — \(viewModel.hex(slot: slot))")
+                        resetCell(for: slot)
+                    }
+                }
+            }
             Text("ANSI 8 – 15").font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 6) { ForEach(8..<16, id: \.self) { i in ansiSwatch(i) } }
+            HStack(spacing: 6) {
+                ForEach(8..<16, id: \.self) { i in
+                    VStack(spacing: 2) {
+                        let slot = TerminalThemeEditorViewModel.Slot.ansi(i)
+                        ColorPicker("", selection: colorBinding(for: slot), supportsOpacity: false)
+                            .labelsHidden()
+                            .help("ANSI \(i) — \(viewModel.hex(slot: slot))")
+                        resetCell(for: slot)
+                    }
+                }
+            }
 
             if let err = viewModel.lastValidationError {
                 Text(humanMessage(for: err))
@@ -64,19 +84,28 @@ struct TerminalThemeEditorView: View {
                 .frame(width: 100)
             ColorPicker("", selection: colorBinding(for: slot), supportsOpacity: false)
                 .labelsHidden()
+            resetCell(for: slot)
         }
     }
 
+    /// Per-slot ↺ button. Visible only when the slot has a draft override; the
+    /// container always reserves layout space (20×20 frame) so the row doesn't
+    /// shift as slots dirty/clean.
     @ViewBuilder
-    private func ansiSwatch(_ index: Int) -> some View {
-        let slot = TerminalThemeEditorViewModel.Slot.ansi(index)
-        ColorPicker(
-            "",
-            selection: colorBinding(for: slot),
-            supportsOpacity: false
-        )
-        .labelsHidden()
-        .help("ANSI \(index) — \(viewModel.hex(slot: slot))")
+    private func resetCell(for slot: TerminalThemeEditorViewModel.Slot) -> some View {
+        Group {
+            if viewModel.isSlotDirty(slot) {
+                Button {
+                    viewModel.unsetSlot(slot)
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.caption2)
+                }
+                .buttonStyle(.borderless)
+                .help("Revert this color to the source")
+            }
+        }
+        .frame(width: 20, height: 20)
     }
 
     private func hexBinding(for slot: TerminalThemeEditorViewModel.Slot) -> Binding<String> {
