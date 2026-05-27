@@ -159,7 +159,10 @@ struct TerminalSettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
-        .sheet(isPresented: $showingSaveAsDialog) { saveAsDialog }
+        .sheet(isPresented: $showingSaveAsDialog, onDismiss: {
+            pendingSchemeSwitch = nil
+            saveAsError = nil
+        }) { saveAsDialog }
         .confirmationDialog(
             "Delete \(editorVM.displayName)?",
             isPresented: $deleteConfirmation,
