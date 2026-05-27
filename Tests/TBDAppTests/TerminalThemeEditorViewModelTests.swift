@@ -75,6 +75,29 @@ struct TerminalThemeEditorViewModelTests {
         #expect(!vm.isDirty)  // last dirty slot cleared → editor clean again
     }
 
+    @Test("unsetSlot clears a matching invalid-hex validation error")
+    func unsetSlotClearsMatchingError() {
+        let vm = TerminalThemeEditorViewModel()
+        vm.load(source: bundledSource(), kind: .bundled)
+        vm.setHex(slot: .foreground, hex: "not-a-color")
+        #expect(vm.lastValidationError != nil)
+
+        vm.unsetSlot(.foreground)
+        #expect(vm.lastValidationError == nil)
+    }
+
+    @Test("unsetSlot keeps a validation error scoped to a DIFFERENT slot")
+    func unsetSlotKeepsUnrelatedError() {
+        let vm = TerminalThemeEditorViewModel()
+        vm.load(source: bundledSource(), kind: .bundled)
+        vm.setHex(slot: .background, hex: "garbage")  // error scoped to Background
+        vm.setHex(slot: .foreground, hex: "#abcdef")   // valid; foreground draft entered
+        #expect(vm.lastValidationError != nil)
+
+        vm.unsetSlot(.foreground)
+        #expect(vm.lastValidationError != nil) // background error still there
+    }
+
     @Test("isSlotDirty returns false for clean slots")
     func isSlotDirtyFalseWhenClean() {
         let vm = TerminalThemeEditorViewModel()

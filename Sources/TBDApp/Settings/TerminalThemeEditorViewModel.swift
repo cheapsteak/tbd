@@ -79,8 +79,9 @@ final class TerminalThemeEditorViewModel: ObservableObject {
     /// isn't currently drafted.
     func unsetSlot(_ slot: Slot) {
         draftHex.removeValue(forKey: slot)
-        // Don't touch displayNameDraft or lastValidationError — those are scoped
-        // to other affordances.
+        if case .invalidHex(let field, _) = lastValidationError, field == slot.humanName {
+            lastValidationError = nil
+        }
     }
 
     /// Whether the given slot currently has a draft override.
