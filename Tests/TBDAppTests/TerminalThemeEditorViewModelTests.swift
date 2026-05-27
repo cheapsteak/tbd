@@ -82,4 +82,22 @@ struct TerminalThemeEditorViewModelTests {
         #expect(!vm.isSlotDirty(.foreground))
         #expect(!vm.isSlotDirty(.ansi(0)))
     }
+
+    @Test("invalid hex uses human-readable field labels")
+    func invalidHexFieldLabelsAreHuman() {
+        let vm = TerminalThemeEditorViewModel()
+        vm.load(source: bundledSource(), kind: .bundled)
+        vm.setHex(slot: .ansi(3), hex: "garbage")
+        if case .invalidHex(let field, _) = vm.lastValidationError {
+            #expect(field == "ANSI 3")
+        } else {
+            Issue.record("expected invalidHex error")
+        }
+        vm.setHex(slot: .foreground, hex: "garbage")
+        if case .invalidHex(let field, _) = vm.lastValidationError {
+            #expect(field == "Foreground")
+        } else {
+            Issue.record("expected invalidHex error")
+        }
+    }
 }
