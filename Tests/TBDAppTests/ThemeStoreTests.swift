@@ -127,4 +127,27 @@ struct ThemeStoreTests {
             try store.saveAs(draft, suggestedDisplayName: "Gruvbox Dark")
         }
     }
+
+    @Test("save overwrites the existing file for the same id")
+    func saveOverwrites() async throws {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "Foo",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        let id = try store.saveAs(draft, suggestedDisplayName: "Foo")
+
+        let edited = UserTerminalTheme(
+            schemaVersion: 1, id: id, displayName: "Foo",
+            ansi: Array(repeating: "#ff0000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        try store.save(edited)
+        store.reloadFromDisk()
+        #expect(store.userThemes.first?.ansi[0].red == UInt16(0xff) * 257)
+    }
 }

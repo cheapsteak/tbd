@@ -85,6 +85,15 @@ final class ThemeStore: ObservableObject {
         return id
     }
 
+    /// Overwrite an existing user theme by id. For new themes use `saveAs`.
+    func save(_ theme: UserTerminalTheme) throws {
+        guard fileExists(forID: theme.id) else {
+            throw SaveError.ioFailed("save called for unknown id \(theme.id); use saveAs for new themes")
+        }
+        try persist(theme)
+        reloadFromDisk()
+    }
+
     private func uniqueID(basedOn slug: String) throws -> String {
         if ColorSchemes.bundled.contains(where: { $0.id == slug }) {
             throw SaveError.bundledIDCollision(slug)
