@@ -178,6 +178,38 @@ private func makeAppStateWithTabs(
 }
 
 @MainActor
+@Test func handleClick_withTerminalID_matchesLiveTranscriptTab() async {
+    // Mirror of `handleClick_withTerminalID_setsActiveTab` but the second
+    // tab is a `.liveTranscript` pane — both arms of the tab-match switch
+    // should select the originating terminal's surface.
+    let worktreeID = UUID()
+    let repoID = UUID()
+    let terminalID = UUID()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    appState.worktrees = [
+        repoID: [
+            Worktree(id: worktreeID, repoID: repoID, name: "x", displayName: "X",
+                     branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x"),
+        ],
+    ]
+    let tab0 = Tab(id: UUID(), content: .terminal(terminalID: UUID()), label: nil)
+    let tab1 = Tab(id: UUID(),
+                   content: .liveTranscript(id: UUID(), terminalID: terminalID),
+                   label: nil)
+    appState.tabs[worktreeID] = [tab0, tab1]
+    appState.activeTabIndices[worktreeID] = 0
+
+    appState.macNotificationManager.handleClick(
+        worktreeID: worktreeID, terminalID: terminalID
+    )
+
+    #expect(appState.selectedWorktreeIDs == [worktreeID])
+    #expect(appState.activeTabIndices[worktreeID] == 1)
+}
+
+@MainActor
 @Test func handleClick_userInfoTerminalIDString_routesToTab() async {
     // Mirrors the string-parsing path used by the UN delegate callback.
     let worktreeID = UUID()

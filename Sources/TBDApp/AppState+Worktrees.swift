@@ -217,6 +217,7 @@ extension AppState {
         // instead and let connectAndLoadInitialState drain at the end.
         if !isInitialStateLoaded {
             pendingDeepLinkID = id
+            pendingDeepLinkTerminalID = terminalID
             return
         }
 
