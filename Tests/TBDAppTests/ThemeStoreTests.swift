@@ -219,6 +219,21 @@ struct ThemeStoreTests {
         }
     }
 
+    @Test("save throws when called for an id that has no file on disk")
+    func saveThrowsForUnknownID() async {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let theme = UserTerminalTheme(
+            schemaVersion: 1, id: "ghost", displayName: "Ghost",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        #expect(throws: ThemeStore.SaveError.self) {
+            try store.save(theme)
+        }
+    }
+
     @Test("when the active theme file vanishes, the schemeID reverts to default")
     func activeThemeVanishesFallsBack() async throws {
         let home = makeIsolatedHome()
