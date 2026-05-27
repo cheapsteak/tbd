@@ -126,9 +126,11 @@ extension AppState {
     /// Resume a Claude session in a new terminal tab and switch focus to it.
     func resumeSession(worktreeID: UUID, sessionId: String) async {
         do {
+            let colorFgBg = appearance?.currentColorFgBg
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
-                resumeSessionID: sessionId
+                resumeSessionID: sessionId,
+                colorFgBg: colorFgBg
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))

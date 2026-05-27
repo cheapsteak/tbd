@@ -11,7 +11,8 @@ extension AppState {
     func createTerminal(worktreeID: UUID, cmd: String? = nil) async {
         do {
             let size = mainAreaTerminalSize()
-            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cmd: cmd, cols: size.cols, rows: size.rows)
+            let colorFgBg = appearance?.currentColorFgBg
+            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cmd: cmd, cols: size.cols, rows: size.rows, colorFgBg: colorFgBg)
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
             tabs[worktreeID, default: []].append(tab)
@@ -27,7 +28,8 @@ extension AppState {
     func createTerminalForSplit(worktreeID: UUID) async -> Terminal? {
         do {
             let size = mainAreaTerminalSize()
-            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cols: size.cols, rows: size.rows)
+            let colorFgBg = appearance?.currentColorFgBg
+            let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cols: size.cols, rows: size.rows, colorFgBg: colorFgBg)
             terminals[worktreeID, default: []].append(terminal)
             return terminal
         } catch {
@@ -86,13 +88,15 @@ extension AppState {
     func createClaudeTerminal(worktreeID: UUID, profileID: UUID? = nil) async {
         do {
             let size = mainAreaTerminalSize()
+            let colorFgBg = appearance?.currentColorFgBg
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
                 cmd: nil,
                 type: .claude,
                 overrideProfileID: profileID,
                 cols: size.cols,
-                rows: size.rows
+                rows: size.rows,
+                colorFgBg: colorFgBg
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
@@ -107,12 +111,14 @@ extension AppState {
     func createCodexTerminal(worktreeID: UUID) async {
         do {
             let size = mainAreaTerminalSize()
+            let colorFgBg = appearance?.currentColorFgBg
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
                 cmd: nil,
                 type: .codex,
                 cols: size.cols,
-                rows: size.rows
+                rows: size.rows,
+                colorFgBg: colorFgBg
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
@@ -127,12 +133,14 @@ extension AppState {
     func forkClaudeTerminal(worktreeID: UUID, sessionID: String, tokenID: UUID? = nil) async {
         do {
             let size = mainAreaTerminalSize()
+            let colorFgBg = appearance?.currentColorFgBg
             let terminal = try await daemonClient.createTerminal(
                 worktreeID: worktreeID,
                 resumeSessionID: sessionID,
                 overrideProfileID: tokenID,
                 cols: size.cols,
-                rows: size.rows
+                rows: size.rows,
+                colorFgBg: colorFgBg
             )
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))

@@ -473,10 +473,10 @@ actor DaemonClient {
     }
 
     /// Create a terminal in a worktree.
-    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideProfileID: overrideProfileID, cols: cols, rows: rows),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideProfileID: overrideProfileID, cols: cols, rows: rows, colorFgBg: colorFgBg),
             resultType: Terminal.self
         )
     }

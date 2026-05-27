@@ -100,6 +100,12 @@ extension RPCRouter {
         env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
+        // Set COLORFGBG if provided (computed from terminal color scheme luminance).
+        // This allows CLI tools (vim, less, fzf, etc.) to auto-adjust to the active scheme.
+        if let colorFgBg = params.colorFgBg {
+            env["COLORFGBG"] = colorFgBg
+        }
+
         // Codex branch: minimal launch with TBD's profile plugin installed in
         // the user's global Codex home. No system prompt injection or token
         // resolution; Codex should keep using the user's normal auth/config.

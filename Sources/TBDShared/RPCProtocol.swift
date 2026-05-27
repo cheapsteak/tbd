@@ -591,9 +591,12 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) {
+    /// COLORFGBG environment variable value computed from active terminal color scheme's
+    /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
+    public let colorFgBg: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
-        self.cols = cols; self.rows = rows
+        self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
     }
 }
 
