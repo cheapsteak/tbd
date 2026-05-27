@@ -133,6 +133,17 @@ extension AppState {
     func navigateToActiveWorktree(_ id: UUID) {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = [id]
+        // Expand the containing repo so the row is part of the rendered list
+        // before we ask the sidebar to scroll to it. Update local state
+        // synchronously (List rerender + scroll), persist via RPC fire-and-forget.
+        if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
+           let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
+           !repos[repoIdx].expanded {
+            repos[repoIdx].expanded = true
+            let repoID = worktree.repoID
+            Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
+        }
+        pendingScrollToWorktreeID = id
         // Only foreground when the AppKit run loop is live — `NSApp` is nil
         // under unit tests, which would crash on the implicit unwrap.
         if NSApplication.shared.isRunning {

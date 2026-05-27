@@ -132,6 +132,11 @@ final class AppState: ObservableObject {
     /// row, then clears the value after the flash animation completes.
     @Published var highlightedArchivedWorktreeID: UUID?
 
+    /// Set briefly when external navigation (notification click, deep link,
+    /// jump menu) lands on an active worktree. `SidebarView` observes this
+    /// to scroll the worktree row into view, then clears the value.
+    @Published var pendingScrollToWorktreeID: UUID?
+
     /// Test seam: when set, replaces the daemon roundtrip for archived
     /// lookups in `navigateToArchivedWorktree(_:)`. Production code leaves
     /// this nil; tests assign a closure returning a deterministic worktree

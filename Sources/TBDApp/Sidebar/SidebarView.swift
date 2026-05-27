@@ -17,10 +17,21 @@ struct SidebarView: View {
     }
 
     var body: some View {
-        List(selection: $appState.selectedWorktreeIDs) {
-            ForEach(filteredRepos) { repo in
-                RepoSectionView(repo: repo)
-                    .opacity(repo.hidden ? 0.55 : 1.0)
+        ScrollViewReader { proxy in
+            List(selection: $appState.selectedWorktreeIDs) {
+                ForEach(filteredRepos) { repo in
+                    RepoSectionView(repo: repo)
+                        .opacity(repo.hidden ? 0.55 : 1.0)
+                }
+            }
+            .onChange(of: appState.pendingScrollToWorktreeID) { _, target in
+                guard let target else { return }
+                // Defer to the next runloop tick so a freshly-expanded repo's
+                // rows are mounted in the List before we ask to scroll to them.
+                DispatchQueue.main.async {
+                    withAnimation { proxy.scrollTo(target, anchor: .center) }
+                    appState.pendingScrollToWorktreeID = nil
+                }
             }
         }
         .listStyle(.plain)

@@ -101,6 +101,38 @@ import TBDShared
 }
 
 @MainActor
+@Test func navigateToActive_setsPendingScrollTarget() async {
+    let appState = AppState()
+    let repoID = UUID()
+    let id = UUID()
+    appState.repos = [Repo(id: repoID, path: "/tmp/r", displayName: "R")]
+    appState.worktrees = [
+        repoID: [Worktree(id: id, repoID: repoID, name: "x", displayName: "X",
+                          branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x")]
+    ]
+
+    appState.navigateToActiveWorktree(id)
+
+    #expect(appState.pendingScrollToWorktreeID == id)
+}
+
+@MainActor
+@Test func navigateToActive_expandsContainingRepoIfCollapsed() async {
+    let appState = AppState()
+    let repoID = UUID()
+    let id = UUID()
+    appState.repos = [Repo(id: repoID, path: "/tmp/r", displayName: "R", expanded: false)]
+    appState.worktrees = [
+        repoID: [Worktree(id: id, repoID: repoID, name: "x", displayName: "X",
+                          branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x")]
+    ]
+
+    appState.navigateToActiveWorktree(id)
+
+    #expect(appState.repos.first(where: { $0.id == repoID })?.expanded == true)
+}
+
+@MainActor
 @Test func navigateToWorktree_beforeInitialLoad_buffersID() async {
     let appState = AppState()
     let id = UUID()
