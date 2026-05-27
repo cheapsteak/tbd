@@ -12,6 +12,7 @@ struct NotificationRecord: Codable, FetchableRecord, PersistableRecord, Sendable
     var message: String?
     var read: Bool
     var createdAt: Date
+    var terminalID: String?
 
     init(from notification: TBDNotification) {
         self.id = notification.id.uuidString
@@ -20,6 +21,7 @@ struct NotificationRecord: Codable, FetchableRecord, PersistableRecord, Sendable
         self.message = notification.message
         self.read = notification.read
         self.createdAt = notification.createdAt
+        self.terminalID = notification.terminalID?.uuidString
     }
 
     func toModel() -> TBDNotification {
@@ -29,7 +31,8 @@ struct NotificationRecord: Codable, FetchableRecord, PersistableRecord, Sendable
             type: NotificationType(rawValue: type)!,
             message: message,
             read: read,
-            createdAt: createdAt
+            createdAt: createdAt,
+            terminalID: terminalID.flatMap(UUID.init(uuidString:))
         )
     }
 }
@@ -46,12 +49,14 @@ public struct NotificationStore: Sendable {
     public func create(
         worktreeID: UUID,
         type: NotificationType,
-        message: String? = nil
+        message: String? = nil,
+        terminalID: UUID? = nil
     ) async throws -> TBDNotification {
         let notification = TBDNotification(
             worktreeID: worktreeID,
             type: type,
-            message: message
+            message: message,
+            terminalID: terminalID
         )
         let record = NotificationRecord(from: notification)
         try await writer.write { db in

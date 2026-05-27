@@ -632,7 +632,8 @@ final class AppState: ObservableObject {
         macNotificationManager.postIfEnabled(
             worktreeID: notification.worktreeID,
             message: notification.message,
-            worktrees: allWorktrees
+            worktrees: allWorktrees,
+            terminalID: notification.terminalID
         )
     }
 

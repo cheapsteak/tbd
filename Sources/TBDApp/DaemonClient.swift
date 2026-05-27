@@ -536,10 +536,12 @@ actor DaemonClient {
     }
 
     /// Send a notification.
-    func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil) async throws {
+    func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil,
+                terminalID: UUID? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.notify,
-            params: NotifyParams(worktreeID: worktreeID, type: type, message: message)
+            params: NotifyParams(worktreeID: worktreeID, type: type, message: message,
+                                 terminalID: terminalID)
         )
     }
 

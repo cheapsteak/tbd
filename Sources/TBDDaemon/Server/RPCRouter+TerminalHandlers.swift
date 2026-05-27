@@ -776,12 +776,14 @@ extension RPCRouter {
         let notification = try await db.notifications.create(
             worktreeID: worktreeID,
             type: params.type,
-            message: params.message
+            message: params.message,
+            terminalID: params.terminalID
         )
 
         subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
             notificationID: notification.id, worktreeID: notification.worktreeID,
-            type: notification.type, message: notification.message
+            type: notification.type, message: notification.message,
+            terminalID: notification.terminalID
         )))
 
         // Signal the suspend/resume coordinator that Claude finished a response

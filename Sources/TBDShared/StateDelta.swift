@@ -75,9 +75,29 @@ public struct NotificationDelta: Codable, Sendable {
     public let worktreeID: UUID
     public let type: NotificationType
     public let message: String?
-    public init(notificationID: UUID, worktreeID: UUID, type: NotificationType, message: String?) {
+    /// Optional terminal that triggered the notification. The app uses this
+    /// to route a banner click to the originating tab. Nil when the
+    /// notification didn't come from a specific terminal or from an older
+    /// daemon that didn't include the field.
+    public let terminalID: UUID?
+    public init(notificationID: UUID, worktreeID: UUID, type: NotificationType,
+                message: String?, terminalID: UUID? = nil) {
         self.notificationID = notificationID; self.worktreeID = worktreeID
         self.type = type; self.message = message
+        self.terminalID = terminalID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case notificationID, worktreeID, type, message, terminalID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        notificationID = try c.decode(UUID.self, forKey: .notificationID)
+        worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
+        type = try c.decode(NotificationType.self, forKey: .type)
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+        terminalID = try c.decodeIfPresent(UUID.self, forKey: .terminalID)
     }
 }
 

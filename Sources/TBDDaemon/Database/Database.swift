@@ -509,6 +509,14 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "config", column: "primary_agent_preference", type: .text)
         }
 
+        // Records the originating terminal for a notification so banner
+        // clicks can switch to the specific tab, not just select the
+        // worktree. Nullable for backwards compat with rows inserted by
+        // pre-v28 daemons.
+        migrator.registerMigration("v28_notification_terminal_id") { db in
+            try db.addColumnIfMissing(table: "notification", column: "terminalID", type: .text)
+        }
+
         return migrator
     }
 }
