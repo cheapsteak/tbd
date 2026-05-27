@@ -11,8 +11,12 @@ extension RPCRouter {
     func handleAppearanceUpdateColorFgBg(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(AppearanceUpdateColorFgBgParams.self, from: paramsData)
 
-        // Discover all known tmux servers from worktrees.
-        let worktrees = try await db.worktrees.list()
+        // Discover tmux servers from active worktrees only. Archived worktrees
+        // have had their tmux servers killed, so attempting setenv -g against them
+        // spawns dead `tmux` processes that fail and log a warning on every
+        // debounce tick. `handleSetMainAreaSize` in this codebase filters the
+        // same way for the same reason.
+        let worktrees = try await db.worktrees.list(status: .active)
         var attemptedServers = Set<String>()
 
         // Build the deduplicated set of servers first (single pass).
