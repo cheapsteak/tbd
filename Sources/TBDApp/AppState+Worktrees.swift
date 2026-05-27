@@ -239,14 +239,35 @@ extension AppState {
         Task { await refreshArchivedWorktrees(repoID: id) }
     }
 
-    /// Fetch archived worktrees for a repo.
+    private static let archivedPageSize = 100
+
+    /// Fetch the first page of archived worktrees for a repo.
     func refreshArchivedWorktrees(repoID: UUID) async {
         do {
-            let archived = try await daemonClient.listWorktrees(repoID: repoID, status: .archived)
+            let archived = try await daemonClient.listWorktrees(
+                repoID: repoID, status: .archived,
+                limit: Self.archivedPageSize
+            )
             archivedWorktrees[repoID] = archived
+            archivedWorktreesHasMore[repoID] = archived.count >= Self.archivedPageSize
             ensureArchivedSelectionValid(repoID: repoID)
         } catch {
             logger.error("Failed to list archived worktrees: \(error)")
+        }
+    }
+
+    /// Load the next page of archived worktrees, appending to the existing list.
+    func loadMoreArchivedWorktrees(repoID: UUID) async {
+        let currentCount = archivedWorktrees[repoID]?.count ?? 0
+        do {
+            let more = try await daemonClient.listWorktrees(
+                repoID: repoID, status: .archived,
+                limit: Self.archivedPageSize, offset: currentCount
+            )
+            archivedWorktrees[repoID, default: []].append(contentsOf: more)
+            archivedWorktreesHasMore[repoID] = more.count >= Self.archivedPageSize
+        } catch {
+            logger.error("Failed to load more archived worktrees: \(error)")
         }
     }
 

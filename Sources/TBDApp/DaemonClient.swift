@@ -411,11 +411,11 @@ actor DaemonClient {
         )
     }
 
-    /// List worktrees, optionally filtered by repo and/or status.
-    func listWorktrees(repoID: UUID? = nil, status: WorktreeStatus? = nil) async throws -> [Worktree] {
+    /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
+    func listWorktrees(repoID: UUID? = nil, status: WorktreeStatus? = nil, limit: Int? = nil, offset: Int? = nil) async throws -> [Worktree] {
         return try await callAsync(
             method: RPCMethod.worktreeList,
-            params: WorktreeListParams(repoID: repoID, status: status),
+            params: WorktreeListParams(repoID: repoID, status: status, limit: limit, offset: offset),
             resultType: [Worktree].self
         )
     }

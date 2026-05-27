@@ -513,8 +513,10 @@ public struct WorktreeCreateParams: Codable, Sendable {
 public struct WorktreeListParams: Codable, Sendable {
     public let repoID: UUID?
     public let status: WorktreeStatus?
-    public init(repoID: UUID? = nil, status: WorktreeStatus? = nil) {
-        self.repoID = repoID; self.status = status
+    public let limit: Int?
+    public let offset: Int?
+    public init(repoID: UUID? = nil, status: WorktreeStatus? = nil, limit: Int? = nil, offset: Int? = nil) {
+        self.repoID = repoID; self.status = status; self.limit = limit; self.offset = offset
     }
 }
 

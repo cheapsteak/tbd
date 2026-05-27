@@ -68,6 +68,10 @@ struct ArchivedWorktreesView: View {
                     Text("\(rows.count) of \(allRows.count)")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                } else if appState.archivedWorktreesHasMore[repoID] == true {
+                    Text("\(rows.count)+")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 } else {
                     Text("\(rows.count)")
                         .font(.callout)
@@ -105,25 +109,42 @@ struct ArchivedWorktreesView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(rows) { row in
-                    ArchivedWorktreeRow(
-                        row: row,
-                        isSelected: selectedID == row.id
-                    )
-                    .id(row.id)
-                    .contentShape(Rectangle())
-                    .onTapGesture { select(row) }
-                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
-                    .listRowBackground(rowBackground(for: row))
-                    .listRowSeparator(.hidden)
-                    .contextMenu {
-                        if row.reviveState == nil {
-                            Button("Revive") {
-                                Task { await appState.reviveWorktree(id: row.worktree.id) }
+                    List {
+                        ForEach(rows) { row in
+                            ArchivedWorktreeRow(
+                                row: row,
+                                isSelected: selectedID == row.id
+                            )
+                            .id(row.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture { select(row) }
+                            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                            .listRowBackground(rowBackground(for: row))
+                            .listRowSeparator(.hidden)
+                            .contextMenu {
+                                if row.reviveState == nil {
+                                    Button("Revive") {
+                                        Task { await appState.reviveWorktree(id: row.worktree.id) }
+                                    }
+                                }
                             }
                         }
+                        if appState.archivedWorktreesHasMore[repoID] == true {
+                            Button {
+                                Task { await appState.loadMoreArchivedWorktrees(repoID: repoID) }
+                            } label: {
+                                Text("Load More…")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                            }
+                            .buttonStyle(.plain)
+                            .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                        }
                     }
-                }
                     .listStyle(.plain)
                     .onChange(of: appState.highlightedArchivedWorktreeID, initial: true) { _, newValue in
                         guard let id = newValue, rows.contains(where: { $0.id == id }) else { return }
