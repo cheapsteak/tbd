@@ -15,6 +15,7 @@ struct TerminalSettingsView: View {
     @State private var saveAsName = ""
     @State private var deleteConfirmation = false
     @State private var importError: String?
+    @State private var errorTitle: String = "Error"
     @State private var pendingSchemeSwitch: String?
     @State private var showingPendingSwitchConfirm = false
 
@@ -165,7 +166,7 @@ struct TerminalSettingsView: View {
         } message: {
             Text("This theme will be moved to .trash/; your terminals will revert to Tango.")
         }
-        .alert("Import failed", isPresented: Binding(
+        .alert(errorTitle, isPresented: Binding(
             get: { importError != nil },
             set: { if !$0 { importError = nil } }
         )) { Button("OK") {} } message: { Text(importError ?? "") }
@@ -257,11 +258,13 @@ struct TerminalSettingsView: View {
             editorVM.load(source: try theme.toScheme(), kind: .user)
             appearance.draftSchemeOverride = nil
         } catch {
-            importError = "Save failed: \(error)"
+            errorTitle = "Save failed"
+            importError = String(describing: error)
         }
     }
 
-    private func performSaveAs(name: String) {
+    @discardableResult
+    private func performSaveAs(name: String) -> Bool {
         do {
             let draft = editorVM.snapshot(id: "")
             let newID = try appState.themeStore.saveAs(draft, suggestedDisplayName: name)
@@ -276,10 +279,13 @@ struct TerminalSettingsView: View {
             } else {
                 pendingSchemeSwitch = nil
             }
+            return true
         } catch {
-            importError = "Save as failed: \(error)"
+            errorTitle = "Save as failed"
+            importError = String(describing: error)
             // Leave pendingSchemeSwitch alone on failure so the user can decide
             // what to do next.
+            return false
         }
     }
 
@@ -288,7 +294,8 @@ struct TerminalSettingsView: View {
         do {
             try appState.themeStore.delete(id: active)
         } catch {
-            importError = "Delete failed: \(error)"
+            errorTitle = "Delete failed"
+            importError = String(describing: error)
             return
         }
         appearance.schemeID = ColorSchemes.defaultScheme.id
@@ -306,7 +313,8 @@ struct TerminalSettingsView: View {
             appearance.schemeID = id
             syncEditorWithScheme()
         } catch {
-            importError = "Import failed: \(error)"
+            errorTitle = "Import failed"
+            importError = String(describing: error)
         }
     }
 
@@ -321,8 +329,9 @@ struct TerminalSettingsView: View {
             HStack {
                 Button("Cancel") { showingSaveAsDialog = false }
                 Button("Save") {
-                    performSaveAs(name: saveAsName)
-                    showingSaveAsDialog = false
+                    if performSaveAs(name: saveAsName) {
+                        showingSaveAsDialog = false
+                    }
                 }
                 .keyboardShortcut(.defaultAction)
             }
