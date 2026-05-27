@@ -178,4 +178,27 @@ struct AppearanceSettingsTests {
             #expect(darkValue == "15;0")
         }
     }
+
+    @Test("currentColorFgBg uses user-theme bg luminance when a user theme is active")
+    func currentColorFgBgForUserTheme() throws {
+        let suiteName = "tbd.test.fgbg-user.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = ThemeStore()
+        let lightUser = TerminalColorScheme(
+            id: "light-user", displayName: "Light U",
+            ansi: Array(repeating: SwiftTerm.Color(red: 0, green: 0, blue: 0), count: 16),
+            foreground: SwiftTerm.Color(red: 0, green: 0, blue: 0),
+            background: SwiftTerm.Color(red: 65535, green: 65535, blue: 65535),
+            cursor: SwiftTerm.Color(red: 0, green: 0, blue: 0),
+            selection: SwiftTerm.Color(red: 32000, green: 32000, blue: 32000)
+        )
+        store.injectForTest(userThemes: [lightUser])
+
+        let appearance = AppearanceSettings(defaults: defaults)
+        appearance.themeStore = store
+        appearance.schemeID = "light-user"
+        #expect(appearance.currentColorFgBg == "0;15")
+    }
 }
