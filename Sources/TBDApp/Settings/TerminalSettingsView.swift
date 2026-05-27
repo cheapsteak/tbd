@@ -17,6 +17,7 @@ struct TerminalSettingsView: View {
     @State private var importError: String?
     @State private var errorTitle: String = "Error"
     @State private var pendingSchemeSwitch: String?
+    @State private var saveAsError: String?
     @State private var showingPendingSwitchConfirm = false
 
     var body: some View {
@@ -72,6 +73,7 @@ struct TerminalSettingsView: View {
                         }
                         Button("Save as…") {
                             saveAsName = editorVM.displayName + " Copy"
+                            saveAsError = nil
                             showingSaveAsDialog = true
                         }
                         Button("Reset") {
@@ -81,6 +83,7 @@ struct TerminalSettingsView: View {
                     } else {
                         Button("Save as…") {
                             saveAsName = editorVM.displayName + " Copy"
+                            saveAsError = nil
                             showingSaveAsDialog = true
                         }
                     }
@@ -184,6 +187,7 @@ struct TerminalSettingsView: View {
             }
             Button("Save as…") {
                 saveAsName = editorVM.displayName + " Copy"
+                saveAsError = nil
                 showingSaveAsDialog = true
                 // pendingSchemeSwitch is intentionally left set — performSaveAs reads it.
             }
@@ -282,14 +286,24 @@ struct TerminalSettingsView: View {
             }
             return true
         } catch ThemeStore.SaveError.bundledIDCollision(let slug) {
-            errorTitle = "Name already taken"
-            importError = "\"\(slug)\" is a built-in theme ID. Please choose a different name."
+            let msg = "\"\(slug)\" is a built-in theme ID. Please choose a different name."
+            if showingSaveAsDialog {
+                saveAsError = msg
+            } else {
+                errorTitle = "Name already taken"
+                importError = msg
+            }
             // Leave pendingSchemeSwitch alone on failure so the user can decide
             // what to do next.
             return false
         } catch {
-            errorTitle = "Save as failed"
-            importError = String(describing: error)
+            let msg = String(describing: error)
+            if showingSaveAsDialog {
+                saveAsError = msg
+            } else {
+                errorTitle = "Save as failed"
+                importError = msg
+            }
             // Leave pendingSchemeSwitch alone on failure so the user can decide
             // what to do next.
             return false
@@ -333,12 +347,20 @@ struct TerminalSettingsView: View {
             TextField("Name", text: $saveAsName)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 240)
+            if let err = saveAsError {
+                Text(err)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(width: 240)
+            }
             HStack {
                 Button("Cancel") {
                     showingSaveAsDialog = false
                     pendingSchemeSwitch = nil
+                    saveAsError = nil
                 }
                 Button("Save") {
+                    saveAsError = nil
                     if performSaveAs(name: saveAsName) {
                         showingSaveAsDialog = false
                     }
