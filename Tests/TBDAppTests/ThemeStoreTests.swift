@@ -203,4 +203,37 @@ struct ThemeStoreTests {
 
         store.stopWatching()
     }
+
+    @Test("when the active theme file vanishes, the schemeID reverts to default")
+    func activeThemeVanishesFallsBack() async throws {
+        let home = makeIsolatedHome()
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+
+        let suiteName = "tbd.test.fallback.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appearance = AppearanceSettings(defaults: defaults)
+        let store = ThemeStore()
+        appearance.themeStore = store
+
+        // Create a user theme and select it.
+        let theme = UserTerminalTheme(
+            schemaVersion: 1, id: "ephemeral", displayName: "Ephemeral",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        try JSONEncoder().encode(theme)
+            .write(to: themesDir.appendingPathComponent("ephemeral.json"))
+        store.reloadFromDisk()
+        appearance.schemeID = "ephemeral"
+
+        // Externally delete the file (simulates `rm`).
+        try FileManager.default.removeItem(at: themesDir.appendingPathComponent("ephemeral.json"))
+        store.reloadFromDisk()
+        appearance.reconcileWithStore()
+
+        #expect(appearance.schemeID == ColorSchemes.defaultScheme.id)
+    }
 }

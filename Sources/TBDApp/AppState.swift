@@ -44,6 +44,8 @@ final class AppState: ObservableObject {
     }
     /// Subscription to appearance.$schemeID changes for pushing COLORFGBG updates to running tmux servers.
     private var appearanceSubscription: AnyCancellable?
+    /// Subscription to themeStore.$userThemes changes for reconciling the active scheme.
+    private var themeStoreSubscription: AnyCancellable?
 
     @Published var repos: [Repo] = []
     @Published var worktrees: [UUID: [Worktree]] = [:]
@@ -481,6 +483,14 @@ final class AppState: ObservableObject {
             .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
             .sink { [weak self] _ in
                 self?.broadcastAppearanceColorFgBg(appearance)
+            }
+
+        // When the theme store reloads (external file add/delete/edit), reconcile
+        // the active schemeID so a deleted theme falls back to the default rather
+        // than leaving the UI pointing at an unknown id.
+        themeStoreSubscription = themeStore.$userThemes
+            .sink { [weak appearance] _ in
+                appearance?.reconcileWithStore()
             }
     }
 

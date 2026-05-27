@@ -144,6 +144,18 @@ final class AppearanceSettings: ObservableObject {
         let scheme = ColorSchemes.scheme(forID: schemeID, store: themeStore)
         return Self.colorFgBg(for: scheme)
     }
+
+    /// Call when ThemeStore reloads. If the active schemeID no longer points
+    /// at a bundled or a known user theme, fall back to the default. Handles
+    /// externally-deleted theme files (vim `:!rm`, `git pull` that removed a
+    /// tracked theme, etc.).
+    func reconcileWithStore() {
+        let bundledHit = ColorSchemes.bundled.contains { $0.id == schemeID }
+        let userHit = themeStore?.userThemes.contains { $0.id == schemeID } ?? false
+        if !bundledHit && !userHit {
+            schemeID = ColorSchemes.defaultScheme.id
+        }
+    }
 }
 
 // MARK: - CursorStyle <-> String
