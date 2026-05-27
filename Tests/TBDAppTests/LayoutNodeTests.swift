@@ -165,6 +165,40 @@ struct LayoutNodeTests {
         #expect(ids == [termID])
     }
 
+    @Test func removingTerminalPanesNotInAllowedSetDropsForeignTerminalPane() {
+        let localID = UUID()
+        let foreignID = UUID()
+        let node = LayoutNode.split(
+            direction: .horizontal,
+            children: [
+                .pane(.terminal(terminalID: localID)),
+                .pane(.terminal(terminalID: foreignID)),
+            ],
+            ratios: [0.5, 0.5]
+        )
+
+        let result = node.removingTerminalPanes(notIn: Set([localID]))
+
+        #expect(result == .pane(.terminal(terminalID: localID)))
+    }
+
+    @Test func removingTerminalPanesNotInAllowedSetKeepsNonTerminalPanes() {
+        let localID = UUID()
+        let webID = UUID()
+        let node = LayoutNode.split(
+            direction: .vertical,
+            children: [
+                .pane(.terminal(terminalID: localID)),
+                .pane(.webview(id: webID, url: URL(string: "https://example.com")!)),
+            ],
+            ratios: [0.4, 0.6]
+        )
+
+        let result = node.removingTerminalPanes(notIn: Set([localID]))
+
+        #expect(result == node)
+    }
+
     // MARK: - Codable backward compat
 
     @Test func codable_backwardCompat_oldTerminalFormat() throws {

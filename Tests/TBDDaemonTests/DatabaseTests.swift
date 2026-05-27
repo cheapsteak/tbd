@@ -168,6 +168,40 @@ struct DatabaseTests {
         #expect(terminals.count == 1)
     }
 
+    @Test func listTerminalsOrdersByCreationTime() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/test-terminal-order", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
+            path: "/tmp/test-terminal-order/.tbd/worktrees/test-wt", tmuxServer: "tbd-a1b2c3d4"
+        )
+        let firstID = UUID()
+        let secondID = UUID()
+
+        try await db.writerForTests.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO terminal
+                        (id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt, kind)
+                    VALUES
+                        (?, ?, '@2', '%2', 'setup', ?, 'shell'),
+                        (?, ?, '@1', '%1', 'Codex', ?, 'codex')
+                    """,
+                arguments: [
+                    secondID.uuidString,
+                    wt.id.uuidString,
+                    Date(timeIntervalSince1970: 20),
+                    firstID.uuidString,
+                    wt.id.uuidString,
+                    Date(timeIntervalSince1970: 10),
+                ]
+            )
+        }
+
+        let terminals = try await db.terminals.list(worktreeID: wt.id)
+        #expect(terminals.map(\.id) == [firstID, secondID])
+    }
+
     @Test func deleteTerminal() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/test", displayName: "test", defaultBranch: "main")

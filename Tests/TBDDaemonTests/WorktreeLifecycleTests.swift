@@ -51,6 +51,30 @@ import Testing
     #expect(!terminals.contains { $0.kind == .claude || $0.label == "Claude Code" })
 }
 
+@Test func testCreateWorktreePersistsPrimaryAgentAsFirstAndActiveTab() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    try await db.config.setPrimaryAgentPreference(.codex)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let result = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+    let terminals = try await db.terminals.list(worktreeID: result.id)
+    let primary = try #require(terminals.first)
+
+    #expect(primary.kind == .codex)
+    #expect(primary.label == "Codex")
+    #expect(try await db.worktrees.getTabOrder(worktreeID: result.id) == terminals.map(\.id))
+    #expect(try await db.worktrees.getActiveTabID(worktreeID: result.id) == primary.id)
+}
+
 @Test func testCreateWorktreeWithCodexPreferenceDoesNotResolveClaudeProfile() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }

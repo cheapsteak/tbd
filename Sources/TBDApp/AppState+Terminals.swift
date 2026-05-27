@@ -5,6 +5,18 @@ import os
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+Terminals")
 
 extension AppState {
+    /// Resolve a terminal only within its owning worktree bucket. Terminal IDs
+    /// are globally unique in normal operation, but persisted split layouts can
+    /// outlive terminal/worktree churn; scoped lookup prevents stale layouts
+    /// from rendering another worktree's tmux window.
+    func terminal(id: UUID, in worktreeID: UUID) -> Terminal? {
+        terminals[worktreeID]?.first { $0.id == id }
+    }
+
+    func initialTabLabel(for terminal: Terminal) -> String? {
+        terminal.kind == .codex || terminal.label == "Codex" ? terminal.label : nil
+    }
+
     // MARK: - Terminal Actions
 
     /// Create a terminal in a worktree and add a new tab for it.
@@ -14,7 +26,7 @@ extension AppState {
             let colorFgBg = appearance?.currentColorFgBg
             let terminal = try await daemonClient.createTerminal(worktreeID: worktreeID, cmd: cmd, cols: size.cols, rows: size.rows, colorFgBg: colorFgBg)
             terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             tabs[worktreeID, default: []].append(tab)
         } catch {
             logger.error("Failed to create terminal: \(error)")
@@ -99,7 +111,7 @@ extension AppState {
                 colorFgBg: colorFgBg
             )
             terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             tabs[worktreeID, default: []].append(tab)
         } catch {
             logger.error("Failed to create Claude terminal: \(error)")
@@ -121,7 +133,7 @@ extension AppState {
                 colorFgBg: colorFgBg
             )
             terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             tabs[worktreeID, default: []].append(tab)
         } catch {
             logger.error("Failed to create Codex terminal: \(error)")
@@ -143,7 +155,7 @@ extension AppState {
                 colorFgBg: colorFgBg
             )
             terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id))
+            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             tabs[worktreeID, default: []].append(tab)
         } catch {
             logger.error("Failed to fork Claude terminal: \(error)")

@@ -17,6 +17,13 @@ struct WorktreePager: NSViewControllerRepresentable {
     let activeID: UUID?
     @EnvironmentObject var appState: AppState
 
+    static func mountedWorktreeIDs(recentIDs: [UUID], activeID: UUID?) -> [UUID] {
+        guard let activeID else { return recentIDs }
+        var ids = recentIDs.filter { $0 != activeID }
+        ids.insert(activeID, at: 0)
+        return ids
+    }
+
     func makeNSViewController(context: Context) -> NSTabViewController {
         let vc = NSTabViewController()
         vc.tabStyle = .unspecified
@@ -25,17 +32,18 @@ struct WorktreePager: NSViewControllerRepresentable {
     }
 
     func updateNSViewController(_ vc: NSTabViewController, context: Context) {
+        let mountedIDs = Self.mountedWorktreeIDs(recentIDs: worktreeIDs, activeID: activeID)
         let currentIDs = vc.tabViewItems.compactMap { $0.identifier as? UUID }
 
         // 1. Remove tab items whose worktree IDs were evicted.
         for (idx, id) in currentIDs.enumerated().reversed() {
-            if !worktreeIDs.contains(id) {
+            if !mountedIDs.contains(id) {
                 vc.removeTabViewItem(vc.tabViewItems[idx])
             }
         }
 
         // 2. Add tab items for new worktree IDs.
-        for id in worktreeIDs where !currentIDs.contains(id) {
+        for id in mountedIDs where !currentIDs.contains(id) {
             let host = NSHostingController(
                 rootView: SingleWorktreeView(worktreeID: id)
                     .environmentObject(appState)

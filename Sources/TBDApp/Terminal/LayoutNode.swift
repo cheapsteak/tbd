@@ -103,6 +103,44 @@ indirect enum LayoutNode: Equatable, Sendable {
             return children.flatMap { $0.allTerminalIDs() }
         }
     }
+
+    /// Returns a copy of the layout with terminal panes outside `allowedIDs`
+    /// removed. Non-terminal panes are preserved. If every pane is removed,
+    /// returns nil.
+    func removingTerminalPanes(notIn allowedIDs: Set<UUID>) -> LayoutNode? {
+        switch self {
+        case .pane(let content):
+            if case .terminal(let id) = content, !allowedIDs.contains(id) {
+                return nil
+            }
+            return self
+
+        case .split(let direction, let children, let ratios):
+            var keptChildren: [LayoutNode] = []
+            var keptRatios: [CGFloat] = []
+
+            for (index, child) in children.enumerated() {
+                if let kept = child.removingTerminalPanes(notIn: allowedIDs) {
+                    keptChildren.append(kept)
+                    keptRatios.append(ratios[index])
+                }
+            }
+
+            if keptChildren.isEmpty {
+                return nil
+            }
+            if keptChildren.count == 1 {
+                return keptChildren[0]
+            }
+
+            let total = keptRatios.reduce(0, +)
+            if total > 0 {
+                keptRatios = keptRatios.map { $0 / total }
+            }
+
+            return .split(direction: direction, children: keptChildren, ratios: keptRatios)
+        }
+    }
 }
 
 // MARK: - Pane lookup / replacement helpers

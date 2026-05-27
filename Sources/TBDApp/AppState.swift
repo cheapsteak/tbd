@@ -893,7 +893,7 @@ final class AppState: ObservableObject {
     /// Removes tabs whose root terminal no longer exists. Adds tabs for
     /// terminals that aren't already represented (either as a tab root or
     /// embedded in another tab's split layout).
-    private func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
+    func reconcileTabs(worktreeID: UUID, terminals: [Terminal]) {
         let alreadyLoadedOrder = worktreeTabOrders[worktreeID] != nil
         var currentTabs = tabs[worktreeID] ?? []
         let terminalIDs = Set(terminals.map(\.id))
@@ -912,13 +912,27 @@ final class AppState: ObservableObject {
         //    This must happen AFTER pruning so that dead tabs' children
         //    don't mask still-alive terminals that need new tabs.
         var terminalIDsInLayouts = Set<UUID>()
-        for tab in currentTabs {
+        for index in currentTabs.indices {
+            let tab = currentTabs[index]
             if let layout = layouts[tab.id] {
-                for id in layout.allTerminalIDs() {
+                guard let scopedLayout = layout.removingTerminalPanes(notIn: terminalIDs) else {
+                    layouts.removeValue(forKey: tab.id)
+                    if case .terminal(let id) = tab.content, terminalIDs.contains(id) {
+                        terminalIDsInLayouts.insert(id)
+                    }
+                    continue
+                }
+                if scopedLayout != layout {
+                    layouts[tab.id] = scopedLayout
+                    if case .pane(let content) = scopedLayout {
+                        currentTabs[index].content = content
+                    }
+                }
+                for id in scopedLayout.allTerminalIDs() {
                     terminalIDsInLayouts.insert(id)
                 }
             } else {
-                if case .terminal(let id) = tab.content {
+                if case .terminal(let id) = tab.content, terminalIDs.contains(id) {
                     terminalIDsInLayouts.insert(id)
                 }
             }
@@ -926,7 +940,11 @@ final class AppState: ObservableObject {
 
         // 3. Add tabs for terminals not already in any surviving layout.
         for terminal in terminals where !terminalIDsInLayouts.contains(terminal.id) {
-            currentTabs.append(Tab(id: terminal.id, content: .terminal(terminalID: terminal.id)))
+            currentTabs.append(Tab(
+                id: terminal.id,
+                content: .terminal(terminalID: terminal.id),
+                label: initialTabLabel(for: terminal)
+            ))
         }
 
         tabs[worktreeID] = currentTabs

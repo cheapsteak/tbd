@@ -38,14 +38,9 @@ struct PanePlaceholder: View {
     @State private var showSourceCode = false
     @State private var hasRenderableContent = false
 
-    /// Find the Terminal model matching a terminal ID across all worktree terminals.
+    /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {
-        for (_, terms) in appState.terminals {
-            if let t = terms.first(where: { $0.id == id }) {
-                return t
-            }
-        }
-        return nil
+        appState.terminal(id: id, in: worktree.id)
     }
 
     var body: some View {
