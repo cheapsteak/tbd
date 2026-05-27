@@ -173,4 +173,34 @@ struct ThemeStoreTests {
         #expect(trashed.count == 1)
         #expect(trashed[0].hasPrefix("\(id)-"))
     }
+
+    @Test("external file additions trigger a reload via the watcher")
+    func watcherReloadsOnExternalAdd() async throws {
+        let home = makeIsolatedHome()
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+
+        let store = ThemeStore()
+        store.startWatching()
+        store.reloadFromDisk()
+        #expect(store.userThemes.isEmpty)
+
+        let theme = UserTerminalTheme(
+            schemaVersion: 1, id: "ext", displayName: "Ext",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        try JSONEncoder().encode(theme)
+            .write(to: themesDir.appendingPathComponent("ext.json"))
+
+        let deadline = Date().addingTimeInterval(5)
+        while store.userThemes.isEmpty && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        #expect(store.userThemes.count == 1)
+        #expect(store.userThemes.first?.id == "ext")
+
+        store.stopWatching()
+    }
 }

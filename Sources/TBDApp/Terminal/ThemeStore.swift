@@ -11,6 +11,12 @@ final class ThemeStore: ObservableObject {
     @Published private(set) var userThemes: [TerminalColorScheme] = []
     @Published private(set) var loadErrors: [LoadError] = []
 
+    private var watcher: ThemeDirectoryWatcher?
+    // Snapshot of themesDirectory taken at startWatching() time.
+    // Keeps the FSEvents callback pointing at the correct directory even if
+    // TBD_HOME changes (test isolation via setenv).
+    private var watchedDirectory: URL?
+
     struct LoadError: Equatable, Identifiable {
         let id = UUID()
         let filename: String
@@ -26,12 +32,16 @@ final class ThemeStore: ObservableObject {
     }
 
     func reloadFromDisk() {
+        reloadFromDisk(at: themesDirectory)
+    }
+
+    private func reloadFromDisk(at directory: URL) {
         var loaded: [TerminalColorScheme] = []
         var errors: [LoadError] = []
 
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
-            at: themesDirectory,
+            at: directory,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else {
@@ -57,6 +67,27 @@ final class ThemeStore: ObservableObject {
 
         self.userThemes = loaded.sorted { $0.displayName.localizedCompare($1.displayName) == .orderedAscending }
         self.loadErrors = errors
+    }
+
+    // MARK: - Watching
+
+    func startWatching() {
+        guard watcher == nil else { return }
+        // Snapshot the directory URL now so the FSEvents callback reloads from
+        // the same path even if TBD_HOME changes (e.g. setenv in tests).
+        let dir = themesDirectory
+        watchedDirectory = dir
+        let w = ThemeDirectoryWatcher { [weak self] in
+            self?.reloadFromDisk(at: dir)
+        }
+        w.start(directory: dir)
+        self.watcher = w
+    }
+
+    func stopWatching() {
+        watcher?.stop()
+        watcher = nil
+        watchedDirectory = nil
     }
 
     // MARK: - Save
