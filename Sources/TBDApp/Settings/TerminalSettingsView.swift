@@ -280,6 +280,12 @@ struct TerminalSettingsView: View {
                 pendingSchemeSwitch = nil
             }
             return true
+        } catch ThemeStore.SaveError.bundledIDCollision(let slug) {
+            errorTitle = "Name already taken"
+            importError = "\"\(slug)\" is a built-in theme ID. Please choose a different name."
+            // Leave pendingSchemeSwitch alone on failure so the user can decide
+            // what to do next.
+            return false
         } catch {
             errorTitle = "Save as failed"
             importError = String(describing: error)
