@@ -89,6 +89,31 @@ struct AppearanceSettingsTests {
         }
     }
 
+    @Test("user theme id is preserved at init when a matching JSON file exists")
+    func preservesUserThemeIDWithMatchingFile() throws {
+        // Regression test: init used to reject any non-bundled id, which
+        // silently clobbered legitimate user-theme selections back to Tango
+        // on every relaunch (the on-disk file load races init).
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-appearance-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        setenv("TBD_HOME", home.path, 1)
+        defer {
+            try? FileManager.default.removeItem(at: home)
+            unsetenv("TBD_HOME")
+        }
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        // Contents don't need to be a valid theme — init only checks file existence.
+        try Data().write(to: themesDir.appendingPathComponent("my-theme.json"))
+
+        withIsolatedDefaults { defaults in
+            defaults.set("my-theme", forKey: "terminal.scheme.id")
+            let settings = AppearanceSettings(defaults: defaults)
+            #expect(settings.schemeID == "my-theme")
+        }
+    }
+
     @Test("computed font falls back to system mono when fontName is bogus")
     func fallbackFontResolution() {
         withIsolatedDefaults { defaults in

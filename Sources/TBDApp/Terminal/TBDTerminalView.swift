@@ -103,7 +103,7 @@ class TBDTerminalView: TerminalView {
     }
 
     private func applyScheme() {
-        let scheme = ColorSchemes.scheme(forID: appearanceSettings.schemeID)
+        let scheme = appearanceSettings.effectiveScheme
         // SwiftTerm's `installColors` takes `[SwiftTerm.Color]`; the per-view
         // foreground/background/caret/selection setters take `NSColor`. We can't
         // use SwiftTerm's internal `NSColor.make(color:)` bridge, so convert

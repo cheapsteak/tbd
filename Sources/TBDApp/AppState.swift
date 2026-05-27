@@ -37,6 +37,7 @@ final class AppState: ObservableObject {
     var appearance: AppearanceSettings? {
         didSet {
             if let appearance {
+                appearance.themeStore = themeStore
                 setupAppearanceSubscriptions(appearance)
             }
         }
@@ -324,6 +325,8 @@ final class AppState: ObservableObject {
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false
 
+    let themeStore = ThemeStore()
+
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
@@ -357,6 +360,8 @@ final class AppState: ObservableObject {
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
         macNotificationManager.configure(appState: self)
+        themeStore.reloadFromDisk()
+        themeStore.startWatching()
         // Under `swift test`, the per-test `AppState()` instances would each
         // spawn a subscription Task that blocks indefinitely in `recv()` on
         // the daemon socket. With enough tests the Swift cooperative thread
