@@ -238,11 +238,15 @@ struct TerminalSettingsView: View {
     }
 
     private func updateDraftOverride() {
-        if editorVM.isDirty {
-            appearance.draftSchemeOverride = try? editorVM.snapshot(id: appearance.schemeID).toScheme()
-        } else {
+        guard editorVM.isDirty else {
             appearance.draftSchemeOverride = nil
+            return
         }
+        if let valid = try? editorVM.snapshot(id: appearance.schemeID).toScheme() {
+            appearance.draftSchemeOverride = valid
+        }
+        // Otherwise: keep the previous valid override in place — don't snap back
+        // to source mid-typing. The next valid edit will refresh it.
     }
 
     // MARK: - Actions
@@ -264,9 +268,19 @@ struct TerminalSettingsView: View {
             let newID = try appState.themeStore.saveAs(draft, suggestedDisplayName: name)
             appearance.schemeID = newID
             syncEditorWithScheme()
-            pendingSchemeSwitch = nil
+            // If the user invoked Save as… from the unsaved-draft confirm dialog,
+            // they had also picked a different scheme they wanted to switch to.
+            // The save-as activated the new user theme; honor their original
+            // switch intent unless they meant to stay on the new theme.
+            if let target = pendingSchemeSwitch, target != newID {
+                commitPendingSwitch()
+            } else {
+                pendingSchemeSwitch = nil
+            }
         } catch {
             importError = "Save as failed: \(error)"
+            // Leave pendingSchemeSwitch alone on failure so the user can decide
+            // what to do next.
         }
     }
 
