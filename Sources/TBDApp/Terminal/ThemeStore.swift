@@ -91,7 +91,7 @@ final class ThemeStore: ObservableObject {
     func startWatching() {
         guard watcher == nil else { return }
         // Snapshot the directory URL now so the FSEvents callback reloads from
-        // the same path even if TBD_HOME changes (e.g. setenv in tests).
+        // the same path even if the watcher fires after a future directory change.
         let dir = themesDirectory
         watchedDirectory = dir
         let w = ThemeDirectoryWatcher { [weak self] in
