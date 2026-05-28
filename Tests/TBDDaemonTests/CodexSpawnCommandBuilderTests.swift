@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import TBDDaemonLib
 
 @Suite("CodexSpawnCommandBuilder")
@@ -59,5 +60,30 @@ struct CodexSpawnCommandBuilderTests {
             )
                 == "unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox 'fix the failing test'"
         )
+    }
+
+    @Test("command output helper returns stdout and stderr")
+    func commandOutputCapturesStdoutAndStderr() {
+        let output = CodexSpawnCommandBuilder.commandOutput(
+            executable: "/bin/sh",
+            arguments: ["-c", "printf stdout; printf stderr >&2"],
+            timeout: 1
+        )
+
+        #expect(output?.contains("stdout") == true)
+        #expect(output?.contains("stderr") == true)
+    }
+
+    @Test("command output helper times out instead of blocking indefinitely")
+    func commandOutputTimesOut() {
+        let start = Date()
+        let output = CodexSpawnCommandBuilder.commandOutput(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 5"],
+            timeout: 0.1
+        )
+
+        #expect(output == nil)
+        #expect(Date().timeIntervalSince(start) < 2)
     }
 }

@@ -253,8 +253,8 @@ enum CodexProfileWriter {
 
 enum CodexSpawnCommandBuilder {
     private static let detectedProfileFlag = profileFlag(
-        codexHelpOutput: codexCommandOutput(arguments: ["--help"]),
-        codexVersionOutput: codexCommandOutput(arguments: ["--version"])
+        codexHelpOutput: commandOutput(arguments: ["codex", "--help"], timeout: 3),
+        codexVersionOutput: commandOutput(arguments: ["codex", "--version"], timeout: 3)
     )
 
     static var command: String {
@@ -336,25 +336,70 @@ enum CodexSpawnCommandBuilder {
         return nil
     }
 
-    private static func codexCommandOutput(arguments: [String]) -> String? {
+    private final class LockedOutput: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func append(_ newData: Data) {
+            lock.lock()
+            data.append(newData)
+            lock.unlock()
+        }
+
+        func snapshot() -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            return data
+        }
+    }
+
+    static func commandOutput(
+        executable: String = "/usr/bin/env",
+        arguments: [String],
+        timeout: TimeInterval
+    ) -> String? {
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
+        let output = LockedOutput()
+        let terminated = DispatchSemaphore(value: 0)
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["codex"] + arguments
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
         process.standardOutput = stdout
         process.standardError = stderr
+
+        let appendOutput: @Sendable (FileHandle) -> Void = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            output.append(data)
+        }
+        stdout.fileHandleForReading.readabilityHandler = appendOutput
+        stderr.fileHandleForReading.readabilityHandler = appendOutput
+        process.terminationHandler = { _ in
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            appendOutput(stdout.fileHandleForReading)
+            appendOutput(stderr.fileHandleForReading)
+            terminated.signal()
+        }
 
         do {
             try process.run()
         } catch {
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
             return nil
         }
 
-        process.waitUntilExit()
-        let output = stdout.fileHandleForReading.readDataToEndOfFile()
-            + stderr.fileHandleForReading.readDataToEndOfFile()
-        return String(data: output, encoding: .utf8)
+        if terminated.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            _ = terminated.wait(timeout: .now() + 1)
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            return nil
+        }
+
+        return String(data: output.snapshot(), encoding: .utf8)
     }
 }
