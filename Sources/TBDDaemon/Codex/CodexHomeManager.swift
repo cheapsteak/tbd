@@ -6,7 +6,7 @@ private let codexLogger = Logger(subsystem: "com.tbd.daemon", category: "codex-i
 
 /// Installs TBD's Codex integration into the user's global Codex home.
 ///
-/// TBD uses the file-backed `codex --profile-v2 tbd` overlay instead of an
+/// TBD uses a file-backed `tbd` Codex profile overlay instead of an
 /// isolated per-repo `CODEX_HOME`, so user auth/config/plugins continue to
 /// merge with TBD's runtime integration while the TBD plugin remains
 /// profile-scoped.
@@ -252,12 +252,109 @@ enum CodexProfileWriter {
 }
 
 enum CodexSpawnCommandBuilder {
-    static let command = "unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox"
+    private static let detectedProfileFlag = profileFlag(
+        codexHelpOutput: codexCommandOutput(arguments: ["--help"]),
+        codexVersionOutput: codexCommandOutput(arguments: ["--version"])
+    )
+
+    static var command: String {
+        baseCommand(profileFlag: detectedProfileFlag)
+    }
 
     static func build(initialPrompt: String?) -> String {
+        build(initialPrompt: initialPrompt, profileFlag: detectedProfileFlag)
+    }
+
+    static func build(
+        initialPrompt: String?,
+        codexHelpOutput: String? = nil,
+        codexVersionOutput: String? = nil
+    ) -> String {
+        build(
+            initialPrompt: initialPrompt,
+            profileFlag: profileFlag(codexHelpOutput: codexHelpOutput, codexVersionOutput: codexVersionOutput)
+        )
+    }
+
+    private static func build(initialPrompt: String?, profileFlag: String) -> String {
+        let command = baseCommand(profileFlag: profileFlag)
         guard let initialPrompt, !initialPrompt.isEmpty else {
             return command
         }
         return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
+    }
+
+    private static func baseCommand(profileFlag: String) -> String {
+        return "unset CODEX_CI CODEX_THREAD_ID; codex \(profileFlag) tbd --dangerously-bypass-approvals-and-sandbox"
+    }
+
+    static func profileFlag(codexHelpOutput: String?, codexVersionOutput: String?) -> String {
+        if let codexHelpOutput {
+            if codexHelpOutput.contains("--profile-v2") {
+                return "--profile-v2"
+            }
+            if codexHelpOutput.contains("--profile") {
+                return "--profile"
+            }
+        }
+
+        if let version = codexVersion(from: codexVersionOutput) {
+            return version >= CodexVersion(major: 0, minor: 134, patch: 0) ? "--profile" : "--profile-v2"
+        }
+
+        return "--profile"
+    }
+
+    private struct CodexVersion: Comparable {
+        let major: Int
+        let minor: Int
+        let patch: Int
+
+        static func < (lhs: CodexVersion, rhs: CodexVersion) -> Bool {
+            (lhs.major, lhs.minor, lhs.patch) < (rhs.major, rhs.minor, rhs.patch)
+        }
+    }
+
+    private static func codexVersion(from output: String?) -> CodexVersion? {
+        guard let output else { return nil }
+        let scanner = Scanner(string: output)
+        scanner.charactersToBeSkipped = CharacterSet(charactersIn: " \n\t")
+
+        while !scanner.isAtEnd {
+            _ = scanner.scanUpToCharacters(from: .decimalDigits)
+            guard let major = scanner.scanInt(),
+                  scanner.scanString(".") != nil,
+                  let minor = scanner.scanInt(),
+                  scanner.scanString(".") != nil,
+                  let patch = scanner.scanInt()
+            else {
+                continue
+            }
+            return CodexVersion(major: major, minor: minor, patch: patch)
+        }
+
+        return nil
+    }
+
+    private static func codexCommandOutput(arguments: [String]) -> String? {
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["codex"] + arguments
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        process.waitUntilExit()
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+            + stderr.fileHandleForReading.readDataToEndOfFile()
+        return String(data: output, encoding: .utf8)
     }
 }
