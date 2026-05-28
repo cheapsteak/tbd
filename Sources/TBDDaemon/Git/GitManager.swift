@@ -227,12 +227,15 @@ public struct GitManager: Sendable {
     /// Dedupe rule: when a local branch and a remote `origin/<same>` both exist,
     /// the remote duplicate is dropped — the local branch is more directly
     /// usable for creating a worktree (`git worktree add <path> <branch>`).
-    /// Skips `origin/HEAD` (it's an alias, not a real branch).
+    /// Skips symbolic refs like `origin/HEAD` (an alias, not a real branch).
     public func listBranches(repoPath: String) async throws -> [BranchRef] {
+        // %(symref) is non-empty for symbolic refs (e.g. refs/remotes/origin/HEAD,
+        // which short-names to bare "origin"). Filtering by symref catches it
+        // regardless of how the short name renders.
         let output = try await run(
             arguments: [
                 "for-each-ref",
-                "--format=%(refname:short)|%(HEAD)",
+                "--format=%(refname:short)|%(HEAD)|%(symref)",
                 "refs/heads",
                 "refs/remotes/origin",
             ],
@@ -245,14 +248,15 @@ public struct GitManager: Sendable {
         for line in output.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
-            // for-each-ref format: "<name>|<HEAD-marker>" where HEAD-marker is
-            // "*" for the current branch, " " (space) otherwise.
-            let parts = trimmed.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            // for-each-ref format: "<name>|<HEAD-marker>|<symref>" where
+            // HEAD-marker is "*" for the current branch (space otherwise), and
+            // symref is the target ref for symbolic refs (empty for normal branches).
+            let parts = trimmed.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
             guard let nameSlice = parts.first else { continue }
             let name = String(nameSlice)
             if name.isEmpty { continue }
-            // Skip the origin/HEAD alias — it's not a real branch.
-            if name == "origin/HEAD" { continue }
+            let symref = parts.count > 2 ? String(parts[2]).trimmingCharacters(in: .whitespaces) : ""
+            if !symref.isEmpty { continue }
             let headMarker = parts.count > 1 ? String(parts[1]) : ""
             let isCurrent = headMarker.trimmingCharacters(in: .whitespaces) == "*"
             let isRemote = name.hasPrefix("origin/")

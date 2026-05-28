@@ -65,8 +65,11 @@ struct GitManagerBranchesTests {
         let refs = try await git.listBranches(repoPath: repoDir.path)
         let names = refs.map(\.name)
         #expect(names.contains("origin/remote-only"))
-        // origin/HEAD must be filtered out.
+        // origin/HEAD must be filtered out. Note: `git for-each-ref` short-names
+        // `refs/remotes/origin/HEAD` to bare "origin" (not "origin/HEAD"), so
+        // the filter has to recognize symbolic refs rather than match by name.
         #expect(!names.contains("origin/HEAD"))
+        #expect(!names.contains("origin"))
 
         let remote = refs.first { $0.name == "origin/remote-only" }
         #expect(remote?.isRemote == true)
