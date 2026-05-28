@@ -20,19 +20,19 @@ func debugLog(_ msg: String) {
 
 // MARK: - TmuxBridge
 
-/// Manages tmux integration using **grouped sessions** and direct PTY attachment.
+/// Manages tmux integration using isolated tmux view sessions and direct PTY attachment.
 ///
 /// Instead of using tmux control mode (-CC) which requires complex protocol parsing,
-/// each terminal panel gets its own tmux client via a grouped session. SwiftTerm
+/// each terminal panel gets its own tmux client via an isolated view session. SwiftTerm
 /// connects to the PTY natively — input, output, and resize all work through the
 /// standard terminal driver.
 ///
 /// Architecture:
 /// - Daemon creates windows in tmux session "main" (one per repo server)
-/// - When showing a terminal panel, we create a grouped session that shares
-///   all windows but has an independent "current window" pointer
-/// - SwiftTerm spawns `tmux attach -t <grouped-session>` in a PTY
-/// - When the panel is hidden, we kill the grouped session
+/// - When showing a terminal panel, we create a standalone view session and
+///   link only the requested window into it
+/// - SwiftTerm spawns `tmux attach -t <view-session>` in a PTY
+/// - When the panel is hidden, we kill the view session
 /// - The "main" session persists even when the app is closed
 final class TmuxBridge: @unchecked Sendable {
     private let lock = NSLock()
@@ -46,9 +46,42 @@ final class TmuxBridge: @unchecked Sendable {
     /// `waitUntilExit`) so it doesn't pump the main runloop.
     private let cleanupQueue = DispatchQueue(label: "com.tbd.app.tmux-cleanup", qos: .utility)
 
-    /// Prepare a tmux grouped session for a specific panel.
-    /// Creates a grouped session linked to "main", selects the right window,
-    /// and returns the tmux arguments needed for SwiftTerm to attach.
+    static func sessionName(for panelID: UUID) -> String {
+        "tbd-view-\(panelID.uuidString.prefix(8).lowercased())"
+    }
+
+    static func newIsolatedSessionArgs(sessionName: String) -> [String] {
+        ["new-session", "-d", "-s", sessionName, "-c", "/tmp"]
+    }
+
+    static func linkWindowArgs(windowID: String, sessionName: String) -> [String] {
+        ["link-window", "-s", windowID, "-t", "\(sessionName):"]
+    }
+
+    static func killInitialWindowArgs(sessionName: String) -> [String] {
+        ["kill-window", "-t", "\(sessionName):0"]
+    }
+
+    static func selectWindowArgs(windowID: String, sessionName: String) -> [String] {
+        ["select-window", "-t", "\(sessionName):\(windowID)"]
+    }
+
+    static func remainOnExitArgs(windowID: String) -> [String] {
+        ["set-option", "-wt", windowID, "remain-on-exit", "on"]
+    }
+
+    static func remainOnExitFormatArgs(windowID: String) -> [String] {
+        ["set-option", "-wt", windowID, "remain-on-exit-format", ""]
+    }
+
+    static func activeWindowQueryArgs(sessionName: String) -> [String] {
+        ["display-message", "-p", "-t", sessionName, "#{window_id}"]
+    }
+
+    /// Prepare a tmux view session for a specific panel.
+    /// Creates an isolated session, links only the requested window into it,
+    /// verifies the selected window, and returns the tmux arguments needed for
+    /// SwiftTerm to attach.
     ///
     /// Async to keep the main thread responsive: the underlying `Process`
     /// invocations no longer use `waitUntilExit` and instead suspend on
@@ -61,31 +94,51 @@ final class TmuxBridge: @unchecked Sendable {
     ///   - windowID: tmux window ID to display (e.g. "@3")
     /// - Returns: Array of arguments for the tmux attach command, or nil on failure
     func prepareSession(panelID: UUID, server: String, windowID: String) async -> [String]? {
-        let sessionName = "tbd-view-\(panelID.uuidString.prefix(8).lowercased())"
+        let sessionName = Self.sessionName(for: panelID)
 
-        // Single tmux invocation: create grouped session + select the target window.
-        // Global options (status, borders, etc.) are set once by the daemon at server creation.
-        // tmux returns the exit code of the last chained command, so if new-session
-        // fails (session exists) but select-window succeeds, result.success is true.
-        let result = await runTmux(server: server, args: [
-            "new-session", "-d", "-t", "main", "-s", sessionName, ";",
-            "select-window", "-t", "\(sessionName):\(windowID)"
-        ])
+        let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
 
-        if !result.success {
-            // Two failure modes:
-            //  (a) session already existed → new-session failed, select-window may still work
-            //  (b) new-session succeeded, select-window failed (window dead)
-            // Retry select-window alone to distinguish. Kill-session is safe in both
-            // cases since session names are UUID-based (no collision risk).
-            let selectResult = await runTmux(server: server, args: [
-                "select-window", "-t", "\(sessionName):\(windowID)"
-            ])
-            if !selectResult.success {
-                debugLog("PREPARE: window \(windowID) is dead on server \(server)")
-                let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
-                return nil
-            }
+        let createResult = await runTmux(server: server, args: Self.newIsolatedSessionArgs(sessionName: sessionName))
+        guard createResult.success else {
+            debugLog("PREPARE: failed to create view session \(sessionName) on server \(server): \(createResult.output)")
+            return nil
+        }
+
+        let linkResult = await runTmux(server: server, args: Self.linkWindowArgs(windowID: windowID, sessionName: sessionName))
+        guard linkResult.success else {
+            debugLog("PREPARE: window \(windowID) is dead on server \(server)")
+            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
+            return nil
+        }
+
+        let _ = await runTmux(server: server, args: Self.killInitialWindowArgs(sessionName: sessionName))
+
+        let selectResult = await runTmux(server: server, args: Self.selectWindowArgs(windowID: windowID, sessionName: sessionName))
+        guard selectResult.success else {
+            debugLog("PREPARE: failed to select window \(windowID) in session \(sessionName): \(selectResult.output)")
+            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
+            return nil
+        }
+
+        let remainOnExitResult = await runTmux(server: server, args: Self.remainOnExitArgs(windowID: windowID))
+        guard remainOnExitResult.success else {
+            debugLog("PREPARE: failed to preserve exited output for window \(windowID): \(remainOnExitResult.output)")
+            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
+            return nil
+        }
+
+        let remainOnExitFormatResult = await runTmux(server: server, args: Self.remainOnExitFormatArgs(windowID: windowID))
+        guard remainOnExitFormatResult.success else {
+            debugLog("PREPARE: failed to suppress exited pane marker for window \(windowID): \(remainOnExitFormatResult.output)")
+            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
+            return nil
+        }
+
+        let activeResult = await runTmux(server: server, args: Self.activeWindowQueryArgs(sessionName: sessionName))
+        guard activeResult.success, activeResult.output == windowID else {
+            debugLog("PREPARE: session \(sessionName) selected \(activeResult.output), expected \(windowID)")
+            let _ = await runTmux(server: server, args: ["kill-session", "-t", sessionName])
+            return nil
         }
 
         lock.withLock {
@@ -98,7 +151,7 @@ final class TmuxBridge: @unchecked Sendable {
         return ["tmux", "-L", server, "attach", "-t", sessionName]
     }
 
-    /// Clean up a grouped session when a panel is hidden.
+    /// Clean up a view session when a panel is hidden.
     ///
     /// Fire-and-forget: the kill-session call runs on a background queue so
     /// callers can return immediately. Safe to call from the main thread
