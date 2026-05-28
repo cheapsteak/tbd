@@ -247,13 +247,14 @@ extension AppState {
     func refreshArchivedWorktrees(repoID: UUID) async {
         let currentCount = archivedWorktrees[repoID]?.count ?? 0
         let fetchCount = max(currentCount, Self.archivedPageSize)
+        let knownExhausted = currentCount > 0 && currentCount % Self.archivedPageSize != 0
         do {
             let archived = try await daemonClient.listWorktrees(
                 repoID: repoID, status: .archived,
                 limit: fetchCount
             )
             archivedWorktrees[repoID] = archived
-            archivedWorktreesHasMore[repoID] = archived.count >= fetchCount
+            archivedWorktreesHasMore[repoID] = knownExhausted ? false : archived.count >= fetchCount
             ensureArchivedSelectionValid(repoID: repoID)
         } catch {
             logger.error("Failed to list archived worktrees: \(error)")
