@@ -198,6 +198,7 @@ extension AppState {
         selectedWorktreeIDs = []
         selectedRepoID = wt.repoID
         archivedWorktrees[wt.repoID] = archived.filter { $0.repoID == wt.repoID }
+        archivedWorktreesHasMore[wt.repoID] = false
         highlightedArchivedWorktreeID = id
         if NSApplication.shared.isRunning {
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -241,15 +242,18 @@ extension AppState {
 
     private static let archivedPageSize = 100
 
-    /// Fetch the first page of archived worktrees for a repo.
+    /// Fetch archived worktrees for a repo, preserving any pages the user has
+    /// already loaded (re-fetches up to `max(currentCount, pageSize)` items).
     func refreshArchivedWorktrees(repoID: UUID) async {
+        let currentCount = archivedWorktrees[repoID]?.count ?? 0
+        let fetchCount = max(currentCount, Self.archivedPageSize)
         do {
             let archived = try await daemonClient.listWorktrees(
                 repoID: repoID, status: .archived,
-                limit: Self.archivedPageSize
+                limit: fetchCount
             )
             archivedWorktrees[repoID] = archived
-            archivedWorktreesHasMore[repoID] = archived.count >= Self.archivedPageSize
+            archivedWorktreesHasMore[repoID] = archived.count >= fetchCount
             ensureArchivedSelectionValid(repoID: repoID)
         } catch {
             logger.error("Failed to list archived worktrees: \(error)")
@@ -258,13 +262,19 @@ extension AppState {
 
     /// Load the next page of archived worktrees, appending to the existing list.
     func loadMoreArchivedWorktrees(repoID: UUID) async {
+        guard isLoadingMoreArchived[repoID] != true else { return }
+        isLoadingMoreArchived[repoID] = true
+        defer { isLoadingMoreArchived[repoID] = false }
+
         let currentCount = archivedWorktrees[repoID]?.count ?? 0
         do {
             let more = try await daemonClient.listWorktrees(
                 repoID: repoID, status: .archived,
                 limit: Self.archivedPageSize, offset: currentCount
             )
-            archivedWorktrees[repoID, default: []].append(contentsOf: more)
+            if archivedWorktrees[repoID]?.count == currentCount {
+                archivedWorktrees[repoID, default: []].append(contentsOf: more)
+            }
             archivedWorktreesHasMore[repoID] = more.count >= Self.archivedPageSize
         } catch {
             logger.error("Failed to load more archived worktrees: \(error)")

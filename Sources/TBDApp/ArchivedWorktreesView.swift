@@ -41,6 +41,10 @@ struct ArchivedWorktreesView: View {
         appState.selectedArchivedWorktreeIDs[repoID]
     }
 
+    private var hasMore: Bool {
+        appState.archivedWorktreesHasMore[repoID] == true
+    }
+
     var body: some View {
         if allRows.isEmpty {
             emptyState
@@ -65,10 +69,10 @@ struct ArchivedWorktreesView: View {
                     .fontWeight(.medium)
                 Spacer()
                 if hideEmpty && rows.count < allRows.count {
-                    Text("\(rows.count) of \(allRows.count)")
+                    Text("\(rows.count) of \(allRows.count)\(hasMore ? "+" : "")")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                } else if appState.archivedWorktreesHasMore[repoID] == true {
+                } else if hasMore {
                     Text("\(rows.count)+")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -129,17 +133,26 @@ struct ArchivedWorktreesView: View {
                                 }
                             }
                         }
-                        if appState.archivedWorktreesHasMore[repoID] == true {
+                        if hasMore {
+                            let isLoading = appState.isLoadingMoreArchived[repoID] == true
                             Button {
                                 Task { await appState.loadMoreArchivedWorktrees(repoID: repoID) }
                             } label: {
-                                Text("Load More…")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
+                                if isLoading {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                } else {
+                                    Text("Load More…")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                }
                             }
                             .buttonStyle(.plain)
+                            .disabled(isLoading)
                             .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
