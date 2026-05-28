@@ -264,7 +264,17 @@ import TBDShared
     }
 
     @Test func codexSpawnCommandUsesFileBackedProfileOverlay() {
-        #expect(CodexSpawnCommandBuilder.command.contains("codex --profile-v2 tbd"))
-        #expect(!CodexSpawnCommandBuilder.command.contains("codex --profile tbd"))
+        #expect(
+            CodexSpawnCommandBuilder.profileFlag(
+                codexHelpOutput: "      --profile-v2 <CONFIG_PROFILE_V2>",
+                codexVersionOutput: nil
+            ) == "--profile-v2"
+        )
+        #expect(
+            CodexSpawnCommandBuilder.profileFlag(
+                codexHelpOutput: "  -p, --profile <CONFIG_PROFILE_V2>",
+                codexVersionOutput: nil
+            ) == "--profile"
+        )
     }
 }

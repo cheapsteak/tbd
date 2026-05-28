@@ -41,6 +41,11 @@ private func newWindowBodies(_ recorded: [[String]]) -> [String] {
     }
 }
 
+private func containsCodexProfileLaunch(_ body: String) -> Bool {
+    body.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox")
+        || body.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
+}
+
 private let codexTestHomePath: String = {
     let path = FileManager.default.temporaryDirectory
         .appendingPathComponent("tbd-codex-home-tests-\(UUID().uuidString)", isDirectory: true)
@@ -183,7 +188,7 @@ func testRecreateAfterRebootCodexBranchSetsWorktreeID() async throws {
     #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
             "codex-branch must still export CODEX_HOME; got bodies: \(bodies)")
     #expect(bodies.contains {
-        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
+        containsCodexProfileLaunch($0)
     }, "codex-branch must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "codex-branch must not use removed --full-auto flag; got bodies: \(bodies)")
@@ -375,7 +380,7 @@ func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
 
     let bodies = newWindowBodies(recorded.snapshot())
     #expect(bodies.contains {
-        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
+        containsCodexProfileLaunch($0)
     }, "recreated codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "recreated codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
@@ -550,7 +555,7 @@ func testHandleTerminalCreateCodexLaunchCommand() async throws {
     #expect(bodies.contains { $0.contains("export CODEX_HOME=") },
             "created codex tab must export CODEX_HOME; got bodies: \(bodies)")
     #expect(bodies.contains {
-        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox")
+        containsCodexProfileLaunch($0)
     }, "created codex tab must launch codex with the TBD profile; got bodies: \(bodies)")
     #expect(!bodies.contains { $0.contains("codex --full-auto") },
             "created codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
@@ -601,6 +606,6 @@ func testHandleTerminalCreateCodexInitialPrompt() async throws {
 
     let bodies = newWindowBodies(recorded.snapshot())
     #expect(bodies.contains {
-        $0.contains("unset CODEX_CI CODEX_THREAD_ID; codex --profile-v2 tbd --dangerously-bypass-approvals-and-sandbox 'don'\\''t ship regressions'")
+        containsCodexProfileLaunch($0) && $0.contains("'don'\\''t ship regressions'")
     }, "fresh codex tab must append the initial prompt as a shell-escaped positional argument; got bodies: \(bodies)")
 }
