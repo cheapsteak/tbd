@@ -138,18 +138,11 @@ struct ArchivedWorktreesView: View {
                             Button {
                                 Task { await appState.loadMoreArchivedWorktrees(repoID: repoID) }
                             } label: {
-                                if isLoading {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 8)
-                                } else {
-                                    Text("Load More…")
-                                        .font(.callout)
-                                        .foregroundStyle(.secondary)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 8)
-                                }
+                                Text(isLoading ? "Loading…" : "Load More…")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
                             }
                             .buttonStyle(.plain)
                             .disabled(isLoading)
