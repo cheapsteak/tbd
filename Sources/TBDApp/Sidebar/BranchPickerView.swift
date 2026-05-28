@@ -13,6 +13,7 @@ struct BranchPickerView: View {
     @State private var branches: [BranchInfo] = []
     @State private var query: String = ""
     @State private var isLoading: Bool = true
+    @State private var loadError: Bool = false
     @FocusState private var searchFocused: Bool
 
     private var filteredBranches: [BranchInfo] {
@@ -43,7 +44,7 @@ struct BranchPickerView: View {
                 }
                 .padding(16)
             } else if filteredBranches.isEmpty {
-                Text(branches.isEmpty ? "No branches found" : "No matches")
+                Text(emptyStateMessage)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(16)
@@ -62,10 +63,24 @@ struct BranchPickerView: View {
         .frame(width: 300, height: 400)
         .task {
             isLoading = true
-            branches = await appState.listBranches(repoID: repoID)
+            loadError = false
+            do {
+                branches = try await appState.listBranches(repoID: repoID)
+            } catch {
+                loadError = true
+            }
             isLoading = false
             searchFocused = true
         }
+    }
+
+    /// Distinguish "we tried and failed to load" from a query-filtered empty
+    /// state or a genuinely empty repo, so the user can tell a load failure
+    /// apart from "no matching branches".
+    private var emptyStateMessage: String {
+        if !branches.isEmpty { return "No matches" }
+        if loadError { return "Failed to load branches" }
+        return "No branches found"
     }
 
     private func pick(_ branch: BranchInfo) {
@@ -98,17 +113,7 @@ private struct BranchPickerRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
-                if branch.isCurrent {
-                    Text("current")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.secondary.opacity(0.15))
-                        )
-                } else if branch.isRemote {
+                if branch.isRemote {
                     Text("remote")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)

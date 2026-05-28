@@ -175,8 +175,7 @@ extension RPCRouter {
             BranchInfo(
                 name: $0.name,
                 localName: $0.localName,
-                isRemote: $0.isRemote,
-                isCurrent: $0.isCurrent
+                isRemote: $0.isRemote
             )
         }
         return try RPCResponse(result: RepoListBranchesResult(branches: branches))

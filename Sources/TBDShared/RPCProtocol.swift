@@ -158,15 +158,13 @@ public struct BranchInfo: Codable, Sendable, Equatable, Identifiable {
     public let name: String
     public let localName: String
     public let isRemote: Bool
-    public let isCurrent: Bool
 
     public var id: String { name }
 
-    public init(name: String, localName: String, isRemote: Bool, isCurrent: Bool) {
+    public init(name: String, localName: String, isRemote: Bool) {
         self.name = name
         self.localName = localName
         self.isRemote = isRemote
-        self.isCurrent = isCurrent
     }
 }
 

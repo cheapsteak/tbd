@@ -12,14 +12,11 @@ public struct BranchRef: Sendable, Equatable {
     public let isRemote: Bool
     /// For remote: stripped of the `origin/` prefix. For local: same as `name`.
     public let localName: String
-    /// True for the currently checked-out local branch (per `git for-each-ref`'s `%(HEAD)`).
-    public let isCurrent: Bool
 
-    public init(name: String, isRemote: Bool, localName: String, isCurrent: Bool) {
+    public init(name: String, isRemote: Bool, localName: String) {
         self.name = name
         self.isRemote = isRemote
         self.localName = localName
-        self.isCurrent = isCurrent
     }
 }
 
@@ -239,7 +236,7 @@ public struct GitManager: Sendable {
         let output = try await run(
             arguments: [
                 "for-each-ref",
-                "--format=%(refname:short)|%(HEAD)|%(symref)",
+                "--format=%(refname:short)|%(symref)",
                 "refs/heads",
                 "refs/remotes/origin",
             ],
@@ -248,10 +245,12 @@ public struct GitManager: Sendable {
 
         // Branches already checked out in any worktree (main repo + linked
         // worktrees) — git rejects a second checkout of the same branch.
+        // Errors propagate: a silent failure here would leak in-use branches
+        // and the user would see a confusing `git worktree add` failure later.
         let inUse = Set(
-            (try? await worktreeList(repoPath: repoPath))?
+            try await worktreeList(repoPath: repoPath)
                 .map(\.branch)
-                .filter { !$0.isEmpty } ?? []
+                .filter { !$0.isEmpty }
         )
 
         var refs: [BranchRef] = []
@@ -260,17 +259,14 @@ public struct GitManager: Sendable {
         for line in output.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
-            // for-each-ref format: "<name>|<HEAD-marker>|<symref>" where
-            // HEAD-marker is "*" for the current branch (space otherwise), and
-            // symref is the target ref for symbolic refs (empty for normal branches).
-            let parts = trimmed.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
+            // for-each-ref format: "<name>|<symref>" where symref is the target
+            // ref for symbolic refs (empty for normal branches).
+            let parts = trimmed.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
             guard let nameSlice = parts.first else { continue }
             let name = String(nameSlice)
             if name.isEmpty { continue }
-            let symref = parts.count > 2 ? String(parts[2]).trimmingCharacters(in: .whitespaces) : ""
+            let symref = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
             if !symref.isEmpty { continue }
-            let headMarker = parts.count > 1 ? String(parts[1]) : ""
-            let isCurrent = headMarker.trimmingCharacters(in: .whitespaces) == "*"
             let isRemote = name.hasPrefix("origin/")
             let localName: String
             if isRemote {
@@ -285,8 +281,7 @@ public struct GitManager: Sendable {
             refs.append(BranchRef(
                 name: name,
                 isRemote: isRemote,
-                localName: localName,
-                isCurrent: isCurrent
+                localName: localName
             ))
         }
 

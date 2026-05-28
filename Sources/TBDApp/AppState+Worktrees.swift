@@ -72,14 +72,15 @@ extension AppState {
     }
 
     /// List local + remote tracking branches for a repo, for the existing-
-    /// branch picker on the sidebar `+` button.
-    func listBranches(repoID: UUID) async -> [BranchInfo] {
+    /// branch picker on the sidebar `+` button. Rethrows so the picker can
+    /// distinguish a fetch failure from a genuinely empty branch list.
+    func listBranches(repoID: UUID) async throws -> [BranchInfo] {
         do {
             return try await daemonClient.listBranches(repoID: repoID)
         } catch {
             logger.error("Failed to list branches: \(error)")
             handleConnectionError(error)
-            return []
+            throw error
         }
     }
 
