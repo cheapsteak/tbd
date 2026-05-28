@@ -1,5 +1,28 @@
 import Foundation
 
+/// A branch reference returned by `GitManager.listBranches`.
+///
+/// Includes both `refs/heads/*` (local) and `refs/remotes/origin/*` (remote
+/// tracking) entries. `localName` strips the `origin/` prefix for remote
+/// entries — it's the name the new local branch will receive when the user
+/// picks a remote ref to create a worktree from.
+public struct BranchRef: Sendable, Equatable {
+    /// e.g. `main` or `origin/feature/x`.
+    public let name: String
+    public let isRemote: Bool
+    /// For remote: stripped of the `origin/` prefix. For local: same as `name`.
+    public let localName: String
+    /// True for the currently checked-out local branch (per `git for-each-ref`'s `%(HEAD)`).
+    public let isCurrent: Bool
+
+    public init(name: String, isRemote: Bool, localName: String, isCurrent: Bool) {
+        self.name = name
+        self.isRemote = isRemote
+        self.localName = localName
+        self.isCurrent = isCurrent
+    }
+}
+
 /// Error thrown when a git command fails.
 public struct GitError: Error, CustomStringConvertible {
     public let command: String
@@ -139,6 +162,16 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["worktree", "add", worktreePath, branch], at: repoPath)
     }
 
+    /// Adds a worktree at `worktreePath` tracking an existing remote branch.
+    /// Creates a local branch named `localBranch` from `remoteRef`
+    /// (e.g. `origin/foo`) with upstream tracking configured.
+    public func worktreeAddTrackingRemote(repoPath: String, worktreePath: String, localBranch: String, remoteRef: String) async throws {
+        _ = try await run(
+            arguments: ["worktree", "add", "--track", "-b", localBranch, worktreePath, remoteRef],
+            at: repoPath
+        )
+    }
+
     /// Adds a worktree at `worktreePath`, creating a new branch pointing at the given SHA.
     /// Used as a fallback when the original branch was renamed/deleted but we have the
     /// archived HEAD SHA to recover the commit.
@@ -187,6 +220,62 @@ public struct GitManager: Sendable {
     /// Prunes stale worktree tracking entries.
     public func worktreePrune(repoPath: String) async throws {
         _ = try await run(arguments: ["worktree", "prune"], at: repoPath)
+    }
+
+    /// Lists local branches and `origin/*` remote tracking branches.
+    ///
+    /// Dedupe rule: when a local branch and a remote `origin/<same>` both exist,
+    /// the remote duplicate is dropped — the local branch is more directly
+    /// usable for creating a worktree (`git worktree add <path> <branch>`).
+    /// Skips `origin/HEAD` (it's an alias, not a real branch).
+    public func listBranches(repoPath: String) async throws -> [BranchRef] {
+        let output = try await run(
+            arguments: [
+                "for-each-ref",
+                "--format=%(refname:short)|%(HEAD)",
+                "refs/heads",
+                "refs/remotes/origin",
+            ],
+            at: repoPath
+        )
+
+        var refs: [BranchRef] = []
+        var localNames = Set<String>()
+
+        for line in output.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            // for-each-ref format: "<name>|<HEAD-marker>" where HEAD-marker is
+            // "*" for the current branch, " " (space) otherwise.
+            let parts = trimmed.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let nameSlice = parts.first else { continue }
+            let name = String(nameSlice)
+            if name.isEmpty { continue }
+            // Skip the origin/HEAD alias — it's not a real branch.
+            if name == "origin/HEAD" { continue }
+            let headMarker = parts.count > 1 ? String(parts[1]) : ""
+            let isCurrent = headMarker.trimmingCharacters(in: .whitespaces) == "*"
+            let isRemote = name.hasPrefix("origin/")
+            let localName: String
+            if isRemote {
+                localName = String(name.dropFirst("origin/".count))
+            } else {
+                localName = name
+                localNames.insert(name)
+            }
+            refs.append(BranchRef(
+                name: name,
+                isRemote: isRemote,
+                localName: localName,
+                isCurrent: isCurrent
+            ))
+        }
+
+        // Drop remote entries that have a matching local branch — the local
+        // is more directly usable.
+        return refs.filter { ref in
+            !(ref.isRemote && localNames.contains(ref.localName))
+        }
     }
 
     /// Lists all worktrees, returning their path and branch name.

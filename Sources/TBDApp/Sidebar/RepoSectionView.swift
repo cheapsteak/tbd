@@ -33,6 +33,7 @@ struct RepoSectionView: View {
     @State private var isChevronHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
     @State private var showRemoveConfirm = false
+    @State private var showBranchPicker = false
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -133,15 +134,19 @@ struct RepoSectionView: View {
             Spacer()
 
             Group {
-                if isSectionHovered {
-                    Button(action: createWorktree) {
+                if isSectionHovered || showBranchPicker {
+                    Button(action: handlePlusButton) {
                         Image(systemName: "plus")
                             .font(.caption)
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(HoverPressButtonStyle())
-                    .help("New worktree")
+                    .help("New worktree (\u{2325}-click to pick existing branch)")
                     .disabled(repo.status == .missing)
+                    .popover(isPresented: $showBranchPicker, arrowEdge: .trailing) {
+                        BranchPickerView(repoID: repo.id)
+                            .environmentObject(appState)
+                    }
                 } else {
                     Color.clear
                 }
@@ -213,6 +218,16 @@ struct RepoSectionView: View {
                     toOffset: destination
                 )
             }
+        }
+    }
+
+    private func handlePlusButton() {
+        // Option-click opens the existing-branch picker; plain click creates
+        // a fresh `tbd/*` worktree (existing behavior).
+        if NSEvent.modifierFlags.contains(.option) {
+            showBranchPicker = true
+        } else {
+            createWorktree()
         }
     }
 

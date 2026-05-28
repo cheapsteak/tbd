@@ -13,14 +13,28 @@ extension AppState {
     /// real worktree once the daemon responds.
     /// When `parentWorktreeID` is non-nil, the new worktree is created as a
     /// nested child of that worktree (must be in the same repo).
-    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil) {
-        // Optimistic placeholder so the row appears instantly
-        let placeholderName = NameGenerator.generate()
+    /// When `existingBranch` is non-nil, the daemon checks out that branch
+    /// into a new worktree (no auto-generated `tbd/*` branch); the optimistic
+    /// placeholder uses the branch's local name so the row looks right
+    /// immediately.
+    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil) {
+        // Optimistic placeholder so the row appears instantly. When picking an
+        // existing branch we use its local name so the placeholder name
+        // doesn't briefly show a fake `tbd/*` value.
+        let placeholderName: String
+        let placeholderBranch: String
+        if let existingBranch {
+            placeholderName = existingBranch.localName
+            placeholderBranch = existingBranch.localName
+        } else {
+            placeholderName = NameGenerator.generate()
+            placeholderBranch = "tbd/\(placeholderName)"
+        }
         let placeholder = Worktree(
             repoID: repoID,
             name: placeholderName,
             displayName: placeholderName,
-            branch: "tbd/\(placeholderName)",
+            branch: placeholderBranch,
             path: "",
             status: .creating,
             tmuxServer: "",
@@ -36,8 +50,11 @@ extension AppState {
             do {
                 let size = mainAreaTerminalSize()
                 let wt = try await daemonClient.createWorktree(
-                    repoID: repoID, cols: size.cols, rows: size.rows,
-                    parentWorktreeID: parentWorktreeID
+                    repoID: repoID,
+                    branch: existingBranch?.name,
+                    cols: size.cols, rows: size.rows,
+                    parentWorktreeID: parentWorktreeID,
+                    useExistingBranch: existingBranch != nil
                 )
                 // Replace the placeholder with the real worktree
                 if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholder.id }) {
@@ -51,6 +68,18 @@ extension AppState {
                 logger.error("Failed to create worktree: \(error)")
                 handleConnectionError(error)
             }
+        }
+    }
+
+    /// List local + remote tracking branches for a repo, for the existing-
+    /// branch picker on the sidebar `+` button.
+    func listBranches(repoID: UUID) async -> [BranchInfo] {
+        do {
+            return try await daemonClient.listBranches(repoID: repoID)
+        } catch {
+            logger.error("Failed to list branches: \(error)")
+            handleConnectionError(error)
+            return []
         }
     }
 

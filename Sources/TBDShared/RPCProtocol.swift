@@ -148,6 +148,36 @@ public enum RPCMethod {
     public static let tabList     = "tab.list"
     public static let worktreeSetActiveTab = "worktree.setActiveTab"
     public static let appearanceUpdateColorFgBg = "appearance.updateColorFgBg"
+    public static let repoListBranches = "repo.listBranches"
+}
+
+// MARK: - Branch Listing
+
+/// Codable mirror of `BranchRef` for the `repo.listBranches` RPC.
+public struct BranchInfo: Codable, Sendable, Equatable, Identifiable {
+    public let name: String
+    public let localName: String
+    public let isRemote: Bool
+    public let isCurrent: Bool
+
+    public var id: String { name }
+
+    public init(name: String, localName: String, isRemote: Bool, isCurrent: Bool) {
+        self.name = name
+        self.localName = localName
+        self.isRemote = isRemote
+        self.isCurrent = isCurrent
+    }
+}
+
+public struct RepoListBranchesParams: Codable, Sendable {
+    public let repoID: UUID
+    public init(repoID: UUID) { self.repoID = repoID }
+}
+
+public struct RepoListBranchesResult: Codable, Sendable {
+    public let branches: [BranchInfo]
+    public init(branches: [BranchInfo]) { self.branches = branches }
 }
 
 // MARK: - Legacy Hook Detection / Removal
@@ -500,13 +530,19 @@ public struct WorktreeCreateParams: Codable, Sendable {
     public let siblingOfWorktreeID: UUID?  // --sibling (caller worktree id)
     public let callerWorktreeID: UUID?     // TBD_WORKTREE_ID env
     public let suppressAutoParent: Bool?   // --no-parent
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil) {
+    /// When true, `branch` is treated as the name of an existing branch
+    /// (local like `feat/x` or remote like `origin/feat/x`) to be checked
+    /// out into a new worktree — no fresh `tbd/*` branch is created.
+    /// Optional/defaulted for backward compatibility with older clients.
+    public let useExistingBranch: Bool?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
         self.siblingOfWorktreeID = siblingOfWorktreeID
         self.callerWorktreeID = callerWorktreeID
         self.suppressAutoParent = suppressAutoParent
+        self.useExistingBranch = useExistingBranch
     }
 }
 
