@@ -37,6 +37,8 @@ struct PanePlaceholder: View {
     @State private var isHeaderHovering = false
     @State private var showSourceCode = false
     @State private var hasRenderableContent = false
+    @StateObject private var webviewState = WebviewState()
+    @State private var didCopyURL = false
 
     /// Find the Terminal model matching a terminal ID across all worktree terminals.
     private func terminal(for id: UUID) -> Terminal? {
@@ -149,7 +151,9 @@ struct PanePlaceholder: View {
                 }
             }
         case .webview(_, let url):
-            Text(url.host ?? url.absoluteString)
+            Text(webviewState.currentURL?.absoluteString ?? url.absoluteString)
+                .truncationMode(.tail)
+                .help(webviewState.currentURL?.absoluteString ?? url.absoluteString)
         case .codeViewer(_, let path):
             Text(URL(fileURLWithPath: path).lastPathComponent)
         case .note(let noteID):
@@ -217,6 +221,13 @@ struct PanePlaceholder: View {
             .buttonStyle(.borderless)
             .disabled(true)
 
+            Button(action: copyWebviewURL) {
+                Image(systemName: didCopyURL ? "checkmark" : "doc.on.doc")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .help("Copy URL")
+
         case .codeViewer:
             if hasRenderableContent {
                 Button(action: { showSourceCode.toggle() }) {
@@ -244,7 +255,7 @@ struct PanePlaceholder: View {
         case .terminal(let terminalID):
             terminalContent(terminalID: terminalID)
         case .webview(_, let url):
-            WebviewPaneView(url: url)
+            WebviewPaneView(url: url, state: webviewState)
         case .codeViewer(_, let path):
             CodeViewerPaneView(path: path, worktreePath: worktree.path, showSourceCode: showSourceCode)
         case .note(let noteID):
@@ -397,6 +408,21 @@ struct PanePlaceholder: View {
                 appState.tabs[worktreeID]?.remove(at: tabIndex)
                 appState.layouts.removeValue(forKey: content.paneID)
             }
+        }
+    }
+
+    // MARK: - Webview Actions
+
+    private func copyWebviewURL() {
+        guard case .webview(_, let initialURL) = content else { return }
+        let urlString = (webviewState.currentURL ?? initialURL).absoluteString
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(urlString, forType: .string)
+        didCopyURL = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            didCopyURL = false
         }
     }
 
