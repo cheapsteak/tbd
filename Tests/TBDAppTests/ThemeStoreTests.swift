@@ -6,27 +6,31 @@ import TBDShared
 @MainActor
 @Suite("ThemeStore")
 struct ThemeStoreTests {
-    private func makeIsolatedHome() -> URL {
+    /// Returns a fresh, isolated themes directory for each test.
+    /// Creates the directory on disk and returns its URL directly,
+    /// with no setenv — so parallel tests never race on TBD_HOME.
+    private func makeIsolatedThemesDir() throws -> URL {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("tbd-themestore-tests-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        setenv("TBD_HOME", dir.path, 1)
+            .appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
 
     @Test("returns empty when the themes dir doesn't exist yet")
     func emptyWhenDirMissing() async {
-        _ = makeIsolatedHome()
-        let store = ThemeStore()
+        // Pass a URL that doesn't exist — ThemeStore should handle it silently.
+        let nonExistent = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-themestore-tests-\(UUID().uuidString)")
+            .appendingPathComponent("terminal-themes")
+        let store = ThemeStore(themesDirectory: nonExistent)
         store.reloadFromDisk()
         #expect(store.userThemes.isEmpty)
     }
 
     @Test("loads all valid JSON theme files")
     func loadsValidThemes() async throws {
-        let home = makeIsolatedHome()
-        let themesDir = home.appendingPathComponent("terminal-themes")
-        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        let themesDir = try makeIsolatedThemesDir()
 
         let theme = UserTerminalTheme(
             schemaVersion: 1, id: "my-test", displayName: "My Test",
@@ -37,7 +41,7 @@ struct ThemeStoreTests {
         let data = try JSONEncoder().encode(theme)
         try data.write(to: themesDir.appendingPathComponent("my-test.json"))
 
-        let store = ThemeStore()
+        let store = ThemeStore(themesDirectory: themesDir)
         store.reloadFromDisk()
         #expect(store.userThemes.count == 1)
         #expect(store.userThemes.first?.id == "my-test")
@@ -45,15 +49,13 @@ struct ThemeStoreTests {
 
     @Test("skips malformed JSON files and records the error")
     func skipsMalformed() async throws {
-        let home = makeIsolatedHome()
-        let themesDir = home.appendingPathComponent("terminal-themes")
-        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        let themesDir = try makeIsolatedThemesDir()
         try "{ not json".write(
             to: themesDir.appendingPathComponent("bad.json"),
             atomically: true, encoding: .utf8
         )
 
-        let store = ThemeStore()
+        let store = ThemeStore(themesDirectory: themesDir)
         store.reloadFromDisk()
         #expect(store.userThemes.isEmpty)
         #expect(store.loadErrors.count == 1)
@@ -62,15 +64,13 @@ struct ThemeStoreTests {
 
     @Test("ignores files that aren't .json")
     func ignoresNonJSON() async throws {
-        let home = makeIsolatedHome()
-        let themesDir = home.appendingPathComponent("terminal-themes")
-        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        let themesDir = try makeIsolatedThemesDir()
         try "ignored".write(
             to: themesDir.appendingPathComponent("foo.toml"),
             atomically: true, encoding: .utf8
         )
 
-        let store = ThemeStore()
+        let store = ThemeStore(themesDirectory: themesDir)
         store.reloadFromDisk()
         #expect(store.userThemes.isEmpty)
         #expect(store.loadErrors.isEmpty)
@@ -78,8 +78,8 @@ struct ThemeStoreTests {
 
     @Test("saveAs slugifies the display name and writes JSON")
     func saveAsSlugifies() async throws {
-        let home = makeIsolatedHome()
-        let store = ThemeStore()
+        let themesDir = try makeIsolatedThemesDir()
+        let store = ThemeStore(themesDirectory: themesDir)
 
         let id = try store.saveAs(
             UserTerminalTheme(
@@ -91,14 +91,14 @@ struct ThemeStoreTests {
             suggestedDisplayName: "My Cool Theme!"
         )
         #expect(id == "my-cool-theme")
-        let file = home.appendingPathComponent("terminal-themes/my-cool-theme.json")
+        let file = themesDir.appendingPathComponent("my-cool-theme.json")
         #expect(FileManager.default.fileExists(atPath: file.path))
     }
 
     @Test("saveAs deduplicates by appending -2, -3 etc.")
     func saveAsDedupes() async throws {
-        _ = makeIsolatedHome()
-        let store = ThemeStore()
+        let themesDir = try makeIsolatedThemesDir()
+        let store = ThemeStore(themesDirectory: themesDir)
         let draft = UserTerminalTheme(
             schemaVersion: 1, id: "", displayName: "Gruvbox Dark Copy",
             ansi: Array(repeating: "#000000", count: 16),
@@ -114,9 +114,9 @@ struct ThemeStoreTests {
     }
 
     @Test("saveAs refuses ids that collide with bundled schemes")
-    func saveAsRefusesBundledCollision() async {
-        _ = makeIsolatedHome()
-        let store = ThemeStore()
+    func saveAsRefusesBundledCollision() async throws {
+        let themesDir = try makeIsolatedThemesDir()
+        let store = ThemeStore(themesDirectory: themesDir)
         let draft = UserTerminalTheme(
             schemaVersion: 1, id: "", displayName: "Gruvbox Dark",
             ansi: Array(repeating: "#000000", count: 16),
@@ -130,8 +130,8 @@ struct ThemeStoreTests {
 
     @Test("save overwrites the existing file for the same id")
     func saveOverwrites() async throws {
-        _ = makeIsolatedHome()
-        let store = ThemeStore()
+        let themesDir = try makeIsolatedThemesDir()
+        let store = ThemeStore(themesDirectory: themesDir)
         let draft = UserTerminalTheme(
             schemaVersion: 1, id: "", displayName: "Foo",
             ansi: Array(repeating: "#000000", count: 16),
@@ -153,8 +153,8 @@ struct ThemeStoreTests {
 
     @Test("delete moves the file into .trash/ with a timestamp suffix")
     func deleteSoftDeletes() async throws {
-        let home = makeIsolatedHome()
-        let store = ThemeStore()
+        let themesDir = try makeIsolatedThemesDir()
+        let store = ThemeStore(themesDirectory: themesDir)
         let draft = UserTerminalTheme(
             schemaVersion: 1, id: "", displayName: "Throwaway",
             ansi: Array(repeating: "#000000", count: 16),
@@ -165,10 +165,10 @@ struct ThemeStoreTests {
 
         try store.delete(id: id)
 
-        let originalPath = home.appendingPathComponent("terminal-themes/\(id).json")
+        let originalPath = themesDir.appendingPathComponent("\(id).json")
         #expect(!FileManager.default.fileExists(atPath: originalPath.path))
 
-        let trashDir = home.appendingPathComponent("terminal-themes/.trash")
+        let trashDir = themesDir.appendingPathComponent(".trash")
         let trashed = try FileManager.default.contentsOfDirectory(atPath: trashDir.path)
         #expect(trashed.count == 1)
         #expect(trashed[0].hasPrefix("\(id)-"))
@@ -176,11 +176,9 @@ struct ThemeStoreTests {
 
     @Test("external file additions trigger a reload via the watcher")
     func watcherReloadsOnExternalAdd() async throws {
-        let home = makeIsolatedHome()
-        let themesDir = home.appendingPathComponent("terminal-themes")
-        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        let themesDir = try makeIsolatedThemesDir()
 
-        let store = ThemeStore()
+        let store = ThemeStore(themesDirectory: themesDir)
         store.startWatching()
         store.reloadFromDisk()
         #expect(store.userThemes.isEmpty)
@@ -205,9 +203,9 @@ struct ThemeStoreTests {
     }
 
     @Test("saveAs rejects display names that slugify to empty")
-    func saveAsRejectsEmptySlug() async {
-        _ = makeIsolatedHome()
-        let store = ThemeStore()
+    func saveAsRejectsEmptySlug() async throws {
+        let themesDir = try makeIsolatedThemesDir()
+        let store = ThemeStore(themesDirectory: themesDir)
         let draft = UserTerminalTheme(
             schemaVersion: 1, id: "", displayName: "!!!",
             ansi: Array(repeating: "#000000", count: 16),
@@ -220,9 +218,9 @@ struct ThemeStoreTests {
     }
 
     @Test("save throws when called for an id that has no file on disk")
-    func saveThrowsForUnknownID() async {
-        _ = makeIsolatedHome()
-        let store = ThemeStore()
+    func saveThrowsForUnknownID() async throws {
+        let themesDir = try makeIsolatedThemesDir()
+        let store = ThemeStore(themesDirectory: themesDir)
         let theme = UserTerminalTheme(
             schemaVersion: 1, id: "ghost", displayName: "Ghost",
             ansi: Array(repeating: "#000000", count: 16),
@@ -236,9 +234,7 @@ struct ThemeStoreTests {
 
     @Test("save refuses to overwrite a file whose id collides with a bundled scheme")
     func saveRefusesBundledCollision() async throws {
-        let home = makeIsolatedHome()
-        let themesDir = home.appendingPathComponent("terminal-themes")
-        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        let themesDir = try makeIsolatedThemesDir()
 
         // Plant a stray JSON named after a bundled scheme (simulates a manual cp
         // or a future import path) so the fileExists guard would otherwise pass.
@@ -251,7 +247,7 @@ struct ThemeStoreTests {
         try JSONEncoder().encode(stray)
             .write(to: themesDir.appendingPathComponent("gruvbox-dark.json"))
 
-        let store = ThemeStore()
+        let store = ThemeStore(themesDirectory: themesDir)
         do {
             try store.save(stray)
             Issue.record("expected SaveError.bundledIDCollision")
@@ -264,15 +260,13 @@ struct ThemeStoreTests {
 
     @Test("when the active theme file vanishes, the schemeID reverts to default")
     func activeThemeVanishesFallsBack() async throws {
-        let home = makeIsolatedHome()
-        let themesDir = home.appendingPathComponent("terminal-themes")
-        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        let themesDir = try makeIsolatedThemesDir()
 
         let suiteName = "tbd.test.fallback.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let appearance = AppearanceSettings(defaults: defaults)
-        let store = ThemeStore()
+        let store = ThemeStore(themesDirectory: themesDir)
         appearance.themeStore = store
 
         // Create a user theme and select it.
