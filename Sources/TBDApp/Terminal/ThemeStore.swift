@@ -11,10 +11,11 @@ final class ThemeStore: ObservableObject {
     @Published private(set) var userThemes: [TerminalColorScheme] = []
     @Published private(set) var loadErrors: [LoadError] = []
 
+    private let directoryOverride: URL?
     private var watcher: ThemeDirectoryWatcher?
     // Snapshot of themesDirectory taken at startWatching() time.
     // Keeps the FSEvents callback pointing at the correct directory even if
-    // TBD_HOME changes (test isolation via setenv).
+    // the watcher callback fires after a future directory change.
     private var watchedDirectory: URL?
 
     struct LoadError: Equatable, Identifiable {
@@ -27,8 +28,12 @@ final class ThemeStore: ObservableObject {
         }
     }
 
+    init(themesDirectory: URL? = nil) {
+        self.directoryOverride = themesDirectory
+    }
+
     var themesDirectory: URL {
-        TBDConstants.configDir.appendingPathComponent("terminal-themes")
+        directoryOverride ?? TBDConstants.configDir.appendingPathComponent("terminal-themes")
     }
 
     func reloadFromDisk() {
@@ -86,7 +91,7 @@ final class ThemeStore: ObservableObject {
     func startWatching() {
         guard watcher == nil else { return }
         // Snapshot the directory URL now so the FSEvents callback reloads from
-        // the same path even if TBD_HOME changes (e.g. setenv in tests).
+        // the same path even if the watcher fires after a future directory change.
         let dir = themesDirectory
         watchedDirectory = dir
         let w = ThemeDirectoryWatcher { [weak self] in
