@@ -240,7 +240,7 @@ extension AppState {
         Task { await refreshArchivedWorktrees(repoID: id) }
     }
 
-    private static let archivedPageSize = 100
+    private static let archivedPageSize = 50
 
     /// Fetch archived worktrees for a repo, preserving any pages the user has
     /// already loaded (re-fetches up to `max(currentCount, pageSize)` items).
