@@ -51,6 +51,35 @@ struct CodexSpawnCommandBuilderTests {
         )
     }
 
+    @Test("runtime detection skips version probe when help identifies the profile flag")
+    func detectionSkipsVersionProbeWhenHelpIsEnough() {
+        var probedArguments: [[String]] = []
+
+        let flag = CodexSpawnCommandBuilder.detectProfileFlag { arguments in
+            probedArguments.append(arguments)
+            return "  -p, --profile <CONFIG_PROFILE_V2>"
+        }
+
+        #expect(flag == "--profile")
+        #expect(probedArguments == [["codex", "--help"]])
+    }
+
+    @Test("runtime detection uses version probe only when help is inconclusive")
+    func detectionUsesVersionProbeWhenHelpIsInconclusive() {
+        var probedArguments: [[String]] = []
+
+        let flag = CodexSpawnCommandBuilder.detectProfileFlag { arguments in
+            probedArguments.append(arguments)
+            if arguments == ["codex", "--version"] {
+                return "codex-cli 0.133.0"
+            }
+            return "Codex CLI"
+        }
+
+        #expect(flag == "--profile-v2")
+        #expect(probedArguments == [["codex", "--help"], ["codex", "--version"]])
+    }
+
     @Test("initial prompt is appended as a shell-escaped trailing argument")
     func appendsInitialPrompt() {
         #expect(

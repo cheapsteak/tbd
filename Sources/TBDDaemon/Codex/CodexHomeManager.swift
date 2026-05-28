@@ -252,10 +252,9 @@ enum CodexProfileWriter {
 }
 
 enum CodexSpawnCommandBuilder {
-    private static let detectedProfileFlag = profileFlag(
-        codexHelpOutput: commandOutput(arguments: ["codex", "--help"], timeout: 3),
-        codexVersionOutput: commandOutput(arguments: ["codex", "--version"], timeout: 3)
-    )
+    private static let detectedProfileFlag = detectProfileFlag { arguments in
+        commandOutput(arguments: arguments, timeout: 3)
+    }
 
     static var command: String {
         baseCommand(profileFlag: detectedProfileFlag)
@@ -303,6 +302,18 @@ enum CodexSpawnCommandBuilder {
         }
 
         return "--profile"
+    }
+
+    static func detectProfileFlag(commandOutput: ([String]) -> String?) -> String {
+        let helpOutput = commandOutput(["codex", "--help"])
+        if let helpOutput, helpOutput.contains("--profile-v2") || helpOutput.contains("--profile") {
+            return profileFlag(codexHelpOutput: helpOutput, codexVersionOutput: nil)
+        }
+
+        return profileFlag(
+            codexHelpOutput: helpOutput,
+            codexVersionOutput: commandOutput(["codex", "--version"])
+        )
     }
 
     private struct CodexVersion: Comparable {
