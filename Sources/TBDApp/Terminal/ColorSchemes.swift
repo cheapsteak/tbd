@@ -21,8 +21,11 @@ enum ColorSchemes {
     /// on different schemes.
     static let defaultScheme: TerminalColorScheme = tango
 
-    static func scheme(forID id: String) -> TerminalColorScheme {
-        bundled.first { $0.id == id } ?? defaultScheme
+    @MainActor
+    static func scheme(forID id: String, store: ThemeStore? = nil) -> TerminalColorScheme {
+        if let bundled = bundled.first(where: { $0.id == id }) { return bundled }
+        if let user = store?.userThemes.first(where: { $0.id == id }) { return user }
+        return defaultScheme
     }
 
     static let bundled: [TerminalColorScheme] = [

@@ -37,12 +37,15 @@ final class AppState: ObservableObject {
     var appearance: AppearanceSettings? {
         didSet {
             if let appearance {
+                appearance.themeStore = themeStore
                 setupAppearanceSubscriptions(appearance)
             }
         }
     }
     /// Subscription to appearance.$schemeID changes for pushing COLORFGBG updates to running tmux servers.
     private var appearanceSubscription: AnyCancellable?
+    /// Subscription to themeStore.$userThemes changes for reconciling the active scheme.
+    private var themeStoreSubscription: AnyCancellable?
 
     @Published var repos: [Repo] = []
     @Published var worktrees: [UUID: [Worktree]] = [:]
@@ -331,6 +334,8 @@ final class AppState: ObservableObject {
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false
 
+    let themeStore = ThemeStore()
+
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
@@ -364,6 +369,8 @@ final class AppState: ObservableObject {
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
         macNotificationManager.configure(appState: self)
+        themeStore.reloadFromDisk()
+        themeStore.startWatching()
         // Under `swift test`, the per-test `AppState()` instances would each
         // spawn a subscription Task that blocks indefinitely in `recv()` on
         // the daemon socket. With enough tests the Swift cooperative thread
@@ -483,6 +490,15 @@ final class AppState: ObservableObject {
             .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
             .sink { [weak self] _ in
                 self?.broadcastAppearanceColorFgBg(appearance)
+            }
+
+        // When the theme store reloads (external file add/delete/edit), reconcile
+        // the active schemeID so a deleted theme falls back to the default rather
+        // than leaving the UI pointing at an unknown id.
+        themeStoreSubscription = themeStore.$userThemes
+            .dropFirst()  // skip subscriber-time emission, match appearanceSubscription pattern
+            .sink { [weak appearance] _ in
+                appearance?.reconcileWithStore()
             }
     }
 

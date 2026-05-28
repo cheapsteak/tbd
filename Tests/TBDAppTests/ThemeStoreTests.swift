@@ -1,0 +1,299 @@
+import Foundation
+import Testing
+@testable import TBDApp
+import TBDShared
+
+@MainActor
+@Suite("ThemeStore")
+struct ThemeStoreTests {
+    private func makeIsolatedHome() -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-themestore-tests-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        setenv("TBD_HOME", dir.path, 1)
+        return dir
+    }
+
+    @Test("returns empty when the themes dir doesn't exist yet")
+    func emptyWhenDirMissing() async {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        store.reloadFromDisk()
+        #expect(store.userThemes.isEmpty)
+    }
+
+    @Test("loads all valid JSON theme files")
+    func loadsValidThemes() async throws {
+        let home = makeIsolatedHome()
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+
+        let theme = UserTerminalTheme(
+            schemaVersion: 1, id: "my-test", displayName: "My Test",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        let data = try JSONEncoder().encode(theme)
+        try data.write(to: themesDir.appendingPathComponent("my-test.json"))
+
+        let store = ThemeStore()
+        store.reloadFromDisk()
+        #expect(store.userThemes.count == 1)
+        #expect(store.userThemes.first?.id == "my-test")
+    }
+
+    @Test("skips malformed JSON files and records the error")
+    func skipsMalformed() async throws {
+        let home = makeIsolatedHome()
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        try "{ not json".write(
+            to: themesDir.appendingPathComponent("bad.json"),
+            atomically: true, encoding: .utf8
+        )
+
+        let store = ThemeStore()
+        store.reloadFromDisk()
+        #expect(store.userThemes.isEmpty)
+        #expect(store.loadErrors.count == 1)
+        #expect(store.loadErrors.first?.filename == "bad.json")
+    }
+
+    @Test("ignores files that aren't .json")
+    func ignoresNonJSON() async throws {
+        let home = makeIsolatedHome()
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        try "ignored".write(
+            to: themesDir.appendingPathComponent("foo.toml"),
+            atomically: true, encoding: .utf8
+        )
+
+        let store = ThemeStore()
+        store.reloadFromDisk()
+        #expect(store.userThemes.isEmpty)
+        #expect(store.loadErrors.isEmpty)
+    }
+
+    @Test("saveAs slugifies the display name and writes JSON")
+    func saveAsSlugifies() async throws {
+        let home = makeIsolatedHome()
+        let store = ThemeStore()
+
+        let id = try store.saveAs(
+            UserTerminalTheme(
+                schemaVersion: 1, id: "", displayName: "My Cool Theme!",
+                ansi: Array(repeating: "#000000", count: 16),
+                foreground: "#ffffff", background: "#000000",
+                cursor: "#ffffff", selection: "#505050"
+            ),
+            suggestedDisplayName: "My Cool Theme!"
+        )
+        #expect(id == "my-cool-theme")
+        let file = home.appendingPathComponent("terminal-themes/my-cool-theme.json")
+        #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    @Test("saveAs deduplicates by appending -2, -3 etc.")
+    func saveAsDedupes() async throws {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "Gruvbox Dark Copy",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        let id1 = try store.saveAs(draft, suggestedDisplayName: "Gruvbox Dark Copy")
+        let id2 = try store.saveAs(draft, suggestedDisplayName: "Gruvbox Dark Copy")
+        let id3 = try store.saveAs(draft, suggestedDisplayName: "Gruvbox Dark Copy")
+        #expect(id1 == "gruvbox-dark-copy")
+        #expect(id2 == "gruvbox-dark-copy-2")
+        #expect(id3 == "gruvbox-dark-copy-3")
+    }
+
+    @Test("saveAs refuses ids that collide with bundled schemes")
+    func saveAsRefusesBundledCollision() async {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "Gruvbox Dark",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        #expect(throws: ThemeStore.SaveError.self) {
+            try store.saveAs(draft, suggestedDisplayName: "Gruvbox Dark")
+        }
+    }
+
+    @Test("save overwrites the existing file for the same id")
+    func saveOverwrites() async throws {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "Foo",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        let id = try store.saveAs(draft, suggestedDisplayName: "Foo")
+
+        let edited = UserTerminalTheme(
+            schemaVersion: 1, id: id, displayName: "Foo",
+            ansi: Array(repeating: "#ff0000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        try store.save(edited)
+        store.reloadFromDisk()
+        #expect(store.userThemes.first?.ansi[0].red == UInt16(0xff) * 257)
+    }
+
+    @Test("delete moves the file into .trash/ with a timestamp suffix")
+    func deleteSoftDeletes() async throws {
+        let home = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "Throwaway",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        let id = try store.saveAs(draft, suggestedDisplayName: "Throwaway")
+
+        try store.delete(id: id)
+
+        let originalPath = home.appendingPathComponent("terminal-themes/\(id).json")
+        #expect(!FileManager.default.fileExists(atPath: originalPath.path))
+
+        let trashDir = home.appendingPathComponent("terminal-themes/.trash")
+        let trashed = try FileManager.default.contentsOfDirectory(atPath: trashDir.path)
+        #expect(trashed.count == 1)
+        #expect(trashed[0].hasPrefix("\(id)-"))
+    }
+
+    @Test("external file additions trigger a reload via the watcher")
+    func watcherReloadsOnExternalAdd() async throws {
+        let home = makeIsolatedHome()
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+
+        let store = ThemeStore()
+        store.startWatching()
+        store.reloadFromDisk()
+        #expect(store.userThemes.isEmpty)
+
+        let theme = UserTerminalTheme(
+            schemaVersion: 1, id: "ext", displayName: "Ext",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        try JSONEncoder().encode(theme)
+            .write(to: themesDir.appendingPathComponent("ext.json"))
+
+        let deadline = Date().addingTimeInterval(5)
+        while store.userThemes.isEmpty && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        #expect(store.userThemes.count == 1)
+        #expect(store.userThemes.first?.id == "ext")
+
+        store.stopWatching()
+    }
+
+    @Test("saveAs rejects display names that slugify to empty")
+    func saveAsRejectsEmptySlug() async {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let draft = UserTerminalTheme(
+            schemaVersion: 1, id: "", displayName: "!!!",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        #expect(throws: ThemeStore.SaveError.self) {
+            try store.saveAs(draft, suggestedDisplayName: "!!!")
+        }
+    }
+
+    @Test("save throws when called for an id that has no file on disk")
+    func saveThrowsForUnknownID() async {
+        _ = makeIsolatedHome()
+        let store = ThemeStore()
+        let theme = UserTerminalTheme(
+            schemaVersion: 1, id: "ghost", displayName: "Ghost",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        #expect(throws: ThemeStore.SaveError.self) {
+            try store.save(theme)
+        }
+    }
+
+    @Test("save refuses to overwrite a file whose id collides with a bundled scheme")
+    func saveRefusesBundledCollision() async throws {
+        let home = makeIsolatedHome()
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+
+        // Plant a stray JSON named after a bundled scheme (simulates a manual cp
+        // or a future import path) so the fileExists guard would otherwise pass.
+        let stray = UserTerminalTheme(
+            schemaVersion: 1, id: "gruvbox-dark", displayName: "Stray",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        try JSONEncoder().encode(stray)
+            .write(to: themesDir.appendingPathComponent("gruvbox-dark.json"))
+
+        let store = ThemeStore()
+        do {
+            try store.save(stray)
+            Issue.record("expected SaveError.bundledIDCollision")
+        } catch let ThemeStore.SaveError.bundledIDCollision(id) {
+            #expect(id == "gruvbox-dark")
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
+    @Test("when the active theme file vanishes, the schemeID reverts to default")
+    func activeThemeVanishesFallsBack() async throws {
+        let home = makeIsolatedHome()
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+
+        let suiteName = "tbd.test.fallback.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appearance = AppearanceSettings(defaults: defaults)
+        let store = ThemeStore()
+        appearance.themeStore = store
+
+        // Create a user theme and select it.
+        let theme = UserTerminalTheme(
+            schemaVersion: 1, id: "ephemeral", displayName: "Ephemeral",
+            ansi: Array(repeating: "#000000", count: 16),
+            foreground: "#ffffff", background: "#000000",
+            cursor: "#ffffff", selection: "#505050"
+        )
+        try JSONEncoder().encode(theme)
+            .write(to: themesDir.appendingPathComponent("ephemeral.json"))
+        store.reloadFromDisk()
+        appearance.schemeID = "ephemeral"
+        appearance.draftSchemeOverride = ColorSchemes.scheme(forID: "tango")
+
+        // Externally delete the file (simulates `rm`).
+        try FileManager.default.removeItem(at: themesDir.appendingPathComponent("ephemeral.json"))
+        store.reloadFromDisk()
+        appearance.reconcileWithStore()
+
+        #expect(appearance.schemeID == ColorSchemes.defaultScheme.id)
+        #expect(appearance.draftSchemeOverride == nil)
+    }
+}

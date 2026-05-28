@@ -89,6 +89,31 @@ struct AppearanceSettingsTests {
         }
     }
 
+    @Test("user theme id is preserved at init when a matching JSON file exists")
+    func preservesUserThemeIDWithMatchingFile() throws {
+        // Regression test: init used to reject any non-bundled id, which
+        // silently clobbered legitimate user-theme selections back to Tango
+        // on every relaunch (the on-disk file load races init).
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-appearance-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        setenv("TBD_HOME", home.path, 1)
+        defer {
+            try? FileManager.default.removeItem(at: home)
+            unsetenv("TBD_HOME")
+        }
+        let themesDir = home.appendingPathComponent("terminal-themes")
+        try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        // Contents don't need to be a valid theme — init only checks file existence.
+        try Data().write(to: themesDir.appendingPathComponent("my-theme.json"))
+
+        withIsolatedDefaults { defaults in
+            defaults.set("my-theme", forKey: "terminal.scheme.id")
+            let settings = AppearanceSettings(defaults: defaults)
+            #expect(settings.schemeID == "my-theme")
+        }
+    }
+
     @Test("computed font falls back to system mono when fontName is bogus")
     func fallbackFontResolution() {
         withIsolatedDefaults { defaults in
@@ -152,5 +177,28 @@ struct AppearanceSettingsTests {
             let darkValue = settings.currentColorFgBg
             #expect(darkValue == "15;0")
         }
+    }
+
+    @Test("currentColorFgBg uses user-theme bg luminance when a user theme is active")
+    func currentColorFgBgForUserTheme() throws {
+        let suiteName = "tbd.test.fgbg-user.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let store = ThemeStore()
+        let lightUser = TerminalColorScheme(
+            id: "light-user", displayName: "Light U",
+            ansi: Array(repeating: SwiftTerm.Color(red: 0, green: 0, blue: 0), count: 16),
+            foreground: SwiftTerm.Color(red: 0, green: 0, blue: 0),
+            background: SwiftTerm.Color(red: 65535, green: 65535, blue: 65535),
+            cursor: SwiftTerm.Color(red: 0, green: 0, blue: 0),
+            selection: SwiftTerm.Color(red: 32000, green: 32000, blue: 32000)
+        )
+        store.injectForTest(userThemes: [lightUser])
+
+        let appearance = AppearanceSettings(defaults: defaults)
+        appearance.themeStore = store
+        appearance.schemeID = "light-user"
+        #expect(appearance.currentColorFgBg == "0;15")
     }
 }
