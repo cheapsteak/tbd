@@ -561,7 +561,7 @@ public struct SessionMessagesParams: Codable, Sendable {
 
 // MARK: - Transcript Items (rich rendering)
 
-public enum SystemKind: String, Codable, Sendable, Equatable {
+public enum SystemKind: String, Codable, Sendable, Equatable, Hashable {
     case toolReminder
     case hookOutput
     case environmentDetails
@@ -570,7 +570,7 @@ public enum SystemKind: String, Codable, Sendable, Equatable {
     case other
 }
 
-public struct ToolResult: Codable, Sendable, Equatable {
+public struct ToolResult: Codable, Sendable, Equatable, Hashable {
     public let text: String
     public let truncatedTo: Int?
     public let isError: Bool
@@ -581,7 +581,7 @@ public struct ToolResult: Codable, Sendable, Equatable {
     }
 }
 
-public struct Subagent: Codable, Sendable, Equatable {
+public struct Subagent: Codable, Sendable, Equatable, Hashable {
     public let agentID: String
     public let agentType: String?
     public let items: [TranscriptItem]
@@ -596,7 +596,7 @@ public struct Subagent: Codable, Sendable, Equatable {
 /// assistant JSONL line. The three fields together represent the size of
 /// the prompt sent on that request — see docs/transcript-context-usage.md
 /// for the meaning of each.
-public struct TokenUsage: Codable, Sendable, Equatable {
+public struct TokenUsage: Codable, Sendable, Equatable, Hashable {
     public let inputTokens: Int
     public let cacheCreationTokens: Int
     public let cacheReadTokens: Int
@@ -613,7 +613,7 @@ public struct TokenUsage: Codable, Sendable, Equatable {
     }
 }
 
-public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable {
+public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable, Hashable {
     case userPrompt(id: String, text: String, timestamp: Date?)
     case assistantText(id: String, text: String, timestamp: Date?, usage: TokenUsage? = nil)
     case toolCall(id: String, name: String, inputJSON: String,
