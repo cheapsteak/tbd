@@ -139,6 +139,11 @@ final class AppState: ObservableObject {
     /// Archived worktrees keyed by repo ID, fetched on demand.
     @Published var archivedWorktrees: [UUID: [Worktree]] = [:]
 
+    /// Whether there are more archived worktrees to load beyond what's in `archivedWorktrees`.
+    @Published var archivedWorktreesHasMore: [UUID: Bool] = [:]
+    /// Guards against concurrent loadMoreArchivedWorktrees calls (double-tap, race with refresh).
+    @Published var isLoadingMoreArchived: [UUID: Bool] = [:]
+
     /// Set briefly when a deep link lands on an archived worktree. The
     /// ArchivedWorktreesView observes this and scrolls/flashes the matching
     /// row, then clears the value after the flash animation completes.
