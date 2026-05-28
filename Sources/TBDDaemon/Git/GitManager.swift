@@ -222,12 +222,16 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["worktree", "prune"], at: repoPath)
     }
 
-    /// Lists local branches and `origin/*` remote tracking branches.
+    /// Lists local branches and `origin/*` remote tracking branches that are
+    /// available to check out into a new worktree.
     ///
-    /// Dedupe rule: when a local branch and a remote `origin/<same>` both exist,
-    /// the remote duplicate is dropped — the local branch is more directly
-    /// usable for creating a worktree (`git worktree add <path> <branch>`).
-    /// Skips symbolic refs like `origin/HEAD` (an alias, not a real branch).
+    /// Filtering:
+    /// - Symbolic refs like `origin/HEAD` are skipped (they're aliases).
+    /// - Branches already checked out in any worktree are skipped — git refuses
+    ///   to check the same branch out twice, and for a remote ref `origin/foo`
+    ///   we'd `-b foo` which would also collide.
+    /// - When a local `foo` and `origin/foo` both exist, the remote duplicate
+    ///   is dropped — the local is directly usable via `git worktree add <path> <branch>`.
     public func listBranches(repoPath: String) async throws -> [BranchRef] {
         // %(symref) is non-empty for symbolic refs (e.g. refs/remotes/origin/HEAD,
         // which short-names to bare "origin"). Filtering by symref catches it
@@ -240,6 +244,14 @@ public struct GitManager: Sendable {
                 "refs/remotes/origin",
             ],
             at: repoPath
+        )
+
+        // Branches already checked out in any worktree (main repo + linked
+        // worktrees) — git rejects a second checkout of the same branch.
+        let inUse = Set(
+            (try? await worktreeList(repoPath: repoPath))?
+                .map(\.branch)
+                .filter { !$0.isEmpty } ?? []
         )
 
         var refs: [BranchRef] = []
@@ -267,6 +279,9 @@ public struct GitManager: Sendable {
                 localName = name
                 localNames.insert(name)
             }
+            // Drop branches already checked out somewhere — applies to local
+            // refs directly, and to remote refs whose local counterpart is taken.
+            if inUse.contains(localName) { continue }
             refs.append(BranchRef(
                 name: name,
                 isRemote: isRemote,

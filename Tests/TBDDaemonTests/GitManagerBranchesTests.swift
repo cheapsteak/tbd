@@ -4,8 +4,8 @@ import Testing
 @testable import TBDDaemonLib
 
 /// Tests for `GitManager.listBranches` — exercises the `for-each-ref` output
-/// parser, the `origin/HEAD` skip, the local-vs-remote dedupe rule, and the
-/// `isCurrent` flag.
+/// parser, the symbolic-ref (`origin/HEAD`) skip, the local-vs-remote dedupe
+/// rule, and the "already checked out" worktree filter.
 struct GitManagerBranchesTests {
     let tempDir: URL
     let repoDir: URL
@@ -45,10 +45,12 @@ struct GitManagerBranchesTests {
 
         let refs = try await git.listBranches(repoPath: repoDir.path)
         let names = refs.map(\.name)
-        #expect(names.contains("main"))
         #expect(names.contains("local-only"))
         #expect(refs.first { $0.name == "local-only" }?.isRemote == false)
         #expect(refs.first { $0.name == "local-only" }?.localName == "local-only")
+        // `main` is the main worktree's checked-out branch, so the
+        // already-in-use filter drops it.
+        #expect(!names.contains("main"))
     }
 
     @Test func listBranchesIncludesOriginButSkipsOriginHEAD() async throws {
@@ -78,23 +80,32 @@ struct GitManagerBranchesTests {
 
     @Test func listBranchesDedupesLocalOverRemote() async throws {
         defer { cleanup() }
-        // `main` exists both locally and as `origin/main` — the remote
-        // duplicate should be dropped.
+        // Create a branch that exists both locally and as `origin/<name>` —
+        // the remote duplicate should be dropped. `feature` isn't checked out
+        // anywhere, so it survives the in-use filter.
+        try await shell("git branch feature", at: repoDir)
+        try await shell("git push -u origin feature", at: repoDir)
+
         let refs = try await git.listBranches(repoPath: repoDir.path)
-        let mainEntries = refs.filter { $0.localName == "main" }
-        #expect(mainEntries.count == 1, "Expected exactly one entry for 'main', got \(mainEntries.map(\.name))")
-        #expect(mainEntries.first?.name == "main", "Local entry should win over origin/main")
-        #expect(mainEntries.first?.isRemote == false)
+        let featureEntries = refs.filter { $0.localName == "feature" }
+        #expect(featureEntries.count == 1, "Expected exactly one entry for 'feature', got \(featureEntries.map(\.name))")
+        #expect(featureEntries.first?.name == "feature", "Local entry should win over origin/feature")
+        #expect(featureEntries.first?.isRemote == false)
     }
 
-    @Test func listBranchesFlagsCurrentBranch() async throws {
+    @Test func listBranchesExcludesBranchesCheckedOutInLinkedWorktree() async throws {
         defer { cleanup() }
-        try await shell("git branch feature-x", at: repoDir)
+        // Create a branch and check it out into a linked worktree — it should
+        // be omitted from the picker, since git rejects a second checkout.
+        try await shell("git branch checked-out-elsewhere", at: repoDir)
+        try await shell("git branch never-checked-out", at: repoDir)
+        let linkedPath = tempDir.appendingPathComponent("linked-wt").path
+        try await shell("git worktree add '\(linkedPath)' checked-out-elsewhere", at: repoDir)
+
         let refs = try await git.listBranches(repoPath: repoDir.path)
-        let main = refs.first { $0.name == "main" }
-        let feature = refs.first { $0.name == "feature-x" }
-        #expect(main?.isCurrent == true)
-        #expect(feature?.isCurrent == false)
+        let names = refs.map(\.name)
+        #expect(!names.contains("checked-out-elsewhere"))
+        #expect(names.contains("never-checked-out"))
     }
 
 }
