@@ -15,6 +15,7 @@ import os
 /// - "transcript.markdown.build"   — ChatBubbleView.bubbleBody (split + Markdown view tree)
 /// - "transcript.markdown.segment" — MarkdownSegments.split
 /// - "transcript.scrollTo"         — proxy.scrollTo call sites
+/// - "transcript.equatable"        — TranscriptRenderNode.== (issue #129 cheap-equality)
 ///
 /// `event` names:
 /// - "hang.detected" — emitted from HangWatchdog when a hang transitions to `.toHung`,
