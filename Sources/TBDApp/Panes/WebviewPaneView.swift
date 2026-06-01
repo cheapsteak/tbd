@@ -32,14 +32,21 @@ extension WKWebView: WebviewReloadClient {
     }
 }
 
+@MainActor
+final class WebviewState: ObservableObject {
+    @Published var currentURL: URL?
+}
+
 struct WebviewPaneView: NSViewRepresentable {
     let url: URL
+    let state: WebviewState
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(state: state) }
 
     func makeNSView(context: Context) -> WebviewPaneHostView {
         let host = WebviewPaneHostView(url: url)
         host.webView.navigationDelegate = context.coordinator
+        context.coordinator.observe(host.webView)
         return host
     }
 
@@ -47,7 +54,22 @@ struct WebviewPaneView: NSViewRepresentable {
         // Don't reload on SwiftUI updates — only initial load matters
     }
 
-    class Coordinator: NSObject, WKNavigationDelegate {}
+    @MainActor
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        private let state: WebviewState
+        private var urlObservation: NSKeyValueObservation?
+
+        init(state: WebviewState) {
+            self.state = state
+        }
+
+        func observe(_ webView: WKWebView) {
+            urlObservation = webView.observe(\.url, options: [.initial, .new]) { [weak state] webView, _ in
+                let newURL = webView.url
+                Task { @MainActor in state?.currentURL = newURL }
+            }
+        }
+    }
 }
 
 final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
