@@ -92,3 +92,138 @@ private func tearDown(_ suiteName: String) {
     let manager = MacNotificationManager()
     manager.dismissDelivered(worktreeIDs: [UUID()])
 }
+
+// MARK: - terminalID routing tests
+
+/// Build a fixture appState with one worktree and a two-tab layout. The
+/// second tab is a `.terminal(terminalID:)` pane for `terminalID` so tests
+/// can verify the click handler selects it.
+@MainActor
+private func makeAppStateWithTabs(
+    worktreeID: UUID,
+    repoID: UUID,
+    terminalID: UUID
+) -> (AppState, String) {
+    let (state, suite) = makeIsolatedAppState()
+    state.isInitialStateLoaded = true
+    state.worktrees = [
+        repoID: [
+            Worktree(id: worktreeID, repoID: repoID, name: "x", displayName: "X",
+                     branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x"),
+        ],
+    ]
+    let tab0 = Tab(id: UUID(), content: .terminal(terminalID: UUID()), label: nil)
+    let tab1 = Tab(id: UUID(), content: .terminal(terminalID: terminalID), label: nil)
+    state.tabs[worktreeID] = [tab0, tab1]
+    state.activeTabIndices[worktreeID] = 0
+    return (state, suite)
+}
+
+@MainActor
+@Test func handleClick_withTerminalID_setsActiveTab() async {
+    let worktreeID = UUID()
+    let repoID = UUID()
+    let terminalID = UUID()
+    let (appState, suite) = makeAppStateWithTabs(
+        worktreeID: worktreeID, repoID: repoID, terminalID: terminalID
+    )
+    defer { tearDown(suite) }
+
+    appState.macNotificationManager.handleClick(
+        worktreeID: worktreeID, terminalID: terminalID
+    )
+
+    #expect(appState.selectedWorktreeIDs == [worktreeID])
+    #expect(appState.activeTabIndices[worktreeID] == 1)
+}
+
+@MainActor
+@Test func handleClick_withTerminalID_terminalNotInTabs_fallsBackSilently() async {
+    let worktreeID = UUID()
+    let repoID = UUID()
+    let terminalID = UUID()
+    let (appState, suite) = makeAppStateWithTabs(
+        worktreeID: worktreeID, repoID: repoID, terminalID: terminalID
+    )
+    defer { tearDown(suite) }
+
+    // Pass a terminal ID that isn't in any tab.
+    let strangerID = UUID()
+    appState.macNotificationManager.handleClick(
+        worktreeID: worktreeID, terminalID: strangerID
+    )
+
+    // Selection still set; active tab unchanged (remains 0 from setup).
+    #expect(appState.selectedWorktreeIDs == [worktreeID])
+    #expect(appState.activeTabIndices[worktreeID] == 0)
+}
+
+@MainActor
+@Test func handleClick_withoutTerminalID_behavesAsBefore() async {
+    let worktreeID = UUID()
+    let repoID = UUID()
+    let terminalID = UUID()
+    let (appState, suite) = makeAppStateWithTabs(
+        worktreeID: worktreeID, repoID: repoID, terminalID: terminalID
+    )
+    defer { tearDown(suite) }
+
+    appState.macNotificationManager.handleClick(
+        worktreeID: worktreeID, terminalID: nil
+    )
+
+    // Selection set, active tab unchanged.
+    #expect(appState.selectedWorktreeIDs == [worktreeID])
+    #expect(appState.activeTabIndices[worktreeID] == 0)
+}
+
+@MainActor
+@Test func handleClick_withTerminalID_matchesLiveTranscriptTab() async {
+    // Mirror of `handleClick_withTerminalID_setsActiveTab` but the second
+    // tab is a `.liveTranscript` pane — both arms of the tab-match switch
+    // should select the originating terminal's surface.
+    let worktreeID = UUID()
+    let repoID = UUID()
+    let terminalID = UUID()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
+    appState.isInitialStateLoaded = true
+    appState.worktrees = [
+        repoID: [
+            Worktree(id: worktreeID, repoID: repoID, name: "x", displayName: "X",
+                     branch: "tbd/x", path: "/tmp/x", tmuxServer: "tbd-x"),
+        ],
+    ]
+    let tab0 = Tab(id: UUID(), content: .terminal(terminalID: UUID()), label: nil)
+    let tab1 = Tab(id: UUID(),
+                   content: .liveTranscript(id: UUID(), terminalID: terminalID),
+                   label: nil)
+    appState.tabs[worktreeID] = [tab0, tab1]
+    appState.activeTabIndices[worktreeID] = 0
+
+    appState.macNotificationManager.handleClick(
+        worktreeID: worktreeID, terminalID: terminalID
+    )
+
+    #expect(appState.selectedWorktreeIDs == [worktreeID])
+    #expect(appState.activeTabIndices[worktreeID] == 1)
+}
+
+@MainActor
+@Test func handleClick_userInfoTerminalIDString_routesToTab() async {
+    // Mirrors the string-parsing path used by the UN delegate callback.
+    let worktreeID = UUID()
+    let repoID = UUID()
+    let terminalID = UUID()
+    let (appState, suite) = makeAppStateWithTabs(
+        worktreeID: worktreeID, repoID: repoID, terminalID: terminalID
+    )
+    defer { tearDown(suite) }
+
+    appState.macNotificationManager.handleClick(
+        identifier: worktreeID.uuidString,
+        terminalIDString: terminalID.uuidString
+    )
+
+    #expect(appState.activeTabIndices[worktreeID] == 1)
+}

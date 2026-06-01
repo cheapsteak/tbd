@@ -266,8 +266,8 @@ public struct WorktreeStore: Sendable {
         return wt
     }
 
-    /// List worktrees, optionally filtered by repo and/or status.
-    public func list(repoID: UUID? = nil, status: WorktreeStatus? = nil) async throws -> [Worktree] {
+    /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
+    public func list(repoID: UUID? = nil, status: WorktreeStatus? = nil, limit: Int? = nil, offset: Int? = nil) async throws -> [Worktree] {
         try await writer.read { db in
             var request = WorktreeRecord.all()
             if let repoID {
@@ -276,7 +276,15 @@ public struct WorktreeStore: Sendable {
             if let status {
                 request = request.filter(Column("status") == status.rawValue)
             }
-            return try request.order(Column("sortOrder").asc).fetchAll(db).map { $0.toModel() }
+            if status == .archived {
+                request = request.order(Column("archivedAt").desc)
+            } else {
+                request = request.order(Column("sortOrder").asc)
+            }
+            if let limit {
+                request = request.limit(limit, offset: offset ?? 0)
+            }
+            return try request.fetchAll(db).map { $0.toModel() }
         }
     }
 

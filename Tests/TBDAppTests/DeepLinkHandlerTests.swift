@@ -159,3 +159,18 @@ import TBDShared
     // No buffering once initial state is loaded.
     #expect(appState.pendingDeepLinkID == nil)
 }
+
+@MainActor
+@Test func navigateToWorktree_beforeInitialLoad_buffersTerminalID() async {
+    let appState = AppState()
+    let id = UUID()
+    let terminalID = UUID()
+    // Default: isInitialStateLoaded == false on a fresh AppState.
+    appState.worktrees = [:]
+
+    appState.navigateToWorktree(id, terminalID: terminalID)
+
+    #expect(appState.pendingDeepLinkID == id)
+    #expect(appState.pendingDeepLinkTerminalID == terminalID)
+    #expect(appState.selectedWorktreeIDs.isEmpty)
+}

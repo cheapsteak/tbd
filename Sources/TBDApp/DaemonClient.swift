@@ -403,19 +403,33 @@ actor DaemonClient {
     }
 
     /// Create a new worktree in a repo.
-    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil) async throws -> Worktree {
+    /// When `useExistingBranch` is true, `branch` MUST be set to an existing
+    /// ref name (local like `foo` or remote like `origin/foo`) — the daemon
+    /// checks it out instead of creating a new `tbd/*` branch.
+    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false) async throws -> Worktree {
         return try await callAsync(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID),
+            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch),
             resultType: Worktree.self
         )
     }
 
-    /// List worktrees, optionally filtered by repo and/or status.
-    func listWorktrees(repoID: UUID? = nil, status: WorktreeStatus? = nil) async throws -> [Worktree] {
+    /// List local + `origin/*` branches for a repo. Used by the existing-
+    /// branch picker on the sidebar `+` button.
+    func listBranches(repoID: UUID) async throws -> [BranchInfo] {
+        let result = try await callAsync(
+            method: RPCMethod.repoListBranches,
+            params: RepoListBranchesParams(repoID: repoID),
+            resultType: RepoListBranchesResult.self
+        )
+        return result.branches
+    }
+
+    /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
+    func listWorktrees(repoID: UUID? = nil, status: WorktreeStatus? = nil, limit: Int? = nil, offset: Int? = nil) async throws -> [Worktree] {
         return try await callAsync(
             method: RPCMethod.worktreeList,
-            params: WorktreeListParams(repoID: repoID, status: status),
+            params: WorktreeListParams(repoID: repoID, status: status, limit: limit, offset: offset),
             resultType: [Worktree].self
         )
     }
@@ -473,10 +487,10 @@ actor DaemonClient {
     }
 
     /// Create a terminal in a worktree.
-    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+    func createTerminal(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideProfileID: overrideProfileID, cols: cols, rows: rows),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, resumeSessionID: resumeSessionID, overrideProfileID: overrideProfileID, cols: cols, rows: rows, colorFgBg: colorFgBg),
             resultType: Terminal.self
         )
     }
@@ -509,6 +523,16 @@ actor DaemonClient {
         )
     }
 
+    /// Update COLORFGBG environment variable in all known tmux servers.
+    /// This notifies running shells that the terminal color scheme has changed,
+    /// allowing tools like vim, less, fzf to auto-adjust their output.
+    func updateAppearanceColorFgBg(value: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.appearanceUpdateColorFgBg,
+            params: AppearanceUpdateColorFgBgParams(value: value)
+        )
+    }
+
     /// Delete a terminal (kills tmux window and removes DB record).
     func deleteTerminal(terminalID: UUID) async throws {
         try await callVoidAsync(
@@ -537,10 +561,12 @@ actor DaemonClient {
     }
 
     /// Send a notification.
-    func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil) async throws {
+    func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil,
+                terminalID: UUID? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.notify,
-            params: NotifyParams(worktreeID: worktreeID, type: type, message: message)
+            params: NotifyParams(worktreeID: worktreeID, type: type, message: message,
+                                 terminalID: terminalID)
         )
     }
 

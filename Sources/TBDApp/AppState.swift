@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import SwiftUI
 import TBDShared
@@ -33,7 +34,18 @@ final class AppState: ObservableObject {
     /// from the user's current font, before any `TBDTerminalView` exists.
     /// Plain (non-weak) optional — `AppState` and `AppearanceSettings` share
     /// the app's lifetime, so this reference cannot outlive its target.
-    var appearance: AppearanceSettings?
+    var appearance: AppearanceSettings? {
+        didSet {
+            if let appearance {
+                appearance.themeStore = themeStore
+                setupAppearanceSubscriptions(appearance)
+            }
+        }
+    }
+    /// Subscription to appearance.$schemeID changes for pushing COLORFGBG updates to running tmux servers.
+    private var appearanceSubscription: AnyCancellable?
+    /// Subscription to themeStore.$userThemes changes for reconciling the active scheme.
+    private var themeStoreSubscription: AnyCancellable?
 
     @Published var repos: [Repo] = []
     @Published var worktrees: [UUID: [Worktree]] = [:]
@@ -127,6 +139,11 @@ final class AppState: ObservableObject {
     /// Archived worktrees keyed by repo ID, fetched on demand.
     @Published var archivedWorktrees: [UUID: [Worktree]] = [:]
 
+    /// Whether there are more archived worktrees to load beyond what's in `archivedWorktrees`.
+    @Published var archivedWorktreesHasMore: [UUID: Bool] = [:]
+    /// Guards against concurrent loadMoreArchivedWorktrees calls (double-tap, race with refresh).
+    @Published var isLoadingMoreArchived: [UUID: Bool] = [:]
+
     /// Set briefly when a deep link lands on an archived worktree. The
     /// ArchivedWorktreesView observes this and scrolls/flashes the matching
     /// row, then clears the value after the flash animation completes.
@@ -154,6 +171,13 @@ final class AppState: ObservableObject {
     /// `connectAndLoadInitialState()`. Internal-only — never written from
     /// outside the AppState extension that consumes it.
     var pendingDeepLinkID: UUID?
+
+    /// Companion to `pendingDeepLinkID`: buffers the originating terminal so
+    /// cold-start clicks land on the right tab after the drain. Drained
+    /// alongside `pendingDeepLinkID` at the end of
+    /// `connectAndLoadInitialState()`. Internal-only — never written from
+    /// outside the AppState extension that consumes it.
+    var pendingDeepLinkTerminalID: UUID?
 
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
@@ -315,6 +339,8 @@ final class AppState: ObservableObject {
     @Published var alertMessage: String? = nil
     @Published var alertIsError: Bool = false
 
+    let themeStore = ThemeStore()
+
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
@@ -348,6 +374,8 @@ final class AppState: ObservableObject {
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
         macNotificationManager.configure(appState: self)
+        themeStore.reloadFromDisk()
+        themeStore.startWatching()
         // Under `swift test`, the per-test `AppState()` instances would each
         // spawn a subscription Task that blocks indefinitely in `recv()` on
         // the daemon socket. With enough tests the Swift cooperative thread
@@ -441,6 +469,55 @@ final class AppState: ObservableObject {
         // Store must happen on MainActor
         Task { @MainActor in
             self.memoryPressureSource = source
+        }
+    }
+
+    // MARK: - Appearance Subscriptions
+
+    /// Subscribe to appearance setting changes and push updates to running tmux servers.
+    /// Called when `appearance` is set via didSet.
+    @MainActor
+    private func setupAppearanceSubscriptions(_ appearance: AppearanceSettings) {
+        // Subscribe to schemeID changes to push COLORFGBG updates to all running tmux servers.
+        // When the user changes the color scheme, this notifies all shells so tools like vim,
+        // less, fzf can auto-adjust to the new scheme.
+        // Debounce rapid changes (e.g., scrubbing through the scheme picker) to coalesce
+        // multiple RPCs into a single request. The 200ms window is long enough to capture
+        // rapid picker changes but short enough to feel responsive.
+        appearanceSubscription = appearance.$schemeID
+            // `@Published` delivers the current value at subscription time. Without
+            // `dropFirst()`, broadcastAppearanceColorFgBg runs on app launch before
+            // the daemon connection is even established — the RPC fails, the error
+            // gets logged and swallowed. Drop that subscriber-time emission so we
+            // only react to actual user-driven scheme changes.
+            .dropFirst()
+            .removeDuplicates()
+            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.broadcastAppearanceColorFgBg(appearance)
+            }
+
+        // When the theme store reloads (external file add/delete/edit), reconcile
+        // the active schemeID so a deleted theme falls back to the default rather
+        // than leaving the UI pointing at an unknown id.
+        themeStoreSubscription = themeStore.$userThemes
+            .dropFirst()  // skip subscriber-time emission, match appearanceSubscription pattern
+            .sink { [weak appearance] _ in
+                appearance?.reconcileWithStore()
+            }
+    }
+
+    /// Compute the new COLORFGBG value and push it to all running tmux servers.
+    @MainActor
+    private func broadcastAppearanceColorFgBg(_ appearance: AppearanceSettings) {
+        let newValue = appearance.currentColorFgBg
+        Task {
+            do {
+                try await daemonClient.updateAppearanceColorFgBg(value: newValue)
+            } catch {
+                logger.error("Failed to broadcast COLORFGBG update: \(error, privacy: .public)")
+                // Fire-and-forget: don't block on RPC failure
+            }
         }
     }
 
@@ -592,7 +669,8 @@ final class AppState: ObservableObject {
         macNotificationManager.postIfEnabled(
             worktreeID: notification.worktreeID,
             message: notification.message,
-            worktrees: allWorktrees
+            worktrees: allWorktrees,
+            terminalID: notification.terminalID
         )
     }
 
@@ -653,8 +731,10 @@ final class AppState: ObservableObject {
         }
         isInitialStateLoaded = true
         if let pendingID = pendingDeepLinkID {
+            let pendingTerminalID = pendingDeepLinkTerminalID
             pendingDeepLinkID = nil
-            navigateToWorktree(pendingID)
+            pendingDeepLinkTerminalID = nil
+            navigateToWorktree(pendingID, terminalID: pendingTerminalID)
         }
         if didConnect {
             Task { [weak self] in

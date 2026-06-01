@@ -6,6 +6,11 @@ protocol WebviewFindClient: AnyObject {
     func find(_ string: String, backwards: Bool, completionHandler: @escaping (Bool) -> Void)
 }
 
+@MainActor
+protocol WebviewReloadClient: AnyObject {
+    func reload()
+}
+
 extension WKWebView: WebviewFindClient {
     func find(_ string: String, backwards: Bool, completionHandler: @escaping (Bool) -> Void) {
         let config = WKFindConfiguration()
@@ -17,14 +22,31 @@ extension WKWebView: WebviewFindClient {
     }
 }
 
+extension WKWebView: WebviewReloadClient {
+    func reload() {
+        // Disambiguate from WKWebView.reload() -> WKNavigation? — calling
+        // reload() inside this extension would recurse, so route through a
+        // typed reference to the original method.
+        let webkitReload: (WKWebView) -> () -> WKNavigation? = WKWebView.reload
+        _ = webkitReload(self)()
+    }
+}
+
+@MainActor
+final class WebviewState: ObservableObject {
+    @Published var currentURL: URL?
+}
+
 struct WebviewPaneView: NSViewRepresentable {
     let url: URL
+    let state: WebviewState
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(state: state) }
 
     func makeNSView(context: Context) -> WebviewPaneHostView {
         let host = WebviewPaneHostView(url: url)
         host.webView.navigationDelegate = context.coordinator
+        context.coordinator.observe(host.webView)
         return host
     }
 
@@ -32,7 +54,22 @@ struct WebviewPaneView: NSViewRepresentable {
         // Don't reload on SwiftUI updates — only initial load matters
     }
 
-    class Coordinator: NSObject, WKNavigationDelegate {}
+    @MainActor
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        private let state: WebviewState
+        private var urlObservation: NSKeyValueObservation?
+
+        init(state: WebviewState) {
+            self.state = state
+        }
+
+        func observe(_ webView: WKWebView) {
+            urlObservation = webView.observe(\.url, options: [.initial, .new]) { [weak state] webView, _ in
+                let newURL = webView.url
+                Task { @MainActor in state?.currentURL = newURL }
+            }
+        }
+    }
 }
 
 final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
@@ -47,13 +84,15 @@ final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
     ]
 
     private let findClient: WebviewFindClient
+    private let reloadClient: WebviewReloadClient
 
-    init(url: URL, findClient: WebviewFindClient? = nil) {
+    init(url: URL, findClient: WebviewFindClient? = nil, reloadClient: WebviewReloadClient? = nil) {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
 
         webView = WKWebView(frame: .zero, configuration: config)
         self.findClient = findClient ?? webView
+        self.reloadClient = reloadClient ?? webView
 
         super.init(frame: .zero)
 
@@ -78,6 +117,34 @@ final class WebviewPaneHostView: NSView, NSUserInterfaceValidations {
     }
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // performKeyEquivalent walks the whole view hierarchy, so without this
+        // guard an unfocused webview pane would steal Cmd+R from whichever
+        // pane the user actually clicked. The first responder is normally the
+        // WKWebView or one of its descendants, not the host itself — walk up
+        // from the first responder and only handle when self is an ancestor.
+        guard isFirstResponderInHierarchy() else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard flags == .command else { return super.performKeyEquivalent(with: event) }
+        guard event.charactersIgnoringModifiers?.lowercased() == "r" else {
+            return super.performKeyEquivalent(with: event)
+        }
+        reloadClient.reload()
+        return true
+    }
+
+    private func isFirstResponderInHierarchy() -> Bool {
+        guard let responder = window?.firstResponder as? NSView else { return false }
+        var current: NSView? = responder
+        while let view = current {
+            if view === self { return true }
+            current = view.superview
+        }
+        return false
+    }
 
     override func performTextFinderAction(_ sender: Any?) {
         guard let action = textFinderAction(from: sender) else { return }

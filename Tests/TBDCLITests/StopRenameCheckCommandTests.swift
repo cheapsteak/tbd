@@ -124,14 +124,23 @@ struct StopRenameCheckCommandTests {
         #expect(out == nil)
     }
 
-    @Test func branchMissingTbdPrefix_returnsNil() {
+    @Test func nonTbdBranch_emitsBlockWithDisplayRenameOnly() throws {
         let dir = Self.tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let out = StopRenameCheckCore.decide(
             stdinData: Self.payload(),
-            dependencies: Self.deps(branch: "main", counterDirectory: dir)
+            dependencies: Self.deps(branch: "feature/foo", counterDirectory: dir)
         )
-        #expect(out == nil)
+        let raw = try #require(out)
+        let parsed = try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any]
+        #expect(parsed?["decision"] as? String == "block")
+        let reason = try #require(parsed?["reason"] as? String)
+        // Only the display rename is suggested — not the branch rename.
+        #expect(!reason.contains("git branch -m"))
+        #expect(reason.contains("tbd worktree rename"))
+        // The "intentionally not renamed" line should mention the actual branch
+        // so it's a real, concrete statement (not boilerplate).
+        #expect(reason.contains("feature/foo"))
     }
 
     @Test func counterAtCap_returnsNil() throws {

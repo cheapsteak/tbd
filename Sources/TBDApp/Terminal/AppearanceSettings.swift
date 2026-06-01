@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import SwiftTerm
+import TBDShared
 
 /// Global user-customizable terminal appearance settings.
 ///
@@ -36,6 +37,20 @@ final class AppearanceSettings: ObservableObject {
     @Published var fontName: String { didSet { defaults.set(fontName, forKey: Keys.fontName) } }
     @Published var fontSize: CGFloat { didSet { defaults.set(Double(fontSize), forKey: Keys.fontSize) } }
     @Published var schemeID: String { didSet { defaults.set(schemeID, forKey: Keys.schemeID) } }
+
+    /// Optional in-memory draft of the current scheme. When non-nil, the
+    /// renderer uses this instead of the persisted scheme — used while the
+    /// user has unsaved edits in the theme editor.
+    @Published var draftSchemeOverride: TerminalColorScheme?
+
+    /// Injected by `AppState`; let `effectiveScheme` see user themes.
+    weak var themeStore: ThemeStore?
+
+    /// Single accessor terminal views should use. Returns the draft override
+    /// when one's active, otherwise the saved scheme (bundled or user).
+    var effectiveScheme: TerminalColorScheme {
+        draftSchemeOverride ?? ColorSchemes.scheme(forID: schemeID, store: themeStore)
+    }
     @Published var cursorStyle: CursorStyle { didSet { defaults.set(cursorStyle.rawString, forKey: Keys.cursorStyle) } }
     @Published var thinStrokes: Bool { didSet { defaults.set(thinStrokes, forKey: Keys.thinStrokes) } }
 
@@ -57,9 +72,20 @@ final class AppearanceSettings: ObservableObject {
 
         // Scheme ID — normalize unknown ids to the default so the Settings Picker
         // always has a matching tag selected (otherwise it renders empty).
+        // Accept the stored id if EITHER it's bundled OR a user-theme JSON file
+        // with that id exists on disk. Without the on-disk check, init would
+        // overwrite a legitimate user-theme selection with `Defaults.schemeID`
+        // before `ThemeStore.reloadFromDisk()` ever ran, silently reverting
+        // the user to Tango on every relaunch. Filesystem check is intentional
+        // (not a ThemeStore dependency) so this stays a pure init step.
         let storedScheme = defaults.string(forKey: Keys.schemeID) ?? Defaults.schemeID
-        self.schemeID = ColorSchemes.bundled.contains(where: { $0.id == storedScheme })
-            ? storedScheme : Defaults.schemeID
+        let bundledHit = ColorSchemes.bundled.contains(where: { $0.id == storedScheme })
+        let userFileHit = FileManager.default.fileExists(
+            atPath: TBDConstants.configDir
+                .appendingPathComponent("terminal-themes/\(storedScheme).json")
+                .path
+        )
+        self.schemeID = (bundledHit || userFileHit) ? storedScheme : Defaults.schemeID
 
         // Cursor — round-trip via rawString; fall back on unknown.
         let storedCursor = defaults.string(forKey: Keys.cursorStyle) ?? ""
@@ -90,6 +116,46 @@ final class AppearanceSettings: ObservableObject {
     var font: NSFont {
         NSFont(name: fontName, size: fontSize)
             ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+    }
+
+    /// Computes the COLORFGBG environment variable value based on a color scheme's
+    /// background luminance. Returns "0;15" (black fg, white bg) for light backgrounds
+    /// (luminance > 0.5), or "15;0" (white fg, black bg) for dark backgrounds.
+    /// Uses an approximate luminance — the WCAG coefficients applied to raw sRGB values,
+    /// skipping the gamma-linearization step. Sufficient for a binary light/dark
+    /// threshold on near-black / near-white terminal backgrounds; do not use this
+    /// helper as a general-purpose accessibility-contrast check.
+    nonisolated static func colorFgBg(for scheme: TerminalColorScheme) -> String {
+        // Convert SwiftTerm.Color channels (0–65535 scale) to 0–1 range.
+        // Bundled scheme values are sRGB hex codes; use sRGB so wide-gamut
+        // displays (Display P3) don't drift from the spec.
+        let red = CGFloat(scheme.background.red) / 65535.0
+        let green = CGFloat(scheme.background.green) / 65535.0
+        let blue = CGFloat(scheme.background.blue) / 65535.0
+
+        let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        // Light background (luminance > 0.5) → use black foreground, white background hint
+        // Dark background (luminance ≤ 0.5) → use white foreground, black background hint
+        return luminance > 0.5 ? "0;15" : "15;0"
+    }
+
+    /// Computes COLORFGBG for the currently active terminal color scheme.
+    var currentColorFgBg: String {
+        let scheme = ColorSchemes.scheme(forID: schemeID, store: themeStore)
+        return Self.colorFgBg(for: scheme)
+    }
+
+    /// Call when ThemeStore reloads. If the active schemeID no longer points
+    /// at a bundled or a known user theme, fall back to the default. Handles
+    /// externally-deleted theme files (vim `:!rm`, `git pull` that removed a
+    /// tracked theme, etc.).
+    func reconcileWithStore() {
+        let bundledHit = ColorSchemes.bundled.contains { $0.id == schemeID }
+        let userHit = themeStore?.userThemes.contains { $0.id == schemeID } ?? false
+        if !bundledHit && !userHit {
+            schemeID = ColorSchemes.defaultScheme.id
+            draftSchemeOverride = nil
+        }
     }
 }
 

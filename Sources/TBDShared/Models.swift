@@ -451,15 +451,37 @@ public struct TBDNotification: Codable, Sendable, Identifiable {
     public var message: String?
     public var read: Bool
     public var createdAt: Date
+    /// Optional terminal that triggered the notification. When present, the
+    /// app can route a banner click to the originating tab rather than just
+    /// selecting the worktree. Nil for older rows or for notifications that
+    /// don't originate from a specific terminal.
+    public var terminalID: UUID?
 
     public init(id: UUID = UUID(), worktreeID: UUID, type: NotificationType,
-                message: String? = nil, read: Bool = false, createdAt: Date = Date()) {
+                message: String? = nil, read: Bool = false, createdAt: Date = Date(),
+                terminalID: UUID? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.type = type
         self.message = message
         self.read = read
         self.createdAt = createdAt
+        self.terminalID = terminalID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, worktreeID, type, message, read, createdAt, terminalID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        worktreeID = try c.decode(UUID.self, forKey: .worktreeID)
+        type = try c.decode(NotificationType.self, forKey: .type)
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+        read = try c.decodeIfPresent(Bool.self, forKey: .read) ?? false
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        terminalID = try c.decodeIfPresent(UUID.self, forKey: .terminalID)
     }
 }
 
@@ -550,7 +572,7 @@ public struct SessionMessagesParams: Codable, Sendable {
 
 // MARK: - Transcript Items (rich rendering)
 
-public enum SystemKind: String, Codable, Sendable, Equatable {
+public enum SystemKind: String, Codable, Sendable, Equatable, Hashable {
     case toolReminder
     case hookOutput
     case environmentDetails
@@ -559,7 +581,7 @@ public enum SystemKind: String, Codable, Sendable, Equatable {
     case other
 }
 
-public struct ToolResult: Codable, Sendable, Equatable {
+public struct ToolResult: Codable, Sendable, Equatable, Hashable {
     public let text: String
     public let truncatedTo: Int?
     public let isError: Bool
@@ -570,7 +592,7 @@ public struct ToolResult: Codable, Sendable, Equatable {
     }
 }
 
-public struct Subagent: Codable, Sendable, Equatable {
+public struct Subagent: Codable, Sendable, Equatable, Hashable {
     public let agentID: String
     public let agentType: String?
     public let items: [TranscriptItem]
@@ -585,7 +607,7 @@ public struct Subagent: Codable, Sendable, Equatable {
 /// assistant JSONL line. The three fields together represent the size of
 /// the prompt sent on that request — see docs/transcript-context-usage.md
 /// for the meaning of each.
-public struct TokenUsage: Codable, Sendable, Equatable {
+public struct TokenUsage: Codable, Sendable, Equatable, Hashable {
     public let inputTokens: Int
     public let cacheCreationTokens: Int
     public let cacheReadTokens: Int
@@ -602,7 +624,7 @@ public struct TokenUsage: Codable, Sendable, Equatable {
     }
 }
 
-public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable {
+public indirect enum TranscriptItem: Codable, Sendable, Identifiable, Equatable, Hashable {
     case userPrompt(id: String, text: String, timestamp: Date?)
     case assistantText(id: String, text: String, timestamp: Date?, usage: TokenUsage? = nil)
     case toolCall(id: String, name: String, inputJSON: String,

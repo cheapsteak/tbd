@@ -11,9 +11,12 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false) async throws -> Worktree {
-        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent)
-        try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows)
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false) async throws -> Worktree {
+        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch)
+        // Pass the original branch ref (may include `origin/` prefix) through
+        // so phase 2 can dispatch to the correct git command.
+        let existingBranchRef = useExistingBranch ? branch : nil
+        try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef)
         guard let completed = try await db.worktrees.get(id: pending.id) else {
             throw WorktreeLifecycleError.worktreeNotFound(pending.id)
         }
@@ -25,7 +28,7 @@ extension WorktreeLifecycle {
     /// Phase 1: Synchronous-fast. Generates a name, inserts a DB row with
     /// `status = .creating`, and returns the worktree immediately.
     /// NO git operations happen here.
-    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false) async throws -> Worktree {
+    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false) async throws -> Worktree {
         // 1. Fetch repo
         guard let repo = try await db.repos.get(id: repoID) else {
             throw WorktreeLifecycleError.repoNotFound(repoID)
@@ -41,8 +44,8 @@ extension WorktreeLifecycle {
         )
 
         // 2. Generate name and construct path
-        let name = folder ?? NameGenerator.generate()
-        let branch = branch ?? "tbd/\(name)"
+        let resolvedName: String
+        let resolvedBranch: String
         let layout = WorktreeLayout()
         let canonicalBase = layout.basePath(for: repo)
         // Lazily create the canonical base directory for this slot.
@@ -58,15 +61,40 @@ extension WorktreeLifecycle {
         if !FileManager.default.fileExists(atPath: canonicalBase) {
             logger.error("Failed to create worktree base dir \(canonicalBase, privacy: .public)")
         }
-        let worktreePath = (canonicalBase as NSString).appendingPathComponent(name)
+
+        if useExistingBranch {
+            // Existing-branch flow: derive a folder name from the branch's
+            // local name (stripping any `origin/` prefix). Never auto-name.
+            guard let providedBranch = branch, !providedBranch.isEmpty else {
+                throw WorktreeLifecycleError.createFailed(
+                    "useExistingBranch requires a branch name"
+                )
+            }
+            let localBranch = providedBranch.hasPrefix("origin/")
+                ? String(providedBranch.dropFirst("origin/".count))
+                : providedBranch
+            let sanitized = WorktreeLayout.sanitize(localBranch)
+            let baseFolder = sanitized.isEmpty ? "branch" : sanitized
+            resolvedName = Self.uniqueFolderName(
+                base: baseFolder, in: canonicalBase
+            )
+            // The on-disk local branch ends up as `localBranch` (for remote
+            // tracking, `--track -b <localName>` creates it; for plain local,
+            // we check out the same branch under the same name).
+            resolvedBranch = localBranch
+        } else {
+            resolvedName = folder ?? NameGenerator.generate()
+            resolvedBranch = branch ?? "tbd/\(resolvedName)"
+        }
+        let worktreePath = (canonicalBase as NSString).appendingPathComponent(resolvedName)
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
 
         // 3. Insert DB row with status = .creating
         let worktree = try await db.worktrees.create(
             repoID: repo.id,
-            name: name,
+            name: resolvedName,
             displayName: displayName,
-            branch: branch,
+            branch: resolvedBranch,
             path: worktreePath,
             tmuxServer: tmuxServer,
             status: .creating,
@@ -76,9 +104,32 @@ extension WorktreeLifecycle {
         return worktree
     }
 
+    /// Returns `<base>`, or `<base>-2`, `<base>-3`, … — the first folder name
+    /// under `parentDir` that does not yet exist on disk. Caps at -1000 to
+    /// avoid pathological infinite loops; throws via the underlying
+    /// `git worktree add` if every candidate is taken.
+    private static func uniqueFolderName(base: String, in parentDir: String) -> String {
+        let firstCandidate = (parentDir as NSString).appendingPathComponent(base)
+        if !FileManager.default.fileExists(atPath: firstCandidate) {
+            return base
+        }
+        for suffix in 2...1000 {
+            let candidate = "\(base)-\(suffix)"
+            let path = (parentDir as NSString).appendingPathComponent(candidate)
+            if !FileManager.default.fileExists(atPath: path) {
+                return candidate
+            }
+        }
+        // Fall through to the original; `git worktree add` will fail loudly.
+        return base
+    }
+
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
     /// then updates status to `.active`. On failure, deletes the DB row.
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil) async throws {
+    ///
+    /// When `existingBranchRef` is non-nil, the worktree is checked out from
+    /// that existing ref (local or `origin/*`) — no fresh branch is created.
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil) async throws {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -103,24 +154,56 @@ extension WorktreeLifecycle {
             )
 
             // 3. git worktree add
-            let result = try await attemptWorktreeAdd(
-                repo: repo, name: worktree.name, branch: worktree.branch,
-                worktreePath: worktree.path,
-                userSpecifiedFolder: userSpecifiedFolder,
-                userSpecifiedBranch: userSpecifiedBranch
-            )
+            let resultPath: String
+            if let ref = existingBranchRef {
+                // Existing-branch flow: check out the chosen ref. Local branches
+                // get `git worktree add <path> <branch>`; remote refs get
+                // `--track -b <localName> <path> origin/<name>` to create a
+                // local tracking branch.
+                do {
+                    if ref.hasPrefix("origin/") {
+                        try await git.worktreeAddTrackingRemote(
+                            repoPath: repo.path,
+                            worktreePath: worktree.path,
+                            localBranch: worktree.branch,
+                            remoteRef: ref
+                        )
+                    } else {
+                        try await git.worktreeAddExisting(
+                            repoPath: repo.path,
+                            worktreePath: worktree.path,
+                            branch: worktree.branch
+                        )
+                    }
+                    resultPath = worktree.path
+                } catch {
+                    // Clean up any partially-created directory before bubbling.
+                    try? FileManager.default.removeItem(atPath: worktree.path)
+                    throw WorktreeLifecycleError.createFailed(
+                        "git worktree add failed for existing branch '\(ref)': \(error)"
+                    )
+                }
+            } else {
+                let result = try await attemptWorktreeAdd(
+                    repo: repo, name: worktree.name, branch: worktree.branch,
+                    worktreePath: worktree.path,
+                    userSpecifiedFolder: userSpecifiedFolder,
+                    userSpecifiedBranch: userSpecifiedBranch
+                )
 
-            // 4. If the name changed due to collision, update the DB record
-            if result.name != worktree.name {
-                // Update path/branch/name in DB would be complex — for now the retry
-                // names the worktree path differently but we keep the original DB row.
-                // The attemptWorktreeAdd already handles retries.
+                // 4. If the name changed due to collision, update the DB record
+                if result.name != worktree.name {
+                    // Update path/branch/name in DB would be complex — for now the retry
+                    // names the worktree path differently but we keep the original DB row.
+                    // The attemptWorktreeAdd already handles retries.
+                }
+                resultPath = result.path
             }
 
             // 5. Setup tmux terminals
             try await setupTerminals(
                 worktree: worktree, repo: repo,
-                worktreePath: result.path,
+                worktreePath: resultPath,
                 skipClaude: skipClaude,
                 initialPrompt: initialPrompt,
                 cols: cols,

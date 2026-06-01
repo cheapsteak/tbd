@@ -1,5 +1,25 @@
 import Foundation
 
+/// A branch reference returned by `GitManager.listBranches`.
+///
+/// Includes both `refs/heads/*` (local) and `refs/remotes/origin/*` (remote
+/// tracking) entries. `localName` strips the `origin/` prefix for remote
+/// entries — it's the name the new local branch will receive when the user
+/// picks a remote ref to create a worktree from.
+public struct BranchRef: Sendable, Equatable {
+    /// e.g. `main` or `origin/feature/x`.
+    public let name: String
+    public let isRemote: Bool
+    /// For remote: stripped of the `origin/` prefix. For local: same as `name`.
+    public let localName: String
+
+    public init(name: String, isRemote: Bool, localName: String) {
+        self.name = name
+        self.isRemote = isRemote
+        self.localName = localName
+    }
+}
+
 /// Error thrown when a git command fails.
 public struct GitError: Error, CustomStringConvertible {
     public let command: String
@@ -139,6 +159,16 @@ public struct GitManager: Sendable {
         _ = try await run(arguments: ["worktree", "add", worktreePath, branch], at: repoPath)
     }
 
+    /// Adds a worktree at `worktreePath` tracking an existing remote branch.
+    /// Creates a local branch named `localBranch` from `remoteRef`
+    /// (e.g. `origin/foo`) with upstream tracking configured.
+    public func worktreeAddTrackingRemote(repoPath: String, worktreePath: String, localBranch: String, remoteRef: String) async throws {
+        _ = try await run(
+            arguments: ["worktree", "add", "--track", "-b", localBranch, worktreePath, remoteRef],
+            at: repoPath
+        )
+    }
+
     /// Adds a worktree at `worktreePath`, creating a new branch pointing at the given SHA.
     /// Used as a fallback when the original branch was renamed/deleted but we have the
     /// archived HEAD SHA to recover the commit.
@@ -187,6 +217,79 @@ public struct GitManager: Sendable {
     /// Prunes stale worktree tracking entries.
     public func worktreePrune(repoPath: String) async throws {
         _ = try await run(arguments: ["worktree", "prune"], at: repoPath)
+    }
+
+    /// Lists local branches and `origin/*` remote tracking branches that are
+    /// available to check out into a new worktree.
+    ///
+    /// Filtering:
+    /// - Symbolic refs like `origin/HEAD` are skipped (they're aliases).
+    /// - Branches already checked out in any worktree are skipped — git refuses
+    ///   to check the same branch out twice, and for a remote ref `origin/foo`
+    ///   we'd `-b foo` which would also collide.
+    /// - When a local `foo` and `origin/foo` both exist, the remote duplicate
+    ///   is dropped — the local is directly usable via `git worktree add <path> <branch>`.
+    public func listBranches(repoPath: String) async throws -> [BranchRef] {
+        // %(symref) is non-empty for symbolic refs (e.g. refs/remotes/origin/HEAD,
+        // which short-names to bare "origin"). Filtering by symref catches it
+        // regardless of how the short name renders.
+        let output = try await run(
+            arguments: [
+                "for-each-ref",
+                "--format=%(refname:short)|%(symref)",
+                "refs/heads",
+                "refs/remotes/origin",
+            ],
+            at: repoPath
+        )
+
+        // Branches already checked out in any worktree (main repo + linked
+        // worktrees) — git rejects a second checkout of the same branch.
+        // Errors propagate: a silent failure here would leak in-use branches
+        // and the user would see a confusing `git worktree add` failure later.
+        let inUse = Set(
+            try await worktreeList(repoPath: repoPath)
+                .map(\.branch)
+                .filter { !$0.isEmpty }
+        )
+
+        var refs: [BranchRef] = []
+        var localNames = Set<String>()
+
+        for line in output.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            // for-each-ref format: "<name>|<symref>" where symref is the target
+            // ref for symbolic refs (empty for normal branches).
+            let parts = trimmed.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let nameSlice = parts.first else { continue }
+            let name = String(nameSlice)
+            if name.isEmpty { continue }
+            let symref = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
+            if !symref.isEmpty { continue }
+            let isRemote = name.hasPrefix("origin/")
+            let localName: String
+            if isRemote {
+                localName = String(name.dropFirst("origin/".count))
+            } else {
+                localName = name
+                localNames.insert(name)
+            }
+            // Drop branches already checked out somewhere — applies to local
+            // refs directly, and to remote refs whose local counterpart is taken.
+            if inUse.contains(localName) { continue }
+            refs.append(BranchRef(
+                name: name,
+                isRemote: isRemote,
+                localName: localName
+            ))
+        }
+
+        // Drop remote entries that have a matching local branch — the local
+        // is more directly usable.
+        return refs.filter { ref in
+            !(ref.isRemote && localNames.contains(ref.localName))
+        }
     }
 
     /// Lists all worktrees, returning their path and branch name.

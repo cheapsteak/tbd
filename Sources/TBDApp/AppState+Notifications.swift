@@ -8,9 +8,11 @@ extension AppState {
     // MARK: - Notification Actions
 
     /// Send a notification.
-    func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil) async {
+    func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil,
+                terminalID: UUID? = nil) async {
         do {
-            try await daemonClient.notify(worktreeID: worktreeID, type: type, message: message)
+            try await daemonClient.notify(worktreeID: worktreeID, type: type,
+                                          message: message, terminalID: terminalID)
         } catch {
             logger.error("Failed to send notification: \(error)")
             handleConnectionError(error)

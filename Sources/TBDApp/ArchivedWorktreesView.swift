@@ -41,6 +41,10 @@ struct ArchivedWorktreesView: View {
         appState.selectedArchivedWorktreeIDs[repoID]
     }
 
+    private var hasMore: Bool {
+        appState.archivedWorktreesHasMore[repoID] == true
+    }
+
     var body: some View {
         if allRows.isEmpty {
             emptyState
@@ -65,7 +69,11 @@ struct ArchivedWorktreesView: View {
                     .fontWeight(.medium)
                 Spacer()
                 if hideEmpty && rows.count < allRows.count {
-                    Text("\(rows.count) of \(allRows.count)")
+                    Text("\(rows.count) of \(allRows.count)\(hasMore ? "+" : "")")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else if hasMore {
+                    Text("\(rows.count)+")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } else {
@@ -105,25 +113,44 @@ struct ArchivedWorktreesView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(rows) { row in
-                    ArchivedWorktreeRow(
-                        row: row,
-                        isSelected: selectedID == row.id
-                    )
-                    .id(row.id)
-                    .contentShape(Rectangle())
-                    .onTapGesture { select(row) }
-                    .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
-                    .listRowBackground(rowBackground(for: row))
-                    .listRowSeparator(.hidden)
-                    .contextMenu {
-                        if row.reviveState == nil {
-                            Button("Revive") {
-                                Task { await appState.reviveWorktree(id: row.worktree.id) }
+                    List {
+                        ForEach(rows) { row in
+                            ArchivedWorktreeRow(
+                                row: row,
+                                isSelected: selectedID == row.id
+                            )
+                            .id(row.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture { select(row) }
+                            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                            .listRowBackground(rowBackground(for: row))
+                            .listRowSeparator(.hidden)
+                            .contextMenu {
+                                if row.reviveState == nil {
+                                    Button("Revive") {
+                                        Task { await appState.reviveWorktree(id: row.worktree.id) }
+                                    }
+                                }
                             }
                         }
+                        if hasMore {
+                            let isLoading = appState.isLoadingMoreArchived[repoID] == true
+                            Button {
+                                Task { await appState.loadMoreArchivedWorktrees(repoID: repoID) }
+                            } label: {
+                                Text(isLoading ? "Loading…" : "Load More…")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isLoading)
+                            .listRowInsets(EdgeInsets(top: 2, leading: 12, bottom: 2, trailing: 12))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                        }
                     }
-                }
                     .listStyle(.plain)
                     .onChange(of: appState.highlightedArchivedWorktreeID, initial: true) { _, newValue in
                         guard let id = newValue, rows.contains(where: { $0.id == id }) else { return }

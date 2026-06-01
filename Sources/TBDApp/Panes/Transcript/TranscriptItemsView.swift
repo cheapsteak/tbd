@@ -39,15 +39,13 @@ struct TranscriptItemsView: View {
     /// need the signal.
     var atBottom: Binding<Bool>? = nil
 
-    /// Tracks the most recently hovered row. The latched row is the only
-    /// one that materializes `.textSelection(.enabled)` (via
-    /// `transcriptSelectableText` + `EnvironmentValues.transcriptTextSelection`)
-    /// — every other visible row renders plain `Text` to avoid the per-row
-    /// `NSTextField` tax that caused ~17 s layout hangs (see
-    /// `TranscriptSelectableText.swift`). The latch is intentional: we do NOT
-    /// clear on hover-exit so that drag-select still works when the cursor
-    /// briefly leaves the row geometry.
-    @State private var hoveredItemID: String? = nil
+    /// Per-`TranscriptItemsView`-instance memoization of the render-node array.
+    /// Returns the SAME `[TranscriptRenderNode]` instance when `items` is
+    /// unchanged so a `body` re-eval (data poll, parent re-render, etc.) does
+    /// not rebuild the array or force AttributeGraph to re-copy it (issue #129).
+    /// A reference type held in `@State` so its mutations persist across body
+    /// passes without themselves invalidating the view.
+    @State private var nodeCache = TranscriptNodeCache()
 
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
@@ -68,7 +66,7 @@ struct TranscriptItemsView: View {
 
     @ViewBuilder
     private var bodyView: some View {
-        let nodes = transcriptRenderNodes(from: items)
+        let nodes = nodeCache.nodes(for: items)
         let _ = {
             guard nodes.count > 100, let tid = terminalID else { return }
             Self.bodyLogged.withLock { logged in
@@ -80,11 +78,7 @@ struct TranscriptItemsView: View {
         }()
         LazyVStack(alignment: .leading, spacing: 4) {
             ForEach(nodes) { node in
-                TranscriptRow(node: node, terminalID: terminalID)
-                    .environment(\.transcriptTextSelection, hoveredItemID == node.id)
-                    .onHover { hovering in
-                        if hovering { hoveredItemID = node.id }
-                    }
+                SelectableTranscriptRow(node: node, terminalID: terminalID)
             }
             // 1pt sentinel that drives `atBottom`. Replaced the prior
             // `.onScrollGeometryChange(for: AtBottomGeometry.self)` reader that
@@ -103,5 +97,43 @@ struct TranscriptItemsView: View {
                 .onDisappear { atBottom?.wrappedValue = false }
         }
         .padding(.vertical, 8)
+    }
+}
+
+/// Wraps a single `TranscriptRow` and owns its own hover state, so a hover
+/// re-renders ONLY the entered/exited row — `TranscriptItemsView.body` never
+/// re-runs on hover. This is the load-bearing half of the issue #129
+/// hover-rebuild fix: previously the hovered-row id lived on
+/// `TranscriptItemsView` as `@State`, so every mouse crossing re-ran the whole
+/// list body (rebuilding the node array, re-diffing the `ForEach`, forcing
+/// AttributeGraph to deep-copy the input). Mirrors the per-row local-hover
+/// pattern already used by `ActivityRowChrome`.
+///
+/// The selection gate (`transcriptTextSelection`) is materialized only while
+/// this row is hovered, preserving the #120 fix that keeps at most one row's
+/// `NSTextField` alive at a time and avoids the ~17 s per-row-NSTextField storm.
+///
+/// Latch decision (issue #129): the previous gate was *latched* — it never
+/// cleared on hover-exit so a drag-select that wandered slightly outside the row
+/// survived. Per-row local state clears on exit instead, and that is safe:
+/// AppKit `NSTrackingArea`s (what SwiftUI `.onHover` is built on) do NOT post
+/// `mouseExited` during an active drag unless `.enabledDuringMouseDrag` is set,
+/// which `.onHover` does not. So while the button is held during a drag-select,
+/// `isHovered` stays `true` and the `NSTextField` is not torn down — the latch
+/// was only ever protecting a case AppKit already handles. Trade-off: if the
+/// pointer leaves the row with no button held, selection clears, which is
+/// acceptable since each row is its own `NSTextField` and selection cannot span
+/// rows anyway. This guarantee assumes the drag-select begins inside the row; a
+/// drag that starts outside never armed this row's selection in the first place.
+private struct SelectableTranscriptRow: View {
+    let node: TranscriptRenderNode
+    let terminalID: UUID?
+
+    @State private var isHovered = false
+
+    var body: some View {
+        TranscriptRow(node: node, terminalID: terminalID)
+            .environment(\.transcriptTextSelection, isHovered)
+            .onHover { isHovered = $0 }
     }
 }

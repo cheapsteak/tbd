@@ -148,6 +148,35 @@ public enum RPCMethod {
     public static let tabSetOrder = "tab.setOrder"
     public static let tabList     = "tab.list"
     public static let worktreeSetActiveTab = "worktree.setActiveTab"
+    public static let appearanceUpdateColorFgBg = "appearance.updateColorFgBg"
+    public static let repoListBranches = "repo.listBranches"
+}
+
+// MARK: - Branch Listing
+
+/// Codable mirror of `BranchRef` for the `repo.listBranches` RPC.
+public struct BranchInfo: Codable, Sendable, Equatable, Identifiable {
+    public let name: String
+    public let localName: String
+    public let isRemote: Bool
+
+    public var id: String { name }
+
+    public init(name: String, localName: String, isRemote: Bool) {
+        self.name = name
+        self.localName = localName
+        self.isRemote = isRemote
+    }
+}
+
+public struct RepoListBranchesParams: Codable, Sendable {
+    public let repoID: UUID
+    public init(repoID: UUID) { self.repoID = repoID }
+}
+
+public struct RepoListBranchesResult: Codable, Sendable {
+    public let branches: [BranchInfo]
+    public init(branches: [BranchInfo]) { self.branches = branches }
 }
 
 // MARK: - Legacy Hook Detection / Removal
@@ -201,6 +230,15 @@ public struct SetMainAreaSizeParams: Codable, Sendable {
 public struct AppSetForegroundStateParams: Codable, Sendable {
     public let isForeground: Bool
     public init(isForeground: Bool) { self.isForeground = isForeground }
+}
+
+// MARK: - Appearance RPC
+
+public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
+    /// COLORFGBG environment variable value computed from terminal color scheme's
+    /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
+    public let value: String
+    public init(value: String) { self.value = value }
 }
 
 // MARK: - Terminal Swap Profile
@@ -491,21 +529,29 @@ public struct WorktreeCreateParams: Codable, Sendable {
     public let siblingOfWorktreeID: UUID?  // --sibling (caller worktree id)
     public let callerWorktreeID: UUID?     // TBD_WORKTREE_ID env
     public let suppressAutoParent: Bool?   // --no-parent
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil) {
+    /// When true, `branch` is treated as the name of an existing branch
+    /// (local like `feat/x` or remote like `origin/feat/x`) to be checked
+    /// out into a new worktree — no fresh `tbd/*` branch is created.
+    /// Optional/defaulted for backward compatibility with older clients.
+    public let useExistingBranch: Bool?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
         self.siblingOfWorktreeID = siblingOfWorktreeID
         self.callerWorktreeID = callerWorktreeID
         self.suppressAutoParent = suppressAutoParent
+        self.useExistingBranch = useExistingBranch
     }
 }
 
 public struct WorktreeListParams: Codable, Sendable {
     public let repoID: UUID?
     public let status: WorktreeStatus?
-    public init(repoID: UUID? = nil, status: WorktreeStatus? = nil) {
-        self.repoID = repoID; self.status = status
+    public let limit: Int?
+    public let offset: Int?
+    public init(repoID: UUID? = nil, status: WorktreeStatus? = nil, limit: Int? = nil, offset: Int? = nil) {
+        self.repoID = repoID; self.status = status; self.limit = limit; self.offset = offset
     }
 }
 
@@ -592,9 +638,12 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil) {
+    /// COLORFGBG environment variable value computed from active terminal color scheme's
+    /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
+    public let colorFgBg: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
-        self.cols = cols; self.rows = rows
+        self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
     }
 }
 
@@ -630,8 +679,15 @@ public struct NotifyParams: Codable, Sendable {
     public let worktreeID: UUID?
     public let type: NotificationType
     public let message: String?
-    public init(worktreeID: UUID? = nil, type: NotificationType, message: String? = nil) {
+    /// Originating terminal id. Optional for backwards compatibility — older
+    /// CLI callers and clients won't include it. The daemon persists it on
+    /// the notification row and forwards it on the broadcast delta so the
+    /// app's banner-click handler can switch to the right tab.
+    public let terminalID: UUID?
+    public init(worktreeID: UUID? = nil, type: NotificationType, message: String? = nil,
+                terminalID: UUID? = nil) {
         self.worktreeID = worktreeID; self.type = type; self.message = message
+        self.terminalID = terminalID
     }
 }
 

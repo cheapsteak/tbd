@@ -17,6 +17,9 @@ struct NotifyCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Worktree ID (auto-detected from PWD if not specified)")
     var worktree: String?
 
+    @Option(name: .long, help: "Terminal ID (auto-detected from TBD_TERMINAL_ID env if not specified)")
+    var terminal: String?
+
     mutating func run() async throws {
         guard let notificationType = NotificationType(rawValue: type) else {
             // Exit silently for unknown types (be lenient for hook usage)
@@ -58,13 +61,24 @@ struct NotifyCommand: AsyncParsableCommand {
             return
         }
 
+        // Resolve terminal ID: --terminal flag → TBD_TERMINAL_ID env → nil.
+        // Invalid UUID strings are ignored silently (matches worktree handling).
+        var terminalID: UUID?
+        if let terminal = terminal {
+            terminalID = UUID(uuidString: terminal)
+        } else if let envID = ProcessInfo.processInfo.environment["TBD_TERMINAL_ID"],
+                  let id = UUID(uuidString: envID) {
+            terminalID = id
+        }
+
         do {
             try client.callVoid(
                 method: RPCMethod.notify,
                 params: NotifyParams(
                     worktreeID: resolvedWorktreeID,
                     type: notificationType,
-                    message: message
+                    message: message,
+                    terminalID: terminalID
                 )
             )
         } catch {

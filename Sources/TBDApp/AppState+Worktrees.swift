@@ -13,14 +13,28 @@ extension AppState {
     /// real worktree once the daemon responds.
     /// When `parentWorktreeID` is non-nil, the new worktree is created as a
     /// nested child of that worktree (must be in the same repo).
-    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil) {
-        // Optimistic placeholder so the row appears instantly
-        let placeholderName = NameGenerator.generate()
+    /// When `existingBranch` is non-nil, the daemon checks out that branch
+    /// into a new worktree (no auto-generated `tbd/*` branch); the optimistic
+    /// placeholder uses the branch's local name so the row looks right
+    /// immediately.
+    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil) {
+        // Optimistic placeholder so the row appears instantly. When picking an
+        // existing branch we use its local name so the placeholder name
+        // doesn't briefly show a fake `tbd/*` value.
+        let placeholderName: String
+        let placeholderBranch: String
+        if let existingBranch {
+            placeholderName = existingBranch.localName
+            placeholderBranch = existingBranch.localName
+        } else {
+            placeholderName = NameGenerator.generate()
+            placeholderBranch = "tbd/\(placeholderName)"
+        }
         let placeholder = Worktree(
             repoID: repoID,
             name: placeholderName,
             displayName: placeholderName,
-            branch: "tbd/\(placeholderName)",
+            branch: placeholderBranch,
             path: "",
             status: .creating,
             tmuxServer: "",
@@ -36,8 +50,11 @@ extension AppState {
             do {
                 let size = mainAreaTerminalSize()
                 let wt = try await daemonClient.createWorktree(
-                    repoID: repoID, cols: size.cols, rows: size.rows,
-                    parentWorktreeID: parentWorktreeID
+                    repoID: repoID,
+                    branch: existingBranch?.name,
+                    cols: size.cols, rows: size.rows,
+                    parentWorktreeID: parentWorktreeID,
+                    useExistingBranch: existingBranch != nil
                 )
                 // Replace the placeholder with the real worktree
                 if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholder.id }) {
@@ -51,6 +68,19 @@ extension AppState {
                 logger.error("Failed to create worktree: \(error)")
                 handleConnectionError(error)
             }
+        }
+    }
+
+    /// List local + remote tracking branches for a repo, for the existing-
+    /// branch picker on the sidebar `+` button. Rethrows so the picker can
+    /// distinguish a fetch failure from a genuinely empty branch list.
+    func listBranches(repoID: UUID) async throws -> [BranchInfo] {
+        do {
+            return try await daemonClient.listBranches(repoID: repoID)
+        } catch {
+            logger.error("Failed to list branches: \(error)")
+            handleConnectionError(error)
+            throw error
         }
     }
 
@@ -128,9 +158,12 @@ extension AppState {
     // MARK: - Archived Worktrees
 
     /// Active-worktree path for deep-link navigation. Caller is responsible
-    /// for verifying the id exists in `self.worktrees` first.
+    /// for verifying the id exists in `self.worktrees` first. When
+    /// `terminalID` is non-nil, also switches the worktree's active tab to
+    /// the one rendering that terminal (live transcript or terminal pane);
+    /// silently falls back to current selection when no tab matches.
     @MainActor
-    func navigateToActiveWorktree(_ id: UUID) {
+    func navigateToActiveWorktree(_ id: UUID, terminalID: UUID? = nil) {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = [id]
         // Expand the containing repo so the row is part of the rendered list
@@ -144,6 +177,23 @@ extension AppState {
             Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
         }
         pendingScrollToWorktreeID = id
+        // Switch to the originating terminal's tab when one matches. Both
+        // `.terminal` and `.liveTranscript` panes count as matches — clicking
+        // the banner should land the user on whichever surface the worktree
+        // currently exposes for that terminal. If neither match exists (e.g.
+        // the terminal was deleted, or surfaced only via the pinned dock),
+        // we silently keep whatever tab was active before.
+        if let terminalID, let arr = tabs[id] {
+            if let idx = arr.firstIndex(where: { tab in
+                switch tab.content {
+                case .terminal(let tid): return tid == terminalID
+                case .liveTranscript(_, let tid): return tid == terminalID
+                default: return false
+                }
+            }) {
+                setActiveTab(worktreeID: id, tabIndex: idx)
+            }
+        }
         // Only foreground when the AppKit run loop is live — `NSApp` is nil
         // under unit tests, which would crash on the implicit unwrap.
         if NSApplication.shared.isRunning {
@@ -178,6 +228,7 @@ extension AppState {
         selectedWorktreeIDs = []
         selectedRepoID = wt.repoID
         archivedWorktrees[wt.repoID] = archived.filter { $0.repoID == wt.repoID }
+        archivedWorktreesHasMore[wt.repoID] = false
         highlightedArchivedWorktreeID = id
         if NSApplication.shared.isRunning {
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -186,15 +237,18 @@ extension AppState {
 
     /// Public entry point for deep-link navigation. Synchronous fast path
     /// for active worktrees; falls through to the async archived path on a
-    /// miss.
+    /// miss. When `terminalID` is non-nil, the active-worktree path also
+    /// switches to the originating tab. The archived path silently drops
+    /// `terminalID` — archived worktrees have no live terminals to focus.
     @MainActor
-    func navigateToWorktree(_ id: UUID) {
+    func navigateToWorktree(_ id: UUID, terminalID: UUID? = nil) {
         // Cold-start guard: a tbd:// click can arrive between AppState.init()
         // and the daemon RPC populating `worktrees`. If we fall through to
         // archived lookup now we'll miss real active worktrees. Buffer
         // instead and let connectAndLoadInitialState drain at the end.
         if !isInitialStateLoaded {
             pendingDeepLinkID = id
+            pendingDeepLinkTerminalID = terminalID
             return
         }
 
@@ -202,7 +256,7 @@ extension AppState {
             .flatMap { $0 }
             .contains(where: { $0.id == id })
         if activeMatch {
-            navigateToActiveWorktree(id)
+            navigateToActiveWorktree(id, terminalID: terminalID)
         } else {
             Task { await navigateToArchivedWorktree(id) }
         }
@@ -216,14 +270,45 @@ extension AppState {
         Task { await refreshArchivedWorktrees(repoID: id) }
     }
 
-    /// Fetch archived worktrees for a repo.
+    private static let archivedPageSize = 50
+
+    /// Fetch archived worktrees for a repo, preserving any pages the user has
+    /// already loaded (re-fetches up to `max(currentCount, pageSize)` items).
     func refreshArchivedWorktrees(repoID: UUID) async {
+        let currentCount = archivedWorktrees[repoID]?.count ?? 0
+        let fetchCount = max(currentCount, Self.archivedPageSize)
+        let knownExhausted = currentCount > 0 && currentCount % Self.archivedPageSize != 0
         do {
-            let archived = try await daemonClient.listWorktrees(repoID: repoID, status: .archived)
+            let archived = try await daemonClient.listWorktrees(
+                repoID: repoID, status: .archived,
+                limit: fetchCount
+            )
             archivedWorktrees[repoID] = archived
+            archivedWorktreesHasMore[repoID] = knownExhausted ? false : archived.count >= fetchCount
             ensureArchivedSelectionValid(repoID: repoID)
         } catch {
             logger.error("Failed to list archived worktrees: \(error)")
+        }
+    }
+
+    /// Load the next page of archived worktrees, appending to the existing list.
+    func loadMoreArchivedWorktrees(repoID: UUID) async {
+        guard isLoadingMoreArchived[repoID] != true else { return }
+        isLoadingMoreArchived[repoID] = true
+        defer { isLoadingMoreArchived[repoID] = false }
+
+        let currentCount = archivedWorktrees[repoID]?.count ?? 0
+        do {
+            let more = try await daemonClient.listWorktrees(
+                repoID: repoID, status: .archived,
+                limit: Self.archivedPageSize, offset: currentCount
+            )
+            if archivedWorktrees[repoID]?.count == currentCount {
+                archivedWorktrees[repoID, default: []].append(contentsOf: more)
+            }
+            archivedWorktreesHasMore[repoID] = more.count >= Self.archivedPageSize
+        } catch {
+            logger.error("Failed to load more archived worktrees: \(error)")
         }
     }
 

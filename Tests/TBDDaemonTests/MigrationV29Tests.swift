@@ -3,7 +3,7 @@ import Foundation
 import GRDB
 @testable import TBDDaemonLib
 
-@Suite struct MigrationV28Tests {
+@Suite struct MigrationV29Tests {
 
     @Test func activityStateColumnExists() async throws {
         let db = try TBDDatabase(inMemory: true)

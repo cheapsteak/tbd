@@ -100,6 +100,12 @@ extension RPCRouter {
         env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
+        // Set COLORFGBG if provided (computed from terminal color scheme luminance).
+        // This allows CLI tools (vim, less, fzf, etc.) to auto-adjust to the active scheme.
+        if let colorFgBg = params.colorFgBg {
+            env["COLORFGBG"] = colorFgBg
+        }
+
         // Codex branch: minimal launch with TBD's profile plugin installed in
         // the user's global Codex home. No system prompt injection or token
         // resolution; Codex should keep using the user's normal auth/config.
@@ -119,6 +125,12 @@ extension RPCRouter {
             // per-repo isolation: it pins deterministic behavior and lets the
             // TBD_TEST_CODEX_HOME test-isolation override flow through.
             codexEnv["CODEX_HOME"] = codexHome.path
+            // COLORFGBG isn't Claude-specific — Codex shells benefit from it too,
+            // so include it at spawn time. (Live updates also reach Codex via
+            // `tmux setenv -g COLORFGBG` fanned out by handleAppearanceUpdateColorFgBg.)
+            if let colorFgBg = params.colorFgBg {
+                codexEnv["COLORFGBG"] = colorFgBg
+            }
 
             let window = try await tmux.createWindow(
                 server: worktree.tmuxServer,
@@ -572,7 +584,8 @@ extension RPCRouter {
 
         let blank = ClaudeSessionScanner.isSessionBlank(
             sessionID: sessionID,
-            worktreePath: worktree.path
+            worktreePath: worktree.path,
+            transcriptFilePath: oldTerminal.transcriptPath
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
 
@@ -765,12 +778,14 @@ extension RPCRouter {
         let notification = try await db.notifications.create(
             worktreeID: worktreeID,
             type: params.type,
-            message: params.message
+            message: params.message,
+            terminalID: params.terminalID
         )
 
         subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
             notificationID: notification.id, worktreeID: notification.worktreeID,
-            type: notification.type, message: notification.message
+            type: notification.type, message: notification.message,
+            terminalID: notification.terminalID
         )))
 
         // Signal the suspend/resume coordinator that Claude finished a response

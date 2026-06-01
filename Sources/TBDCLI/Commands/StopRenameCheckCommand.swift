@@ -10,10 +10,15 @@ import TBDShared
 /// 1. Read the Stop hook JSON payload from stdin.
 /// 2. Resolve the worktree for `cwd` via the daemon.
 /// 3. Skip if status is .main, displayName != name (already customized),
-///    branch doesn't start with `tbd/`, or we've already fired > 2 times
-///    this session.
+///    the current branch can't be resolved, or we've already fired > 2
+///    times this session.
 /// 4. Otherwise emit `{"decision":"block","reason":"<directive>"}` so
-///    the agent stays in-turn and sees the directive.
+///    the agent stays in-turn and sees the directive. The directive shape
+///    depends on the branch: `tbd/*` branches are auto-generated and the
+///    directive suggests renaming both the branch and the display name;
+///    non-`tbd/*` branches were chosen deliberately (and may be shared
+///    with collaborators), so the directive only suggests renaming the
+///    display name.
 struct StopRenameCheckCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "stop-rename-check",
@@ -150,8 +155,9 @@ enum StopRenameCheckCore {
             return nil
         }
 
-        // 3c. Branch must be tbd/<...> for us to suggest renaming it.
-        guard let branch = dependencies.fetchBranch(cwd), branch.hasPrefix("tbd/") else {
+        // 3c. Resolve the branch. Skip silently on git failure; the directive
+        // shape downstream branches on whether it starts with `tbd/`.
+        guard let branch = dependencies.fetchBranch(cwd) else {
             return nil
         }
 
@@ -193,8 +199,21 @@ enum StopRenameCheckCore {
     }
 
     /// Build the directive shown to the agent. Mirrors the spec verbatim
-    /// except for branch/folder substitution.
+    /// except for branch/folder substitution. `tbd/*` branches are
+    /// auto-generated and safe to rename; other branches were chosen
+    /// deliberately and may be shared with collaborators, so we only
+    /// suggest renaming the display name.
     static func buildDirective(branch: String, folder: String) -> String {
+        if branch.hasPrefix("tbd/") {
+            return tbdBranchDirective(branch: branch, folder: folder)
+        } else {
+            return displayOnlyDirective(branch: branch, folder: folder)
+        }
+    }
+
+    /// Directive for auto-generated `tbd/*` branches: suggest renaming both
+    /// the branch and the display name.
+    static func tbdBranchDirective(branch: String, folder: String) -> String {
         """
         Before stopping: this worktree is still named \(branch). Now that the work is done, rename it to reflect what was accomplished:
 
@@ -208,6 +227,28 @@ enum StopRenameCheckCore {
         Examples:
           fix-login-timeout  →  ⏱ Fix Login Timeout
           add-export-csv     →  📊 Add Export CSV
+
+        Then you may stop.
+        """
+    }
+
+    /// Directive for branches that already had a meaningful name (created
+    /// from an existing branch, not auto-generated). Only suggests renaming
+    /// the display name — the branch is left alone.
+    static func displayOnlyDirective(branch: String, folder: String) -> String {
+        """
+        Before stopping: the worktree folder is still named "\(folder)". Now that the work is done, rename it to reflect what was accomplished:
+
+          tbd worktree rename \(folder) "<emoji> <Title Case>"
+
+        Format:
+          Display: a relevant emoji + a Title Case summary, under ~30 chars.
+
+        Examples:
+          ⏱ Fix Login Timeout
+          📊 Add Export CSV
+
+        The branch (\(branch)) is intentionally not renamed — it may be shared with others.
 
         Then you may stop.
         """
