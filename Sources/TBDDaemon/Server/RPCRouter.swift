@@ -92,6 +92,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRepoSetHidden(request.paramsData)
             case RPCMethod.repoSetExpanded:
                 return try await handleRepoSetExpanded(request.paramsData)
+            case RPCMethod.repoListBranches:
+                return try await handleRepoListBranches(request.paramsData)
             case RPCMethod.worktreeCreate:
                 return try await handleWorktreeCreate(request.paramsData)
             case RPCMethod.worktreeList:

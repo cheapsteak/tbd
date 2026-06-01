@@ -163,6 +163,24 @@ extension RPCRouter {
         return .ok()
     }
 
+    func handleRepoListBranches(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(RepoListBranchesParams.self, from: paramsData)
+
+        guard let repo = try await db.repos.get(id: params.repoID) else {
+            return RPCResponse(error: "Repository not found: \(params.repoID)")
+        }
+
+        let refs = try await git.listBranches(repoPath: repo.path)
+        let branches = refs.map {
+            BranchInfo(
+                name: $0.name,
+                localName: $0.localName,
+                isRemote: $0.isRemote
+            )
+        }
+        return try RPCResponse(result: RepoListBranchesResult(branches: branches))
+    }
+
     func handleRepoRename(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(RepoRenameParams.self, from: paramsData)
 

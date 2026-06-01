@@ -10,6 +10,7 @@ extension RPCRouter {
 
     func handleWorktreeCreate(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
+        let useExistingBranch = params.useExistingBranch ?? false
 
         // Phase 1: Fast — insert DB row with status = .creating, return immediately
         let pending = try await lifecycle.beginCreateWorktree(
@@ -20,7 +21,8 @@ extension RPCRouter {
             parentWorktreeID: params.parentWorktreeID,
             siblingOfWorktreeID: params.siblingOfWorktreeID,
             callerWorktreeID: params.callerWorktreeID,
-            suppressAutoParent: params.suppressAutoParent ?? false
+            suppressAutoParent: params.suppressAutoParent ?? false,
+            useExistingBranch: useExistingBranch
         )
 
         // Phase 2: Fire-and-forget — git operations + tmux setup in background.
@@ -32,9 +34,12 @@ extension RPCRouter {
         let userSpecifiedBranch = params.branch != nil
         let cols = params.cols
         let rows = params.rows
+        // Pass the raw branch ref (possibly `origin/...`) to phase 2 so it
+        // can dispatch to the right git command.
+        let existingBranchRef = useExistingBranch ? params.branch : nil
         await repoSerializer.submit(repoID: pending.repoID) {
             do {
-                try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows)
+                try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef)
                 subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
                     worktreeID: pending.id, repoID: pending.repoID,
                     name: pending.name, path: pending.path

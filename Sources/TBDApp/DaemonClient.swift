@@ -403,12 +403,26 @@ actor DaemonClient {
     }
 
     /// Create a new worktree in a repo.
-    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil) async throws -> Worktree {
+    /// When `useExistingBranch` is true, `branch` MUST be set to an existing
+    /// ref name (local like `foo` or remote like `origin/foo`) — the daemon
+    /// checks it out instead of creating a new `tbd/*` branch.
+    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false) async throws -> Worktree {
         return try await callAsync(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID),
+            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch),
             resultType: Worktree.self
         )
+    }
+
+    /// List local + `origin/*` branches for a repo. Used by the existing-
+    /// branch picker on the sidebar `+` button.
+    func listBranches(repoID: UUID) async throws -> [BranchInfo] {
+        let result = try await callAsync(
+            method: RPCMethod.repoListBranches,
+            params: RepoListBranchesParams(repoID: repoID),
+            resultType: RepoListBranchesResult.self
+        )
+        return result.branches
     }
 
     /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
