@@ -7,6 +7,33 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "AppState+Termin
 extension AppState {
     // MARK: - Terminal Actions
 
+    /// Treat an explicit user interrupt as "not working" for Codex terminals.
+    /// This clears the sidebar spinner immediately and mirrors the state to
+    /// the daemon best-effort.
+    func handleTerminalInterrupt(terminalID: UUID) {
+        guard let terminal = terminals.values.flatMap({ $0 })
+            .first(where: { $0.id == terminalID }),
+              terminal.kind == .codex || terminal.label == "Codex"
+        else {
+            return
+        }
+
+        if let idx = terminals[terminal.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
+            terminals[terminal.worktreeID]?[idx].activityState = .idle
+        }
+
+        Task {
+            do {
+                try await daemonClient.setTerminalActivity(
+                    terminalID: terminalID,
+                    activityState: .idle
+                )
+            } catch {
+                logger.debug("Failed to publish terminal interrupt state: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
     /// Create a terminal in a worktree and add a new tab for it.
     func createTerminal(worktreeID: UUID, cmd: String? = nil) async {
         do {

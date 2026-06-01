@@ -517,6 +517,15 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "notification", column: "terminalID", type: .text)
         }
 
+        migrator.registerMigration("v29_terminal_activity_state") { db in
+            try db.addColumnIfMissing(
+                table: "terminal",
+                column: "activityState",
+                type: .text,
+                defaults: TerminalActivityState.unknown.rawValue
+            )
+        }
+
         return migrator
     }
 }

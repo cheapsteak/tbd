@@ -131,6 +131,7 @@ public enum RPCMethod {
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalSessionEvent = "terminal.sessionEvent"
+    public static let terminalActivityEvent = "terminal.activityEvent"
     public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
     public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
     public static let appSetForegroundState = "app.setForegroundState"
@@ -920,6 +921,15 @@ public struct TerminalSessionEventParams: Codable, Sendable {
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
         self.source = source
+    }
+}
+
+public struct TerminalActivityEventParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let activityState: TerminalActivityState
+    public init(terminalID: UUID, activityState: TerminalActivityState) {
+        self.terminalID = terminalID
+        self.activityState = activityState
     }
 }
 

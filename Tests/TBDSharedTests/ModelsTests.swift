@@ -58,13 +58,15 @@ import Testing
         tmuxWindowID: "@1",
         tmuxPaneID: "%3",
         label: "editor",
-        createdAt: Date()
+        createdAt: Date(),
+        activityState: .working
     )
     let data = try JSONEncoder().encode(terminal)
     let decoded = try JSONDecoder().decode(Terminal.self, from: data)
     #expect(terminal.id == decoded.id)
     #expect(decoded.tmuxWindowID == "@1")
     #expect(decoded.label == "editor")
+    #expect(decoded.activityState == .working)
 }
 
 @Test func testNotificationRoundTrip() throws {
@@ -120,6 +122,22 @@ import Testing
     """.data(using: .utf8)!
     let decoded = try JSONDecoder().decode(ModelProfileListResult.self, from: json)
     #expect(decoded.primaryAgentPreference == .claude)
+}
+
+@Test func testTerminalDecodesWithoutActivityState() throws {
+    let json = """
+    {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "worktreeID": "22222222-2222-2222-2222-222222222222",
+        "tmuxWindowID": "@1",
+        "tmuxPaneID": "%1",
+        "label": "Codex",
+        "createdAt": 0
+    }
+    """.data(using: .utf8)!
+
+    let decoded = try JSONDecoder().decode(Terminal.self, from: json)
+    #expect(decoded.activityState == .unknown)
 }
 
 // MARK: - NotificationType Severity Ordering
