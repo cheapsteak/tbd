@@ -320,7 +320,7 @@ private struct PRButtonLabel: View {
                     .frame(width: 12, height: 12)
                     .foregroundStyle(presentation.color)
             }
-            Text("#\(prStatus.number)")
+            Text(verbatim: "#\(prStatus.number)")
                 .font(.caption)
                 .fontWeight(.medium)
         }
