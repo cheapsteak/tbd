@@ -492,7 +492,13 @@ final class AppState: ObservableObject {
             // only react to actual user-driven scheme changes.
             .dropFirst()
             .removeDuplicates()
-            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+            // `DispatchQueue.main` rather than `RunLoop.main`: Combine's RunLoop
+            // scheduler fires its debounce Timer in `.default` mode only, so while
+            // the user scrubs the scheme picker (run loop in `.eventTracking` mode)
+            // the trailing emission stalls until the drag ends. The dispatch
+            // scheduler delivers regardless of run-loop mode — and is reliably
+            // serviced under structured concurrency, which the unit test depends on.
+            .debounce(for: .milliseconds(200), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.broadcastAppearanceColorFgBg(appearance)
             }
