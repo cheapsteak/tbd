@@ -448,6 +448,16 @@ private struct TabBarItem: View {
         terminal?.suspendedAt != nil
     }
 
+    /// Bold this tab's label when its terminal fired a `.responseComplete`
+    /// while in the background. Never bold the active/selected tab — activating
+    /// it clears the unread state, but guard here too so the active tab can
+    /// never render bold even for a frame. Mirrors WorktreeRowView's bold.
+    private var hasUnreadCompletion: Bool {
+        guard !isSelected else { return false }
+        let tids = appState.terminalIDs(in: tab)
+        return tids.contains { appState.unreadTerminals.contains($0) }
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             // Clickable tab content area
@@ -489,6 +499,7 @@ private struct TabBarItem: View {
                             displayContent: {
                                 Text(tabLabel)
                                     .font(.system(size: 11))
+                                    .fontWeight(hasUnreadCompletion ? .bold : .regular)
                                     .lineLimit(1)
                                     .fixedSize()
                                     .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
@@ -499,6 +510,7 @@ private struct TabBarItem: View {
                     } else {
                         Text(tabLabel)
                             .font(.system(size: 11))
+                            .fontWeight(hasUnreadCompletion ? .bold : .regular)
                             .lineLimit(1)
                             .fixedSize()
                             .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))

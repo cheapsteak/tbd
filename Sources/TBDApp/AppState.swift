@@ -58,6 +58,12 @@ final class AppState: ObservableObject {
     /// from this dictionary because `refreshNotifications` auto-marks them
     /// read on every poll.
     @Published var unreadByWorktree: [UUID: UnreadSummary] = [:]
+    /// Terminal IDs that fired a `.responseComplete` notification while their
+    /// tab was NOT the active tab of a focused worktree. Drives the bold tab
+    /// label in `TabBar`, mirroring the worktree-row bold. App-local and
+    /// in-memory only — cleared when the user activates the tab (or focuses the
+    /// worktree on that tab); intentionally not persisted across app restarts.
+    @Published var unreadTerminals: Set<UUID> = []
     @Published var selectedWorktreeIDs: Set<UUID> = [] {
         didSet {
             // If the List selected a repo header tag (not a worktree), treat it
@@ -76,6 +82,13 @@ final class AppState: ObservableObject {
             for id in selectedWorktreeIDs where !selectionOrder.contains(id) {
                 selectionOrder.append(id)
             }
+            // When a single worktree becomes the focused selection, the user is
+            // now viewing its active tab — clear that tab's unread-completion
+            // bold. Single-select only: tab bars only render in single-select.
+            if selectedWorktreeIDs.count == 1, let only = selectedWorktreeIDs.first {
+                clearUnreadForActiveTab(worktreeID: only)
+            }
+
             // Clear repo selection when a worktree is selected
             if !selectedWorktreeIDs.isEmpty {
                 if let leaving = selectedRepoID { clearRevivingArchived(repoID: leaving) }
@@ -643,7 +656,65 @@ final class AppState: ObservableObject {
         modelProfiles[idx] = ModelProfileWithUsage(profile: existing.profile, usage: usage)
     }
 
+    /// The terminal ID(s) a `Tab` renders. A tab with a stored split layout in
+    /// `layouts[tab.id]` can render multiple terminals across its panes; a tab
+    /// without one renders the single surface in `tab.content`. Both `.terminal`
+    /// and `.liveTranscript` panes reference a terminal; everything else (notes,
+    /// webviews, code viewers) has none.
+    ///
+    /// Consults the split layout first via the same resolution the close path
+    /// uses (`layouts[tab.id] ?? .pane(tab.content)` then `allTerminalIDs()`),
+    /// then unions the `tab.content` terminal so `.liveTranscript` tabs — whose
+    /// IDs `allTerminalIDs()` does not enumerate — stay covered.
+    func terminalIDs(in tab: Tab) -> Set<UUID> {
+        let layout = layouts[tab.id] ?? .pane(tab.content)
+        var ids = Set(layout.allTerminalIDs())
+        switch tab.content {
+        case .terminal(let tid):
+            ids.insert(tid)
+        case .liveTranscript(_, let tid):
+            ids.insert(tid)
+        default:
+            break
+        }
+        return ids
+    }
+
+    /// True iff `worktreeID` is the single selection AND its active tab renders
+    /// `terminalID`. Used to decide whether a `.responseComplete` arrival should
+    /// be recorded as unread — a completion on the tab the user is already
+    /// looking at must never bold.
+    func isActiveTabTerminal(_ terminalID: UUID, inFocusedWorktree worktreeID: UUID) -> Bool {
+        guard selectedWorktreeIDs == [worktreeID] else { return false }
+        guard let arr = tabs[worktreeID], !arr.isEmpty else { return false }
+        let activeIndex = activeTabIndices[worktreeID] ?? 0
+        guard arr.indices.contains(activeIndex) else { return false }
+        return terminalIDs(in: arr[activeIndex]).contains(terminalID)
+    }
+
+    /// Remove the active tab's terminal(s) from `unreadTerminals` for the given
+    /// worktree. Called when the user activates a tab or focuses a worktree so
+    /// the surface they're now looking at clears its bold.
+    func clearUnreadForActiveTab(worktreeID: UUID) {
+        guard let arr = tabs[worktreeID], !arr.isEmpty else { return }
+        let activeIndex = activeTabIndices[worktreeID] ?? 0
+        guard arr.indices.contains(activeIndex) else { return }
+        let tids = terminalIDs(in: arr[activeIndex])
+        guard !tids.isEmpty else { return }
+        unreadTerminals.subtract(tids)
+    }
+
     private func handleNotificationDelta(_ notification: NotificationDelta) {
+        // Record a background-tab completion so its tab label bolds. Done
+        // BEFORE the visible-worktree early-return because a worktree can be
+        // "visible" (selected) while the completing terminal lives on a
+        // background tab — that tab should still bold. The
+        // isActiveTabTerminal guard excludes the tab the user is looking at.
+        if notification.type == .responseComplete, let tid = notification.terminalID,
+           !isActiveTabTerminal(tid, inFocusedWorktree: notification.worktreeID) {
+            unreadTerminals.insert(tid)
+        }
+
         let visible = visibleWorktreeIDs
         guard !visible.contains(notification.worktreeID) else { return }
 
