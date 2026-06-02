@@ -12,7 +12,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 /// its own overlay file pinned at spawn time without touching the user's
 /// settings.json at all.
 ///
-/// The overlay registers four event types:
+/// The overlay registers five event types:
 /// - `SessionStart` (matcher `*`): calls `tbd session-event`, which
 ///   relays the new session ID + transcript path to the daemon. This is
 ///   what fixes the post-`/clear`/`/compact` transcript freeze.
@@ -21,6 +21,9 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 ///     legacy globally-installed hook.
 ///   - `tbd hooks stop-rename-check`, which prompts the agent to rename
 ///     a still-default worktree/branch at end-of-turn.
+/// - `StopFailure`: `tbd notify --type error` when a turn dies on an API
+///   error (rate limit, server overload, etc.), which the `Stop` hook does
+///   not catch — `Stop` fires only on normal completion.
 /// - `PreToolUse:AskUserQuestion` / `PostToolUse:AskUserQuestion`:
 ///   bridge tool input and `tool_use_id` so the transcript pane can
 ///   render the question before Claude flushes the assistant message
@@ -58,6 +61,17 @@ public enum ClaudeHookOverlay {
     static let stopRenameCheckCommand =
         #"tbd hooks stop-rename-check 2>/dev/null || true"#
 
+    /// The shell command for the StopFailure hook. Claude Code fires
+    /// StopFailure (not Stop) when a turn ends due to an API error — rate
+    /// limit, server overload, auth/billing failure, etc. By the time it
+    /// fires, Claude has already auto-retried ~10×, so it is a genuine
+    /// "this turn is dead" signal. We extract `error_type` from the hook
+    /// payload and raise an `error`-severity notification so the otherwise
+    /// silent thread death surfaces. Silent failure so we never wedge the
+    /// agent, consistent with the other hooks.
+    static let stopFailureCommand =
+        #"TYPE=$(jq -r '.error_type // "unknown"' 2>/dev/null); tbd notify --type error --message "Claude stopped: API error ($TYPE)" 2>/dev/null || true"#
+
     /// Bridges the `PreToolUse:AskUserQuestion` hook into TBD. Captures the
     /// tool input and tool_use_id so the transcript pane can render the
     /// question before Claude flushes the assistant message to the JSONL.
@@ -91,6 +105,13 @@ public enum ClaudeHookOverlay {
                     [
                         "hooks": [
                             ["type": "command", "command": stopRenameCheckCommand]
+                        ]
+                    ]
+                ],
+                "StopFailure": [
+                    [
+                        "hooks": [
+                            ["type": "command", "command": stopFailureCommand]
                         ]
                     ]
                 ],
