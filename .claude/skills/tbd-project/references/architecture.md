@@ -29,7 +29,7 @@ Connects to daemon on launch (starts it if not running). Stateless except for UI
 - **Tab system** — generic Tab model wrapping `PaneContent` (`.terminal`/`.webview`/`.codeViewer`/`.note`/`.liveTranscript`/`.history`); tabs are renameable, reorderable, and DB-persisted
 - **Pane types** — terminal, webview (WKWebView), code viewer (Highlightr), note (text editor), live transcript (Claude conversation as chat), history (past sessions)
 - **Transcript pane** — renders a Claude session's JSONL as a chat UI with per-tool cards (Read/Write/Edit/Bash/Grep/Glob/Agent/AskUserQuestion/...), context-usage badge, subagent expansion; retargets automatically when the session id rolls over
-- **Terminal rendering** — grouped tmux sessions + direct PTY attachment (NOT control mode); customizable font, colors, cursor; user-defined themes via `ThemeStore` + `UserTerminalTheme` (importable from Alacritty YAML format via `AlacrittyImporter`, watched for on-disk changes by `ThemeDirectoryWatcher`)
+- **Terminal rendering** — grouped tmux sessions + direct PTY attachment (NOT control mode); customizable font, colors, cursor; user-defined themes via `ThemeStore` + `UserTerminalTheme` (importable from Alacritty TOML format via `AlacrittyImporter`, watched for on-disk changes by `ThemeDirectoryWatcher`)
 - **Pinned terminal dock** — vertical dock showing pinned terminals from worktrees not currently visible
 - **Jump menu** — Cmd-K palette that jumps to the worktree that just pinged
 - **Navigation history** — browser-style back/forward across recently selected worktrees
@@ -76,7 +76,7 @@ GRDB `DatabaseMigrator`, numbered sequentially. Never modify an existing migrati
 - **v26_claude_env_settings** — adds `claude_env_settings` column to `config`; stores user-configurable spawn-time Claude env overrides (`ClaudeEnvValue`: bool/int/string, keyed by `ClaudeEnvSetting.id`)
 - **v27_primary_agent_preference** — adds `primary_agent_preference` column to `config`; global preference for claude vs. codex as the default spawned agent
 - **v28_notification_terminal_id** — adds `terminalID` (nullable) to `notification`; enables banner clicks to switch to the originating terminal tab
-- **v29_terminal_activity_state** — adds `activityState` column to `terminal` (enum: `unknown`, `working`, `idle`, `waiting_for_user`)
+- **v29_terminal_activity_state** — adds `activityState` column to `terminal` (`TerminalActivityState`: `unknown`, `working`, `idle`, `waitingForUser`)
 
 ### Key model types
 - `WorktreeStatus`: `.active`, `.archived`, `.main`, `.creating`
