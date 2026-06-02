@@ -5,6 +5,47 @@ import os
 private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")
 private let reconcileLogger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 
+struct RuntimeIntegrationRefresher {
+    var writeFallbackSkill: () throws -> Void
+    var writeClaudePlugin: () throws -> Void
+    var ensureCodexProfilePlugin: () throws -> Void
+    var writeClaudeHookOverlay: () -> Void
+
+    static func production() -> RuntimeIntegrationRefresher {
+        RuntimeIntegrationRefresher(
+            writeFallbackSkill: { try SkillFileWriter().writeFallback() },
+            writeClaudePlugin: { try PluginDirWriter().writePlugin() },
+            ensureCodexProfilePlugin: { _ = try CodexHomeManager().ensureProfilePlugin() },
+            writeClaudeHookOverlay: { ClaudeHookOverlay.writeOverlay() }
+        )
+    }
+
+    func refresh() {
+        do {
+            try writeFallbackSkill()
+        } catch {
+            Logger(subsystem: "com.tbd.daemon", category: "skill")
+                .error("Failed to write fallback skill file: \(String(describing: error), privacy: .public)")
+        }
+
+        do {
+            try writeClaudePlugin()
+        } catch {
+            Logger(subsystem: "com.tbd.daemon", category: "plugin")
+                .error("Failed to write TBD plugin: \(String(describing: error), privacy: .public)")
+        }
+
+        do {
+            try ensureCodexProfilePlugin()
+        } catch {
+            Logger(subsystem: "com.tbd.daemon", category: "codex-integration")
+                .error("Failed to refresh Codex profile plugin: \(String(describing: error), privacy: .public)")
+        }
+
+        writeClaudeHookOverlay()
+    }
+}
+
 /// Top-level daemon orchestrator.
 ///
 /// Coordinates all subsystems: database, managers, servers, and subscriptions.
@@ -107,32 +148,10 @@ public final class Daemon: Sendable {
         // 4. Write PID file
         try pidFile.write()
 
-        // Drop the canonical TBD skill body to the failsafe path so any
-        // Claude session can `Read` it even when no harness skill is registered.
-        // Failures here are non-fatal — the slim system-prompt pointer can still
-        // reference the path, and a missing file is recoverable on next boot.
-        do {
-            try SkillFileWriter().writeFallback()
-        } catch {
-            Logger(subsystem: "com.tbd.daemon", category: "skill")
-                .error("Failed to write fallback skill file: \(String(describing: error), privacy: .public)")
-        }
-
-        // Write the TBD-owned Claude plugin so newly spawned sessions can
-        // load the `tbd` skill via `--plugin-dir`. Idempotent; failures here
-        // are non-fatal (the slim system-prompt pointer still works).
-        do {
-            try PluginDirWriter().writePlugin()
-        } catch {
-            Logger(subsystem: "com.tbd.daemon", category: "plugin")
-                .error("Failed to write TBD plugin: \(String(describing: error), privacy: .public)")
-        }
-
-        // Refresh the TBD-owned Claude settings overlay so newly spawned
-        // Claude sessions register the SessionStart + Stop hooks. Idempotent;
-        // failures degrade gracefully to the legacy cwd-based transcript
-        // resolution (the bridge just won't fire).
-        ClaudeHookOverlay.writeOverlay()
+        // Refresh the agent runtime integration assets up front so both
+        // Claude and Codex sessions pick up the current TBD hook/plugin state
+        // even before any new terminal spawn path runs.
+        RuntimeIntegrationRefresher.production().refresh()
 
         // 4a. Scrub inherited TBD_* env vars before any tmux server is spawned.
         // The daemon may have been launched from inside a TBD-spawned shell (e.g.
