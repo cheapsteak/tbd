@@ -1112,6 +1112,22 @@ final class AppState: ObservableObject {
         defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? false
     }
 
+    /// UserDefaults key for the `@AppStorage` toggle in the
+    /// Settings → Experimental section that gates the experimental live
+    /// transcript pane. The View layer (`PanePlaceholder`) reads it directly
+    /// via `@AppStorage`; `transcriptFeatureEnabled(defaults:)` exposes the
+    /// same fail-closed read for non-View callers. The feature can freeze the
+    /// UI on very large transcripts, so it is opt-in and fails closed.
+    static let enableTranscriptKey = "enableTranscript"
+
+    /// Fail-closed read of the experimental live-transcript toggle for
+    /// non-View callers (the View layer uses `@AppStorage` directly).
+    /// Defaults to false when the user has never touched the toggle, matching
+    /// the `@AppStorage` default.
+    static func transcriptFeatureEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enableTranscriptKey) as? Bool ?? false
+    }
+
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
     nonisolated static func claudeEnvKey(_ settingID: String) -> String {
         "claudeEnvSetting.\(settingID)"
