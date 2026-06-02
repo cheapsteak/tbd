@@ -106,6 +106,7 @@ public struct TerminalStore: Sendable {
             if let worktreeID {
                 request = request.filter(Column("worktreeID") == worktreeID.uuidString)
             }
+            request = request.order(Column("createdAt").asc, Column("id").asc)
             return try request.fetchAll(db).map { $0.toModel() }
         }
     }

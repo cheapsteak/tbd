@@ -364,6 +364,7 @@ extension WorktreeLifecycle {
 
         // Create terminal 1: primary agent (or shell if skipped).
         let plannedTerminalID1 = UUID()
+        var createdTerminalIDs = [plannedTerminalID1]
         let primaryCommand: String
         let primaryEnv: [String: String]
         let primarySensitiveEnv: [String: String]
@@ -455,6 +456,7 @@ extension WorktreeLifecycle {
 
         // Create terminal 2: setup hook
         let plannedTerminalID2 = UUID()
+        createdTerminalIDs.append(plannedTerminalID2)
         let setupHookPath = hooks.resolve(
             event: .setup,
             repoPath: worktreePath,
@@ -499,6 +501,7 @@ extension WorktreeLifecycle {
         if !skipClaude {
             for sessionID in additionalArchivedClaudeSessions {
                 let plannedID = UUID()
+                createdTerminalIDs.append(plannedID)
                 let spawn = ClaudeSpawnCommandBuilder.build(
                     resumeID: sessionID,
                     freshSessionID: nil,
@@ -543,6 +546,9 @@ extension WorktreeLifecycle {
                 )
             }
         }
+
+        try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: createdTerminalIDs)
+        try await db.worktrees.setActiveTabID(worktreeID: worktreeID, tabID: plannedTerminalID1)
 
         // Kill the untracked initial window that new-session created
         if let windowID = initialWindowID {
