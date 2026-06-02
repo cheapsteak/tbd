@@ -54,6 +54,8 @@ extension AppState {
     func setActiveTab(worktreeID: UUID, tabIndex: Int) {
         activeTabIndices[worktreeID] = tabIndex
         guard let arr = tabs[worktreeID], arr.indices.contains(tabIndex) else { return }
+        // Activating a tab clears its unread-completion bold.
+        unreadTerminals.subtract(terminalIDs(in: arr[tabIndex]))
         let tabID = arr[tabIndex].id
         Task {
             do {
@@ -140,6 +142,11 @@ extension AppState {
            focusedTabCloseContext?.tabID == tab.id {
             focusedTabCloseContext = nil
         }
+
+        // Drop any pending unread-completion bold for this tab's terminals so a
+        // background tab that completed and was closed without being activated
+        // doesn't leak stale UUIDs into `unreadTerminals`.
+        unreadTerminals.subtract(terminalIDsInTab)
 
         layouts.removeValue(forKey: tab.id)
         arr.remove(at: index)
