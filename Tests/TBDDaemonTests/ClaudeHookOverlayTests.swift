@@ -31,6 +31,23 @@ import Testing
         #expect(allStopCommands.contains(where: { $0.contains("stop-rename-check") }))
     }
 
+    @Test func registersStopFailureNotifyHook() throws {
+        let data = try ClaudeHookOverlay.generateBody()
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let hooks = parsed?["hooks"] as? [String: Any]
+
+        // StopFailure fires when a turn dies on an API error (rate limit,
+        // server error, etc.). It must shell out to `tbd notify --type error`
+        // so the dead thread surfaces instead of dying silently.
+        let stopFailure = hooks?["StopFailure"] as? [[String: Any]]
+        #expect(stopFailure?.count == 1)
+        let inner = stopFailure?.first?["hooks"] as? [[String: Any]]
+        let cmd = inner?.first?["command"] as? String
+        #expect(cmd?.contains("tbd notify --type error") == true)
+        // Surfaces the error_type so the message is actionable.
+        #expect(cmd?.contains("error_type") == true)
+    }
+
     @Test func roundtripsAsValidJSON() throws {
         let data = try ClaudeHookOverlay.generateBody()
         // Must round-trip — a malformed overlay file would crash Claude
