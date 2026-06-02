@@ -29,7 +29,7 @@ Connects to daemon on launch (starts it if not running). Stateless except for UI
 - **Tab system** — generic Tab model wrapping `PaneContent` (`.terminal`/`.webview`/`.codeViewer`/`.note`/`.liveTranscript`/`.history`); tabs are renameable, reorderable, and DB-persisted
 - **Pane types** — terminal, webview (WKWebView), code viewer (Highlightr), note (text editor), live transcript (Claude conversation as chat), history (past sessions)
 - **Transcript pane** — renders a Claude session's JSONL as a chat UI with per-tool cards (Read/Write/Edit/Bash/Grep/Glob/Agent/AskUserQuestion/...), context-usage badge, subagent expansion; retargets automatically when the session id rolls over
-- **Terminal rendering** — grouped tmux sessions + direct PTY attachment (NOT control mode); customizable font, colors, cursor
+- **Terminal rendering** — grouped tmux sessions + direct PTY attachment (NOT control mode); customizable font, colors, cursor; user-defined themes via `ThemeStore` + `UserTerminalTheme` (importable from Alacritty YAML format via `AlacrittyImporter`, watched for on-disk changes by `ThemeDirectoryWatcher`)
 - **Pinned terminal dock** — vertical dock showing pinned terminals from worktrees not currently visible
 - **Jump menu** — Cmd-K palette that jumps to the worktree that just pinged
 - **Navigation history** — browser-style back/forward across recently selected worktrees
@@ -43,8 +43,8 @@ Connects to daemon on launch (starts it if not running). Stateless except for UI
 Stateless. Connects to daemon socket, sends RPC, prints result, exits.
 - POSIX socket client (not NIO — simpler for one-shot connections)
 - Auto-resolves repo/worktree from `$PWD` via `resolve.path` RPC
-- Subcommands: `repo`, `worktree`, `terminal`, `notify`, `session-event`, `ask-user-question`, `daemon`, `hooks`, `setup-hooks` (deprecated), `cleanup`, `link`
-- `session-event` and `ask-user-question` are internal — invoked by the Claude settings-overlay hooks, not by humans
+- Subcommands: `repo`, `worktree`, `terminal`, `notify`, `session-event`, `terminal-activity`, `ask-user-question`, `daemon`, `hooks`, `setup-hooks` (deprecated), `cleanup`, `link`, `doctor`
+- `session-event`, `terminal-activity`, and `ask-user-question` are internal — invoked by the Claude settings-overlay hooks, not by humans
 
 ## Session Instrumentation
 
@@ -63,7 +63,7 @@ The `SessionStart` hook calls `tbd session-event`, which RPCs the daemon with th
 Tables: `repo`, `worktree`, `terminal`, `notification`, `note`, `tab`, `model_profile`, `model_profile_usage`, plus a `tbd_meta` key/value store. See `Sources/TBDShared/Models.swift` for struct definitions and `Sources/TBDDaemon/Database/` for GRDB stores.
 
 ### Migrations
-GRDB `DatabaseMigrator`, numbered sequentially. Never modify an existing migration — always add a new one. Current range: `v1`–`v25`. Notables:
+GRDB `DatabaseMigrator`, numbered sequentially. Never modify an existing migration — always add a new one. Current range: `v1`–`v29`. Notables:
 - **v1–v13** — initial schema + incremental columns (gitStatus → hasConflicts, pinnedAt, claudeSessionID, suspend snapshots, notes, sortOrder, per-repo instructions, etc.)
 - **v14_worktree_location** — supports the canonical `~/tbd/worktrees/` location
 - **v15_model_profiles** / **v25_model_profiles_bedrock** — model profile table + bedrock fields
@@ -73,16 +73,22 @@ GRDB `DatabaseMigrator`, numbered sequentially. Never modify an existing migrati
 - **v20_worktree_active_tab**, **v21_repo_expanded**, **v22_terminal_kind**
 - **v23_worktree_parent** — worktree lineage (parent pointer)
 - **v24_drop_conductor** — removes the retired Conductor feature's table + rows
+- **v26_claude_env_settings** — adds `claude_env_settings` column to `config`; stores user-configurable spawn-time Claude env overrides (`ClaudeEnvValue`: bool/int/string, keyed by `ClaudeEnvSetting.id`)
+- **v27_primary_agent_preference** — adds `primary_agent_preference` column to `config`; global preference for claude vs. codex as the default spawned agent
+- **v28_notification_terminal_id** — adds `terminalID` (nullable) to `notification`; enables banner clicks to switch to the originating terminal tab
+- **v29_terminal_activity_state** — adds `activityState` column to `terminal` (enum: `unknown`, `working`, `idle`, `waiting_for_user`)
 
 ### Key model types
 - `WorktreeStatus`: `.active`, `.archived`, `.main`, `.creating`
 - `RepoStatus`: `.ok`, `.missing` (stale path)
 - `Repo`: `renamePrompt` + `customInstructions` (per-repo prompt customization), `hidden`, `expanded`
 - `Worktree`: `hasConflicts`, `sortOrder`, `parentID` (lineage), `activeTabID`, `tabOrder`, `archivedHeadSHA`
-- `Terminal`: `kind` (`TerminalKind`), `pinnedAt`, `claudeSessionID`, `transcriptPath`, `suspendedAt`/`suspendedSnapshot`, `modelProfileID`
+- `Terminal`: `kind` (`TerminalKind`), `pinnedAt`, `claudeSessionID`, `transcriptPath`, `suspendedAt`/`suspendedSnapshot`, `modelProfileID`, `activityState` (`TerminalActivityState`: `unknown`, `working`, `idle`, `waitingForUser`)
 - `TerminalKind` / `TerminalCreateType`: `shell`, `claude`, `codex`
 - `CredentialKind`: `oauth`, `apiKey`, `proxy`, `bedrock`
 - `ModelProfile`: named credential container — kind + routing fields (baseURL/model for proxy, awsRegion/awsProfile for bedrock)
+- `Config`: global config row — `defaultProfileID`, `primaryAgentPreference` (`PrimaryAgentPreference`: `.claude`/`.codex`), `envSettingOverrides` (map of `ClaudeEnvSetting.id` → `ClaudeEnvValue`)
+- `Notification`: gained `terminalID` (optional `UUID`) — the terminal that triggered the notification
 - `Note`: freeform editor content tied to a worktree
 - `TabState`: persisted tab metadata (label, order)
 - `SessionSummary` / session message types: parsed Claude JSONL transcript items
@@ -151,13 +157,15 @@ Maintains a stable symlink at `~/.ssh/tbd-agent.sock` pointing to a live SSH age
 
 JSON-RPC style over Unix socket (newline-delimited) and HTTP POST `/rpc`. Method families (see `Sources/TBDDaemon/Server/RPCRouter+*Handlers.swift`):
 
-- **Repo**: `repo.add`, `repo.remove`, `repo.list`, `repo.rename`, `repo.relocate`, `repo.updateInstructions`, hidden/expanded toggles
+- **Repo**: `repo.add`, `repo.remove`, `repo.list`, `repo.rename`, `repo.relocate`, `repo.updateInstructions`, `repo.listBranches`, hidden/expanded toggles
 - **Worktree**: `worktree.create`, `.list`, `.archive`, `.revive`, `.adopt`, `.rename`, `.reorder`, `.move` (reparent), `.selectionChanged`, `.suspend`, `.resume`
-- **Terminal**: `terminal.create` (`type`/`prompt`), `.list`, `.send` (`submit`), `.delete`, `.setPin`, `.output`, `.conversation`, `.transcript`, `.transcriptItemFullBody`, `.suspend`, `.resume`, `.recreateWindow`, `.swapProfile`
+- **Terminal**: `terminal.create` (`type`/`prompt`), `.list`, `.send` (`submit`), `.delete`, `.setPin`, `.output`, `.conversation`, `.transcript`, `.transcriptItemFullBody`, `.suspend`, `.resume`, `.recreateWindow`, `.swapProfile`, `.activityEvent` (internal — fired by the terminal-activity hook)
 - **Tab**: `tab.setLabel`, `tab.setOrder`, `tab.list`, `worktree.setActiveTab`
 - **Session**: `session.list`, `session.messages` — list/parse Claude JSONL transcripts; plus `terminal.sessionEvent` (SessionStart hook bridge)
 - **AskUserQuestion**: `terminal.askUserQuestionPending` / `terminal.askUserQuestionCleared`, backed by `PendingQuestionStore`
-- **Model profile**: `modelProfile.list`/`.add`/`.delete`/`.rename`/`.updateEndpoint`/`.updateBedrock`/`.setGlobalDefault`/`.setRepoOverride`/`.fetchUsage`/`.healthCheck`
+- **Model profile**: `modelProfile.list`/`.add`/`.delete`/`.rename`/`.updateEndpoint`/`.updateBedrock`/`.setGlobalDefault`/`.setPrimaryAgentPreference`/`.setRepoOverride`/`.fetchUsage`/`.healthCheck`
+- **Claude preferences**: `claude.setSpawnPreferences` — stores Claude spawn-env overrides (`ClaudeSpawnPreferences`) into the config row; handled by `RPCRouter+ClaudePreferencesHandlers.swift`
+- **Appearance**: `appearance.updateColorFgBg` — fans out `COLORFGBG` env update to all active tmux servers; handled by `RPCRouter+AppearanceHandlers.swift`
 - **Notification**: `notify`, `notifications.list`, `notifications.markRead`
 - **PR**: `pr.list`, `pr.refresh`
 - **Note**: `note.create`/`.get`/`.update`/`.delete`/`.list`
@@ -170,6 +178,7 @@ See `Sources/TBDCLI/Commands/`. Highlights:
 - `tbd worktree create [--position child|sibling|root] [--branch] [--prompt|--prompt-file] [--no-wait] [--json]`, plus `list`, `adopt`, `archive`, `revive`, `rename`, `reparent`
 - `tbd terminal create <worktree> [--type shell|claude|codex] [--cmd] [--prompt|--prompt-file] [--json]`, `send --terminal <id> --text <t> [--submit]`, `list`, `output`, `conversation`
 - `tbd hooks status` — show the Claude overlay + legacy hook state; `tbd hooks stop-rename-check` — internal Stop-hook
-- `tbd session-event`, `tbd ask-user-question pre|post` — internal hooks fired by the settings overlay
+- `tbd session-event`, `tbd terminal-activity`, `tbd ask-user-question pre|post` — internal hooks fired by the settings overlay
 - `tbd link` — print a `tbd://` deep link for the current worktree
+- `tbd doctor [--dry-run]` — diagnose and repair the `~/.local/bin/tbd` CLI install (checks that it is a hard link to the TBDCLI binary sibling of the running daemon; repairs stale or missing links)
 - `tbd notify`, `tbd daemon status`, `tbd cleanup`, `tbd setup-hooks` (deprecated)
