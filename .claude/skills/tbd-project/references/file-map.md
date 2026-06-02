@@ -3,7 +3,7 @@
 Key source files and what they do. Not exhaustive — see the directory listing for the rest.
 
 ## Package
-- `Package.swift` — SPM manifest. Targets: TBDShared, TBDDaemonLib, TBDDaemon, TBDCLI, TBDApp
+- `Package.swift` — SPM manifest. Targets: TBDShared, TBDAppIcon, IconBaker, TBDDaemonLib, TBDDaemon, TBDCLI, TBDApp
 
 ## Sources/TBDShared/
 - `Constants.swift` — paths under `~/tbd/` (configDir, socket, db, pid, port, repos), version; honors `TBD_HOME`/`TBD_SOCKET_PATH`
@@ -17,6 +17,11 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `NameGenerator.swift` / `Adjectives.swift` / `Animals.swift` — `YYYYMMDD-adjective-animal` names
 - `RepoConstants.swift` — default rename-prompt template
 - `EmojiData.swift` — emoji dataset for worktree-name autocomplete
+- `ClaudeEnvRegistry.swift` — registry of user-configurable spawn-time Claude env settings (`ClaudeEnvValue`: bool/int/string, frozen JSON format; `ClaudeEnvRegistry.all` is the single source of truth)
+
+## Sources/TBDAppIcon/ & Sources/IconBaker/
+- `TBDAppIcon/AppIcon.swift` — programmatic AppKit/CoreGraphics/CoreText icon drawing; per-worktree ribbon variant at runtime, shared by TBDApp and IconBaker
+- `IconBaker/main.swift` — one-shot executable: renders the default (no-ribbon) icon and writes a multi-rep `.icns` file; run after changing AppIcon.swift and commit the result
 
 ## Sources/TBDDaemon/ (TBDDaemonLib target)
 
@@ -65,7 +70,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references
-- `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Selection, Subscription, LegacyHook, Relocate handlers
+- `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Selection, Subscription, LegacyHook, Relocate, Appearance (terminal COLORFGBG), ClaudePreferences (spawn-time env overrides) handlers
 - `SocketServer.swift` / `HTTPServer.swift` — NIO Unix-socket + HTTP RPC servers
 - `StateSubscription.swift` — `StateDelta` broadcasting to subscribed clients
 - `RepoSerializer.swift` — repo serialization for RPC results
@@ -81,19 +86,21 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 ## Sources/TBDCLI/
 - `TBD.swift` — `@main`, registers subcommands
 - `SocketClient.swift` / `PathResolver.swift` / `Utilities.swift` — POSIX RPC client, `$PWD`→repo/worktree resolution, helpers
-- `Commands/` — `RepoCommands`, `WorktreeCommands` (+`WorktreePosition`), `TerminalCommands`, `NotifyCommand`, `HooksCommand`, `SetupHooksCommand` (deprecated), `SessionEventCommand`, `AskUserQuestionEventCommand`, `StopRenameCheckCommand`, `LinkCommand`, `CleanupCommand`, `DaemonCommands`
+- `Commands/` — `RepoCommands`, `WorktreeCommands` (+`WorktreePosition`), `TerminalCommands`, `NotifyCommand`, `HooksCommand`, `SetupHooksCommand` (deprecated), `SessionEventCommand`, `AskUserQuestionEventCommand`, `StopRenameCheckCommand`, `LinkCommand`, `CleanupCommand`, `DaemonCommands`, `DoctorCommand` (`tbd doctor` — diagnose/repair CLI install), `TerminalActivityEventCommand` (agent hook → terminal-activity bridge)
 
 ## Sources/TBDApp/
-- `TBDApp.swift` — `@main` App + AppDelegate; `AppIcon.swift` — programmatic icon
-- `AppState.swift` + `AppState+*.swift` — observable state split (Repos/Worktrees/Terminals/Tabs/Notes/Notifications/Navigation/History/ModelProfiles)
+- `TBDApp.swift` — `@main` App + AppDelegate
+- `AppState.swift` + `AppState+*.swift` — observable state split (Repos/Worktrees/Terminals/Tabs/Notes/Notifications/Navigation/History/ModelProfiles/ArchiveTombstones/TerminalFocus)
+- `AutoTabLabelResolver.swift` — derives display labels for terminal tabs automatically
+- `PRStatusPresentation.swift` — color/label helpers for PR status display
 - `DaemonClient.swift` — actor, POSIX RPC client; `DeepLinkHandler.swift` — `tbd://` routing
 - `ContentView.swift` / `RepoDetailView.swift` / `RepoInstructionsView.swift` / `TabBar.swift` / `ArchivedWorktreesView.swift`
 - `CLIInstallerCoordinator.swift` / `LegacyHooksCoordinator.swift` — launch-time install + legacy-hook migration prompts
-- `Sidebar/` — repo sections, nested worktree rows/subtrees, context menu, emoji picker, inline rename
-- `Terminal/` — TmuxBridge, TBDTerminalView, panels, split layout, LayoutNode, PaneContent, pinned dock, appearance/color schemes, WorktreePager
-- `Panes/` — code viewer, note, webview, history, `LiveTranscriptPaneView`, `Transcript/` (per-tool cards, chat bubbles, context-usage badge, markdown)
+- `Sidebar/` — repo sections, nested worktree rows/subtrees, context menu, emoji picker, inline rename, `BranchPickerView` (option-click `+` to create worktree from an existing branch)
+- `Terminal/` — TmuxBridge, TBDTerminalView, panels, split layout, LayoutNode, PaneContent, pinned dock, appearance/color schemes, WorktreePager; custom/importable terminal themes: `ThemeStore`, `UserTerminalTheme`, `AlacrittyImporter` (TOML), `ThemeDirectoryWatcher`, `TmuxConfigStyleDetector`
+- `Panes/` — code viewer, note, webview, history, `LiveTranscriptPaneView`, `Transcript/` (per-tool cards with body/header split files, chat bubbles, context-usage badge, markdown; file-preview overlay: `TranscriptOverlayView`, `TranscriptOverlayCoordinator`, `TranscriptOverlayEnvironment`, `OverlayFileView`, `OverlayFileLinkAction`, `LocalFileLinker`, `TranscriptNodeCache`)
 - `JumpMenu/` — Cmd-K worktree jump palette
-- `MenuBar/ModelProfileMenu.swift`, `Settings/` (general, terminal, repo hooks, model profiles, AWS/Bedrock pickers)
+- `MenuBar/ModelProfileMenu.swift`, `Settings/` (general, terminal incl. `TerminalThemeEditorView`/`TerminalThemeEditorViewModel`, repo hooks, model profiles, AWS/Bedrock pickers)
 - `Diagnostics/` — hang watchdog, main-thread sampler, transcript signposts
 - `Services/` — Mac notifications, notification sounds
 - `FileViewer/FileViewerPanel.swift` — git status file viewer
