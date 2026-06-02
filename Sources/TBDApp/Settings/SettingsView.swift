@@ -39,6 +39,8 @@ struct GeneralSettingsTab: View {
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
+    @AppStorage("errorNotificationSoundName") private var errorSoundName: String = "Sosumi"
+    @AppStorage("errorNotificationSoundCustomPath") private var errorCustomPath: String = ""
 
     private var systemSounds: [String] { NotificationSoundPlayer.systemSoundNames() }
     private let soundPlayer = NotificationSoundPlayer()
@@ -78,6 +80,36 @@ struct GeneralSettingsTab: View {
 
                         Button("Test") {
                             soundPlayer.playTest()
+                        }
+                        .controlSize(.small)
+                    }
+
+                    HStack {
+                        Picker("Error sound", selection: Binding(
+                            get: { errorCustomPath.isEmpty ? errorSoundName : "__custom__" },
+                            set: { newValue in
+                                if newValue == "__custom__" {
+                                    pickErrorCustomSound()
+                                } else {
+                                    errorSoundName = newValue
+                                    errorCustomPath = ""
+                                }
+                            }
+                        )) {
+                            ForEach(systemSounds, id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                            Divider()
+                            Text("Custom…").tag("__custom__")
+                            if !errorCustomPath.isEmpty {
+                                Text(URL(fileURLWithPath: errorCustomPath).lastPathComponent)
+                                    .tag("__custom__")
+                            }
+                        }
+                        .frame(maxWidth: 200)
+
+                        Button("Test") {
+                            soundPlayer.playTestError()
                         }
                         .controlSize(.small)
                     }
@@ -128,6 +160,19 @@ struct GeneralSettingsTab: View {
 
         if panel.runModal() == .OK, let url = panel.url {
             customPath = url.path
+        }
+    }
+
+    private func pickErrorCustomSound() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ["aiff", "mp3", "wav", "m4a"]
+            .compactMap { UTType(filenameExtension: $0) }
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Choose an error notification sound"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            errorCustomPath = url.path
         }
     }
 }
