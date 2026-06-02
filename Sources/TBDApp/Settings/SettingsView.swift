@@ -35,6 +35,7 @@ struct GeneralSettingsTab: View {
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
+    @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = false
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
@@ -100,6 +101,8 @@ struct GeneralSettingsTab: View {
             Section("Experimental") {
                 Toggle("Auto-suspend idle Claude when switching worktrees", isOn: $autoSuspend)
                     .help("Experimental: exit idle Claude instances when you switch away and resume them when you switch back, freeing memory. Off by default — may interrupt long-running work.")
+                Toggle("Live transcript pane", isOn: $enableTranscript)
+                    .help("Experimental: show a chat-style live transcript pane for Claude sessions. Off by default — may freeze the app on very large transcripts.")
             }
         }
         .formStyle(.grouped)

@@ -39,6 +39,7 @@ struct PanePlaceholder: View {
     @State private var hasRenderableContent = false
     @StateObject private var webviewState = WebviewState()
     @State private var didCopyURL = false
+    @AppStorage(AppState.enableTranscriptKey) private var transcriptFeatureEnabled = false
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {
@@ -188,7 +189,7 @@ struct PanePlaceholder: View {
             }
             .buttonStyle(.borderless)
 
-            if terminal(for: terminalID)?.isClaudeResumable == true {
+            if terminal(for: terminalID)?.isClaudeResumable == true && transcriptFeatureEnabled {
                 Button(action: { openTranscript(terminalID: terminalID) }) {
                     HStack(spacing: 2) {
                         Image(systemName: "text.bubble")
@@ -256,14 +257,18 @@ struct PanePlaceholder: View {
         case .note(let noteID):
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):
-            LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
-                .environment(\.openFilePreview, { path in
-                    let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                    layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
-                })
-                .environment(\.openTranscriptOverlay) { itemID in
-                    overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
-                }
+            if transcriptFeatureEnabled {
+                LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
+                    .environment(\.openFilePreview, { path in
+                        let newContent = PaneContent.codeViewer(id: UUID(), path: path)
+                        layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                    })
+                    .environment(\.openTranscriptOverlay) { itemID in
+                        overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
+                    }
+            } else {
+                transcriptDisabledPlaceholder
+            }
         }
     }
 
@@ -384,6 +389,23 @@ struct PanePlaceholder: View {
                 }
             }
         }
+    }
+
+    /// Placeholder shown when a transcript pane exists but the feature flag is off.
+    /// Renders a centered message pointing the user to enable the feature in Settings.
+    private var transcriptDisabledPlaceholder: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "text.bubble")
+                .font(.system(size: 32))
+                .foregroundStyle(.tertiary)
+            Text("Transcript view is turned off")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Text("Enable it in Settings → Experimental")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Close
