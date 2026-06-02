@@ -742,7 +742,7 @@ final class AppState: ObservableObject {
         }
 
         // Fire sound + macOS notification
-        notificationSoundPlayer.playIfEnabled()
+        notificationSoundPlayer.playIfEnabled(for: notification.type)
         macNotificationManager.postIfEnabled(
             worktreeID: notification.worktreeID,
             message: notification.message,
