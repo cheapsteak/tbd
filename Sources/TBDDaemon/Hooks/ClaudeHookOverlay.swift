@@ -61,16 +61,15 @@ public enum ClaudeHookOverlay {
     static let stopRenameCheckCommand =
         #"tbd hooks stop-rename-check 2>/dev/null || true"#
 
-    /// The shell command for the StopFailure hook. Claude Code fires
-    /// StopFailure (not Stop) when a turn ends due to an API error — rate
-    /// limit, server overload, auth/billing failure, etc. By the time it
-    /// fires, Claude has already auto-retried ~10×, so it is a genuine
-    /// "this turn is dead" signal. We extract `error_type` from the hook
-    /// payload and raise an `error`-severity notification so the otherwise
-    /// silent thread death surfaces. Silent failure so we never wedge the
-    /// agent, consistent with the other hooks.
+    /// The shell command for the StopFailure hook. Delegates to
+    /// `tbd hooks stop-failure`, which reads the verbatim API-error text from
+    /// the transcript (so a session limit reads "You've hit your session limit
+    /// · resets 3pm" rather than a generic "rate_limit"), then pipes the
+    /// message into `tbd notify --type error`. Mirrors the `Stop` hook's
+    /// `MSG=$(…); tbd notify …` shape. Trailing `; true` keeps the hook exit 0
+    /// so it never wedges the agent.
     static let stopFailureCommand =
-        #"TYPE=$(jq -r '.error_type // "unknown"' 2>/dev/null); tbd notify --type error --message "Claude stopped: API error ($TYPE)" 2>/dev/null || true"#
+        #"MSG=$(tbd hooks stop-failure 2>/dev/null); [ -n "$MSG" ] && tbd notify --type error --message "$MSG" 2>/dev/null; true"#
 
     /// Bridges the `PreToolUse:AskUserQuestion` hook into TBD. Captures the
     /// tool input and tool_use_id so the transcript pane can render the
