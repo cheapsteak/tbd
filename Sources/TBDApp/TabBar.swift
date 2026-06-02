@@ -170,6 +170,7 @@ private struct AddTabButton: View {
     let onAddCodex: () -> Void
     let onAddNote: () -> Void
     @State private var isHovering = false
+    @State private var availability = AgentExecutableAvailability.detect()
 
     var body: some View {
         Image(systemName: "plus")
@@ -185,9 +186,13 @@ private struct AddTabButton: View {
             .onHover { hovering in isHovering = hovering }
             .onTapGesture { showMenu() }
             .help("New Tab")
+            .task {
+                availability = AgentExecutableAvailability.detect()
+            }
     }
 
     private func showMenu() {
+        availability = AgentExecutableAvailability.detect()
         let coordinator = MenuCoordinator(
             onShell: onAddShell,
             onClaude: onAddClaude,
@@ -195,13 +200,69 @@ private struct AddTabButton: View {
             onCodex: onAddCodex,
             onNote: onAddNote
         )
-        let menu = AddTabMenu.build(profiles: profiles, coordinator: coordinator)
+        let menu = AddTabMenu.build(
+            profiles: profiles,
+            availability: availability,
+            coordinator: coordinator
+        )
 
         // Keep coordinator alive for the duration of the menu.
         objc_setAssociatedObject(menu, "coordinator", coordinator, .OBJC_ASSOCIATION_RETAIN)
 
         let location = NSEvent.mouseLocation
         menu.popUp(positioning: nil, at: location, in: nil)
+    }
+}
+
+struct AgentExecutableAvailability: Equatable {
+    var claude: Bool
+    var codex: Bool
+
+    static let allAvailable = AgentExecutableAvailability(claude: true, codex: true)
+
+    static func detect(
+        path: String? = ProcessInfo.processInfo.environment["PATH"],
+        homeDir: String = NSHomeDirectory(),
+        fileManager: FileManager = .default
+    ) -> AgentExecutableAvailability {
+        AgentExecutableAvailability(
+            claude: isExecutableOnPath("claude", path: path, homeDir: homeDir, fileManager: fileManager),
+            codex: isExecutableOnPath("codex", path: path, homeDir: homeDir, fileManager: fileManager)
+        )
+    }
+
+    private static func isExecutableOnPath(
+        _ executable: String,
+        path: String?,
+        homeDir: String,
+        fileManager: FileManager
+    ) -> Bool {
+        if executable.contains("/") {
+            return fileManager.isExecutableFile(atPath: executable)
+        }
+
+        let pathDirs = (path ?? "")
+            .split(separator: ":", omittingEmptySubsequences: true)
+            .map(String.init)
+        let fallbackDirs = [
+            "\(homeDir)/.local/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+
+        var seen = Set<String>()
+        for dir in pathDirs + fallbackDirs {
+            guard seen.insert(dir).inserted else { continue }
+            let candidate = (dir as NSString).appendingPathComponent(executable)
+            if fileManager.isExecutableFile(atPath: candidate) {
+                return true
+            }
+        }
+        return false
     }
 }
 
@@ -251,7 +312,11 @@ enum AddTabMenu {
     /// below the "Claude" item — clicking one starts a Claude session pinned to
     /// that profile. With an empty `profiles` list, no profile items appear and
     /// the menu is identical to the pre-feature menu.
-    static func build(profiles: [ModelProfileWithUsage], coordinator: MenuCoordinator) -> NSMenu {
+    static func build(
+        profiles: [ModelProfileWithUsage],
+        availability: AgentExecutableAvailability = .allAvailable,
+        coordinator: MenuCoordinator
+    ) -> NSMenu {
         let menu = NSMenu()
 
         let shellItem = NSMenuItem(
@@ -261,39 +326,43 @@ enum AddTabMenu {
         shellItem.target = coordinator
         menu.addItem(shellItem)
 
-        let claudeIcon = claudeAsteriskImage()
-        let claudeItem = NSMenuItem(
-            title: "Claude", action: #selector(MenuCoordinator.addClaude), keyEquivalent: ""
-        )
-        claudeItem.image = claudeIcon
-        claudeItem.target = coordinator
-        menu.addItem(claudeItem)
-
-        // One item per profile, titled with the profile's display name. Each
-        // gets a transparent placeholder icon the same size as the Claude
-        // asterisk so its title lines up in the same title column as "Claude"
-        // — the empty icon slot is the visual nesting cue. The profile id
-        // rides along in `representedObject` for MenuCoordinator.addClaudeProfile.
-        for entry in profiles {
-            let item = NSMenuItem(
-                title: entry.profile.name,
-                action: #selector(MenuCoordinator.addClaudeProfile(_:)),
-                keyEquivalent: ""
+        if availability.claude {
+            let claudeIcon = claudeAsteriskImage()
+            let claudeItem = NSMenuItem(
+                title: "Claude", action: #selector(MenuCoordinator.addClaude), keyEquivalent: ""
             )
-            item.image = blankIcon(size: claudeIcon.size)
-            item.representedObject = entry.profile.id
-            item.target = coordinator
-            menu.addItem(item)
+            claudeItem.image = claudeIcon
+            claudeItem.target = coordinator
+            menu.addItem(claudeItem)
+
+            // One item per profile, titled with the profile's display name. Each
+            // gets a transparent placeholder icon the same size as the Claude
+            // asterisk so its title lines up in the same title column as "Claude"
+            // — the empty icon slot is the visual nesting cue. The profile id
+            // rides along in `representedObject` for MenuCoordinator.addClaudeProfile.
+            for entry in profiles {
+                let item = NSMenuItem(
+                    title: entry.profile.name,
+                    action: #selector(MenuCoordinator.addClaudeProfile(_:)),
+                    keyEquivalent: ""
+                )
+                item.image = blankIcon(size: claudeIcon.size)
+                item.representedObject = entry.profile.id
+                item.target = coordinator
+                menu.addItem(item)
+            }
         }
 
-        let codexItem = NSMenuItem(
-            title: "Codex", action: #selector(MenuCoordinator.addCodex), keyEquivalent: ""
-        )
-        codexItem.image = NSImage(
-            systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: nil
-        )
-        codexItem.target = coordinator
-        menu.addItem(codexItem)
+        if availability.codex {
+            let codexItem = NSMenuItem(
+                title: "Codex", action: #selector(MenuCoordinator.addCodex), keyEquivalent: ""
+            )
+            codexItem.image = NSImage(
+                systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: nil
+            )
+            codexItem.target = coordinator
+            menu.addItem(codexItem)
+        }
 
         menu.addItem(.separator())
 
