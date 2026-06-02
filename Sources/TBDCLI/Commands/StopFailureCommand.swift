@@ -1,6 +1,5 @@
 import ArgumentParser
 import Foundation
-import TBDShared
 
 /// `tbd hooks stop-failure` — handler for Claude Code's StopFailure hook,
 /// which fires (unlike Stop) when a turn ends due to an API error. It reads

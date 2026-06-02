@@ -21,9 +21,9 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 ///     legacy globally-installed hook.
 ///   - `tbd hooks stop-rename-check`, which prompts the agent to rename
 ///     a still-default worktree/branch at end-of-turn.
-/// - `StopFailure`: `tbd notify --type error` when a turn dies on an API
-///   error (rate limit, server overload, etc.), which the `Stop` hook does
-///   not catch — `Stop` fires only on normal completion.
+/// - `StopFailure`: runs `tbd hooks stop-failure` to read the verbatim
+///   API-error text from the transcript, then pipes that into
+///   `tbd notify --type error` — `Stop` fires only on normal completion.
 /// - `PreToolUse:AskUserQuestion` / `PostToolUse:AskUserQuestion`:
 ///   bridge tool input and `tool_use_id` so the transcript pane can
 ///   render the question before Claude flushes the assistant message
