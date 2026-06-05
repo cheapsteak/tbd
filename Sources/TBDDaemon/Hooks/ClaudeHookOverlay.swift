@@ -12,22 +12,27 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 /// its own overlay file pinned at spawn time without touching the user's
 /// settings.json at all.
 ///
-/// The overlay registers five event types:
+/// The overlay registers six event types:
 /// - `SessionStart` (matcher `*`): calls `tbd session-event`, which
 ///   relays the new session ID + transcript path to the daemon. This is
-///   what fixes the post-`/clear`/`/compact` transcript freeze.
+///   what fixes the post-`/clear`/`/compact` transcript freeze. Also
+///   sets the terminal activity state to idle.
 /// - `Stop` (two entries):
 ///   - `tbd notify` for response-complete notifications, matching the
-///     legacy globally-installed hook.
+///     legacy globally-installed hook. Also sets activity to idle.
 ///   - `tbd hooks stop-rename-check`, which prompts the agent to rename
 ///     a still-default worktree/branch at end-of-turn.
 /// - `StopFailure`: runs `tbd hooks stop-failure` to read the verbatim
 ///   API-error text from the transcript, then pipes that into
 ///   `tbd notify --type error` — `Stop` fires only on normal completion.
+///   Also sets activity to idle.
+/// - `UserPromptSubmit`: sets activity to working so the thinking
+///   indicator appears in the sidebar while Claude processes a prompt.
 /// - `PreToolUse:AskUserQuestion` / `PostToolUse:AskUserQuestion`:
 ///   bridge tool input and `tool_use_id` so the transcript pane can
 ///   render the question before Claude flushes the assistant message
-///   to the JSONL.
+///   to the JSONL. Pre sets activity to waiting_for_user; post sets
+///   it back to working (Claude continues processing after user answers).
 ///
 /// The overlay is regenerated on every daemon startup so changes to the
 /// shape (new hooks, new commands) take effect on the next worktree open.
@@ -45,14 +50,15 @@ public enum ClaudeHookOverlay {
     /// The shell command for the SessionStart hook. Reads stdin (Claude's
     /// hook payload) into `tbd session-event`, which RPCs the daemon. The
     /// command tolerates `tbd` not being on PATH — silent failure is fine.
+    /// Also initializes terminal activity to idle.
     static let sessionStartCommand =
-        #"tbd session-event 2>/dev/null || true"#
+        #"tbd session-event 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
 
     /// The shell command for the Stop hook. Mirrors the legacy
     /// `setup-hooks --global` command so TBD can replace it without
-    /// regressing notification behavior.
+    /// regressing notification behavior. Also clears the thinking indicator.
     static let stopCommand =
-        #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
+        #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
 
     /// Second Stop hook: prompt the agent to rename its worktree/branch at
     /// end-of-turn while the work is fresh and context is highest. Reads
@@ -66,22 +72,33 @@ public enum ClaudeHookOverlay {
     /// the transcript (so a session limit reads "You've hit your session limit
     /// · resets 3pm" rather than a generic "rate_limit"), then pipes the
     /// message into `tbd notify --type error`. Mirrors the `Stop` hook's
-    /// `MSG=$(…); tbd notify …` shape. Trailing `; true` keeps the hook exit 0
-    /// so it never wedges the agent.
+    /// `MSG=$(…); tbd notify …` shape. Also clears the thinking indicator.
+    /// Trailing `; true` keeps the hook exit 0 so it never wedges the agent.
     static let stopFailureCommand =
-        #"MSG=$(tbd hooks stop-failure 2>/dev/null); [ -n "$MSG" ] && tbd notify --type error --message "$MSG" 2>/dev/null; true"#
+        #"MSG=$(tbd hooks stop-failure 2>/dev/null); [ -n "$MSG" ] && tbd notify --type error --message "$MSG" 2>/dev/null; tbd terminal-activity idle 2>/dev/null || true; true"#
 
     /// Bridges the `PreToolUse:AskUserQuestion` hook into TBD. Captures the
     /// tool input and tool_use_id so the transcript pane can render the
     /// question before Claude flushes the assistant message to the JSONL.
+    /// Also signals waiting_for_user so the sidebar shows the correct state.
     static let askUserQuestionPreCommand =
-        #"tbd ask-user-question pre 2>/dev/null || true"#
+        #"tbd ask-user-question pre 2>/dev/null || true; tbd terminal-activity waiting_for_user 2>/dev/null || true"#
 
     /// Bridges the `PostToolUse:AskUserQuestion` hook into TBD. Defensive
     /// only — see RPCRouter+TerminalHandlers.swift for why we rely on JSONL
-    /// dedupe rather than eager cleanup.
+    /// dedupe rather than eager cleanup. Also signals working since Claude
+    /// continues processing after the user answers.
     static let askUserQuestionPostCommand =
-        #"tbd ask-user-question post 2>/dev/null || true"#
+        #"tbd ask-user-question post 2>/dev/null || true; tbd terminal-activity working 2>/dev/null || true"#
+
+    /// Sets the terminal activity state to working (shows the thinking
+    /// indicator in the sidebar while Claude processes a prompt).
+    static let workingCommand =
+        #"tbd terminal-activity working 2>/dev/null || true"#
+
+    /// Sets the terminal activity state to waiting_for_user.
+    static let waitingForUserCommand =
+        #"tbd terminal-activity waiting_for_user 2>/dev/null || true"#
 
     /// Build the JSON-encoded overlay body.
     ///
@@ -118,6 +135,13 @@ public enum ClaudeHookOverlay {
                     [
                         "hooks": [
                             ["type": "command", "command": stopFailureCommand]
+                        ]
+                    ]
+                ],
+                "UserPromptSubmit": [
+                    [
+                        "hooks": [
+                            ["type": "command", "command": workingCommand]
                         ]
                     ]
                 ],
