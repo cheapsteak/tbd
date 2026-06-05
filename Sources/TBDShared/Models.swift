@@ -688,11 +688,18 @@ extension ModelProfile {
         switch kind {
         case .oauth:
             // OAuth profiles need a one-time /login to establish credentials
-            // in the isolated config dir. Show this hint even for simple OAuth.
-            if let baseURL { return "Run /login once · via \(baseURL)" }
-            return "Run /login once"
+            // in the isolated config dir. Show this hint even for simple OAuth,
+            // plus the pinned model (if any) so the Edit sheet's effect is visible.
+            var parts = ["Run /login once"]
+            if let baseURL { parts.append("via \(baseURL)") }
+            if let model, !model.isEmpty { parts.append(model) }
+            return parts.joined(separator: " · ")
         case .apiKey:
-            guard let baseURL else { return nil }
+            guard let baseURL else {
+                // Direct api-key profile: nothing to show unless a model is pinned.
+                if let model, !model.isEmpty { return model }
+                return nil
+            }
             if let model, !model.isEmpty { return "via \(baseURL) · \(model)" }
             return "via \(baseURL)"
         case .bedrock:
