@@ -81,10 +81,16 @@ struct ModelProfileDisplayTests {
         #expect(p.detailCaption == "? · anthropic.claude-sonnet-4-5")
     }
 
-    @Test("detailCaption: direct apiKey with model set → nil (model not shown without proxy)")
-    func detailDirectApiKeyWithModelNil() {
+    @Test("detailCaption: direct apiKey with model set → model")
+    func detailDirectApiKeyWithModel() {
         let p = ModelProfile(name: "x", kind: .apiKey, model: "claude-opus-4")
-        #expect(p.detailCaption == nil)
+        #expect(p.detailCaption == "claude-opus-4")
+    }
+
+    @Test("detailCaption: oauth with model → login hint + model")
+    func detailOAuthWithModel() {
+        let p = ModelProfile(name: "x", kind: .oauth, model: "opus")
+        #expect(p.detailCaption == "Run /login once · opus")
     }
 
     @Test("detailCaption: bedrock with both region and model nil → bare \"?\"")

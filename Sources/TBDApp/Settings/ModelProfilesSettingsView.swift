@@ -642,7 +642,9 @@ struct AddModelProfileSheet: View {
                 name: trimmedName,
                 token: preset == .claudeDirect ? nil : tokenValue,
                 baseURL: preset == .proxy ? trimmedBase : nil,
-                model: (preset == .proxy || preset == .claudeDirect) ? (trimmedModel.isEmpty ? nil : trimmedModel) : nil
+                // Bedrock returns early above, so only proxy/claudeDirect reach here —
+                // both carry an optional model.
+                model: trimmedModel.isEmpty ? nil : trimmedModel
             )
             await MainActor.run {
                 isSaving = false
