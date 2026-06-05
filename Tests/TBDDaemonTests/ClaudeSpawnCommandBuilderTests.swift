@@ -206,6 +206,42 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == "gpt-5-codex")
     }
 
+    @Test("oauth profile with model emits ANTHROPIC_MODEL")
+    func oauthProfileWithModelEmitsModel() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            profileKind: .oauth,
+            profileBaseURL: nil,
+            profileModel: "opus",
+            profileConfigDir: "/Users/me/tbd/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == "opus")
+    }
+
+    @Test("oauth profile without model does not emit ANTHROPIC_MODEL")
+    func oauthProfileWithoutModelOmitsModel() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            profileKind: .oauth,
+            profileBaseURL: nil,
+            profileModel: nil,
+            profileConfigDir: "/Users/me/tbd/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.sensitiveEnv["ANTHROPIC_MODEL"] == nil)
+    }
+
     @Test("oauth profile without configDir → no token, no config dir")
     func oauthWithoutConfigDirInjectsNothing() {
         let r = ClaudeSpawnCommandBuilder.build(

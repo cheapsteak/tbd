@@ -73,6 +73,7 @@ struct ModelProfileRow: View {
     @State private var showDeleteConfirm = false
     @State private var showEditEndpoint = false
     @State private var showEditBedrock = false
+    @State private var showEditClaudeDirect = false
 
     private var profile: ModelProfile { entry.profile }
     private var usage: ModelProfileUsage? { entry.usage }
@@ -83,12 +84,16 @@ struct ModelProfileRow: View {
                 nameView
                 kindBadge
                 Spacer()
-                if profile.baseURL != nil && profile.kind != .bedrock {
-                    Button("Edit") { showEditEndpoint = true }
-                        .controlSize(.small)
-                }
+                // Exactly one Edit button per row, partitioned by profile shape:
+                // bedrock → proxy (non-bedrock with a baseURL) → Claude-direct (the rest).
                 if profile.kind == .bedrock {
                     Button("Edit") { showEditBedrock = true }
+                        .controlSize(.small)
+                } else if profile.baseURL != nil {
+                    Button("Edit") { showEditEndpoint = true }
+                        .controlSize(.small)
+                } else {
+                    Button("Edit") { showEditClaudeDirect = true }
                         .controlSize(.small)
                 }
                 menuButton
@@ -114,6 +119,10 @@ struct ModelProfileRow: View {
         }
         .sheet(isPresented: $showEditBedrock) {
             EditBedrockSheet(profile: profile)
+                .environmentObject(appState)
+        }
+        .sheet(isPresented: $showEditClaudeDirect) {
+            EditClaudeDirectSheet(profile: profile)
                 .environmentObject(appState)
         }
     }
@@ -411,6 +420,14 @@ struct AddModelProfileSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    LabeledField(
+                        "Model (optional)",
+                        caption: "Leave blank to use Claude Code's default model."
+                    ) {
+                        TextField("", text: $model, prompt: Text("e.g. opus"))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: .infinity)
+                    }
 
                 case .proxy:
                     LabeledField("Token") {
@@ -625,7 +642,7 @@ struct AddModelProfileSheet: View {
                 name: trimmedName,
                 token: preset == .claudeDirect ? nil : tokenValue,
                 baseURL: preset == .proxy ? trimmedBase : nil,
-                model: preset == .proxy ? (trimmedModel.isEmpty ? nil : trimmedModel) : nil
+                model: (preset == .proxy || preset == .claudeDirect) ? (trimmedModel.isEmpty ? nil : trimmedModel) : nil
             )
             await MainActor.run {
                 isSaving = false
@@ -950,6 +967,106 @@ struct EditBedrockSheet: View {
                 if newAlert != priorAlert, let msg = newAlert {
                     errorMessage = msg
                     appState.alertMessage = priorAlert
+                    return
+                }
+                dismiss()
+            }
+        }
+    }
+}
+
+// MARK: - Edit Claude (direct) sheet
+
+struct EditClaudeDirectSheet: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    let profile: ModelProfile
+
+    @State private var name: String
+    @State private var model: String
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+
+    init(profile: ModelProfile) {
+        self.profile = profile
+        _name = State(initialValue: profile.name)
+        _model = State(initialValue: profile.model ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Edit Claude Profile").font(.headline)
+            VStack(alignment: .leading, spacing: 14) {
+                LabeledField("Name") {
+                    TextField("", text: $name).textFieldStyle(.roundedBorder).frame(maxWidth: .infinity)
+                }
+                LabeledField(
+                    "Model (optional)",
+                    caption: "Leave blank to use Claude Code's default model."
+                ) {
+                    TextField("", text: $model, prompt: Text("e.g. opus"))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button(action: save) {
+                    if isSaving { ProgressView().controlSize(.small) } else { Text("Save") }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canSave)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private var canSave: Bool {
+        !name.trimmingCharacters(in: .whitespaces).isEmpty && !isSaving
+    }
+
+    private func save() {
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        let trimmedModel = model.trimmingCharacters(in: .whitespaces)
+        isSaving = true
+        errorMessage = nil
+        Task {
+            let priorAlert = await MainActor.run { appState.alertMessage }
+
+            // Rename first if changed; bail on conflict so we don't update
+            // fields under a stale name.
+            if trimmedName != profile.name {
+                await appState.renameModelProfile(id: profile.id, name: trimmedName)
+                let postRenameAlert = await MainActor.run { appState.alertMessage }
+                if postRenameAlert != priorAlert, let msg = postRenameAlert {
+                    await MainActor.run {
+                        isSaving = false
+                        errorMessage = msg
+                        appState.alertMessage = priorAlert
+                    }
+                    return
+                }
+            }
+
+            let priorAlert2 = await MainActor.run { appState.alertMessage }
+            await appState.updateModelProfileEndpoint(
+                id: profile.id,
+                baseURL: nil,
+                model: trimmedModel.isEmpty ? nil : trimmedModel
+            )
+            await MainActor.run {
+                isSaving = false
+                let newAlert = appState.alertMessage
+                if newAlert != priorAlert2, let msg = newAlert {
+                    errorMessage = msg
+                    appState.alertMessage = priorAlert2
                     return
                 }
                 dismiss()
