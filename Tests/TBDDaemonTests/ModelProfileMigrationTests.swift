@@ -76,6 +76,34 @@ struct ModelProfileMigrationTests {
         }
     }
 
+    @Test("v30 adds fallback_models column")
+    func v30AddsFallbackModelsColumn() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.writerForTests.read { conn in
+            let cols = try Row.fetchAll(conn, sql: "PRAGMA table_info(model_profiles)")
+                .map { $0["name"] as String }
+            #expect(cols.contains("fallback_models"))
+        }
+    }
+
+    @Test("ModelProfile round-trips fallbackModels through the store (nil and non-nil)")
+    func fallbackModelsRoundTrip() async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        // nil — no fallback configured.
+        let none = try await db.modelProfiles.create(name: "None", kind: .oauth)
+        let noneReloaded = try await db.modelProfiles.get(id: none.id)
+        #expect(noneReloaded?.fallbackModels == nil)
+
+        // non-nil ordered array.
+        let withFallback = try await db.modelProfiles.create(
+            name: "WithFallback", kind: .oauth,
+            fallbackModels: ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"]
+        )
+        let reloaded = try await db.modelProfiles.get(id: withFallback.id)
+        #expect(reloaded?.fallbackModels == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"])
+    }
+
     @Test("ModelProfile round-trips through the store with baseURL/model nil and non-nil")
     func dataPreservationRoundTrip() async throws {
         let db = try TBDDatabase(inMemory: true)

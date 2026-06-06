@@ -284,12 +284,19 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     public var awsRegion: String?
     /// Named AWS profile to use for credential lookup. nil = use ambient credentials.
     public var awsProfile: String?
+    /// Ordered list of fallback model ids (up to three) written into the Claude
+    /// Code `fallbackModel` settings.json key, so spawned interactive sessions
+    /// degrade to an alternate model on overload instead of hard-failing. The
+    /// id namespace is profile-specific (bedrock/proxy/oauth differ), so this
+    /// lives on the profile, not globally. nil/empty = no fallback configured.
+    public var fallbackModels: [String]?
     public var createdAt: Date
     public var lastUsedAt: Date?
 
     public init(id: UUID = UUID(), name: String, kind: CredentialKind,
                 baseURL: String? = nil, model: String? = nil,
                 awsRegion: String? = nil, awsProfile: String? = nil,
+                fallbackModels: [String]? = nil,
                 createdAt: Date = Date(), lastUsedAt: Date? = nil) {
         self.id = id
         self.name = name
@@ -298,12 +305,13 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         self.model = model
         self.awsRegion = awsRegion
         self.awsProfile = awsProfile
+        self.fallbackModels = fallbackModels
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, kind, baseURL, model, awsRegion, awsProfile, createdAt, lastUsedAt
+        case id, name, kind, baseURL, model, awsRegion, awsProfile, fallbackModels, createdAt, lastUsedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -315,6 +323,7 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         model = try c.decodeIfPresent(String.self, forKey: .model)
         awsRegion = try c.decodeIfPresent(String.self, forKey: .awsRegion)
         awsProfile = try c.decodeIfPresent(String.self, forKey: .awsProfile)
+        fallbackModels = try c.decodeIfPresent([String].self, forKey: .fallbackModels)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
     }

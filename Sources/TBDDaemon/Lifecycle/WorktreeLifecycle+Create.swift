@@ -420,7 +420,10 @@ extension WorktreeLifecycle {
                 profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
                 cmd: nil,
                 shellFallback: defaultShell,
-                settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                settingsOverlayPath: try ClaudeHookOverlay.resolveOverlayPath(
+                    fallbackModels: resolvedProfile?.fallbackModels,
+                    sessionKey: plannedTerminalID1.uuidString
+                ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
             )
@@ -516,7 +519,10 @@ extension WorktreeLifecycle {
                     profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
                     cmd: nil,
                     shellFallback: defaultShell,
-                    settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                    settingsOverlayPath: try ClaudeHookOverlay.resolveOverlayPath(
+                        fallbackModels: resolvedProfile?.fallbackModels,
+                        sessionKey: plannedID.uuidString
+                    ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
                     envSettingOverrides: claudeEnvOverrides
                 )

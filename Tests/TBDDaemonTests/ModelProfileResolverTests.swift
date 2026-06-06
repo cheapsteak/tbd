@@ -219,6 +219,50 @@ struct ModelProfileResolverTests {
         #expect(result?.secret == nil)
     }
 
+    @Test("resolver carries fallbackModels through the global default")
+    func resolve_globalDefault_carriesFallbackModels() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let g = try await db.modelProfiles.create(
+            name: "G", kind: .oauth,
+            fallbackModels: ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"]
+        )
+        try await db.config.setDefaultProfileID(g.id)
+        box.map[g.id.uuidString] = "secret-G"
+
+        let result = try await resolver.resolve(repoID: nil)
+        #expect(result?.profileID == g.id)
+        #expect(result?.fallbackModels == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"])
+    }
+
+    @Test("resolver carries fallbackModels through the repo override")
+    func resolve_repoOverride_carriesFallbackModels() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let override = try await db.modelProfiles.create(
+            name: "Override", kind: .apiKey,
+            fallbackModels: ["claude-haiku-4-5-20251001"]
+        )
+        let global = try await db.modelProfiles.create(name: "Global", kind: .apiKey)
+        try await db.config.setDefaultProfileID(global.id)
+        let repo = try await makeRepo(db, override: override.id)
+        box.map[override.id.uuidString] = "secret-override"
+        box.map[global.id.uuidString] = "secret-global"
+
+        let result = try await resolver.resolve(repoID: repo.id)
+        #expect(result?.profileID == override.id)
+        #expect(result?.fallbackModels == ["claude-haiku-4-5-20251001"])
+    }
+
+    @Test("resolver leaves fallbackModels nil when the profile has none")
+    func resolve_noFallbackModels_isNil() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let g = try await db.modelProfiles.create(name: "G", kind: .oauth)
+        try await db.config.setDefaultProfileID(g.id)
+        box.map[g.id.uuidString] = "secret-G"
+
+        let result = try await resolver.resolve(repoID: nil)
+        #expect(result?.fallbackModels == nil)
+    }
+
     @Test("AC4.2: apiKey profile with missing keychain returns nil")
     func apiKeyProfile_keychainMissing_returnsNil() async throws {
         let (db, _, resolver) = try makeHarness()

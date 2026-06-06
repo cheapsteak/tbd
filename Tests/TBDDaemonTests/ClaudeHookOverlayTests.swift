@@ -45,6 +45,115 @@ import Testing
         #expect(cmd?.contains("tbd notify --type error") == true)
     }
 
+    @Test func generateBodyWithoutFallbackModelsOmitsKey() throws {
+        // Default (no fallback) — body has hooks, no fallbackModel key.
+        let data = try ClaudeHookOverlay.generateBody()
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        #expect(parsed?["fallbackModel"] == nil)
+    }
+
+    @Test func generateBodyWithNilFallbackModelsOmitsKey() throws {
+        let data = try ClaudeHookOverlay.generateBody(fallbackModels: nil)
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        #expect(parsed?["fallbackModel"] == nil)
+    }
+
+    @Test func generateBodyWithEmptyFallbackModelsOmitsKey() throws {
+        let data = try ClaudeHookOverlay.generateBody(fallbackModels: [])
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        #expect(parsed?["fallbackModel"] == nil)
+    }
+
+    @Test func generateBodyWithFallbackModelsIncludesOrderedArrayAndKeepsHooks() throws {
+        let models = ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"]
+        let data = try ClaudeHookOverlay.generateBody(fallbackModels: models)
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+
+        // The fallbackModel array is present, in the exact supplied order.
+        let fallback = parsed?["fallbackModel"] as? [String]
+        #expect(fallback == models)
+
+        // All the existing hooks are still present.
+        let hooks = parsed?["hooks"] as? [String: Any]
+        #expect(hooks != nil)
+        #expect(hooks?["SessionStart"] != nil)
+        #expect(hooks?["Stop"] != nil)
+        #expect(hooks?["StopFailure"] != nil)
+        #expect(hooks?["PreToolUse"] != nil)
+        #expect(hooks?["PostToolUse"] != nil)
+    }
+
+    @Test func resolveOverlayPathWithoutFallbackReturnsGlobalPath() throws {
+        let path = try ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString
+        )
+        #expect(path == ClaudeHookOverlay.overlayPath)
+    }
+
+    @Test func resolveOverlayPathWithEmptyFallbackReturnsGlobalPath() throws {
+        let path = try ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: [],
+            sessionKey: UUID().uuidString
+        )
+        #expect(path == ClaudeHookOverlay.overlayPath)
+    }
+
+    @Test func resolveOverlayPathWithFallbackWritesPerSessionFileWithMergedBody() throws {
+        // Isolate from the developer's ~/tbd.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let key = UUID().uuidString
+        let models = ["claude-haiku-4-5-20251001"]
+        let path = try ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: models,
+            sessionKey: key
+        )
+
+        // Per-session path, NOT the global overlay path.
+        #expect(path != ClaudeHookOverlay.overlayPath)
+        #expect(path.contains(key))
+        #expect(FileManager.default.fileExists(atPath: path))
+
+        // The written file merges hooks + fallbackModel.
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect(parsed?["hooks"] != nil)
+        #expect((parsed?["fallbackModel"] as? [String]) == models)
+    }
+
+    @Test func resolveOverlayPathIsIdempotentForSameSessionKey() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let key = UUID().uuidString
+        let p1 = try ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: ["a"], sessionKey: key
+        )
+        let p2 = try ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: ["a", "b"], sessionKey: key
+        )
+        // Same session key → same path; second write overwrites with new content.
+        #expect(p1 == p2)
+        let data = try Data(contentsOf: URL(fileURLWithPath: p2))
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        #expect((parsed?["fallbackModel"] as? [String]) == ["a", "b"])
+    }
+
     @Test func roundtripsAsValidJSON() throws {
         let data = try ClaudeHookOverlay.generateBody()
         // Must round-trip — a malformed overlay file would crash Claude

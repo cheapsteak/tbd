@@ -13,6 +13,9 @@ public struct ResolvedModelProfile: Sendable, Equatable {
     public let secret: String?
     public let awsRegion: String?
     public let awsProfile: String?
+    /// Ordered fallback model ids for the Claude `fallbackModel` setting.
+    /// nil/empty = no fallback configured for this profile.
+    public let fallbackModels: [String]?
 }
 
 public struct ModelProfileResolver: Sendable {
@@ -62,7 +65,8 @@ public struct ModelProfileResolver: Sendable {
             model: row.model,
             secret: secret,
             awsRegion: row.awsRegion,
-            awsProfile: row.awsProfile
+            awsProfile: row.awsProfile,
+            fallbackModels: row.fallbackModels
         )
     }
 

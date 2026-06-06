@@ -226,7 +226,12 @@ extension RPCRouter {
             profileConfigDir: isClaudeType ? ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile) : nil,
             cmd: params.cmd,
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
-            settingsOverlayPath: isClaudeType ? ClaudeHookOverlay.overlayPath : nil,
+            settingsOverlayPath: isClaudeType
+                ? try ClaudeHookOverlay.resolveOverlayPath(
+                    fallbackModels: resolvedProfile?.fallbackModels,
+                    sessionKey: plannedTerminalID.uuidString
+                  )
+                : nil,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
             envSettingOverrides: claudeEnvOverrides
         )
@@ -610,7 +615,10 @@ extension RPCRouter {
                 profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved),
                 cmd: nil,
                 shellFallback: "",
-                settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                settingsOverlayPath: try ClaudeHookOverlay.resolveOverlayPath(
+                    fallbackModels: resolved?.fallbackModels,
+                    sessionKey: plannedTerminalID.uuidString
+                ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
             )
@@ -635,7 +643,10 @@ extension RPCRouter {
                 profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved),
                 cmd: nil,
                 shellFallback: "",
-                settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                settingsOverlayPath: try ClaudeHookOverlay.resolveOverlayPath(
+                    fallbackModels: resolved?.fallbackModels,
+                    sessionKey: plannedTerminalID.uuidString
+                ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
             )

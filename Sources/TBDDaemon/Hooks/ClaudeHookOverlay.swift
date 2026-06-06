@@ -84,8 +84,15 @@ public enum ClaudeHookOverlay {
         #"tbd ask-user-question post 2>/dev/null || true"#
 
     /// Build the JSON-encoded overlay body.
-    public static func generateBody() throws -> Data {
-        let body: [String: Any] = [
+    ///
+    /// When `fallbackModels` is non-nil and non-empty, a top-level
+    /// `"fallbackModel"` array (the ordered model ids) is included alongside
+    /// `hooks`. Claude Code's `--settings` flag takes the FIRST file's scalar
+    /// keys (it does NOT merge across multiple `--settings` flags), so the
+    /// fallback list MUST ride in the same file as the hooks — hence this
+    /// merged body rather than a second overlay.
+    public static func generateBody(fallbackModels: [String]? = nil) throws -> Data {
+        var body: [String: Any] = [
             "hooks": [
                 "SessionStart": [
                     [
@@ -132,10 +139,62 @@ public enum ClaudeHookOverlay {
                 ]
             ]
         ]
+        if let fallbackModels, !fallbackModels.isEmpty {
+            body["fallbackModel"] = fallbackModels
+        }
         return try JSONSerialization.data(
             withJSONObject: body,
             options: [.prettyPrinted, .sortedKeys]
         )
+    }
+
+    /// Resolve the `--settings` overlay path for a spawn.
+    ///
+    /// - No fallback models (nil/empty) → returns the shared global
+    ///   `overlayPath` unchanged (hooks-only, the pre-existing behavior).
+    /// - Fallback models present → writes a PER-SESSION overlay file that
+    ///   merges hooks + the `fallbackModel` array (because `fallbackModel` is
+    ///   per-profile and the global overlay is shared across all sessions),
+    ///   then returns that file's path.
+    ///
+    /// The per-session path is keyed by `sessionKey` (a session/terminal/
+    /// worktree-unique string) so concurrent sessions with different profiles
+    /// don't race on the same file. Writes are idempotent — the same key
+    /// overwrites in place.
+    public static func resolveOverlayPath(
+        fallbackModels: [String]?,
+        sessionKey: String
+    ) throws -> String {
+        guard let fallbackModels, !fallbackModels.isEmpty else {
+            return overlayPath
+        }
+        let path = perSessionOverlayPath(sessionKey: sessionKey)
+        let data = try generateBody(fallbackModels: fallbackModels)
+        let parent = (path as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(
+            atPath: parent,
+            withIntermediateDirectories: true
+        )
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        logger.info("Wrote per-session Claude overlay at \(path, privacy: .public)")
+        return path
+    }
+
+    /// Path of a per-session overlay file. Lives alongside the global overlay
+    /// under `~/tbd/runtime/`. The `sessionKey` is sanitized to stay
+    /// filesystem-safe.
+    static func perSessionOverlayPath(sessionKey: String) -> String {
+        let safe = sessionKey.unicodeScalars.map { scalar -> Character in
+            let isSafe = scalar == "-" || scalar == "_"
+                || (scalar >= "0" && scalar <= "9")
+                || (scalar >= "a" && scalar <= "z")
+                || (scalar >= "A" && scalar <= "Z")
+            return isSafe ? Character(scalar) : "_"
+        }
+        return TBDConstants.configDir
+            .appendingPathComponent("runtime")
+            .appendingPathComponent("claude-overlay-session-\(String(safe)).json")
+            .path
     }
 
     /// Write the overlay to `overlayPath`, creating the parent directory if

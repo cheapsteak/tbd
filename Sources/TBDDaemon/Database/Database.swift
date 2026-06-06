@@ -526,6 +526,13 @@ public final class TBDDatabase: Sendable {
             )
         }
 
+        // Per-profile Claude `fallbackModel` list, stored as a JSON-encoded
+        // string array (e.g. `["claude-haiku-4-5-20251001"]`). Nullable so
+        // existing rows decode as "no fallback configured".
+        migrator.registerMigration("v30_model_profile_fallback_models") { db in
+            try db.addColumnIfMissing(table: "model_profiles", column: "fallback_models", type: .text)
+        }
+
         return migrator
     }
 }
