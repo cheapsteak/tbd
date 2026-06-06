@@ -72,7 +72,7 @@ existing logic.
 ```
 CLI terminal focus ──RPC terminalFocus{terminalID, message?, activate}──▶ daemon
   daemon: terminals.get(id) → worktreeID
-          notifications.create(type: .attentionNeeded, message, terminalID)
+          notifications.create(type: .focusRequest, message, terminalID)
           broadcast .notificationReceived(NotificationDelta{…, activate})
   app subscribe handler (handleNotificationDelta):
     activate == false → record unread on W + bold T's tab + fire banner/sound   (soft)
@@ -80,11 +80,34 @@ CLI terminal focus ──RPC terminalFocus{terminalID, message?, activate}──
 ```
 
 The only new transport field is a single `activate` bool on `NotificationDelta`. Notification
-persistence, the unread summary, the banner, and the sound are all reused unchanged.
+persistence, the unread summary, and the sound are all reused unchanged; the banner gains a
+focus-specific title prefix (see "Distinguishing the banner" below).
+
+### Distinguishing the banner
+
+A focus push must be recognizable in the macOS banner / Notification Center, separate from a
+normal `tbd notify` message. macOS does not let an app swap a notification's left-side icon
+(it is always TBD's app icon), so the distinction is carried by a **dedicated
+`NotificationType.focusRequest`** plus an **emoji prefix on the banner title** (e.g.
+`🎯 worktree-name`).
+
+Decisions:
+
+- **New type, not a flag.** `.focusRequest` (rawValue `focus_request`) is an additive enum
+  case — safe for existing DB rows, and Swift's exhaustive switches force every site to give
+  it a treatment.
+- **No new in-app look.** By explicit choice, the in-app surfaces (sidebar dot, jump-menu
+  dot, bolding) do **not** need to distinguish a focus push. `.focusRequest` therefore maps
+  to the same presentation as `.attentionNeeded` (orange dot, `severity` 3) at every in-app
+  switch. Only the banner differs.
+- **Banner only.** The emoji prefix is applied in the banner builder when the type is
+  `.focusRequest`; all other types render unchanged.
 
 ### Changes by layer
 
 1. **TBDShared**
+   - `NotificationType.focusRequest` (rawValue `focus_request`), with `severity` matching
+     `.attentionNeeded` (3) (`Sources/TBDShared/Models.swift`).
    - `NotificationDelta.activate: Bool`, defaulting to `false` so existing broadcasts and
      any in-flight decoders are unaffected (`Sources/TBDShared/StateDelta.swift:85`).
    - `RPCMethod.terminalFocus` (`Sources/TBDShared/RPCProtocol.swift`).
@@ -93,8 +116,8 @@ persistence, the unread summary, the banner, and the sound are all reused unchan
 
 2. **TBDDaemon**
    - `handleTerminalFocus`: decode params, resolve the terminal via
-     `db.terminals.get(id:)` (return an error response if not found), persist an
-     `attention_needed` notification carrying the terminalID (mirroring `handleNotify`),
+     `db.terminals.get(id:)` (return an error response if not found), persist a
+     `.focusRequest` notification carrying the terminalID (mirroring `handleNotify`),
      and broadcast `.notificationReceived(NotificationDelta(…, activate: params.activate))`.
    - Route `RPCMethod.terminalFocus` in `RPCRouter`.
 
@@ -103,13 +126,22 @@ persistence, the unread summary, the banner, and the sound are all reused unchan
      registered in `TerminalCommand.subcommands`. Validates the terminal UUID and prints
      a clear error on failure (non-silent).
 
-4. **TBDApp** — `handleNotificationDelta` (`Sources/TBDApp/AppState.swift`):
-   - **Generalize tab bolding (gap 2):** insert into `unreadTerminals` whenever the delta
-     carries a `terminalID` and that terminal is not the active focused tab — today this is
-     gated to `.responseComplete`. This keeps the in-app cue as precise as the banner.
-   - **Activate branch (gap 1):** handled *before* the existing visible-worktree
-     early-return; when `delta.activate` is set, call
-     `navigateToWorktree(worktreeID, terminalID:)` (which foregrounds + selects) and return.
+4. **TBDApp**
+   - `handleNotificationDelta` (`Sources/TBDApp/AppState.swift`):
+     - **Generalize tab bolding (gap 2):** insert into `unreadTerminals` whenever the delta
+       carries a `terminalID` and that terminal is not the active focused tab — today this is
+       gated to `.responseComplete`. This keeps the in-app cue as precise as the banner.
+     - **Activate branch (gap 1):** handled *before* the existing visible-worktree
+       early-return; when `delta.activate` is set, call
+       `navigateToWorktree(worktreeID, terminalID:)` (which foregrounds + selects) and return.
+     - Pass the notification `type` through to `postIfEnabled` so the banner can prefix.
+   - `MacNotificationManager.postIfEnabled` gains a `type:` parameter; when the type is
+     `.focusRequest`, prefix `content.title` with the focus emoji (`🎯`). All other types
+     render unchanged.
+   - **Exhaustive-switch sites** that must add the `.focusRequest` case, mapping it to the
+     same presentation as `.attentionNeeded` (no new in-app look): `WorktreeRowView`
+     (`badgeColor`, `hasBoldNotification`), `JumpMenuRow.severityColor`,
+     `NotificationSoundPlayer.playIfEnabled`, and any other `switch` over `NotificationType`.
 
 5. **Docs** — add `tbd terminal focus` to the command list in
    `Sources/TBDShared/TBDSkillContent.swift`.
@@ -124,9 +156,12 @@ Every gated branch gets a test for both states:
   - Bolding: a terminalID-bearing soft push bolds a *background* tab but **not** the active
     focused tab.
 - **Daemon**: `terminalFocus` resolves the worktree from the terminal and broadcasts a delta
-  with the right `activate` value; an unknown terminal yields an error response.
+  with the right `activate` value, persisting a `.focusRequest` notification; an unknown
+  terminal yields an error response.
 - **CLI**: arg parsing for `--terminal` / `--message` / `--activate`; an invalid terminal
   UUID errors.
+- **Banner**: `postIfEnabled` prefixes the title with the focus emoji for `.focusRequest`
+  and leaves every other type's title unchanged.
 
 ### Edge cases
 
