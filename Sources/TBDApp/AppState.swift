@@ -747,6 +747,7 @@ final class AppState: ObservableObject {
             worktreeID: notification.worktreeID,
             message: notification.message,
             worktrees: allWorktrees,
+            type: notification.type,
             terminalID: notification.terminalID
         )
     }

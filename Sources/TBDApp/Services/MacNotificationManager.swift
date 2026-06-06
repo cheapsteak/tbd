@@ -48,8 +48,16 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// The banner title for a notification. Focus pushes get a distinguishing
+    /// emoji prefix so they're recognizable in the banner / Notification Center;
+    /// macOS does not allow swapping the left-side app icon. All other types
+    /// render the worktree name unchanged.
+    nonisolated static func bannerTitle(worktreeName: String, type: NotificationType) -> String {
+        type == .focusRequest ? "🎯 \(worktreeName)" : worktreeName
+    }
+
     func postIfEnabled(worktreeID: UUID, message: String?, worktrees: [Worktree],
-                       terminalID: UUID? = nil) {
+                       type: NotificationType, terminalID: UUID? = nil) {
         guard enabled, isAvailable else { return }
         requestPermissionIfNeeded()
 
@@ -64,7 +72,7 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         }
 
         let content = UNMutableNotificationContent()
-        content.title = worktreeName
+        content.title = Self.bannerTitle(worktreeName: worktreeName, type: type)
         content.body = truncatedMessage
         content.sound = nil
         // The request `identifier` must stay as worktreeID so re-posting
