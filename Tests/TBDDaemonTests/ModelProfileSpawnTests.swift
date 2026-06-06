@@ -3,7 +3,10 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-@Suite("Claude Token Spawn + Swap")
+// Serialized: several tests mutate the process-global `TBD_HOME` env var
+// (via setenv/unsetenv) to isolate the overlay/runtime dir. Running them in
+// parallel would race on that shared global.
+@Suite("Claude Token Spawn + Swap", .serialized)
 struct ModelProfileSpawnTests {
 
     /// Recorder for tmux argv lists invoked during dryRun.
@@ -223,6 +226,48 @@ struct ModelProfileSpawnTests {
         // A per-session overlay file is used, NOT the shared global overlay.
         #expect(bodies.contains("claude-overlay-session-"))
         #expect(!bodies.contains(" --settings \(ClaudeHookOverlay.overlayPath)"))
+    }
+
+    @Test("delete: removes the per-session fallbackModel overlay on terminal teardown")
+    func deleteRemovesPerSessionOverlay() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-spawn-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        ClaudeHookOverlay.writeOverlay()
+
+        let (router, db, _) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let tok = try await db.modelProfiles.create(
+            name: "WithFallback", kind: .oauth,
+            fallbackModels: ["claude-haiku-4-5-20251001"]
+        )
+        try await db.config.setDefaultProfileID(tok.id)
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        #expect(createResp.success)
+        let term = try createResp.decodeResult(Terminal.self)
+
+        // The per-session overlay was written, keyed by the terminal id.
+        let overlayPath = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: term.id.uuidString)
+        #expect(FileManager.default.fileExists(atPath: overlayPath))
+
+        // Deleting the terminal reclaims the per-session overlay.
+        let delResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: term.id)
+        ))
+        #expect(delResp.success)
+        #expect(!FileManager.default.fileExists(atPath: overlayPath))
+        // The shared global overlay is left intact.
+        #expect(FileManager.default.fileExists(atPath: ClaudeHookOverlay.overlayPath))
     }
 
     // MARK: - Swap: to a different token

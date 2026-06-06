@@ -254,6 +254,16 @@ public final class Daemon: Sendable {
             reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
         }
 
+        // 11a-pre. Prune per-session Claude `fallbackModel` overlay files
+        // orphaned by crashes or teardown paths that didn't clean up. Keep only
+        // files whose key matches a live terminal. Best-effort.
+        do {
+            let liveTerminalIDs = try await database.terminals.list().map { $0.id.uuidString }
+            ClaudeHookOverlay.pruneOrphanedSessionOverlays(liveSessionKeys: liveTerminalIDs)
+        } catch {
+            daemonLogger.warning("Failed to prune orphaned per-session overlays: \(error.localizedDescription, privacy: .public)")
+        }
+
         // 11a. Backfill archived worktrees whose branch is missing — repairs
         // rows whose branch was renamed before archive captured the new name.
         // Idempotent and best-effort; never throws.

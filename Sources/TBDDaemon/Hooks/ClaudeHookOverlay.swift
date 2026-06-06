@@ -161,40 +161,99 @@ public enum ClaudeHookOverlay {
     /// worktree-unique string) so concurrent sessions with different profiles
     /// don't race on the same file. Writes are idempotent — the same key
     /// overwrites in place.
+    ///
+    /// Never throws: if the per-session overlay write fails for any reason
+    /// (unwritable runtime dir, disk full, …), the error is logged and the
+    /// shared global `overlayPath` is returned instead. This guarantees a
+    /// spawn always has a usable `--settings` path — it degrades to "no
+    /// fallback models" rather than aborting the spawn.
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String
-    ) throws -> String {
+    ) -> String {
         guard let fallbackModels, !fallbackModels.isEmpty else {
             return overlayPath
         }
         let path = perSessionOverlayPath(sessionKey: sessionKey)
-        let data = try generateBody(fallbackModels: fallbackModels)
-        let parent = (path as NSString).deletingLastPathComponent
-        try FileManager.default.createDirectory(
-            atPath: parent,
-            withIntermediateDirectories: true
-        )
-        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-        logger.info("Wrote per-session Claude overlay at \(path, privacy: .public)")
-        return path
+        do {
+            let data = try generateBody(fallbackModels: fallbackModels)
+            let parent = (path as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(
+                atPath: parent,
+                withIntermediateDirectories: true
+            )
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            logger.info("Wrote per-session Claude overlay at \(path, privacy: .public)")
+            return path
+        } catch {
+            logger.error(
+                "Failed to write per-session Claude overlay at \(path, privacy: .public); falling back to global overlay: \(error.localizedDescription, privacy: .public)"
+            )
+            return overlayPath
+        }
     }
 
     /// Path of a per-session overlay file. Lives alongside the global overlay
     /// under `~/tbd/runtime/`. The `sessionKey` is sanitized to stay
     /// filesystem-safe.
+    ///
+    /// Callers MUST pass a unique opaque id (the terminal UUID). The
+    /// character sanitization (non-`[A-Za-z0-9_-]` → `_`) is only
+    /// collision-safe for such inputs — two distinct human-readable strings
+    /// could sanitize to the same filename, but distinct UUIDs never do.
     static func perSessionOverlayPath(sessionKey: String) -> String {
-        let safe = sessionKey.unicodeScalars.map { scalar -> Character in
+        runtimeDir
+            .appendingPathComponent("\(perSessionPrefix)\(sanitize(sessionKey))\(perSessionSuffix)")
+            .path
+    }
+
+    /// Filename prefix/suffix for per-session overlay files. Shared between the
+    /// path builder and the orphan-prune sweep so the two never drift.
+    static let perSessionPrefix = "claude-overlay-session-"
+    static let perSessionSuffix = ".json"
+
+    private static var runtimeDir: URL {
+        TBDConstants.configDir.appendingPathComponent("runtime")
+    }
+
+    /// Filesystem-safe rendering of `sessionKey` (non-`[A-Za-z0-9_-]` → `_`).
+    static func sanitize(_ sessionKey: String) -> String {
+        String(sessionKey.unicodeScalars.map { scalar -> Character in
             let isSafe = scalar == "-" || scalar == "_"
                 || (scalar >= "0" && scalar <= "9")
                 || (scalar >= "a" && scalar <= "z")
                 || (scalar >= "A" && scalar <= "Z")
             return isSafe ? Character(scalar) : "_"
+        })
+    }
+
+    /// Delete the per-session overlay file for `sessionKey`, if present.
+    /// Best-effort — a missing file or removal error is ignored. Called on
+    /// terminal teardown so per-session overlays don't accumulate under
+    /// `~/tbd/runtime/`.
+    static func removePerSessionOverlay(sessionKey: String) {
+        let path = perSessionOverlayPath(sessionKey: sessionKey)
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
+    /// Startup sweep: delete every `claude-overlay-session-*.json` file whose
+    /// (sanitized) session key is NOT in `liveSessionKeys`. This reclaims
+    /// per-session overlays orphaned by crashes, worktree archive, or any
+    /// teardown path that didn't call `removePerSessionOverlay` — so cleanup
+    /// can't drift as new teardown paths are added. Best-effort.
+    static func pruneOrphanedSessionOverlays(liveSessionKeys: [String]) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: runtimeDir.path) else {
+            return
         }
-        return TBDConstants.configDir
-            .appendingPathComponent("runtime")
-            .appendingPathComponent("claude-overlay-session-\(String(safe)).json")
-            .path
+        let liveSanitized = Set(liveSessionKeys.map { sanitize($0) })
+        for entry in entries where entry.hasPrefix(perSessionPrefix) && entry.hasSuffix(perSessionSuffix) {
+            let key = String(entry.dropFirst(perSessionPrefix.count).dropLast(perSessionSuffix.count))
+            if liveSanitized.contains(key) { continue }
+            let path = runtimeDir.appendingPathComponent(entry).path
+            try? fm.removeItem(atPath: path)
+            logger.info("Pruned orphaned per-session Claude overlay \(entry, privacy: .public)")
+        }
     }
 
     /// Write the overlay to `overlayPath`, creating the parent directory if

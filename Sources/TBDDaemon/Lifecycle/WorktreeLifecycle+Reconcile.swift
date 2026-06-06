@@ -314,7 +314,7 @@ extension WorktreeLifecycle {
                 profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
                 cmd: nil,
                 shellFallback: defaultShell,
-                settingsOverlayPath: try ClaudeHookOverlay.resolveOverlayPath(
+                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
                     sessionKey: terminal.id.uuidString
                 ),

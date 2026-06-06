@@ -2,7 +2,10 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 
-@Suite struct ClaudeHookOverlayTests {
+// Serialized: the per-session overlay tests mutate the process-global
+// `TBD_HOME` env var to isolate the runtime dir; parallel execution would
+// race on that shared global.
+@Suite(.serialized) struct ClaudeHookOverlayTests {
 
     @Test func generateBodyHasExpectedShape() throws {
         let data = try ClaudeHookOverlay.generateBody()
@@ -87,7 +90,7 @@ import Testing
     }
 
     @Test func resolveOverlayPathWithoutFallbackReturnsGlobalPath() throws {
-        let path = try ClaudeHookOverlay.resolveOverlayPath(
+        let path = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: nil,
             sessionKey: UUID().uuidString
         )
@@ -95,7 +98,7 @@ import Testing
     }
 
     @Test func resolveOverlayPathWithEmptyFallbackReturnsGlobalPath() throws {
-        let path = try ClaudeHookOverlay.resolveOverlayPath(
+        let path = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: [],
             sessionKey: UUID().uuidString
         )
@@ -114,7 +117,7 @@ import Testing
 
         let key = UUID().uuidString
         let models = ["claude-haiku-4-5-20251001"]
-        let path = try ClaudeHookOverlay.resolveOverlayPath(
+        let path = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: models,
             sessionKey: key
         )
@@ -141,10 +144,10 @@ import Testing
         }
 
         let key = UUID().uuidString
-        let p1 = try ClaudeHookOverlay.resolveOverlayPath(
+        let p1 = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: ["a"], sessionKey: key
         )
-        let p2 = try ClaudeHookOverlay.resolveOverlayPath(
+        let p2 = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: ["a", "b"], sessionKey: key
         )
         // Same session key → same path; second write overwrites with new content.
@@ -152,6 +155,103 @@ import Testing
         let data = try Data(contentsOf: URL(fileURLWithPath: p2))
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         #expect((parsed?["fallbackModel"] as? [String]) == ["a", "b"])
+    }
+
+    @Test func resolveOverlayPathFallsBackToGlobalWhenPerSessionWriteFails() throws {
+        // Force the per-session write to fail: make the `runtime` dir an
+        // existing *regular file* so createDirectory(runtime) throws.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        // Block the `runtime` subdir by occupying its path with a file.
+        let runtimeAsFile = tmp.appendingPathComponent("runtime")
+        try Data("not a dir".utf8).write(to: runtimeAsFile)
+
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: ["claude-haiku-4-5-20251001"],
+            sessionKey: UUID().uuidString
+        )
+        // Degrades to the global overlay path instead of throwing/aborting.
+        #expect(path == ClaudeHookOverlay.overlayPath)
+    }
+
+    @Test func removePerSessionOverlayDeletesTheFile() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let key = UUID().uuidString
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: ["claude-haiku-4-5-20251001"],
+            sessionKey: key
+        )
+        #expect(FileManager.default.fileExists(atPath: path))
+
+        ClaudeHookOverlay.removePerSessionOverlay(sessionKey: key)
+        #expect(!FileManager.default.fileExists(atPath: path))
+
+        // Idempotent — removing again on a missing file is a no-op (no throw).
+        ClaudeHookOverlay.removePerSessionOverlay(sessionKey: key)
+    }
+
+    @Test func pruneOrphanedSessionOverlaysKeepsLiveDeletesOrphans() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let liveKey = UUID().uuidString
+        let orphanKey = UUID().uuidString
+        let livePath = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: ["a"], sessionKey: liveKey
+        )
+        let orphanPath = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: ["b"], sessionKey: orphanKey
+        )
+        // Also write the global overlay; the sweep must never touch it.
+        ClaudeHookOverlay.writeOverlay()
+        #expect(FileManager.default.fileExists(atPath: livePath))
+        #expect(FileManager.default.fileExists(atPath: orphanPath))
+
+        ClaudeHookOverlay.pruneOrphanedSessionOverlays(liveSessionKeys: [liveKey])
+
+        // Live key survives; orphan is gone; global overlay untouched.
+        #expect(FileManager.default.fileExists(atPath: livePath))
+        #expect(!FileManager.default.fileExists(atPath: orphanPath))
+        #expect(FileManager.default.fileExists(atPath: ClaudeHookOverlay.overlayPath))
+    }
+
+    @Test func pruneOrphanedSessionOverlaysWithEmptyLiveSetDeletesAll() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+
+        let p1 = ClaudeHookOverlay.resolveOverlayPath(fallbackModels: ["a"], sessionKey: UUID().uuidString)
+        let p2 = ClaudeHookOverlay.resolveOverlayPath(fallbackModels: ["b"], sessionKey: UUID().uuidString)
+        ClaudeHookOverlay.writeOverlay()
+
+        ClaudeHookOverlay.pruneOrphanedSessionOverlays(liveSessionKeys: [])
+
+        #expect(!FileManager.default.fileExists(atPath: p1))
+        #expect(!FileManager.default.fileExists(atPath: p2))
+        // Global overlay is not a per-session file → never pruned.
+        #expect(FileManager.default.fileExists(atPath: ClaudeHookOverlay.overlayPath))
     }
 
     @Test func roundtripsAsValidJSON() throws {
