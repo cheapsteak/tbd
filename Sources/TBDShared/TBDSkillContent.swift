@@ -97,6 +97,27 @@ tbd terminal send --terminal <id> --text "..." [--submit]
 tbd terminal output <id> [--lines N]
 ```
 
+### Pull the user's attention to a worker's tab
+
+Use when an orchestrator wants the user to look at a specific child tab (e.g. a
+worker needs input). Default is a **soft push** — a banner + an unread mark on
+that worktree; the user lands on the tab when they choose to look. It does NOT
+steal focus.
+
+```bash
+tbd terminal focus --terminal <id> [--message "..."]
+```
+
+Add `--activate` ONLY when the user has explicitly asked to be taken there — it
+foregrounds the app and switches to the tab immediately, interrupting whatever
+they're doing:
+
+```bash
+tbd terminal focus --terminal <id> --activate
+```
+
+Get `<id>` from `tbd terminal list <worktree>` or the output of `tbd terminal create`.
+
 ### Notify the TBD UI
 
 ```bash
