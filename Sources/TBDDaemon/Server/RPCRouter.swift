@@ -128,6 +128,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalActivityEvent(request.paramsData)
             case RPCMethod.notify:
                 return try await handleNotify(request.paramsData)
+            case RPCMethod.terminalFocus:
+                return try await handleTerminalFocus(request.paramsData)
             case RPCMethod.daemonStatus:
                 return try handleDaemonStatus()
             case RPCMethod.resolvePath:

@@ -796,6 +796,29 @@ extension RPCRouter {
         return try RPCResponse(result: notification)
     }
 
+    func handleTerminalFocus(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalFocusParams.self, from: paramsData)
+
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            return RPCResponse(error: "Unknown terminal: \(params.terminalID.uuidString)")
+        }
+
+        let notification = try await db.notifications.create(
+            worktreeID: terminal.worktreeID,
+            type: .focusRequest,
+            message: params.message,
+            terminalID: terminal.id
+        )
+
+        subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
+            notificationID: notification.id, worktreeID: notification.worktreeID,
+            type: notification.type, message: notification.message,
+            terminalID: notification.terminalID, activate: params.activate
+        )))
+
+        return try RPCResponse(result: notification)
+    }
+
     // MARK: - Notifications List
 
     func handleNotificationsList() async throws -> RPCResponse {
