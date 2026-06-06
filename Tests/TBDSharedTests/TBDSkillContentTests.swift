@@ -26,6 +26,8 @@ import Foundation
     #expect(body.contains("tbd link"))
     #expect(body.contains("tbd terminal send"))
     #expect(body.contains("tbd terminal output"))
+    #expect(body.contains("tbd terminal focus"))
+    #expect(body.contains("--activate"))
 }
 
 @Test func bodyDelegatesFlagDetailToHelp() {

@@ -711,12 +711,21 @@ final class AppState: ObservableObject {
     }
 
     private func handleNotificationDelta(_ notification: NotificationDelta) {
-        // Record a background-tab completion so its tab label bolds. Done
-        // BEFORE the visible-worktree early-return because a worktree can be
-        // "visible" (selected) while the completing terminal lives on a
-        // background tab — that tab should still bold. The
-        // isActiveTabTerminal guard excludes the tab the user is looking at.
-        if notification.type == .responseComplete, let tid = notification.terminalID,
+        // Loud focus push: foreground + select the originating tab immediately,
+        // regardless of what the user is currently looking at. Done before any
+        // unread/bold bookkeeping (we're navigating there, so it's moot).
+        if notification.activate {
+            navigateToWorktree(notification.worktreeID, terminalID: notification.terminalID)
+            return
+        }
+
+        // Record a background-tab arrival so its tab label bolds. Fires for any
+        // terminal-stamped delta (any type — response completions, errors, focus
+        // pushes, etc.), as long as it isn't the tab the user is already looking
+        // at. Done BEFORE the visible-worktree early-return because a worktree
+        // can be "visible" (selected) while the stamped terminal lives on a
+        // background tab.
+        if let tid = notification.terminalID,
            !isActiveTabTerminal(tid, inFocusedWorktree: notification.worktreeID) {
             unreadTerminals.insert(tid)
         }
@@ -747,6 +756,7 @@ final class AppState: ObservableObject {
             worktreeID: notification.worktreeID,
             message: notification.message,
             worktrees: allWorktrees,
+            type: notification.type,
             terminalID: notification.terminalID
         )
     }

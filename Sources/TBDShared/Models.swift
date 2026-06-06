@@ -433,11 +433,15 @@ public enum NotificationType: String, Codable, Sendable {
     case error
     case taskComplete = "task_complete"
     case attentionNeeded = "attention_needed"
+    /// A focus push from `tbd terminal focus`. Rendered like `.attentionNeeded`
+    /// in-app; the macOS banner adds a distinguishing title prefix.
+    case focusRequest = "focus_request"
 
     public var severity: Int {
         switch self {
         case .error: 4
         case .attentionNeeded: 3
+        case .focusRequest: 3
         case .taskComplete: 2
         case .responseComplete: 1
         }

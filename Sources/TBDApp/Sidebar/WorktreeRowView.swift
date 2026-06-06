@@ -34,7 +34,7 @@ struct WorktreeRowView: View {
         switch n {
         case .error:
             return .red
-        case .attentionNeeded:
+        case .attentionNeeded, .focusRequest:
             return .orange
         case .taskComplete:
             return .green

@@ -94,7 +94,10 @@ struct TabUnreadCompletionTests {
         }
     }
 
-    @Test func nonResponseComplete_doesNotRecordUnread() {
+    /// Bolding is generalized to ANY terminal-stamped delta (not just
+    /// `.responseComplete`): a background-tab `.error` records unread so its tab
+    /// label bolds, matching the focus-push behavior.
+    @Test func nonResponseComplete_forBackgroundTab_recordsUnread() {
         withState { state in
             let worktreeID = UUID()
             let backgroundTerminal = UUID()
@@ -109,7 +112,7 @@ struct TabUnreadCompletionTests {
 
             state.handleDelta(makeDelta(worktreeID: worktreeID, terminalID: backgroundTerminal, type: .error))
 
-            #expect(!state.unreadTerminals.contains(backgroundTerminal))
+            #expect(state.unreadTerminals.contains(backgroundTerminal))
         }
     }
 

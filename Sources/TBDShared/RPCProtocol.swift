@@ -90,6 +90,7 @@ public enum RPCMethod {
     public static let terminalCreate = "terminal.create"
     public static let terminalList = "terminal.list"
     public static let terminalSend = "terminal.send"
+    public static let terminalFocus = "terminal.focus"
     public static let terminalDelete = "terminal.delete"
     public static let terminalSetPin = "terminal.setPin"
     public static let notify = "notify"
@@ -688,6 +689,21 @@ public struct NotifyParams: Codable, Sendable {
                 terminalID: UUID? = nil) {
         self.worktreeID = worktreeID; self.type = type; self.message = message
         self.terminalID = terminalID
+    }
+}
+
+public struct TerminalFocusParams: Codable, Sendable {
+    /// Target terminal. The daemon resolves the owning worktree from this.
+    public let terminalID: UUID
+    /// Banner text. Falls back to a generic message when nil.
+    public let message: String?
+    /// When true, foreground + select the tab immediately (loud pull).
+    /// When false (default), soft push: banner + unread, no focus steal.
+    public let activate: Bool
+    public init(terminalID: UUID, message: String? = nil, activate: Bool = false) {
+        self.terminalID = terminalID
+        self.message = message
+        self.activate = activate
     }
 }
 

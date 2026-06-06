@@ -92,15 +92,20 @@ public struct NotificationDelta: Codable, Sendable {
     /// notification didn't come from a specific terminal or from an older
     /// daemon that didn't include the field.
     public let terminalID: UUID?
+    /// When true, the app foregrounds and selects the originating tab
+    /// immediately (the `--activate` "loud" focus push). Defaults false so
+    /// existing notify broadcasts and older daemons keep the soft behavior.
+    public let activate: Bool
     public init(notificationID: UUID, worktreeID: UUID, type: NotificationType,
-                message: String?, terminalID: UUID? = nil) {
+                message: String?, terminalID: UUID? = nil, activate: Bool = false) {
         self.notificationID = notificationID; self.worktreeID = worktreeID
         self.type = type; self.message = message
         self.terminalID = terminalID
+        self.activate = activate
     }
 
     enum CodingKeys: String, CodingKey {
-        case notificationID, worktreeID, type, message, terminalID
+        case notificationID, worktreeID, type, message, terminalID, activate
     }
 
     public init(from decoder: Decoder) throws {
@@ -110,6 +115,7 @@ public struct NotificationDelta: Codable, Sendable {
         type = try c.decode(NotificationType.self, forKey: .type)
         message = try c.decodeIfPresent(String.self, forKey: .message)
         terminalID = try c.decodeIfPresent(UUID.self, forKey: .terminalID)
+        activate = try c.decodeIfPresent(Bool.self, forKey: .activate) ?? false
     }
 }
 

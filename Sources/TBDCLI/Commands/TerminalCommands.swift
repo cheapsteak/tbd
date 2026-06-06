@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalOutput.self, TerminalConversation.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self]
     )
 }
 
@@ -143,6 +143,38 @@ struct TerminalSend: AsyncParsableCommand {
         } else {
             print("Text sent.")
         }
+    }
+}
+
+// MARK: - terminal focus
+
+struct TerminalFocus: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "focus",
+        abstract: "Push the user's attention to a terminal's tab (soft by default; --activate foregrounds)"
+    )
+
+    @Option(name: .long, help: "Terminal ID")
+    var terminal: String
+
+    @Option(name: .long, help: "Notification message")
+    var message: String?
+
+    @Flag(name: .long, help: "Foreground and select the tab immediately instead of a soft push")
+    var activate = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+        try client.callVoid(
+            method: RPCMethod.terminalFocus,
+            params: TerminalFocusParams(terminalID: terminalID, message: message, activate: activate)
+        )
+
+        print(activate ? "Focused (activated)." : "Focus push sent.")
     }
 }
 
