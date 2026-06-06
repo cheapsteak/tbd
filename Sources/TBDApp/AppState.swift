@@ -720,10 +720,11 @@ final class AppState: ObservableObject {
         }
 
         // Record a background-tab arrival so its tab label bolds. Fires for any
-        // terminal-stamped delta (response completions AND focus pushes), as
-        // long as it isn't the tab the user is already looking at. Done BEFORE
-        // the visible-worktree early-return because a worktree can be "visible"
-        // (selected) while the stamped terminal lives on a background tab.
+        // terminal-stamped delta (any type — response completions, errors, focus
+        // pushes, etc.), as long as it isn't the tab the user is already looking
+        // at. Done BEFORE the visible-worktree early-return because a worktree
+        // can be "visible" (selected) while the stamped terminal lives on a
+        // background tab.
         if let tid = notification.terminalID,
            !isActiveTabTerminal(tid, inFocusedWorktree: notification.worktreeID) {
             unreadTerminals.insert(tid)
