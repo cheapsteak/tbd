@@ -22,7 +22,7 @@ struct JumpMenuRow: Identifiable, Equatable {
 private func severityColor(_ type: NotificationType) -> Color {
     switch type {
     case .error:            return .red
-    case .attentionNeeded:  return .orange
+    case .attentionNeeded, .focusRequest: return .orange
     case .taskComplete:     return .green
     case .responseComplete: return .blue
     }
