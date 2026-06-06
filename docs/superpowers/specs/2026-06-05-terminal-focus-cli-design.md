@@ -143,8 +143,20 @@ Decisions:
      (`badgeColor`, `hasBoldNotification`), `JumpMenuRow.severityColor`,
      `NotificationSoundPlayer.playIfEnabled`, and any other `switch` over `NotificationType`.
 
-5. **Docs** — add `tbd terminal focus` to the command list in
-   `Sources/TBDShared/TBDSkillContent.swift`.
+5. **The `tbd` skill** (`Sources/TBDShared/TBDSkillContent.swift`) — this is the single
+   source of truth for the agent-facing `tbd` skill, written out as `SKILL.md` for
+   Claude/Codex; it is the surface orchestration sessions actually read, so it is a
+   first-class deliverable here, not a command-list footnote. Add a `tbd terminal focus`
+   section that covers:
+   - the command + flags (`--terminal`, `--message`, `--activate`);
+   - **orchestration guidance** — the default is a *soft push* (banner + unread, the user
+     lands on the tab when they choose to look). Use `--activate` only when the user has
+     explicitly asked to be pulled over, because it steals focus and interrupts whatever
+     they are doing;
+   - where the terminal UUID comes from (`tbd terminal list` / `tbd terminal create`).
+
+   The `tbd-project` developer skill does not enumerate CLI subcommands, so it needs no
+   change for this feature.
 
 ### Testing (per CLAUDE.md branch-coverage rule)
 
