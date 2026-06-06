@@ -14,4 +14,24 @@ struct MacNotificationBannerTitleTests {
             #expect(MacNotificationManager.bannerTitle(worktreeName: "acme", type: type) == "acme")
         }
     }
+
+    @Test func focusRequestFallbackIsAttentionNeeded() {
+        #expect(MacNotificationManager.bannerBody(message: nil, type: .focusRequest) == "Attention needed.")
+    }
+
+    @Test func responseCompleteFallbackIsFinishedResponding() {
+        #expect(MacNotificationManager.bannerBody(message: nil, type: .responseComplete)
+            == "Claude has finished responding.")
+    }
+
+    @Test func suppliedMessageIsUsedVerbatim() {
+        #expect(MacNotificationManager.bannerBody(message: "hi", type: .focusRequest) == "hi")
+    }
+
+    @Test func longMessageIsTruncatedTo200CharsPlusEllipsis() {
+        let input = String(repeating: "a", count: 250)
+        let body = MacNotificationManager.bannerBody(message: input, type: .responseComplete)
+        #expect(body.count == 201)
+        #expect(body.hasSuffix("…"))
+    }
 }

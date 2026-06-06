@@ -56,6 +56,17 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         type == .focusRequest ? "🎯 \(worktreeName)" : worktreeName
     }
 
+    /// The banner body. Falls back to a type-appropriate default when no
+    /// message was supplied. Mirrors `bannerTitle` as a pure, testable seam
+    /// (`postIfEnabled` early-returns unbundled, so the logic can't be tested
+    /// through it).
+    nonisolated static func bannerBody(message: String?, type: NotificationType) -> String {
+        if let msg = message, !msg.isEmpty {
+            return msg.count > 200 ? String(msg.prefix(200)) + "…" : msg
+        }
+        return type == .focusRequest ? "Attention needed." : "Claude has finished responding."
+    }
+
     func postIfEnabled(worktreeID: UUID, message: String?, worktrees: [Worktree],
                        type: NotificationType, terminalID: UUID? = nil) {
         guard enabled, isAvailable else { return }
@@ -64,12 +75,7 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         let worktreeName = worktrees.first(where: { $0.id == worktreeID })?.displayName
             ?? worktreeID.uuidString
 
-        let truncatedMessage: String
-        if let msg = message, !msg.isEmpty {
-            truncatedMessage = msg.count > 200 ? String(msg.prefix(200)) + "…" : msg
-        } else {
-            truncatedMessage = "Claude has finished responding."
-        }
+        let truncatedMessage = Self.bannerBody(message: message, type: type)
 
         let content = UNMutableNotificationContent()
         content.title = Self.bannerTitle(worktreeName: worktreeName, type: type)
