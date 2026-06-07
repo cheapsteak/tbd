@@ -287,6 +287,10 @@ struct FallbackModelsEditor: View {
 
 /// Convert editor rows into the daemon payload: trim, drop blanks, cap at 3,
 /// and collapse an empty result to nil.
+///
+/// Deliberately duplicates the daemon-side `normalizeFallbackModels` in
+/// `Sources/TBDDaemon/Server/RPCRouter+ModelProfileHandlers.swift` —
+/// defense-in-depth at both layers. Keep the two in sync.
 func normalizedFallbackModels(_ rows: [String]) -> [String]? {
     let cleaned = rows
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

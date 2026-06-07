@@ -125,6 +125,9 @@ extension WorktreeLifecycle {
             try await db.tabs.deleteForWorktree(worktreeID: wt.id)
             for terminal in terminals {
                 await pendingQuestions.clear(terminalID: terminal.id)
+                // Reclaim any per-session fallbackModel overlay (keyed by terminal
+                // id), mirroring handleTerminalDelete. No-op when none was written.
+                ClaudeHookOverlay.removePerSessionOverlay(sessionKey: terminal.id.uuidString)
             }
             try await db.worktrees.archive(id: wt.id)
         }

@@ -2,10 +2,12 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 
-// Serialized: the per-session overlay tests mutate the process-global
-// `TBD_HOME` env var to isolate the runtime dir; parallel execution would
-// race on that shared global.
-@Suite(.serialized) struct ClaudeHookOverlayTests {
+// Nested under TBDHomeSerialized: the per-session overlay tests mutate the
+// process-global `TBD_HOME` env var to isolate the runtime dir. Nesting (rather
+// than a bare per-suite `.serialized`) prevents cross-suite races with the other
+// TBD_HOME-mutating suites. See TBDHomeSerializedSuites.swift.
+extension TBDHomeSerialized {
+@Suite struct ClaudeHookOverlayTests {
 
     @Test func generateBodyHasExpectedShape() throws {
         let data = try ClaudeHookOverlay.generateBody()
@@ -260,4 +262,5 @@ import Testing
         // Code's settings loader. JSONSerialization throws on invalid JSON.
         _ = try JSONSerialization.jsonObject(with: data, options: [])
     }
+}
 }

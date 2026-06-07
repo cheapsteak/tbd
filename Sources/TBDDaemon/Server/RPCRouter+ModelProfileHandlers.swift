@@ -7,6 +7,11 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "modelProfile
 /// Normalize a user-supplied fallback model list: trim each id, drop blanks,
 /// cap at 3 (Claude Code's documented maximum), and collapse an empty result
 /// to nil so the column stores NULL. Order is preserved.
+///
+/// Deliberately duplicates the app-side `normalizedFallbackModels` in
+/// `Sources/TBDApp/Settings/ModelProfilesSettingsView.swift` — defense-in-depth
+/// so the daemon normalizes even payloads from clients that skip the UI helper.
+/// Keep the two in sync.
 func normalizeFallbackModels(_ raw: [String]?) -> [String]? {
     guard let raw else { return nil }
     let cleaned = raw

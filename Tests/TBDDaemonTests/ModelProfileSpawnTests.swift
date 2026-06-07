@@ -3,10 +3,12 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-// Serialized: several tests mutate the process-global `TBD_HOME` env var
-// (via setenv/unsetenv) to isolate the overlay/runtime dir. Running them in
-// parallel would race on that shared global.
-@Suite("Claude Token Spawn + Swap", .serialized)
+// Nested under TBDHomeSerialized: several tests mutate the process-global
+// `TBD_HOME` env var (via setenv/unsetenv) to isolate the overlay/runtime dir.
+// Nesting prevents cross-suite races with the other TBD_HOME-mutating suites.
+// See TBDHomeSerializedSuites.swift.
+extension TBDHomeSerialized {
+@Suite("Claude Token Spawn + Swap")
 struct ModelProfileSpawnTests {
 
     /// Recorder for tmux argv lists invoked during dryRun.
@@ -412,4 +414,5 @@ struct ModelProfileSpawnTests {
         ))
         #expect(!swapResp.success)
     }
+}
 }
