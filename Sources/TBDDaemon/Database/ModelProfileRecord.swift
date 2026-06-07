@@ -117,23 +117,29 @@ public struct ModelProfileStore: Sendable {
         }
     }
 
-    /// Update the proxy fields. Pass nil to clear them.
-    public func updateEndpoint(id: UUID, baseURL: String?, model: String?) async throws {
+    /// Update the proxy fields. Pass nil to clear them. `fallbackModels`
+    /// nil/empty clears the stored list (column set to NULL).
+    public func updateEndpoint(id: UUID, baseURL: String?, model: String?,
+                               fallbackModels: [String]? = nil) async throws {
+        let fallbackJSON = ModelProfileRecord.encodeFallbackModels(fallbackModels)
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE model_profiles SET base_url = ?, model = ? WHERE id = ?",
-                arguments: [baseURL, model, id.uuidString]
+                sql: "UPDATE model_profiles SET base_url = ?, model = ?, fallback_models = ? WHERE id = ?",
+                arguments: [baseURL, model, fallbackJSON, id.uuidString]
             )
         }
     }
 
     /// Update the bedrock-specific fields on an existing profile. Pass
     /// `awsProfile == nil` to clear (use AWS SDK default chain).
-    public func updateBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String) async throws {
+    /// `fallbackModels` nil/empty clears the stored list (column set to NULL).
+    public func updateBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String,
+                              fallbackModels: [String]? = nil) async throws {
+        let fallbackJSON = ModelProfileRecord.encodeFallbackModels(fallbackModels)
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE model_profiles SET aws_region = ?, aws_profile = ?, model = ? WHERE id = ?",
-                arguments: [awsRegion, awsProfile, model, id.uuidString]
+                sql: "UPDATE model_profiles SET aws_region = ?, aws_profile = ?, model = ?, fallback_models = ? WHERE id = ?",
+                arguments: [awsRegion, awsProfile, model, fallbackJSON, id.uuidString]
             )
         }
     }

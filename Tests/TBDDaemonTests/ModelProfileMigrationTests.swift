@@ -104,6 +104,55 @@ struct ModelProfileMigrationTests {
         #expect(reloaded?.fallbackModels == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"])
     }
 
+    @Test("updateEndpoint persists fallbackModels (set, then clear)")
+    func updateEndpointPersistsFallbackModels() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p = try await db.modelProfiles.create(name: "P", kind: .oauth)
+        #expect(try await db.modelProfiles.get(id: p.id)?.fallbackModels == nil)
+
+        // Set via updateEndpoint.
+        try await db.modelProfiles.updateEndpoint(
+            id: p.id, baseURL: nil, model: "opus",
+            fallbackModels: ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"]
+        )
+        let setReloaded = try await db.modelProfiles.get(id: p.id)
+        #expect(setReloaded?.model == "opus")
+        #expect(setReloaded?.fallbackModels == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"])
+
+        // Clear via nil — column goes back to NULL.
+        try await db.modelProfiles.updateEndpoint(id: p.id, baseURL: nil, model: "opus", fallbackModels: nil)
+        #expect(try await db.modelProfiles.get(id: p.id)?.fallbackModels == nil)
+
+        // Clear via empty array also normalizes to nil.
+        try await db.modelProfiles.updateEndpoint(id: p.id, baseURL: nil, model: "opus", fallbackModels: ["x"])
+        #expect(try await db.modelProfiles.get(id: p.id)?.fallbackModels == ["x"])
+        try await db.modelProfiles.updateEndpoint(id: p.id, baseURL: nil, model: "opus", fallbackModels: [])
+        #expect(try await db.modelProfiles.get(id: p.id)?.fallbackModels == nil)
+    }
+
+    @Test("updateBedrock persists fallbackModels (set, then clear)")
+    func updateBedrockPersistsFallbackModels() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let p = try await db.modelProfiles.create(
+            name: "B", kind: .bedrock, model: "anthropic.claude-sonnet-4-5",
+            awsRegion: "us-west-2"
+        )
+
+        try await db.modelProfiles.updateBedrock(
+            id: p.id, awsRegion: "us-east-1", awsProfile: nil, model: "anthropic.claude-sonnet-4-5",
+            fallbackModels: ["anthropic.claude-haiku-4-5"]
+        )
+        let setReloaded = try await db.modelProfiles.get(id: p.id)
+        #expect(setReloaded?.awsRegion == "us-east-1")
+        #expect(setReloaded?.fallbackModels == ["anthropic.claude-haiku-4-5"])
+
+        try await db.modelProfiles.updateBedrock(
+            id: p.id, awsRegion: "us-east-1", awsProfile: nil, model: "anthropic.claude-sonnet-4-5",
+            fallbackModels: nil
+        )
+        #expect(try await db.modelProfiles.get(id: p.id)?.fallbackModels == nil)
+    }
+
     @Test("ModelProfile round-trips through the store with baseURL/model nil and non-nil")
     func dataPreservationRoundTrip() async throws {
         let db = try TBDDatabase(inMemory: true)

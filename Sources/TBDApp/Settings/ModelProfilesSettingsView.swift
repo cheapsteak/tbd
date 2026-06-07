@@ -229,6 +229,68 @@ private struct LabeledField<Field: View>: View {
     }
 }
 
+/// Ordered editor for a profile's fallback model ids (capped at 3). Each row
+/// is a text field with a remove button; an "Add fallback model" button appends
+/// a row while under the cap. Order is significant — Claude Code tries the
+/// models top-to-bottom when the primary is overloaded/unavailable.
+///
+/// Binds to a `[String]` of exactly the rows shown. Callers convert empty/blank
+/// rows to `nil` before sending to the daemon (the daemon also normalizes).
+struct FallbackModelsEditor: View {
+    @Binding var models: [String]
+    static let maxCount = 3
+
+    var body: some View {
+        LabeledField(
+            "Fallback models (optional)",
+            caption: "Tried in order when the primary model is overloaded or unavailable. Up to \(Self.maxCount). e.g. claude-haiku-4-5-20251001"
+        ) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(models.indices, id: \.self) { index in
+                    HStack(spacing: 6) {
+                        Text("\(index + 1).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, alignment: .trailing)
+                        TextField("", text: Binding(
+                            get: { index < models.count ? models[index] : "" },
+                            set: { if index < models.count { models[index] = $0 } }
+                        ), prompt: Text("model id"))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: .infinity)
+                        Button {
+                            models.remove(at: index)
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove this fallback model")
+                    }
+                }
+                if models.count < Self.maxCount {
+                    Button {
+                        models.append("")
+                    } label: {
+                        Label("Add fallback model", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                }
+            }
+        }
+    }
+}
+
+/// Convert editor rows into the daemon payload: trim, drop blanks, cap at 3,
+/// and collapse an empty result to nil.
+func normalizedFallbackModels(_ rows: [String]) -> [String]? {
+    let cleaned = rows
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .prefix(FallbackModelsEditor.maxCount)
+    return cleaned.isEmpty ? nil : Array(cleaned)
+}
+
 private enum AddPreset: String, CaseIterable, Identifiable {
     case claudeDirect = "Claude"
     case proxy        = "Proxy"
@@ -385,6 +447,7 @@ struct AddModelProfileSheet: View {
     @State private var awsProfile = ""
     @State private var awsProfileSuggestions: [String] = []
     @State private var modelDiscovery: BedrockModels.DiscoveryResult = .idle
+    @State private var fallbackModels: [String] = []
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var probeStatus: ProbeStatus = .idle
@@ -489,6 +552,8 @@ struct AddModelProfileSheet: View {
                     }
                     modelDiscoveryStatus(profile: awsProfile, discovery: modelDiscovery)
                 }
+
+                FallbackModelsEditor(models: $fallbackModels)
             }
 
             probeView
@@ -606,7 +671,8 @@ struct AddModelProfileSheet: View {
                     baseURL: nil,
                     model: trimmedModel.isEmpty ? nil : trimmedModel,
                     awsRegion: trimmedRegion,
-                    awsProfile: trimmedAwsProfile.isEmpty ? nil : trimmedAwsProfile
+                    awsProfile: trimmedAwsProfile.isEmpty ? nil : trimmedAwsProfile,
+                    fallbackModels: normalizedFallbackModels(fallbackModels)
                 )
                 await MainActor.run {
                     isSaving = false
@@ -644,7 +710,8 @@ struct AddModelProfileSheet: View {
                 baseURL: preset == .proxy ? trimmedBase : nil,
                 // Bedrock returns early above, so only proxy/claudeDirect reach here —
                 // both carry an optional model.
-                model: trimmedModel.isEmpty ? nil : trimmedModel
+                model: trimmedModel.isEmpty ? nil : trimmedModel,
+                fallbackModels: normalizedFallbackModels(fallbackModels)
             )
             await MainActor.run {
                 isSaving = false
@@ -679,6 +746,7 @@ struct EditEndpointSheet: View {
     @State private var name: String
     @State private var baseURL: String
     @State private var model: String
+    @State private var fallbackModels: [String]
     @State private var isSaving = false
     @State private var probeStatus: ProbeStatus = .idle
     @State private var errorMessage: String?
@@ -688,6 +756,7 @@ struct EditEndpointSheet: View {
         _name = State(initialValue: profile.name)
         _baseURL = State(initialValue: profile.baseURL ?? "")
         _model = State(initialValue: profile.model ?? "")
+        _fallbackModels = State(initialValue: profile.fallbackModels ?? [])
     }
 
     var body: some View {
@@ -710,6 +779,7 @@ struct EditEndpointSheet: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: .infinity)
                 }
+                FallbackModelsEditor(models: $fallbackModels)
             }
             probeLabel
             if let errorMessage {
@@ -792,7 +862,8 @@ struct EditEndpointSheet: View {
             await appState.updateModelProfileEndpoint(
                 id: profile.id,
                 baseURL: trimmedBase,
-                model: trimmedModel.isEmpty ? nil : trimmedModel
+                model: trimmedModel.isEmpty ? nil : trimmedModel,
+                fallbackModels: normalizedFallbackModels(fallbackModels)
             )
             await MainActor.run {
                 isSaving = false
@@ -821,6 +892,7 @@ struct EditBedrockSheet: View {
     @State private var awsRegion: String
     @State private var awsProfile: String
     @State private var model: String
+    @State private var fallbackModels: [String]
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var awsProfileSuggestions: [String] = []
@@ -832,6 +904,7 @@ struct EditBedrockSheet: View {
         _awsRegion = State(initialValue: profile.awsRegion ?? "")
         _awsProfile = State(initialValue: profile.awsProfile ?? "")
         _model = State(initialValue: profile.model ?? "")
+        _fallbackModels = State(initialValue: profile.fallbackModels ?? [])
     }
 
     var body: some View {
@@ -882,6 +955,8 @@ struct EditBedrockSheet: View {
                 }
             }
             modelDiscoveryStatus(profile: awsProfile, discovery: modelDiscovery)
+
+            FallbackModelsEditor(models: $fallbackModels)
 
             if let errorMessage {
                 Text(errorMessage).font(.caption).foregroundStyle(.red)
@@ -961,7 +1036,8 @@ struct EditBedrockSheet: View {
                 id: profile.id,
                 awsRegion: trimmedRegion,
                 awsProfile: trimmedAwsProfile.isEmpty ? nil : trimmedAwsProfile,
-                model: trimmedModel
+                model: trimmedModel,
+                fallbackModels: normalizedFallbackModels(fallbackModels)
             )
             await MainActor.run {
                 isSaving = false
@@ -986,6 +1062,7 @@ struct EditClaudeDirectSheet: View {
 
     @State private var name: String
     @State private var model: String
+    @State private var fallbackModels: [String]
     @State private var isSaving = false
     @State private var errorMessage: String?
 
@@ -993,6 +1070,7 @@ struct EditClaudeDirectSheet: View {
         self.profile = profile
         _name = State(initialValue: profile.name)
         _model = State(initialValue: profile.model ?? "")
+        _fallbackModels = State(initialValue: profile.fallbackModels ?? [])
     }
 
     var body: some View {
@@ -1010,6 +1088,7 @@ struct EditClaudeDirectSheet: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: .infinity)
                 }
+                FallbackModelsEditor(models: $fallbackModels)
             }
             if let errorMessage {
                 Text(errorMessage)
@@ -1061,7 +1140,8 @@ struct EditClaudeDirectSheet: View {
             await appState.updateModelProfileEndpoint(
                 id: profile.id,
                 baseURL: nil,
-                model: trimmedModel.isEmpty ? nil : trimmedModel
+                model: trimmedModel.isEmpty ? nil : trimmedModel,
+                fallbackModels: normalizedFallbackModels(fallbackModels)
             )
             await MainActor.run {
                 isSaving = false

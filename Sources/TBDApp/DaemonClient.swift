@@ -836,10 +836,11 @@ actor DaemonClient {
                          baseURL: String? = nil,
                          model: String? = nil,
                          awsRegion: String? = nil,
-                         awsProfile: String? = nil) async throws -> ModelProfileAddResult {
+                         awsProfile: String? = nil,
+                         fallbackModels: [String]? = nil) async throws -> ModelProfileAddResult {
         return try await callAsync(
             method: RPCMethod.modelProfileAdd,
-            params: ModelProfileAddParams(name: name, kind: kind, token: token, baseURL: baseURL, model: model, awsRegion: awsRegion, awsProfile: awsProfile),
+            params: ModelProfileAddParams(name: name, kind: kind, token: token, baseURL: baseURL, model: model, awsRegion: awsRegion, awsProfile: awsProfile, fallbackModels: fallbackModels),
             resultType: ModelProfileAddResult.self
         )
     }
@@ -860,19 +861,21 @@ actor DaemonClient {
         )
     }
 
-    /// Update a model profile's proxy endpoint (baseURL + model).
-    func updateModelProfileEndpoint(id: UUID, baseURL: String?, model: String?) async throws {
+    /// Update a model profile's proxy endpoint (baseURL + model) and fallback list.
+    func updateModelProfileEndpoint(id: UUID, baseURL: String?, model: String?,
+                                    fallbackModels: [String]? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.modelProfileUpdateEndpoint,
-            params: ModelProfileUpdateEndpointParams(id: id, baseURL: baseURL, model: model)
+            params: ModelProfileUpdateEndpointParams(id: id, baseURL: baseURL, model: model, fallbackModels: fallbackModels)
         )
     }
 
-    /// Update a bedrock model profile's region, awsProfile, and model.
-    func updateModelProfileBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String) async throws {
+    /// Update a bedrock model profile's region, awsProfile, model, and fallback list.
+    func updateModelProfileBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String,
+                                   fallbackModels: [String]? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.modelProfileUpdateBedrock,
-            params: ModelProfileUpdateBedrockParams(id: id, awsRegion: awsRegion, awsProfile: awsProfile, model: model)
+            params: ModelProfileUpdateBedrockParams(id: id, awsRegion: awsRegion, awsProfile: awsProfile, model: model, fallbackModels: fallbackModels)
         )
     }
 

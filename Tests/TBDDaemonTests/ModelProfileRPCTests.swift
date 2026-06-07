@@ -860,4 +860,98 @@ struct ModelProfileRPCTests {
         #expect(resp.error?.lowercased().contains("not available") == true)
         #expect(stub.callCount == 0)
     }
+
+    // MARK: - fallbackModels (Idea 2: user-settable via RPC)
+
+    @Test("add: forwards fallbackModels to the stored oauth profile")
+    func addForwardsFallbackModels() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "WithFallback", token: nil,
+                fallbackModels: ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"]
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.profile.fallbackModels == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"])
+        let reloaded = try await db.modelProfiles.get(id: result.profile.id)
+        #expect(reloaded?.fallbackModels == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"])
+    }
+
+    @Test("add: normalizes fallbackModels — trims, drops blanks, caps at 3")
+    func addNormalizesFallbackModels() async throws {
+        let (router, db, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(
+                name: "Normalize", token: nil,
+                fallbackModels: ["  a  ", "", "b", "   ", "c", "d"]
+            )
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        // Trimmed, blanks dropped, capped at 3, order preserved.
+        #expect(result.profile.fallbackModels == ["a", "b", "c"])
+        _ = db
+    }
+
+    @Test("add: nil fallbackModels stores nil")
+    func addNilFallbackModels() async throws {
+        let (router, _, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileAdd,
+            params: ModelProfileAddParams(name: "NoFallback", token: nil)
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfileAddResult.self)
+        #expect(result.profile.fallbackModels == nil)
+    }
+
+    @Test("updateEndpoint: forwards fallbackModels (set then clear)")
+    func updateEndpointForwardsFallbackModels() async throws {
+        let (router, db, _) = makeRouter()
+        let row = try await db.modelProfiles.create(name: "P", kind: .oauth)
+
+        let setReq = try RPCRequest(
+            method: RPCMethod.modelProfileUpdateEndpoint,
+            params: ModelProfileUpdateEndpointParams(
+                id: row.id, baseURL: nil, model: "opus",
+                fallbackModels: ["claude-haiku-4-5-20251001"]
+            )
+        )
+        #expect(await router.handle(setReq).success)
+        #expect(try await db.modelProfiles.get(id: row.id)?.fallbackModels == ["claude-haiku-4-5-20251001"])
+
+        let clearReq = try RPCRequest(
+            method: RPCMethod.modelProfileUpdateEndpoint,
+            params: ModelProfileUpdateEndpointParams(
+                id: row.id, baseURL: nil, model: "opus", fallbackModels: nil
+            )
+        )
+        #expect(await router.handle(clearReq).success)
+        #expect(try await db.modelProfiles.get(id: row.id)?.fallbackModels == nil)
+    }
+
+    @Test("updateBedrock: forwards fallbackModels")
+    func updateBedrockForwardsFallbackModels() async throws {
+        let (router, db, _) = makeRouter()
+        let row = try await db.modelProfiles.create(
+            name: "B", kind: .bedrock, model: "anthropic.claude-sonnet-4-5", awsRegion: "us-west-2"
+        )
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfileUpdateBedrock,
+            params: ModelProfileUpdateBedrockParams(
+                id: row.id, awsRegion: "us-east-1", awsProfile: nil,
+                model: "anthropic.claude-sonnet-4-5",
+                fallbackModels: ["anthropic.claude-haiku-4-5"]
+            )
+        )
+        #expect(await router.handle(req).success)
+        #expect(try await db.modelProfiles.get(id: row.id)?.fallbackModels == ["anthropic.claude-haiku-4-5"])
+    }
 }
