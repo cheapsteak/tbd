@@ -4,6 +4,23 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "modelProfileHandlers")
 
+/// Normalize a user-supplied fallback model list: trim each id, drop blanks,
+/// cap at 3 (Claude Code's documented maximum), and collapse an empty result
+/// to nil so the column stores NULL. Order is preserved.
+///
+/// Deliberately duplicates the app-side `normalizedFallbackModels` in
+/// `Sources/TBDApp/Settings/ModelProfilesSettingsView.swift` — defense-in-depth
+/// so the daemon normalizes even payloads from clients that skip the UI helper.
+/// Keep the two in sync.
+func normalizeFallbackModels(_ raw: [String]?) -> [String]? {
+    guard let raw else { return nil }
+    let cleaned = raw
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .prefix(3)
+    return cleaned.isEmpty ? nil : Array(cleaned)
+}
+
 extension RPCRouter {
 
     // MARK: - List
@@ -27,6 +44,7 @@ extension RPCRouter {
     func handleModelProfileAdd(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ModelProfileAddParams.self, from: paramsData)
         let name = params.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackModels = normalizeFallbackModels(params.fallbackModels)
 
         guard !name.isEmpty else {
             return RPCResponse(error: "Name cannot be empty")
@@ -56,7 +74,8 @@ extension RPCRouter {
                 baseURL: nil,
                 model: model,
                 awsRegion: region,
-                awsProfile: awsProfile
+                awsProfile: awsProfile,
+                fallbackModels: fallbackModels
             )
             subscriptions.broadcast(delta: .modelProfilesChanged)
             return try RPCResponse(result: ModelProfileAddResult(profile: row, warning: nil))
@@ -75,7 +94,8 @@ extension RPCRouter {
                 name: name,
                 kind: .oauth,
                 baseURL: nil,
-                model: params.model
+                model: params.model,
+                fallbackModels: fallbackModels
             )
             subscriptions.broadcast(delta: .modelProfilesChanged)
             return try RPCResponse(result: ModelProfileAddResult(profile: profileRow, warning: nil))
@@ -116,7 +136,8 @@ extension RPCRouter {
             name: name,
             kind: kind,
             baseURL: params.baseURL,
-            model: params.model
+            model: params.model,
+            fallbackModels: fallbackModels
         )
 
         // Only store keychain for API key profiles; OAuth profiles don't store secrets.
@@ -213,7 +234,12 @@ extension RPCRouter {
         guard profile.kind != .bedrock else {
             return RPCResponse(error: "Cannot update endpoint on a bedrock profile")
         }
-        try await db.modelProfiles.updateEndpoint(id: params.id, baseURL: params.baseURL, model: params.model)
+        try await db.modelProfiles.updateEndpoint(
+            id: params.id,
+            baseURL: params.baseURL,
+            model: params.model,
+            fallbackModels: normalizeFallbackModels(params.fallbackModels)
+        )
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
@@ -246,7 +272,8 @@ extension RPCRouter {
             id: params.id,
             awsRegion: region,
             awsProfile: awsProfile,
-            model: model
+            model: model,
+            fallbackModels: normalizeFallbackModels(params.fallbackModels)
         )
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

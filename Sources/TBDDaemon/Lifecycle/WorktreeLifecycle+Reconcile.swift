@@ -125,6 +125,9 @@ extension WorktreeLifecycle {
             try await db.tabs.deleteForWorktree(worktreeID: wt.id)
             for terminal in terminals {
                 await pendingQuestions.clear(terminalID: terminal.id)
+                // Reclaim any per-session fallbackModel overlay (keyed by terminal
+                // id), mirroring handleTerminalDelete. No-op when none was written.
+                ClaudeHookOverlay.removePerSessionOverlay(sessionKey: terminal.id.uuidString)
             }
             try await db.worktrees.archive(id: wt.id)
         }
@@ -314,7 +317,10 @@ extension WorktreeLifecycle {
                 profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
                 cmd: nil,
                 shellFallback: defaultShell,
-                settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
+                    fallbackModels: resolvedProfile?.fallbackModels,
+                    sessionKey: terminal.id.uuidString
+                ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
             )

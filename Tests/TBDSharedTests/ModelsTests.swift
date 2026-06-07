@@ -124,6 +124,54 @@ import Testing
     #expect(decoded.primaryAgentPreference == .claude)
 }
 
+// MARK: - fallbackModels RPC param decode
+
+@Test func modelProfileAddParamsDecodesWithFallbackModels() throws {
+    let json = """
+    {"name":"P","kind":"claudeDirect","fallbackModels":["claude-haiku-4-5-20251001","claude-sonnet-4-5"]}
+    """.data(using: .utf8)!
+    let decoded = try JSONDecoder().decode(ModelProfileAddParams.self, from: json)
+    #expect(decoded.fallbackModels == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"])
+}
+
+@Test func modelProfileAddParamsDecodesWithoutFallbackModels() throws {
+    // Payload from an older client lacks the key — must still decode (nil).
+    let json = #"{"name":"P","kind":"claudeDirect"}"#.data(using: .utf8)!
+    let decoded = try JSONDecoder().decode(ModelProfileAddParams.self, from: json)
+    #expect(decoded.fallbackModels == nil)
+    #expect(decoded.name == "P")
+}
+
+@Test func modelProfileUpdateEndpointParamsDecodesWithAndWithoutFallbackModels() throws {
+    let id = "11111111-1111-1111-1111-111111111111"
+    let withJSON = """
+    {"id":"\(id)","baseURL":null,"model":"opus","fallbackModels":["claude-haiku-4-5-20251001"]}
+    """.data(using: .utf8)!
+    let withDecoded = try JSONDecoder().decode(ModelProfileUpdateEndpointParams.self, from: withJSON)
+    #expect(withDecoded.fallbackModels == ["claude-haiku-4-5-20251001"])
+    #expect(withDecoded.model == "opus")
+
+    let withoutJSON = #"{"id":"\#(id)","baseURL":null,"model":null}"#.data(using: .utf8)!
+    let withoutDecoded = try JSONDecoder().decode(ModelProfileUpdateEndpointParams.self, from: withoutJSON)
+    #expect(withoutDecoded.fallbackModels == nil)
+}
+
+@Test func modelProfileUpdateBedrockParamsDecodesWithAndWithoutFallbackModels() throws {
+    let id = "11111111-1111-1111-1111-111111111111"
+    let withJSON = """
+    {"id":"\(id)","awsRegion":"us-west-2","awsProfile":null,"model":"m","fallbackModels":["a","b"]}
+    """.data(using: .utf8)!
+    let withDecoded = try JSONDecoder().decode(ModelProfileUpdateBedrockParams.self, from: withJSON)
+    #expect(withDecoded.fallbackModels == ["a", "b"])
+
+    let withoutJSON = """
+    {"id":"\(id)","awsRegion":"us-west-2","awsProfile":null,"model":"m"}
+    """.data(using: .utf8)!
+    let withoutDecoded = try JSONDecoder().decode(ModelProfileUpdateBedrockParams.self, from: withoutJSON)
+    #expect(withoutDecoded.fallbackModels == nil)
+    #expect(withoutDecoded.awsRegion == "us-west-2")
+}
+
 @Test func testTerminalDecodesWithoutActivityState() throws {
     let json = """
     {

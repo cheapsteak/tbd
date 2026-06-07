@@ -13,6 +13,10 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
     var model: String?
     var aws_region: String?
     var aws_profile: String?
+    /// JSON-encoded `[String]` (the profile's ordered fallback model ids), or
+    /// nil when no fallback is configured. Stored as text so the array survives
+    /// a single column.
+    var fallback_models: String?
     var created_at: Date
     var last_used_at: Date?
 
@@ -25,6 +29,7 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
         self.model = profile.model
         self.aws_region = profile.awsRegion
         self.aws_profile = profile.awsProfile
+        self.fallback_models = Self.encodeFallbackModels(profile.fallbackModels)
         self.created_at = profile.createdAt
         self.last_used_at = profile.lastUsedAt
     }
@@ -38,9 +43,26 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
             model: model,
             awsRegion: aws_region,
             awsProfile: aws_profile,
+            fallbackModels: Self.decodeFallbackModels(fallback_models),
             createdAt: created_at,
             lastUsedAt: last_used_at
         )
+    }
+
+    /// Encode the fallback list to JSON text. Returns nil for nil/empty so the
+    /// column stays NULL and `toModel()` round-trips back to nil.
+    static func encodeFallbackModels(_ models: [String]?) -> String? {
+        guard let models, !models.isEmpty else { return nil }
+        guard let data = try? JSONEncoder().encode(models) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Decode the JSON-text fallback list. nil/empty/invalid → nil.
+    static func decodeFallbackModels(_ text: String?) -> [String]? {
+        guard let text, let data = text.data(using: .utf8),
+              let models = try? JSONDecoder().decode([String].self, from: data),
+              !models.isEmpty else { return nil }
+        return models
     }
 }
 
@@ -53,9 +75,11 @@ public struct ModelProfileStore: Sendable {
 
     public func create(name: String, kind: CredentialKind,
                        baseURL: String? = nil, model: String? = nil,
-                       awsRegion: String? = nil, awsProfile: String? = nil) async throws -> ModelProfile {
+                       awsRegion: String? = nil, awsProfile: String? = nil,
+                       fallbackModels: [String]? = nil) async throws -> ModelProfile {
         let profile = ModelProfile(name: name, kind: kind, baseURL: baseURL, model: model,
-                                   awsRegion: awsRegion, awsProfile: awsProfile)
+                                   awsRegion: awsRegion, awsProfile: awsProfile,
+                                   fallbackModels: fallbackModels)
         let record = ModelProfileRecord(from: profile)
         try await writer.write { db in
             try record.insert(db)
@@ -93,23 +117,29 @@ public struct ModelProfileStore: Sendable {
         }
     }
 
-    /// Update the proxy fields. Pass nil to clear them.
-    public func updateEndpoint(id: UUID, baseURL: String?, model: String?) async throws {
+    /// Update the proxy fields. Pass nil to clear them. `fallbackModels`
+    /// nil/empty clears the stored list (column set to NULL).
+    public func updateEndpoint(id: UUID, baseURL: String?, model: String?,
+                               fallbackModels: [String]? = nil) async throws {
+        let fallbackJSON = ModelProfileRecord.encodeFallbackModels(fallbackModels)
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE model_profiles SET base_url = ?, model = ? WHERE id = ?",
-                arguments: [baseURL, model, id.uuidString]
+                sql: "UPDATE model_profiles SET base_url = ?, model = ?, fallback_models = ? WHERE id = ?",
+                arguments: [baseURL, model, fallbackJSON, id.uuidString]
             )
         }
     }
 
     /// Update the bedrock-specific fields on an existing profile. Pass
     /// `awsProfile == nil` to clear (use AWS SDK default chain).
-    public func updateBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String) async throws {
+    /// `fallbackModels` nil/empty clears the stored list (column set to NULL).
+    public func updateBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String,
+                              fallbackModels: [String]? = nil) async throws {
+        let fallbackJSON = ModelProfileRecord.encodeFallbackModels(fallbackModels)
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE model_profiles SET aws_region = ?, aws_profile = ?, model = ? WHERE id = ?",
-                arguments: [awsRegion, awsProfile, model, id.uuidString]
+                sql: "UPDATE model_profiles SET aws_region = ?, aws_profile = ?, model = ?, fallback_models = ? WHERE id = ?",
+                arguments: [awsRegion, awsProfile, model, fallbackJSON, id.uuidString]
             )
         }
     }

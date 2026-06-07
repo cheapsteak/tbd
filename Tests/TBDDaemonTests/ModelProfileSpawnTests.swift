@@ -3,6 +3,11 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+// Nested under TBDHomeSerialized: several tests mutate the process-global
+// `TBD_HOME` env var (via setenv/unsetenv) to isolate the overlay/runtime dir.
+// Nesting prevents cross-suite races with the other TBD_HOME-mutating suites.
+// See TBDHomeSerializedSuites.swift.
+extension TBDHomeSerialized {
 @Suite("Claude Token Spawn + Swap")
 struct ModelProfileSpawnTests {
 
@@ -159,6 +164,114 @@ struct ModelProfileSpawnTests {
         #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
+    // MARK: - Spawn: fallbackModels overlay routing
+
+    @Test("spawn: profile WITHOUT fallbackModels uses the global overlay path")
+    func spawnWithoutFallbackModelsUsesGlobalOverlay() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-spawn-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        // The --settings flag is only emitted when the overlay file exists.
+        ClaudeHookOverlay.writeOverlay()
+
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let tok = try await seedOAuthProfile(db, name: "NoFallback")
+        try await db.config.setDefaultProfileID(tok.id)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        #expect(resp.success)
+
+        let bodies = recorder.shellBodies
+        #expect(bodies.contains("--settings"))
+        // Uses the shared global overlay, NOT a per-session file.
+        #expect(bodies.contains(ClaudeHookOverlay.overlayPath))
+        #expect(!bodies.contains("claude-overlay-session-"))
+    }
+
+    @Test("spawn: profile WITH fallbackModels uses a per-session overlay path")
+    func spawnWithFallbackModelsUsesPerSessionOverlay() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-spawn-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        ClaudeHookOverlay.writeOverlay()
+
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let tok = try await db.modelProfiles.create(
+            name: "WithFallback", kind: .oauth,
+            fallbackModels: ["claude-haiku-4-5-20251001"]
+        )
+        try await db.config.setDefaultProfileID(tok.id)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        #expect(resp.success)
+
+        let bodies = recorder.shellBodies
+        #expect(bodies.contains("--settings"))
+        // A per-session overlay file is used, NOT the shared global overlay.
+        #expect(bodies.contains("claude-overlay-session-"))
+        #expect(!bodies.contains(" --settings \(ClaudeHookOverlay.overlayPath)"))
+    }
+
+    @Test("delete: removes the per-session fallbackModel overlay on terminal teardown")
+    func deleteRemovesPerSessionOverlay() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-spawn-test-\(UUID().uuidString)")
+        setenv("TBD_HOME", tmp.path, 1)
+        defer {
+            unsetenv("TBD_HOME")
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        ClaudeHookOverlay.writeOverlay()
+
+        let (router, db, _) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let tok = try await db.modelProfiles.create(
+            name: "WithFallback", kind: .oauth,
+            fallbackModels: ["claude-haiku-4-5-20251001"]
+        )
+        try await db.config.setDefaultProfileID(tok.id)
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        #expect(createResp.success)
+        let term = try createResp.decodeResult(Terminal.self)
+
+        // The per-session overlay was written, keyed by the terminal id.
+        let overlayPath = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: term.id.uuidString)
+        #expect(FileManager.default.fileExists(atPath: overlayPath))
+
+        // Deleting the terminal reclaims the per-session overlay.
+        let delResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalDelete,
+            params: TerminalDeleteParams(terminalID: term.id)
+        ))
+        #expect(delResp.success)
+        #expect(!FileManager.default.fileExists(atPath: overlayPath))
+        // The shared global overlay is left intact.
+        #expect(FileManager.default.fileExists(atPath: ClaudeHookOverlay.overlayPath))
+    }
+
     // MARK: - Swap: to a different token
 
     @Test("swap on blank session: forks into a new tab with a fresh session id and new token")
@@ -301,4 +414,5 @@ struct ModelProfileSpawnTests {
         ))
         #expect(!swapResp.success)
     }
+}
 }

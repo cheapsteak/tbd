@@ -274,6 +274,9 @@ public struct ModelProfileAddParams: Codable, Sendable {
     public let model: String?
     public let awsRegion: String?
     public let awsProfile: String?
+    /// Ordered list of fallback model ids (tried in order on overload). nil =
+    /// none. Optional/decodeIfPresent so payloads from older clients still decode.
+    public let fallbackModels: [String]?
 
     public init(name: String,
                 kind: ModelProfileAddKind? = nil,
@@ -281,7 +284,8 @@ public struct ModelProfileAddParams: Codable, Sendable {
                 baseURL: String? = nil,
                 model: String? = nil,
                 awsRegion: String? = nil,
-                awsProfile: String? = nil) {
+                awsProfile: String? = nil,
+                fallbackModels: [String]? = nil) {
         self.kind = kind
         self.name = name
         self.token = token
@@ -289,6 +293,23 @@ public struct ModelProfileAddParams: Codable, Sendable {
         self.model = model
         self.awsRegion = awsRegion
         self.awsProfile = awsProfile
+        self.fallbackModels = fallbackModels
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case kind, name, token, baseURL, model, awsRegion, awsProfile, fallbackModels
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = try c.decodeIfPresent(ModelProfileAddKind.self, forKey: .kind)
+        name = try c.decode(String.self, forKey: .name)
+        token = try c.decodeIfPresent(String.self, forKey: .token)
+        baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        awsRegion = try c.decodeIfPresent(String.self, forKey: .awsRegion)
+        awsProfile = try c.decodeIfPresent(String.self, forKey: .awsProfile)
+        fallbackModels = try c.decodeIfPresent([String].self, forKey: .fallbackModels)
     }
 }
 
@@ -318,8 +339,24 @@ public struct ModelProfileUpdateEndpointParams: Codable, Sendable {
     public let id: UUID
     public let baseURL: String?
     public let model: String?
-    public init(id: UUID, baseURL: String?, model: String?) {
+    /// Ordered fallback model ids; nil = leave unset/clear. Optional/
+    /// decodeIfPresent so older payloads still decode.
+    public let fallbackModels: [String]?
+    public init(id: UUID, baseURL: String?, model: String?, fallbackModels: [String]? = nil) {
         self.id = id; self.baseURL = baseURL; self.model = model
+        self.fallbackModels = fallbackModels
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, baseURL, model, fallbackModels
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        fallbackModels = try c.decodeIfPresent([String].self, forKey: .fallbackModels)
     }
 }
 
@@ -328,11 +365,28 @@ public struct ModelProfileUpdateBedrockParams: Codable, Sendable {
     public let awsRegion: String
     public let awsProfile: String?
     public let model: String
-    public init(id: UUID, awsRegion: String, awsProfile: String?, model: String) {
+    /// Ordered fallback model ids; nil = leave unset/clear. Optional/
+    /// decodeIfPresent so older payloads still decode.
+    public let fallbackModels: [String]?
+    public init(id: UUID, awsRegion: String, awsProfile: String?, model: String, fallbackModels: [String]? = nil) {
         self.id = id
         self.awsRegion = awsRegion
         self.awsProfile = awsProfile
         self.model = model
+        self.fallbackModels = fallbackModels
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, awsRegion, awsProfile, model, fallbackModels
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        awsRegion = try c.decode(String.self, forKey: .awsRegion)
+        awsProfile = try c.decodeIfPresent(String.self, forKey: .awsProfile)
+        model = try c.decode(String.self, forKey: .model)
+        fallbackModels = try c.decodeIfPresent([String].self, forKey: .fallbackModels)
     }
 }
 

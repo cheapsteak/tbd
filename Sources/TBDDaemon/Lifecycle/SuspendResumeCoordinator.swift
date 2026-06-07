@@ -379,6 +379,12 @@ public actor SuspendResumeCoordinator {
         }
 
         let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
+        // resolveOverlayPath never throws — it degrades to the global hooks-only
+        // overlay if the per-session write fails, so resume always proceeds.
+        let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: resolvedProfile?.fallbackModels,
+            sessionKey: terminal.id.uuidString
+        )
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
@@ -393,7 +399,7 @@ public actor SuspendResumeCoordinator {
             profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
             cmd: nil,
             shellFallback: defaultShell,
-            settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+            settingsOverlayPath: overlayPath,
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: claudeEnvOverrides
         )

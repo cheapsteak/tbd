@@ -53,6 +53,23 @@ struct ModelProfileModelTests {
         #expect(p.model == nil)
     }
 
+    @Test func decodeModelProfileWithFallbackModels() throws {
+        let json = #"{"id":"11111111-1111-1111-1111-111111111111","name":"Personal","kind":"oauth","fallbackModels":["claude-haiku-4-5-20251001","claude-sonnet-4-5"],"createdAt":"2026-04-06T00:00:00Z"}"#.data(using: .utf8)!
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        let p = try dec.decode(ModelProfile.self, from: json)
+        #expect(p.fallbackModels == ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"])
+    }
+
+    @Test func decodeModelProfileWithoutFallbackModels() throws {
+        // Existing persisted rows/JSON (pre-fallbackModels) must still decode.
+        let json = #"{"id":"11111111-1111-1111-1111-111111111111","name":"Personal","kind":"oauth","createdAt":"2026-04-06T00:00:00Z"}"#.data(using: .utf8)!
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        let p = try dec.decode(ModelProfile.self, from: json)
+        #expect(p.fallbackModels == nil)
+    }
+
     @Test func repoDecodesWithoutOverride() throws {
         let json = #"{"id":"11111111-1111-1111-1111-111111111111","path":"/tmp/x","displayName":"x","defaultBranch":"main","createdAt":"2026-04-06T00:00:00Z"}"#.data(using: .utf8)!
         let dec = JSONDecoder()

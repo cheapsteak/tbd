@@ -226,7 +226,12 @@ extension RPCRouter {
             profileConfigDir: isClaudeType ? ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile) : nil,
             cmd: params.cmd,
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
-            settingsOverlayPath: isClaudeType ? ClaudeHookOverlay.overlayPath : nil,
+            settingsOverlayPath: isClaudeType
+                ? ClaudeHookOverlay.resolveOverlayPath(
+                    fallbackModels: resolvedProfile?.fallbackModels,
+                    sessionKey: plannedTerminalID.uuidString
+                  )
+                : nil,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
             envSettingOverrides: claudeEnvOverrides
         )
@@ -284,6 +289,10 @@ extension RPCRouter {
         try await db.terminals.delete(id: params.terminalID)
         try await db.tabs.delete(tabID: params.terminalID)
         await pendingQuestions.clear(terminalID: params.terminalID)
+
+        // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
+        // if this terminal had one. No-op when the profile had no fallback.
+        ClaudeHookOverlay.removePerSessionOverlay(sessionKey: params.terminalID.uuidString)
 
         subscriptions.broadcast(delta: .terminalRemoved(TerminalIDDelta(
             terminalID: terminal.id
@@ -610,7 +619,10 @@ extension RPCRouter {
                 profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved),
                 cmd: nil,
                 shellFallback: "",
-                settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
+                    fallbackModels: resolved?.fallbackModels,
+                    sessionKey: plannedTerminalID.uuidString
+                ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
             )
@@ -635,7 +647,10 @@ extension RPCRouter {
                 profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolved),
                 cmd: nil,
                 shellFallback: "",
-                settingsOverlayPath: ClaudeHookOverlay.overlayPath,
+                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
+                    fallbackModels: resolved?.fallbackModels,
+                    sessionKey: plannedTerminalID.uuidString
+                ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
             )

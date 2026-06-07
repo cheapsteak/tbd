@@ -223,7 +223,8 @@ struct ClaudeProfileConfigDirManagerTests {
             model: "anthropic.claude-sonnet-4-5",
             secret: nil,
             awsRegion: "us-west-2",
-            awsProfile: nil
+            awsProfile: nil,
+            fallbackModels: nil
         )
         #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
     }
@@ -238,7 +239,8 @@ struct ClaudeProfileConfigDirManagerTests {
             model: nil,
             secret: nil,
             awsRegion: nil,
-            awsProfile: nil
+            awsProfile: nil,
+            fallbackModels: nil
         )
         #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
     }

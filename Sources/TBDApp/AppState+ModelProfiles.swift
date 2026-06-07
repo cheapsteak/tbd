@@ -41,12 +41,14 @@ extension AppState {
                          baseURL: String? = nil,
                          model: String? = nil,
                          awsRegion: String? = nil,
-                         awsProfile: String? = nil) async -> String? {
+                         awsProfile: String? = nil,
+                         fallbackModels: [String]? = nil) async -> String? {
         do {
             let result = try await daemonClient.addModelProfile(
                 name: name, kind: kind, token: token,
                 baseURL: baseURL, model: model,
-                awsRegion: awsRegion, awsProfile: awsProfile
+                awsRegion: awsRegion, awsProfile: awsProfile,
+                fallbackModels: fallbackModels
             )
             await loadModelProfiles()
             return result.warning
@@ -81,9 +83,12 @@ extension AppState {
 
     /// Update a model profile's proxy endpoint (baseURL + model). Pass nil to
     /// either field to clear it.
-    func updateModelProfileEndpoint(id: UUID, baseURL: String?, model: String?) async {
+    func updateModelProfileEndpoint(id: UUID, baseURL: String?, model: String?,
+                                    fallbackModels: [String]? = nil) async {
         do {
-            try await daemonClient.updateModelProfileEndpoint(id: id, baseURL: baseURL, model: model)
+            try await daemonClient.updateModelProfileEndpoint(
+                id: id, baseURL: baseURL, model: model, fallbackModels: fallbackModels
+            )
             await loadModelProfiles()
         } catch {
             logger.error("Failed to update model profile endpoint: \(error, privacy: .public)")
@@ -91,11 +96,13 @@ extension AppState {
         }
     }
 
-    /// Update a bedrock model profile's region, awsProfile, and model in-place.
-    func updateModelProfileBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String) async {
+    /// Update a bedrock model profile's region, awsProfile, model, and fallback list in-place.
+    func updateModelProfileBedrock(id: UUID, awsRegion: String, awsProfile: String?, model: String,
+                                   fallbackModels: [String]? = nil) async {
         do {
             try await daemonClient.updateModelProfileBedrock(
-                id: id, awsRegion: awsRegion, awsProfile: awsProfile, model: model
+                id: id, awsRegion: awsRegion, awsProfile: awsProfile, model: model,
+                fallbackModels: fallbackModels
             )
             await loadModelProfiles()
         } catch {
