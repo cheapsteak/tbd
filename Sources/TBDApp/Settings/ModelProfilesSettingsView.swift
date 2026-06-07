@@ -229,6 +229,11 @@ private struct LabeledField<Field: View>: View {
     }
 }
 
+/// Maximum number of fallback models Claude Code accepts (documented cap of 3).
+/// Top-level (nonisolated) so both the main-actor editor view and the
+/// nonisolated `normalizedFallbackModels` helper can reference one constant.
+let fallbackModelsMaxCount = 3
+
 /// Ordered editor for a profile's fallback model ids (capped at 3). Each row
 /// is a text field with a remove button; an "Add fallback model" button appends
 /// a row while under the cap. Order is significant — Claude Code tries the
@@ -238,12 +243,11 @@ private struct LabeledField<Field: View>: View {
 /// rows to `nil` before sending to the daemon (the daemon also normalizes).
 struct FallbackModelsEditor: View {
     @Binding var models: [String]
-    static let maxCount = 3
 
     var body: some View {
         LabeledField(
             "Fallback models (optional)",
-            caption: "Tried in order when the primary model is overloaded or unavailable. Up to \(Self.maxCount). e.g. claude-haiku-4-5-20251001"
+            caption: "Tried in order when the primary model is overloaded or unavailable. Up to \(fallbackModelsMaxCount). e.g. claude-haiku-4-5-20251001"
         ) {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(models.indices, id: \.self) { index in
@@ -259,7 +263,7 @@ struct FallbackModelsEditor: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: .infinity)
                         Button {
-                            models.remove(at: index)
+                            if index < models.count { models.remove(at: index) }
                         } label: {
                             Image(systemName: "minus.circle")
                         }
@@ -267,7 +271,7 @@ struct FallbackModelsEditor: View {
                         .help("Remove this fallback model")
                     }
                 }
-                if models.count < Self.maxCount {
+                if models.count < fallbackModelsMaxCount {
                     Button {
                         models.append("")
                     } label: {
@@ -287,7 +291,7 @@ func normalizedFallbackModels(_ rows: [String]) -> [String]? {
     let cleaned = rows
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
-        .prefix(FallbackModelsEditor.maxCount)
+        .prefix(fallbackModelsMaxCount)
     return cleaned.isEmpty ? nil : Array(cleaned)
 }
 
