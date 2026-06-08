@@ -133,7 +133,10 @@ public actor PRStatusManager {
             case "CLEAN", "HAS_HOOKS":
                 return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
             case "BLOCKED":
-                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .blocked
+                if Self.isPendingStatusCheckRollup(statusCheckRollupState) { return .pending }
+                // Only blocker is a required (but not-yet-given) review while checks pass → ready to merge, show green.
+                if reviewDecision == "REVIEW_REQUIRED" { return .mergeable }
+                return .blocked
             case "DIRTY", "BEHIND":
                 return .blocked
             case "UNSTABLE":
