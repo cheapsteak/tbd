@@ -274,7 +274,21 @@ struct PanePlaceholder: View {
 
     @ViewBuilder
     private func terminalContent(terminalID: UUID) -> some View {
-        if let terminal = terminal(for: terminalID) {
+        if AppState.shouldSuppressTerminalInLayout(
+            terminalID: terminalID,
+            dockedTerminalIDs: appState.dockedTerminalIDs
+        ) {
+            // This terminal is pinned and currently owned by PinnedTerminalDock.
+            // Rendering a second TerminalPanelView here (this is the worktree
+            // layout / keep-alive pager path) would mount the same terminal
+            // twice and collide on the shared `tbd-view-<id>` tmux session. The
+            // dock holds the live viewer; show a placeholder instead. This
+            // placeholder is only ever offscreen (a kept-alive non-selected
+            // worktree) — selecting the worktree moves the terminal into
+            // `visibleTerminalIDs`, so it leaves `dockedTerminalIDs` and renders
+            // for real in the main area.
+            pinnedInDockPlaceholder
+        } else if let terminal = terminal(for: terminalID) {
             if appState.suspendingTerminalIDs.contains(terminal.id) {
                 // Show screenshot (or black fallback) — no live tmux connection
                 Group {
@@ -389,6 +403,23 @@ struct PanePlaceholder: View {
                 }
             }
         }
+    }
+
+    /// Placeholder shown in the worktree-layout path for a terminal that is
+    /// currently pinned and rendered live in `PinnedTerminalDock`. Avoids a
+    /// second `TerminalPanelView` for the same terminal (which would fight over
+    /// the shared `tbd-view-<id>` tmux session). Never user-visible in practice
+    /// — only the offscreen kept-alive pager hits this branch.
+    private var pinnedInDockPlaceholder: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "pin.fill")
+                .font(.system(size: 32))
+                .foregroundStyle(.tertiary)
+            Text("Pinned — shown in the dock")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// Placeholder shown when a transcript pane exists but the feature flag is off.

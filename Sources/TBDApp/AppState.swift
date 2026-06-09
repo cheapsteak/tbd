@@ -216,6 +216,75 @@ final class AppState: ObservableObject {
         return ids
     }
 
+    /// Worktree IDs with at least one terminal currently in the `.working`
+    /// activity state (an agent is actively running). These must not have their
+    /// view trees torn down by keep-alive eviction — unmounting kills the
+    /// on-screen tmux viewer mid-run and shows a spurious detach message.
+    var workingWorktreeIDs: Set<UUID> {
+        var ids = Set<UUID>()
+        for (worktreeID, terminalList) in terminals
+        where terminalList.contains(where: { $0.activityState == .working }) {
+            ids.insert(worktreeID)
+        }
+        return ids
+    }
+
+    /// Worktrees that must never be evicted from the keep-alive mount set:
+    /// open (selected) plus actively working. Consumed by `keepAliveWorktreeIDs`.
+    ///
+    /// Pinned terminals are deliberately NOT force-protected here: `PinnedTerminalDock`
+    /// already keeps a pinned terminal's view alive independently. A worktree can
+    /// still be protected here for being selected or working even when its
+    /// active-tab terminal is pinned — the would-be double-mount of that terminal
+    /// (dock cell + kept-alive pager) is prevented structurally by the
+    /// `dockedTerminalIDs` dedup in `PanePlaceholder`, so the two viewers never
+    /// collide on the shared `tbd-view-<id>` tmux session.
+    var protectedWorktreeIDs: Set<UUID> {
+        selectedWorktreeIDs.union(workingWorktreeIDs)
+    }
+
+    /// Terminal IDs rendered in the active-tab layouts of the currently selected
+    /// worktree(s) — the terminals showing in the main content area. Single
+    /// source of truth shared by the dock filter (`dockedTerminalIDs`) and the
+    /// pager dedup. (Moved off `TerminalContainerView` so both consumers agree.)
+    var visibleTerminalIDs: Set<UUID> {
+        var ids = Set<UUID>()
+        for worktreeID in selectedWorktreeIDs {
+            let wtTabs = tabs[worktreeID] ?? []
+            guard !wtTabs.isEmpty else { continue }
+            let activeIndex = activeTabIndices[worktreeID] ?? 0
+            let tab = wtTabs[min(activeIndex, wtTabs.count - 1)]
+            let layout = layouts[tab.id] ?? .pane(tab.content)
+            for id in layout.allTerminalIDs() {
+                ids.insert(id)
+            }
+        }
+        return ids
+    }
+
+    /// Pinned terminal IDs that are NOT already visible in the main content area
+    /// — i.e. exactly the terminals `PinnedTerminalDock` renders. The keep-alive
+    /// pager must skip these (see `AppState.shouldSuppressTerminalInLayout` /
+    /// `PanePlaceholder`) so a docked terminal is never mounted a second time;
+    /// two `TerminalPanelView`s for one terminal would collide on the shared
+    /// `tbd-view-<id>` tmux session and thrash it.
+    var dockedTerminalIDs: Set<UUID> {
+        let visible = visibleTerminalIDs
+        return Set(pinnedTerminals.map(\.id).filter { !visible.contains($0) })
+    }
+
+    /// Whether a terminal rendered in a worktree-layout pane should be
+    /// suppressed (replaced by a lightweight placeholder) because it is already
+    /// owned by `PinnedTerminalDock`. Pure so the dedup decision is testable
+    /// without a view tree. Applies ONLY to the layout/pager path — the dock
+    /// cell renders `TerminalPanelView` directly and never routes through here.
+    static func shouldSuppressTerminalInLayout(
+        terminalID: UUID,
+        dockedTerminalIDs: Set<UUID>
+    ) -> Bool {
+        dockedTerminalIDs.contains(terminalID)
+    }
+
     @Published var dockRatio: CGFloat = 0.3 {
         didSet { userDefaults.set(Double(dockRatio), forKey: Self.dockRatioKey) }
     }
@@ -288,9 +357,12 @@ final class AppState: ObservableObject {
     @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
     @Published var sessionTranscriptLoading: Set<String> = []
 
-    /// Worktree IDs whose view trees we keep alive past their selection,
-    /// most-recent-first. Cap: keepAliveLimit. Older worktrees get evicted
-    /// (their SingleWorktreeView unmounts) when the cap is exceeded.
+    /// Raw most-recent-first log of recently-visited worktrees, the recency
+    /// input to the keep-alive policy. Bounded by `touchVisitedWorktree`, which
+    /// drops the oldest NON-protected entries past `keepAliveLimit`. The actual
+    /// mount set the view consumes is the computed `keepAliveWorktreeIDs`, which
+    /// re-merges the live protection set; do not feed this raw log to the pager
+    /// directly.
     @Published private(set) var recentlyVisitedWorktreeIDs: [UUID] = []
 
     /// LRU of recently-selected worktrees consumed by the cmd-K jump menu.
@@ -303,17 +375,77 @@ final class AppState: ObservableObject {
 
     private let keepAliveLimit = 8
 
-    /// Move `id` to the front of recentlyVisitedWorktreeIDs, evicting the
-    /// oldest entries if we exceed keepAliveLimit. Idempotent — calling
-    /// repeatedly with the same id only updates ordering.
+    /// Move `id` to the front of `recentlyVisitedWorktreeIDs`, then trim the LRU
+    /// so it never grows unbounded. Protected worktrees (`protectedWorktreeIDs`)
+    /// are never evicted here — only the oldest NON-protected entries past
+    /// `keepAliveLimit` are dropped. The live mount set is computed separately
+    /// by `keepAliveWorktreeIDs` (which re-merges the protection set), so this
+    /// trim only bounds the stored recency log. Idempotent.
     func touchVisitedWorktree(_ id: UUID) {
         recentlyVisitedWorktreeIDs.removeAll { $0 == id }
         recentlyVisitedWorktreeIDs.insert(id, at: 0)
-        if recentlyVisitedWorktreeIDs.count > keepAliveLimit {
-            recentlyVisitedWorktreeIDs.removeLast(
-                recentlyVisitedWorktreeIDs.count - keepAliveLimit
-            )
+        let protected = protectedWorktreeIDs
+        var nonProtectedKept = 0
+        recentlyVisitedWorktreeIDs.removeAll { entry in
+            if protected.contains(entry) { return false }
+            nonProtectedKept += 1
+            return nonProtectedKept > keepAliveLimit
         }
+    }
+
+    /// The worktree IDs whose view trees should be kept mounted, most-recent
+    /// first. This is what `WorktreePager` consumes.
+    ///
+    /// Semantics: protected worktrees (`protectedWorktreeIDs` — open/selected
+    /// or actively working) are ALWAYS kept, regardless of age, and do NOT
+    /// consume the non-protected budget. In addition, up to `keepAliveLimit`
+    /// most-recently-visited NON-protected worktrees are kept as a warm cache.
+    /// Decoupling the budgets means a burst of working background worktrees can
+    /// never starve the recency cache, and a freshly-protected worktree that had
+    /// aged out of the recency log is re-mounted. Because this is a computed
+    /// property, it is re-evaluated on every render, so eviction always reflects
+    /// the live protection set (a worktree that starts/stops working, or is
+    /// selected/deselected, is re-protected/released without needing an explicit
+    /// visit). Pinned-only worktrees are intentionally NOT protected here — see
+    /// `protectedWorktreeIDs` for why.
+    var keepAliveWorktreeIDs: [UUID] {
+        Self.keepAliveWorktreeIDs(
+            recentlyVisited: recentlyVisitedWorktreeIDs,
+            protected: protectedWorktreeIDs,
+            limit: keepAliveLimit
+        )
+    }
+
+    /// Pure keep-alive policy (see `keepAliveWorktreeIDs`). Extracted as a
+    /// static function so the eviction decision is unit-testable without an
+    /// AppKit/SwiftUI view tree.
+    static func keepAliveWorktreeIDs(
+        recentlyVisited: [UUID],
+        protected: Set<UUID>,
+        limit: Int
+    ) -> [UUID] {
+        var result: [UUID] = []
+        var seen = Set<UUID>()
+        var nonProtectedKept = 0
+        for id in recentlyVisited {
+            guard !seen.contains(id) else { continue }
+            if protected.contains(id) {
+                result.append(id)
+                seen.insert(id)
+            } else if nonProtectedKept < limit {
+                result.append(id)
+                seen.insert(id)
+                nonProtectedKept += 1
+            }
+            // Older non-protected entries beyond the cap are dropped (evicted).
+        }
+        // Protected worktrees that were never visited (or aged out of the
+        // recency log before becoming protected) must still be mounted.
+        for id in protected where !seen.contains(id) {
+            result.append(id)
+            seen.insert(id)
+        }
+        return result
     }
 
     /// Insertion/access order for `sessionTranscripts`. The most recently
@@ -460,7 +592,9 @@ final class AppState: ObservableObject {
         focusObservers = [active, resigned]
     }
 
-    /// Respond to system memory pressure by purging purgeable caches.
+    /// Observe system memory pressure. Currently only flushes window bitmap
+    /// caches and drains the autorelease pool — it deliberately does NOT tear
+    /// down terminal sessions or app caches.
     private nonisolated func startMemoryPressureMonitor() {
         let source = DispatchSource.makeMemoryPressureSource(
             eventMask: [.warning, .critical],
@@ -469,7 +603,7 @@ final class AppState: ObservableObject {
         source.setEventHandler { [weak self] in
             guard self != nil else { return }
             Task { @MainActor in
-                logger.warning("Memory pressure detected — purging caches")
+                logger.notice("Memory pressure detected — flushing window bitmap caches; terminal sessions left intact")
                 // Flush bitmap caches on all windows
                 for window in NSApp.windows {
                     window.displaysWhenScreenProfileChanges = true
