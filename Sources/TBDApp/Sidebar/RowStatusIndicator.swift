@@ -9,13 +9,21 @@ enum RowStatusIndicator: Equatable {
     case suspended
     case prStatus
 
+    /// Notifications at or above this `NotificationType.severity` outrank the
+    /// working spinner: errors and attention/focus requests must not be hidden
+    /// behind a spinner that can run for minutes. Lower-severity completion
+    /// badges yield to the spinner, so a stale "done" dot never masks active work.
+    private static let highSeverityThreshold = 3
+
     /// Resolves which indicator (if any) a worktree row should show.
     ///
     /// Invariant: a worktree row shows at most one status indicator.
     /// Add new indicators as a branch in this priority chain — never as an
     /// additional stacked icon in `WorktreeRowView`.
     ///
-    /// Priority (highest first): pending > working > notification badge > suspended > PR status.
+    /// Priority (highest first): pending > high-severity badge (error,
+    /// attentionNeeded, focusRequest) > working > low-severity badge
+    /// (taskComplete, responseComplete) > suspended > PR status.
     static func resolve(
         isPending: Bool,
         isWorking: Bool,
@@ -25,6 +33,8 @@ enum RowStatusIndicator: Equatable {
     ) -> RowStatusIndicator? {
         if isPending {
             return .pendingSpinner
+        } else if let notification, notification.severity >= highSeverityThreshold {
+            return .notificationBadge(notification)
         } else if isWorking {
             return .workingSpinner
         } else if let notification {

@@ -16,7 +16,7 @@ struct RowStatusIndicatorTests {
         #expect(result == .pendingSpinner)
     }
 
-    @Test func workingWinsOverNotificationSuspendedAndPR() {
+    @Test func workingWinsOverLowSeverityNotificationSuspendedAndPR() {
         let result = RowStatusIndicator.resolve(
             isPending: false,
             isWorking: true,
@@ -25,6 +25,41 @@ struct RowStatusIndicatorTests {
             hasPRStatus: true
         )
         #expect(result == .workingSpinner)
+    }
+
+    @Test(arguments: [NotificationType.error, .attentionNeeded, .focusRequest])
+    func highSeverityBadgeWinsOverWorkingSpinner(notification: NotificationType) {
+        let result = RowStatusIndicator.resolve(
+            isPending: false,
+            isWorking: true,
+            notification: notification,
+            isSuspended: false,
+            hasPRStatus: true
+        )
+        #expect(result == .notificationBadge(notification))
+    }
+
+    @Test(arguments: [NotificationType.taskComplete, .responseComplete])
+    func lowSeverityBadgeYieldsToWorkingSpinner(notification: NotificationType) {
+        let result = RowStatusIndicator.resolve(
+            isPending: false,
+            isWorking: true,
+            notification: notification,
+            isSuspended: false,
+            hasPRStatus: false
+        )
+        #expect(result == .workingSpinner)
+    }
+
+    @Test func pendingWinsOverHighSeverityBadge() {
+        let result = RowStatusIndicator.resolve(
+            isPending: true,
+            isWorking: false,
+            notification: .error,
+            isSuspended: false,
+            hasPRStatus: false
+        )
+        #expect(result == .pendingSpinner)
     }
 
     @Test func workingSpinnerHidesPRStatus() {
