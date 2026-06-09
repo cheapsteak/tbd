@@ -68,6 +68,49 @@ struct PRStatusManagerTests {
         #expect(status == .pending)
     }
 
+    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + SUCCESS checks to .mergeable")
+    func mapsReviewRequiredWithPassingChecksToMergeable() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "REVIEW_REQUIRED",
+            statusCheckRollupState: "SUCCESS"
+        )
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + nil checks to .mergeable")
+    func mapsReviewRequiredWithNilChecksToMergeable() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "REVIEW_REQUIRED",
+            statusCheckRollupState: nil
+        )
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + pending checks to .pending (pending wins)")
+    func mapsReviewRequiredWithPendingChecksToPending() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "REVIEW_REQUIRED",
+            statusCheckRollupState: "PENDING"
+        )
+        #expect(status == .pending)
+    }
+
+    @Test("maps OPEN + BLOCKED + empty reviewDecision to .blocked (review-required branch off)")
+    func mapsBlockedWithEmptyReviewDecisionToBlocked() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: ""
+        )
+        #expect(status == .blocked)
+    }
+
     @Test("maps HAS_HOOKS to .mergeable")
     func mapsHasHooks() {
         let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "HAS_HOOKS")
