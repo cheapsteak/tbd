@@ -29,20 +29,6 @@ struct WorktreeRowView: View {
         return false
     }
 
-    private var badgeColor: Color? {
-        guard let n = notification else { return nil }
-        switch n {
-        case .error:
-            return .red
-        case .attentionNeeded, .focusRequest:
-            return .orange
-        case .taskComplete:
-            return .green
-        case .responseComplete:
-            return .blue
-        }
-    }
-
     private var prPresentation: PRStatusPresentation? {
         guard !isMain else { return nil }
         return PRStatusPresentation.make(for: prStatus)
@@ -58,33 +44,48 @@ struct WorktreeRowView: View {
         return terminals.contains { $0.activityState == .working }
     }
 
+    /// Spinner sized to visually match the 12×12 PR status icon.
+    /// The small `ProgressView` is ~16pt; scale by 0.75 and pin the layout frame.
+    private func spinner() -> some View {
+        ProgressView()
+            .controlSize(.small)
+            .scaleEffect(0.75)
+            .frame(width: 12, height: 12)
+    }
+
     @ViewBuilder
     private func rowIcons() -> some View {
-        if hasSuspendedTerminal {
+        // Resolved through RowStatusIndicator so at most one indicator renders.
+        // Add new indicators in RowStatusIndicator.resolve, never as stacked icons here.
+        switch RowStatusIndicator.resolve(
+            isPending: isPending && !isEditing,
+            isWorking: hasWorkingTerminal,
+            notification: notification,
+            isSuspended: hasSuspendedTerminal,
+            hasPRStatus: prPresentation != nil
+        ) {
+        case .pendingSpinner, .workingSpinner:
+            spinner()
+        case .notificationBadge(let n):
+            Circle()
+                .fill(RowStatusIndicator.badgeColor(for: n))
+                .frame(width: 8, height: 8)
+        case .suspended:
             Image(systemName: "pause.circle.fill")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-        }
-        if hasWorkingTerminal {
-            ProgressView()
-                .controlSize(.small)
-        }
-        if isPending && !isEditing {
-            ProgressView()
-                .controlSize(.small)
-        } else if let color = badgeColor {
-            Circle()
-                .fill(color)
-                .frame(width: 8, height: 8)
-        }
-        if let presentation = prPresentation,
-           let nsImage = loadIcon(presentation.iconName) {
-            Image(nsImage: nsImage)
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 12, height: 12)
-                .foregroundStyle(presentation.color)
+        case .prStatus:
+            if let presentation = prPresentation,
+               let nsImage = loadIcon(presentation.iconName) {
+                Image(nsImage: nsImage)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 12, height: 12)
+                    .foregroundStyle(presentation.color)
+            }
+        case nil:
+            EmptyView()
         }
     }
 
