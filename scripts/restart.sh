@@ -100,7 +100,24 @@ printf '%s' "$REPO_ROOT" > "$BUNDLE_DIR/Contents/SourceWorktreePath.txt"
 #  - All TBD worktrees share CFBundleIdentifier=com.tbd.app, so whichever
 #    worktree most recently ran restart.sh "wins" /Applications — same
 #    last-restart-wins behavior already documented for tbd:// URL routing.
-codesign --force --deep --sign - "$BUNDLE_DIR" >/dev/null
+# Prefer a stable self-signed identity so TCC permission grants/denials persist
+# across rebuilds. Ad-hoc signing (`--sign -`) gives TCC only a bare cdhash with
+# no stable anchor, so every rebuild — and even repeated accesses within one
+# build, when access is attributed via a spawned child like a `claude` session —
+# fails the stored code-requirement check and re-prompts (Desktop/Documents/
+# Downloads/Photos/etc.). A persistent leaf-cert anchor fixes that.
+# One-time setup creates the "TBD Dev Signing" identity in a dedicated
+# tbd-signing keychain (see docs/tcc-signing.md). If it's absent (e.g. a fresh
+# clone or another contributor's machine), fall back to ad-hoc so restart still works.
+SIGN_KEYCHAIN="$HOME/Library/Keychains/tbd-signing.keychain-db"
+SIGN_IDENTITY="TBD Dev Signing"
+if security find-identity -p codesigning "$SIGN_KEYCHAIN" 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+    security unlock-keychain -p tbd-signing "$SIGN_KEYCHAIN" 2>/dev/null || true
+    codesign --force --deep --identifier com.github.cheapsteak.tbd \
+        --sign "$SIGN_IDENTITY" --keychain "$SIGN_KEYCHAIN" "$BUNDLE_DIR" >/dev/null
+else
+    codesign --force --deep --sign - "$BUNDLE_DIR" >/dev/null
+fi
 
 INSTALLED_BUNDLE="/Applications/TBD.app"
 rm -rf "$INSTALLED_BUNDLE"
