@@ -29,27 +29,12 @@ struct MainAreaSizeKey: PreferenceKey {
 struct TerminalContainerView: View {
     @EnvironmentObject var appState: AppState
 
-    /// Terminal IDs currently visible in the active tab layouts of selected worktrees.
-    private var visibleTerminalIDs: Set<UUID> {
-        var ids = Set<UUID>()
-        for worktreeID in appState.selectedWorktreeIDs {
-            let tabs = appState.tabs[worktreeID] ?? []
-            guard !tabs.isEmpty else { continue }
-            let activeIndex = appState.activeTabIndices[worktreeID] ?? 0
-            let tab = tabs[min(activeIndex, tabs.count - 1)]
-            let layout = appState.layouts[tab.id] ?? .pane(tab.content)
-            for id in layout.allTerminalIDs() {
-                ids.insert(id)
-            }
-        }
-        return ids
-    }
-
     var body: some View {
-        let visible = visibleTerminalIDs
-        let dockTerminals = appState.pinnedTerminals.filter { terminal in
-            !visible.contains(terminal.id)
-        }
+        // `dockedTerminalIDs` (on AppState) is the single source of truth for
+        // which pinned terminals fall to the dock; the keep-alive pager dedups
+        // against the same set so a docked terminal is never mounted twice.
+        let docked = appState.dockedTerminalIDs
+        let dockTerminals = appState.pinnedTerminals.filter { docked.contains($0.id) }
 
         let activeWorktreeID: UUID? = appState.selectedWorktreeIDs.count == 1
             ? appState.selectedWorktreeIDs.first
@@ -67,7 +52,7 @@ struct TerminalContainerView: View {
                 // visited worktrees' views alive without resetting their @State or
                 // leaking AppKit events to inactive subtrees.
                 WorktreePager(
-                    worktreeIDs: appState.recentlyVisitedWorktreeIDs,
+                    worktreeIDs: appState.keepAliveWorktreeIDs,
                     activeID: activeWorktreeID
                 )
             }
