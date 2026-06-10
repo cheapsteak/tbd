@@ -38,65 +38,65 @@ struct PRStatusManagerTests {
         #expect(status == .pending)
     }
 
-    @Test("maps pending status checks to .pending")
+    @Test("maps required pending checks to .pending")
     func mapsPendingChecks() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "UNKNOWN",
-            statusCheckRollupState: "PENDING"
+            requiredChecksPending: true
         )
         #expect(status == .pending)
     }
 
-    @Test("maps OPEN + CLEAN + pending status checks to .pending")
+    @Test("maps OPEN + CLEAN + required pending checks to .pending")
     func mapsPendingChecksOverClean() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "CLEAN",
-            statusCheckRollupState: "PENDING"
+            requiredChecksPending: true
         )
         #expect(status == .pending)
     }
 
-    @Test("maps OPEN + BLOCKED + pending status checks to .pending")
+    @Test("maps OPEN + BLOCKED + required pending checks to .pending")
     func mapsPendingChecksOverBlocked() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "BLOCKED",
-            statusCheckRollupState: "PENDING"
+            requiredChecksPending: true
         )
         #expect(status == .pending)
     }
 
-    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + SUCCESS checks to .mergeable")
+    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + passing required checks to .mergeable")
     func mapsReviewRequiredWithPassingChecksToMergeable() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "BLOCKED",
             reviewDecision: "REVIEW_REQUIRED",
-            statusCheckRollupState: "SUCCESS"
+            requiredChecksFailing: false,
+            requiredChecksPending: false
         )
         #expect(status == .mergeable)
     }
 
-    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + nil checks to .mergeable")
+    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + no check signals to .mergeable")
     func mapsReviewRequiredWithNilChecksToMergeable() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "BLOCKED",
-            reviewDecision: "REVIEW_REQUIRED",
-            statusCheckRollupState: nil
+            reviewDecision: "REVIEW_REQUIRED"
         )
         #expect(status == .mergeable)
     }
 
-    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + pending checks to .pending (pending wins)")
+    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + required pending checks to .pending (pending wins)")
     func mapsReviewRequiredWithPendingChecksToPending() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "BLOCKED",
             reviewDecision: "REVIEW_REQUIRED",
-            statusCheckRollupState: "PENDING"
+            requiredChecksPending: true
         )
         #expect(status == .pending)
     }
@@ -123,12 +123,43 @@ struct PRStatusManagerTests {
         #expect(status == .mergeable)
     }
 
-    @Test("maps UNSTABLE + pending checks to .pending (non-required check still running)")
+    @Test("maps UNSTABLE + required pending checks to .pending (a required check still running)")
     func mapsUnstablePendingChecks() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "UNSTABLE",
-            statusCheckRollupState: "PENDING"
+            requiredChecksPending: true
+        )
+        #expect(status == .pending)
+    }
+
+    @Test("maps UNSTABLE + no required pending (only non-required failing/running) to .mergeable")
+    func mapsUnstableNonRequiredChecksStayMergeable() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE",
+            requiredChecksFailing: false,
+            requiredChecksPending: false
+        )
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps CLEAN + required pending checks to .pending")
+    func mapsCleanRequiredPendingChecks() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            requiredChecksPending: true
+        )
+        #expect(status == .pending)
+    }
+
+    @Test("maps BLOCKED + required pending checks to .pending")
+    func mapsBlockedRequiredPendingChecks() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            requiredChecksPending: true
         )
         #expect(status == .pending)
     }
@@ -139,12 +170,12 @@ struct PRStatusManagerTests {
         #expect(status == .blocked)
     }
 
-    @Test("maps unknown future merge state with pending checks to .pending")
+    @Test("maps unknown future merge state with required pending checks to .pending")
     func mapsPendingUnknownFutureMergeState() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "SOME_FUTURE_STATE",
-            statusCheckRollupState: "EXPECTED"
+            requiredChecksPending: true
         )
         #expect(status == .pending)
     }
@@ -184,7 +215,7 @@ struct PRStatusManagerTests {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "CLEAN",
-            statusCheckRollupState: "FAILURE"
+            requiredChecksFailing: false
         )
         #expect(status == .mergeable)
     }
@@ -194,7 +225,6 @@ struct PRStatusManagerTests {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "BLOCKED",
-            statusCheckRollupState: "FAILURE",
             requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
@@ -208,8 +238,8 @@ struct PRStatusManagerTests {
             ghState: "OPEN",
             mergeStateStatus: "BLOCKED",
             reviewDecision: "REVIEW_REQUIRED",
-            statusCheckRollupState: "FAILURE",
-            requiredChecksFailing: false
+            requiredChecksFailing: false,
+            requiredChecksPending: false
         )
         #expect(status == .mergeable)
     }
@@ -220,7 +250,7 @@ struct PRStatusManagerTests {
             ghState: "OPEN",
             mergeStateStatus: "CLEAN",
             isDraft: true,
-            statusCheckRollupState: "FAILURE"
+            requiredChecksFailing: true
         )
         #expect(status == .draft)
     }
@@ -370,38 +400,77 @@ struct PRStatusManagerTests {
 
     // MARK: - Required-check parsing
 
-    @Test("requiredChecksFailing is true when a required CheckRun is FAILURE")
+    @Test("requiredCheckSignals reports failing when a required CheckRun is FAILURE")
     func requiredCheckRunFailureIsRequiredFailing() throws {
         let json = """
         {
           "data": { "repository": { "pullRequest": { "commits": { "nodes": [
             { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
-              { "__typename": "CheckRun", "conclusion": "FAILURE", "isRequired": true }
+              { "__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE", "isRequired": true }
             ] } } } }
           ] } } } }
         }
         """.data(using: .utf8)!
 
-        #expect(try PRStatusManager.requiredChecksFailing(fromContextsJSON: json) == true)
+        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
+        #expect(signals.failing == true)
+        #expect(signals.pending == false)
     }
 
-    @Test("requiredChecksFailing is false when only a non-required check fails")
-    func nonRequiredFailureWithRequiredSuccessIsNotRequiredFailing() throws {
+    @Test("requiredCheckSignals reports pending when a required CheckRun is IN_PROGRESS with no conclusion")
+    func requiredCheckRunInProgressIsPending() throws {
         let json = """
         {
           "data": { "repository": { "pullRequest": { "commits": { "nodes": [
             { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
-              { "__typename": "CheckRun", "conclusion": "FAILURE", "isRequired": false },
-              { "__typename": "CheckRun", "conclusion": "SUCCESS", "isRequired": true }
+              { "__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": null, "isRequired": true }
             ] } } } }
           ] } } } }
         }
         """.data(using: .utf8)!
 
-        #expect(try PRStatusManager.requiredChecksFailing(fromContextsJSON: json) == false)
+        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
+        #expect(signals.failing == false)
+        #expect(signals.pending == true)
     }
 
-    @Test("requiredChecksFailing is true when a required StatusContext is ERROR")
+    @Test("requiredCheckSignals reports pending when a required StatusContext is PENDING")
+    func requiredStatusContextPendingIsPending() throws {
+        let json = """
+        {
+          "data": { "repository": { "pullRequest": { "commits": { "nodes": [
+            { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
+              { "__typename": "StatusContext", "state": "PENDING", "isRequired": true }
+            ] } } } }
+          ] } } } }
+        }
+        """.data(using: .utf8)!
+
+        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
+        #expect(signals.pending == true)
+        #expect(signals.failing == false)
+    }
+
+    @Test("requiredCheckSignals ignores non-required failing/running checks (core bug case)")
+    func nonRequiredFailingAndRunningWithRequiredSuccessIsNeither() throws {
+        let json = """
+        {
+          "data": { "repository": { "pullRequest": { "commits": { "nodes": [
+            { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
+              { "__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE", "isRequired": false },
+              { "__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": null, "isRequired": false },
+              { "__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS", "isRequired": true }
+            ] } } } }
+          ] } } } }
+        }
+        """.data(using: .utf8)!
+
+        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
+        #expect(signals.failing == false)
+        #expect(signals.pending == false)
+    }
+
+    @Test("requiredCheckSignals reports failing when a required StatusContext is ERROR")
     func requiredStatusContextErrorIsRequiredFailing() throws {
         let json = """
         {
@@ -413,7 +482,19 @@ struct PRStatusManagerTests {
         }
         """.data(using: .utf8)!
 
-        #expect(try PRStatusManager.requiredChecksFailing(fromContextsJSON: json) == true)
+        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
+        #expect(signals.failing == true)
+        #expect(signals.pending == false)
+    }
+
+    @Test("requiredCheckSignals throws on malformed outer shape")
+    func requiredCheckSignalsThrowsOnBadJSON() {
+        let json = """
+        { "data": { "nope": true } }
+        """.data(using: .utf8)!
+        #expect(throws: PRStatusError.self) {
+            _ = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
+        }
     }
 
     // MARK: - parseOwnerRepo

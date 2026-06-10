@@ -60,7 +60,7 @@ public actor PRStatusManager {
                 upstreamBranch: wt.upstreamBranch
             )
             if let node = candidates.compactMap({ byBranch[$0] }).first {
-                let requiredChecksFailing = await computeRequiredChecksFailing(node: node, repoPath: repoPath)
+                let signals = await computeRequiredCheckSignals(node: node, repoPath: repoPath)
                 cache[wt.id] = PRStatus(
                     number: node.number,
                     url: node.url,
@@ -69,48 +69,44 @@ public actor PRStatusManager {
                         mergeStateStatus: node.mergeStateStatus,
                         reviewDecision: node.reviewDecision,
                         isDraft: node.isDraft,
-                        statusCheckRollupState: node.statusCheckRollupState,
-                        requiredChecksFailing: requiredChecksFailing
+                        requiredChecksFailing: signals.failing,
+                        requiredChecksPending: signals.pending
                     )
                 )
             }
         }
     }
 
-    /// Decide whether a required check is failing for a batch-matched PR node, using only
-    /// the aggregate data we already have where possible. Only the single ambiguous case
-    /// (OPEN + BLOCKED + REVIEW_REQUIRED + failing aggregate) needs an extra per-PR query.
-    private func computeRequiredChecksFailing(node: PRNode, repoPath: String) async -> Bool {
-        // Not open, or aggregate not failing → no required check is failing.
+    /// Compute the `(failing, pending)` required-check signals for a batch-matched PR node.
+    ///
+    /// Cheap aggregate pre-filter, then the SAME per-check query/parse used by `refresh` so
+    /// both paths always agree:
+    /// - Not OPEN → `(false, false)`, no query.
+    /// - Aggregate rollup indicates neither failing nor pending (SUCCESS/nil) → `(false, false)`, no query.
+    /// - Otherwise (any non-success aggregate) → run the per-check query and parse both signals.
+    private func computeRequiredCheckSignals(node: PRNode, repoPath: String) async -> (failing: Bool, pending: Bool) {
         guard node.state == "OPEN",
-              Self.isFailingStatusCheckRollup(node.statusCheckRollupState) else {
-            return false
+              Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) else {
+            return (false, false)
         }
+        guard let ownerRepo = Self.parseOwnerRepo(fromURL: node.url) else {
+            // Can't query — be conservative and keep red.
+            return (true, false)
+        }
+        return await fetchRequiredCheckSignals(
+            owner: ownerRepo.owner,
+            name: ownerRepo.name,
+            number: node.number,
+            repoPath: repoPath
+        )
+    }
 
-        switch node.mergeStateStatus {
-        case "BLOCKED":
-            if node.reviewDecision == "REVIEW_REQUIRED" {
-                // AMBIGUOUS: the block could be the missing review alone (failing checks all
-                // non-required → green) or a failing required check (→ red). Query to disambiguate.
-                guard let ownerRepo = Self.parseOwnerRepo(fromURL: node.url) else {
-                    // Can't query — be conservative and keep red.
-                    return true
-                }
-                return await fetchRequiredChecksFailing(
-                    owner: ownerRepo.owner,
-                    name: ownerRepo.name,
-                    number: node.number,
-                    repoPath: repoPath
-                )
-            }
-            // BLOCKED + failing + review not REVIEW_REQUIRED (approved/empty): a non-required
-            // failure with an approved review would be UNSTABLE, not BLOCKED → the block must
-            // be a required check failing.
-            return true
-        default:
-            // UNSTABLE / CLEAN / HAS_HOOKS + failing → failing checks are non-required.
-            return false
-        }
+    /// The aggregate rollup classifies a per-check query as worthwhile when it is NOT a settled
+    /// success — i.e. it is failing or pending (or any other non-success/non-nil value). SUCCESS
+    /// or nil means no required check can be failing or pending → skip the query.
+    private static func aggregateRollupIsNonSuccess(_ state: String?) -> Bool {
+        guard let state else { return false }
+        return state != "SUCCESS"
     }
 
     /// Refresh a single worktree using `gh pr view`. Used for on-select refresh.
@@ -128,10 +124,21 @@ public actor PRStatusManager {
                 continue
             }
 
-            // Fetch the per-check contexts (with `isRequired`) and the aggregate rollup state
-            // in one graphql call. We have the real per-check data here, so we compute
-            // `requiredChecksFailing` directly — no ambiguity logic needed.
-            let detail = await fetchPRCheckDetail(url: obj.url, number: obj.number, repoPath: repoPath)
+            // Fetch the per-check contexts (with `isRequired`) and parse BOTH the failing and
+            // pending signals from the SAME data — the identical computation used by `fetchAll`,
+            // so the two paths can never disagree.
+            let signals: (failing: Bool, pending: Bool)
+            if let ownerRepo = Self.parseOwnerRepo(fromURL: obj.url) {
+                signals = await fetchRequiredCheckSignals(
+                    owner: ownerRepo.owner,
+                    name: ownerRepo.name,
+                    number: obj.number,
+                    repoPath: repoPath
+                )
+            } else {
+                // Can't query — be conservative and keep red.
+                signals = (true, false)
+            }
 
             let status = PRStatus(
                 number: obj.number,
@@ -140,8 +147,8 @@ public actor PRStatusManager {
                                      mergeStateStatus: obj.mergeStateStatus,
                                      reviewDecision: obj.reviewDecision ?? "",
                                      isDraft: obj.isDraft,
-                                     statusCheckRollupState: detail.rollupState,
-                                     requiredChecksFailing: detail.requiredChecksFailing)
+                                     requiredChecksFailing: signals.failing,
+                                     requiredChecksPending: signals.pending)
             )
             cache[worktreeID] = status
             return status
@@ -163,8 +170,8 @@ public actor PRStatusManager {
         mergeStateStatus: String,
         reviewDecision: String = "",
         isDraft: Bool = false,
-        statusCheckRollupState: String? = nil,
-        requiredChecksFailing: Bool = false
+        requiredChecksFailing: Bool = false,
+        requiredChecksPending: Bool = false
     ) -> PRMergeableState {
         switch ghState {
         case "MERGED": return .merged
@@ -176,37 +183,25 @@ public actor PRStatusManager {
             switch mergeStateStatus {
             case "CLEAN", "HAS_HOOKS":
                 // Mergeable. A non-required check may be failing without blocking the merge → not red.
-                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
+                // Yellow only if a *required* check is still pending.
+                return requiredChecksPending ? .pending : .mergeable
             case "BLOCKED":
                 // Branch protection is blocking: a required check failing/missing, or a required review.
-                if Self.isPendingStatusCheckRollup(statusCheckRollupState) { return .pending }
-                // A *required* check is failing → red. (Aggregate rollup can't tell us this on
-                // its own — only the per-check `isRequired` field can, so it's passed in.)
-                if requiredChecksFailing { return .checksFailed }
-                // Only blocker is a required (but not-yet-given) review while required checks pass → show green.
-                if reviewDecision == "REVIEW_REQUIRED" { return .mergeable }
+                if requiredChecksPending { return .pending }       // a *required* check is still running
+                if requiredChecksFailing { return .checksFailed }  // a *required* check failed → red
+                if reviewDecision == "REVIEW_REQUIRED" { return .mergeable } // only blocker is the review → green
                 return .blocked
             case "UNSTABLE":
-                // Mergeable; only non-required checks failing (or pending) → not red.
-                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
+                // Mergeable; only non-required checks failing. Yellow only if a required check is still pending.
+                return requiredChecksPending ? .pending : .mergeable
             case "DIRTY", "BEHIND":
                 return .blocked
             case "UNKNOWN":
                 return .pending
             default:
-                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .blocked
+                return requiredChecksPending ? .pending : .blocked
             }
         }
-    }
-
-    private static func isFailingStatusCheckRollup(_ state: String?) -> Bool {
-        guard let state else { return false }
-        return ["ERROR", "FAILURE"].contains(state)
-    }
-
-    private static func isPendingStatusCheckRollup(_ state: String?) -> Bool {
-        guard let state else { return false }
-        return ["EXPECTED", "PENDING"].contains(state)
     }
 
     /// Conclusions (CheckRun) that count as a failing check.
@@ -215,12 +210,24 @@ public actor PRStatusManager {
     ]
     /// States (StatusContext) that count as a failing check.
     private static let failingStatusContextStates: Set<String> = ["FAILURE", "ERROR"]
+    /// CheckRun `status` values that mean the check is still running / not yet concluded.
+    private static let pendingCheckRunStatuses: Set<String> = [
+        "QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"
+    ]
+    /// StatusContext `state` values that count as a pending check.
+    private static let pendingStatusContextStates: Set<String> = ["PENDING", "EXPECTED"]
 
-    /// Pure parse of a single PR's last-commit status-check contexts.
-    /// Returns true when ANY context is both required AND failing.
+    /// Pure parse of a single PR's last-commit status-check contexts, returning BOTH
+    /// the failing and pending signals for *required* checks in one pass.
+    ///
+    /// - failing: any required context with a failing CheckRun conclusion or failing StatusContext state.
+    /// - pending: any required context that is a CheckRun still running (status in the pending set and
+    ///   no conclusion yet) or a StatusContext in a pending state.
+    ///
     /// Expects the JSON shape returned by the `isRequired` GraphQL query
     /// (`data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes`).
-    static func requiredChecksFailing(fromContextsJSON data: Data) throws -> Bool {
+    /// Throws `PRStatusError.invalidJSON` if the outer shape can't be parsed.
+    static func requiredCheckSignals(fromContextsJSON data: Data) throws -> (failing: Bool, pending: Bool) {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataObj = root["data"] as? [String: Any],
               let repository = dataObj["repository"] as? [String: Any],
@@ -229,6 +236,9 @@ public actor PRStatusManager {
               let commitNodes = commits["nodes"] as? [Any] else {
             throw PRStatusError.invalidJSON
         }
+
+        var failing = false
+        var pending = false
 
         for commitNode in commitNodes.compactMap({ $0 as? [String: Any] }) {
             guard let commit = commitNode["commit"] as? [String: Any],
@@ -240,18 +250,31 @@ public actor PRStatusManager {
 
             for context in contextNodes.compactMap({ $0 as? [String: Any] }) {
                 guard context["isRequired"] as? Bool == true else { continue }
-                if let conclusion = context["conclusion"] as? String,
-                   Self.failingCheckRunConclusions.contains(conclusion) {
-                    return true
+
+                let conclusion = context["conclusion"] as? String
+                if let conclusion, Self.failingCheckRunConclusions.contains(conclusion) {
+                    failing = true
                 }
                 if let state = context["state"] as? String,
                    Self.failingStatusContextStates.contains(state) {
-                    return true
+                    failing = true
+                }
+
+                // CheckRun pending: still running AND has no conclusion yet.
+                if let status = context["status"] as? String,
+                   Self.pendingCheckRunStatuses.contains(status),
+                   conclusion == nil {
+                    pending = true
+                }
+                // StatusContext pending.
+                if let state = context["state"] as? String,
+                   Self.pendingStatusContextStates.contains(state) {
+                    pending = true
                 }
             }
         }
 
-        return false
+        return (failing: failing, pending: pending)
     }
 
     /// Parse `owner` and `name` from a PR URL like
@@ -271,7 +294,7 @@ public actor PRStatusManager {
         { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
           commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
             __typename
-            ... on CheckRun { conclusion isRequired(pullRequestNumber: \(number)) }
+            ... on CheckRun { status conclusion isRequired(pullRequestNumber: \(number)) }
             ... on StatusContext { state isRequired(pullRequestNumber: \(number)) }
           } } } } } } } } }
         """
@@ -284,7 +307,7 @@ public actor PRStatusManager {
         { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
           commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
             __typename
-            ... on CheckRun { conclusion isRequired(pullRequestNumber: \(number)) }
+            ... on CheckRun { status conclusion isRequired(pullRequestNumber: \(number)) }
             ... on StatusContext { state isRequired(pullRequestNumber: \(number)) }
           } } } } } } } } }
         """
@@ -386,50 +409,27 @@ public actor PRStatusManager {
         return data
     }
 
-    /// Query the per-check `isRequired` data for a single PR and decide whether any
-    /// required check is failing. Conservative: returns `true` on any failure
-    /// (gh missing, non-zero exit, parse failure) so we keep showing red rather
-    /// than falsely flipping to green.
-    private func fetchRequiredChecksFailing(
+    /// Single shared per-check query used by BOTH `fetchAll` and `refresh`: query the per-check
+    /// `isRequired` data for one PR and parse the `(failing, pending)` signals from the same data.
+    /// Conservative: returns `(failing: true, pending: false)` on any failure (gh missing,
+    /// non-zero exit, parse failure) so we keep showing red rather than falsely flipping to
+    /// green/settled.
+    private func fetchRequiredCheckSignals(
         owner: String,
         name: String,
         number: Int,
         repoPath: String
-    ) async -> Bool {
+    ) async -> (failing: Bool, pending: Bool) {
         let query = Self.requiredChecksQuery(owner: owner, name: name, number: number)
         let args = ["api", "graphql", "-f", "query=\(query)"]
         guard let result = await runGHResult(args: args, repoPath: repoPath),
               result.exitStatus == 0,
               let data = Self.graphQLOutputData(stdout: result.stdout),
-              let failing = try? Self.requiredChecksFailing(fromContextsJSON: data) else {
+              let signals = try? Self.requiredCheckSignals(fromContextsJSON: data) else {
             logger.debug("isRequired query failed for PR #\(number, privacy: .public); assuming required checks failing")
-            return true
+            return (failing: true, pending: false)
         }
-        return failing
-    }
-
-    /// One graphql call returning both the aggregate rollup `state` (for pending detection)
-    /// and the per-check contexts (to compute `requiredChecksFailing` directly).
-    /// On any failure: nil rollup state and conservative `requiredChecksFailing == true`.
-    private func fetchPRCheckDetail(
-        url: String,
-        number: Int,
-        repoPath: String
-    ) async -> (rollupState: String?, requiredChecksFailing: Bool) {
-        guard let ownerRepo = Self.parseOwnerRepo(fromURL: url) else {
-            return (nil, true)
-        }
-        let query = Self.prCheckDetailQuery(owner: ownerRepo.owner, name: ownerRepo.name, number: number)
-        let args = ["api", "graphql", "-f", "query=\(query)"]
-        guard let result = await runGHResult(args: args, repoPath: repoPath),
-              result.exitStatus == 0,
-              let data = Self.graphQLOutputData(stdout: result.stdout) else {
-            logger.debug("PR check detail query failed for PR #\(number, privacy: .public); assuming required checks failing")
-            return (nil, true)
-        }
-        let rollupState = Self.rollupState(fromContextsJSON: data)
-        let failing = (try? Self.requiredChecksFailing(fromContextsJSON: data)) ?? true
-        return (rollupState, failing)
+        return signals
     }
 
     /// Pure extraction of the aggregate `statusCheckRollup.state` from the isRequired query shape.
