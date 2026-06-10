@@ -194,9 +194,24 @@ struct PRStatusManagerTests {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "BLOCKED",
-            statusCheckRollupState: "FAILURE"
+            statusCheckRollupState: "FAILURE",
+            requiredChecksFailing: true
         )
         #expect(status == .checksFailed)
+    }
+
+    @Test("maps BLOCKED + REVIEW_REQUIRED + failing (non-required) check to .mergeable")
+    func mapsBlockedReviewRequiredNonRequiredFailingToMergeable() {
+        // Bug case: PR blocked only by a missing review, with an unrelated
+        // failing *non-required* check. The failing aggregate must NOT turn it red.
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "REVIEW_REQUIRED",
+            statusCheckRollupState: "FAILURE",
+            requiredChecksFailing: false
+        )
+        #expect(status == .mergeable)
     }
 
     @Test("draft wins over failing status checks")
@@ -351,6 +366,68 @@ struct PRStatusManagerTests {
         )
 
         #expect(candidates == ["feature/local", "tbd/upstream-feature"])
+    }
+
+    // MARK: - Required-check parsing
+
+    @Test("requiredChecksFailing is true when a required CheckRun is FAILURE")
+    func requiredCheckRunFailureIsRequiredFailing() throws {
+        let json = """
+        {
+          "data": { "repository": { "pullRequest": { "commits": { "nodes": [
+            { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
+              { "__typename": "CheckRun", "conclusion": "FAILURE", "isRequired": true }
+            ] } } } }
+          ] } } } }
+        }
+        """.data(using: .utf8)!
+
+        #expect(try PRStatusManager.requiredChecksFailing(fromContextsJSON: json) == true)
+    }
+
+    @Test("requiredChecksFailing is false when only a non-required check fails")
+    func nonRequiredFailureWithRequiredSuccessIsNotRequiredFailing() throws {
+        let json = """
+        {
+          "data": { "repository": { "pullRequest": { "commits": { "nodes": [
+            { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
+              { "__typename": "CheckRun", "conclusion": "FAILURE", "isRequired": false },
+              { "__typename": "CheckRun", "conclusion": "SUCCESS", "isRequired": true }
+            ] } } } }
+          ] } } } }
+        }
+        """.data(using: .utf8)!
+
+        #expect(try PRStatusManager.requiredChecksFailing(fromContextsJSON: json) == false)
+    }
+
+    @Test("requiredChecksFailing is true when a required StatusContext is ERROR")
+    func requiredStatusContextErrorIsRequiredFailing() throws {
+        let json = """
+        {
+          "data": { "repository": { "pullRequest": { "commits": { "nodes": [
+            { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
+              { "__typename": "StatusContext", "state": "ERROR", "isRequired": true }
+            ] } } } }
+          ] } } } }
+        }
+        """.data(using: .utf8)!
+
+        #expect(try PRStatusManager.requiredChecksFailing(fromContextsJSON: json) == true)
+    }
+
+    // MARK: - parseOwnerRepo
+
+    @Test("parseOwnerRepo extracts owner and name from a PR URL")
+    func parseOwnerRepoFromURL() {
+        let result = PRStatusManager.parseOwnerRepo(fromURL: "https://github.com/cheapsteak/tbd/pull/263")
+        #expect(result?.owner == "cheapsteak")
+        #expect(result?.name == "tbd")
+    }
+
+    @Test("parseOwnerRepo returns nil for a malformed URL")
+    func parseOwnerRepoMalformed() {
+        #expect(PRStatusManager.parseOwnerRepo(fromURL: "https://example.com/not-a-pr") == nil)
     }
 
     @Test("allStatuses reflects cache after manual seed")
