@@ -56,7 +56,7 @@ struct StatusBarView: View {
     /// - Multiple worktrees selected: `"<N> worktrees"`.
     /// - Repo selected, no worktree: the repo's `displayName`.
     /// - Nothing selected: `nil` (renders nothing on the left side).
-    static func focusLabel(
+    nonisolated static func focusLabel(
         selectedWorktreeIDs: Set<UUID>,
         worktrees: [UUID: [Worktree]],
         repos: [Repo],
