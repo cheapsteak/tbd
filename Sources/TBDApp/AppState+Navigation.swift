@@ -53,6 +53,42 @@ extension AppState {
         updateNavigationFlags()
     }
 
+    /// Navigate back to the most recent usable history entry after `archivedID`
+    /// was archived. Walks backwards from the current index, skipping entries
+    /// that reference the archived worktree or worktrees that no longer exist,
+    /// and applies the first usable one. Returns `false` (leaving selection
+    /// untouched) when no usable entry exists, so callers can fall back to the
+    /// plain empty-selection behavior.
+    @discardableResult
+    func navigateBackPastArchived(_ archivedID: UUID) -> Bool {
+        guard navigationIndex >= 0, !navigationEntries.isEmpty else { return false }
+        let start = min(navigationIndex, navigationEntries.count - 1)
+        for index in stride(from: start, through: 0, by: -1) {
+            let entry = navigationEntries[index]
+            guard isUsableEntry(entry, excluding: archivedID) else { continue }
+            navigationIndex = index
+            withNavigating { applyNavigationEntry(entry) }
+            updateNavigationFlags()
+            return true
+        }
+        return false
+    }
+
+    /// Whether a history entry is still a valid landing spot once `archivedID`
+    /// is gone: worktree entries must not reference the archived ID and every
+    /// referenced worktree must still exist; repo entries must reference a
+    /// repo we still know about.
+    private func isUsableEntry(_ entry: NavigationEntry, excluding archivedID: UUID) -> Bool {
+        switch entry {
+        case .worktrees(let ids):
+            guard !ids.isEmpty, !ids.contains(archivedID) else { return false }
+            let existing = Set(worktrees.values.flatMap { $0 }.map(\.id))
+            return ids.allSatisfy { existing.contains($0) }
+        case .repo(let id):
+            return repos.contains { $0.id == id }
+        }
+    }
+
     /// Run `block` with `isNavigating` set so the resulting selection mutations
     /// don't get recorded as new history entries.
     private func withNavigating(_ block: () -> Void) {
