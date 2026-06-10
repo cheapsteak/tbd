@@ -1,10 +1,68 @@
 import Foundation
+import TBDShared
 
 /// A single navigable view state — either a worktree selection (one or more)
 /// or a repo selection (showing archived worktrees in the detail pane).
 enum NavigationEntry: Equatable {
     case worktrees([UUID])
     case repo(UUID)
+}
+
+// MARK: - Sidebar reveal
+
+extension AppState {
+    /// Pick which sidebar row a status-bar click should reveal.
+    ///
+    /// - Exactly one worktree selected → that worktree's ID.
+    /// - Multiple selected → the selected worktree whose UUID string sorts
+    ///   first alphabetically. UUID strings are stable across runs, so this
+    ///   gives a deterministic choice without requiring the caller to know
+    ///   sidebar ordering across repos.
+    /// - No worktree selected but `selectedRepoID` set → the repo ID (the repo
+    ///   header row is tagged with repo.id so scrolling to it works).
+    /// - Otherwise → nil.
+    nonisolated static func sidebarRevealTarget(
+        selectedWorktreeIDs: Set<UUID>,
+        worktrees: [UUID: [Worktree]],
+        selectedRepoID: UUID?
+    ) -> UUID? {
+        if selectedWorktreeIDs.count == 1 {
+            return selectedWorktreeIDs.first
+        } else if selectedWorktreeIDs.count > 1 {
+            // Sort by uuidString for a stable, deterministic pick.
+            let allWorktreeIDs = Set(worktrees.values.flatMap { $0 }.map(\.id))
+            let candidates = selectedWorktreeIDs.filter { allWorktreeIDs.contains($0) }
+            return candidates.min(by: { $0.uuidString < $1.uuidString })
+                ?? selectedWorktreeIDs.min(by: { $0.uuidString < $1.uuidString })
+        } else if let repoID = selectedRepoID {
+            return repoID
+        } else {
+            return nil
+        }
+    }
+
+    /// Expand the containing repo (if collapsed) and set `pendingScrollToWorktreeID`
+    /// so the sidebar scrolls to reveal the currently selected worktree or repo.
+    /// Does NOT change selection.
+    @MainActor
+    func revealSelectionInSidebar() {
+        guard let target = Self.sidebarRevealTarget(
+            selectedWorktreeIDs: selectedWorktreeIDs,
+            worktrees: worktrees,
+            selectedRepoID: selectedRepoID
+        ) else { return }
+
+        // If the target is a worktree, expand its containing repo before scrolling.
+        if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == target }),
+           let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
+           !repos[repoIdx].expanded {
+            repos[repoIdx].expanded = true
+            let repoID = worktree.repoID
+            Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
+        }
+
+        pendingScrollToWorktreeID = target
+    }
 }
 
 extension AppState {
