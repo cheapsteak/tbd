@@ -15,9 +15,8 @@ extension AppState {
     ///
     /// - Exactly one worktree selected → that worktree's ID.
     /// - Multiple selected → the selected worktree whose UUID string sorts
-    ///   first alphabetically. UUID strings are stable across runs, so this
-    ///   gives a deterministic choice without requiring the caller to know
-    ///   sidebar ordering across repos.
+    ///   first alphabetically among those that still exist in `worktrees`.
+    ///   Returns `nil` when none of the selected IDs exist (all stale).
     /// - No worktree selected but `selectedRepoID` set → the repo ID (the repo
     ///   header row is tagged with repo.id so scrolling to it works).
     /// - Otherwise → nil.
@@ -33,7 +32,6 @@ extension AppState {
             let allWorktreeIDs = Set(worktrees.values.flatMap { $0 }.map(\.id))
             let candidates = selectedWorktreeIDs.filter { allWorktreeIDs.contains($0) }
             return candidates.min(by: { $0.uuidString < $1.uuidString })
-                ?? selectedWorktreeIDs.min(by: { $0.uuidString < $1.uuidString })
         } else if let repoID = selectedRepoID {
             return repoID
         } else {

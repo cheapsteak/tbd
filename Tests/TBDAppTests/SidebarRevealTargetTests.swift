@@ -108,4 +108,24 @@ struct SidebarRevealTargetTests {
 
         #expect(target == nil)
     }
+
+    @Test("multi-selection with all stale IDs returns nil")
+    func multiSelectionAllStaleReturnsNil() {
+        let repoID = UUID()
+        let staleID1 = UUID()
+        let staleID2 = UUID()
+        // worktrees dict has a different worktree — neither stale ID is present
+        let otherID = UUID()
+        let worktrees: [UUID: [Worktree]] = [
+            repoID: [makeWorktree(id: otherID, repoID: repoID, displayName: "other")]
+        ]
+
+        let target = AppState.sidebarRevealTarget(
+            selectedWorktreeIDs: [staleID1, staleID2],
+            worktrees: worktrees,
+            selectedRepoID: nil
+        )
+
+        #expect(target == nil)
+    }
 }
