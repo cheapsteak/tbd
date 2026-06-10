@@ -14,6 +14,8 @@ private let knownEditors: [ExternalEditor] = [
     ExternalEditor(name: "Tower",           bundleID: "com.fournova.Tower3"),
     ExternalEditor(name: "GitHub Desktop",  bundleID: "com.github.GitHubClient"),
     ExternalEditor(name: "DataGrip",        bundleID: "com.jetbrains.datagrip"),
+    ExternalEditor(name: "IntelliJ IDEA",   bundleID: "com.jetbrains.intellij"),
+    ExternalEditor(name: "IntelliJ IDEA CE", bundleID: "com.jetbrains.intellij.ce"),
     ExternalEditor(name: "Finder",          bundleID: "com.apple.finder"),
 ]
 
@@ -24,9 +26,30 @@ private func installedEditors() -> [(editor: ExternalEditor, appURL: URL)] {
     }
 }
 
+private let intelliJBundleIDs: Set<String> = ["com.jetbrains.intellij", "com.jetbrains.intellij.ce"]
+
+private func findIdeaCLIScript() -> String? {
+    let candidates = [
+        NSString(string: "~/Library/Application Support/JetBrains/Toolbox/scripts/idea").expandingTildeInPath,
+        NSString(string: "~/.local/bin/idea").expandingTildeInPath,
+        "/usr/local/bin/idea",
+        "/opt/homebrew/bin/idea",
+    ]
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+}
+
 private func openInEditor(path: String, bundleID: String) {
     if bundleID == "com.apple.finder" {
         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+        return
+    }
+    if intelliJBundleIDs.contains(bundleID), let script = findIdeaCLIScript() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: script)
+        process.arguments = [path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
         return
     }
     guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return }
