@@ -127,20 +127,24 @@ public actor PRStatusManager {
         default:
             if isDraft || mergeStateStatus == "DRAFT" { return .draft }
             if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
-            if Self.isFailingStatusCheckRollup(statusCheckRollupState) { return .checksFailed }
 
             switch mergeStateStatus {
             case "CLEAN", "HAS_HOOKS":
+                // Mergeable. A non-required check may be failing without blocking the merge → not red.
                 return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
             case "BLOCKED":
+                // Branch protection is blocking: a required check failing/missing, or a required review.
                 if Self.isPendingStatusCheckRollup(statusCheckRollupState) { return .pending }
+                // A failing rollup while BLOCKED means a *required* check is failing → red.
+                if Self.isFailingStatusCheckRollup(statusCheckRollupState) { return .checksFailed }
                 // Only blocker is a required (but not-yet-given) review while checks pass → ready to merge, show green.
                 if reviewDecision == "REVIEW_REQUIRED" { return .mergeable }
                 return .blocked
+            case "UNSTABLE":
+                // Mergeable with only non-required checks failing (or pending) → not red.
+                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
             case "DIRTY", "BEHIND":
                 return .blocked
-            case "UNSTABLE":
-                return .checksFailed
             case "UNKNOWN":
                 return .pending
             default:

@@ -117,10 +117,20 @@ struct PRStatusManagerTests {
         #expect(status == .mergeable)
     }
 
-    @Test("maps UNSTABLE to .checksFailed")
+    @Test("maps UNSTABLE (non-required checks failing) to .mergeable")
     func mapsUnstable() {
         let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNSTABLE")
-        #expect(status == .checksFailed)
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps UNSTABLE + pending checks to .pending (non-required check still running)")
+    func mapsUnstablePendingChecks() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE",
+            statusCheckRollupState: "PENDING"
+        )
+        #expect(status == .pending)
     }
 
     @Test("maps unknown future merge state to .blocked")
@@ -169,11 +179,21 @@ struct PRStatusManagerTests {
         #expect(status == .draft)
     }
 
-    @Test("maps failing status checks to .checksFailed")
-    func mapsFailingChecks() {
+    @Test("maps CLEAN + failing (non-required) status check to .mergeable")
+    func mapsNonRequiredFailingCheckStaysMergeable() {
         let status = PRStatusManager.mapState(
             ghState: "OPEN",
             mergeStateStatus: "CLEAN",
+            statusCheckRollupState: "FAILURE"
+        )
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps BLOCKED + failing (required) status check to .checksFailed")
+    func mapsRequiredFailingCheckToChecksFailed() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
             statusCheckRollupState: "FAILURE"
         )
         #expect(status == .checksFailed)
