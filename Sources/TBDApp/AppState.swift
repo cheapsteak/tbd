@@ -112,7 +112,12 @@ final class AppState: ObservableObject {
         }
     }
     /// Tracks the order of selected worktrees for split view rendering (cmd+click order).
-    @Published var selectionOrder: [UUID] = []
+    /// Persists to UserDefaults on every change (gated on `isInitialStateLoaded`) so the
+    /// final, correctly-ordered value is always what gets saved — regardless of whether
+    /// the change came from a user selection, back/forward navigation, or startup restore.
+    @Published var selectionOrder: [UUID] = [] {
+        didSet { persistSelectionOrder() }
+    }
     /// Selected repo ID — set when a repo header is clicked, shows archived worktrees in content pane.
     @Published var selectedRepoID: UUID? = nil {
         didSet {
@@ -498,6 +503,7 @@ final class AppState: ObservableObject {
 
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
+    private static let selectionOrderKey = "com.tbd.app.selectionOrder"
 
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var focusObservers: [NSObjectProtocol] = []
@@ -685,6 +691,55 @@ final class AppState: ObservableObject {
         guard let data = userDefaults.data(forKey: Self.layoutsKey),
               let restored = try? JSONDecoder().decode([UUID: LayoutNode].self, from: data) else { return }
         layouts = restored
+    }
+
+    // MARK: - Selection Persistence
+
+    /// Persist the current `selectionOrder` to UserDefaults.
+    /// Gated on `isInitialStateLoaded` so startup does not clobber a
+    /// previously-saved value before the restore has run.
+    private func persistSelectionOrder() {
+        guard isInitialStateLoaded else { return }
+        let strings = selectionOrder.map(\.uuidString)
+        guard let data = try? JSONEncoder().encode(strings) else { return }
+        userDefaults.set(data, forKey: Self.selectionOrderKey)
+    }
+
+    /// Restore the persisted worktree selection, retaining only IDs that are
+    /// still present in `validWorktreeIDs` and preserving their saved order.
+    ///
+    /// No-op when:
+    /// - `pendingDeepLinkID` is set (deep links win over persisted selection)
+    /// - the current selection is already non-empty
+    /// - there are no valid IDs left after filtering stale ones
+    ///
+    /// Call this from `connectAndLoadInitialState()` after `refreshAll()` and
+    /// before the `worktreeSelectionChanged` RPC so the daemon learns the real
+    /// restored selection.
+    func restoreSavedSelection(validWorktreeIDs: [UUID]) {
+        guard selectedWorktreeIDs.isEmpty, pendingDeepLinkID == nil else { return }
+        guard let data = userDefaults.data(forKey: Self.selectionOrderKey),
+              let savedStrings = try? JSONDecoder().decode([String].self, from: data) else { return }
+        let savedIDs = savedStrings.compactMap { UUID(uuidString: $0) }
+        let validSet = Set(validWorktreeIDs)
+        let filteredIDs = savedIDs.filter { validSet.contains($0) }
+        guard !filteredIDs.isEmpty else { return }
+        // Suppress navigation recording while mutating state: the
+        // selectedWorktreeIDs didSet would call recordNavigation with
+        // Set-iteration order before we fix selectionOrder. Gate on
+        // isNavigating to block that scrambled entry.
+        isNavigating = true
+        // Set the IDs — didSet rebuilds selectionOrder in Set-iteration order.
+        selectedWorktreeIDs = Set(filteredIDs)
+        // Explicitly restore the saved order, overriding the non-deterministic
+        // Set-iteration order that the didSet produced.
+        // The selectionOrder.didSet will persist this corrected order.
+        selectionOrder = filteredIDs
+        // Re-enable recording before the explicit recordNavigation call below.
+        isNavigating = false
+        // Record exactly one entry with the correct saved order so cmd+[ can
+        // return to the restored selection after the user navigates elsewhere.
+        recordNavigation(.worktrees(filteredIDs))
     }
 
     func stopPolling() {
@@ -936,6 +991,22 @@ final class AppState: ObservableObject {
         isConnected = didConnect
         if didConnect {
             await refreshAll()
+            // Restore persisted selection before notifying the daemon — the RPC
+            // below captures `selectedWorktreeIDs` so the daemon learns the real
+            // selection from the previous session.
+            let allWorktreeIDs = worktrees.values.flatMap { $0 }.map(\.id)
+            restoreSavedSelection(validWorktreeIDs: allWorktreeIDs)
+            // Expand any repo whose worktree is now selected but was collapsed,
+            // so the restored row is visible in the sidebar.
+            for id in selectedWorktreeIDs {
+                if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
+                   let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
+                   !repos[repoIdx].expanded {
+                    repos[repoIdx].expanded = true
+                    let repoID = worktree.repoID
+                    Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
+                }
+            }
             await loadModelProfiles()
             startSubscription()
             await refreshPRStatuses()

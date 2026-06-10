@@ -49,12 +49,47 @@ struct StatusBarView: View {
         return (worktree.displayName, version)
     }
 
+    /// Compute the left-side focus label for the status bar.
+    ///
+    /// - Single worktree selected: `"<repo name> / <worktree displayName>"`,
+    ///   or just `<worktree displayName>` when the repo lookup fails.
+    /// - Multiple worktrees selected: `"<N> worktrees"`.
+    /// - Repo selected, no worktree: the repo's `displayName`.
+    /// - Nothing selected: `nil` (renders nothing on the left side).
+    nonisolated static func focusLabel(
+        selectedWorktreeIDs: Set<UUID>,
+        worktrees: [UUID: [Worktree]],
+        repos: [Repo],
+        selectedRepoID: UUID?
+    ) -> String? {
+        let count = selectedWorktreeIDs.count
+        if count == 0 {
+            guard let repoID = selectedRepoID,
+                  let repo = repos.first(where: { $0.id == repoID }) else { return nil }
+            return repo.displayName
+        } else if count == 1, let id = selectedWorktreeIDs.first {
+            let allWorktrees = worktrees.values.flatMap { $0 }
+            guard let wt = allWorktrees.first(where: { $0.id == id }) else { return nil }
+            if let repo = repos.first(where: { $0.id == wt.repoID }) {
+                return "\(repo.displayName) / \(wt.displayName)"
+            }
+            return wt.displayName
+        } else {
+            return "\(count) worktrees"
+        }
+    }
+
     var body: some View {
         HStack {
-            Circle()
-                .fill(appState.isConnected ? .green : .red)
-                .frame(width: 8, height: 8)
-            Text(appState.isConnected ? "tbdd connected" : "tbdd disconnected")
+            if let label = Self.focusLabel(
+                selectedWorktreeIDs: appState.selectedWorktreeIDs,
+                worktrees: appState.worktrees,
+                repos: appState.repos,
+                selectedRepoID: appState.selectedRepoID
+            ) {
+                Text(label)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             if let info = selectedWorktreeInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)
