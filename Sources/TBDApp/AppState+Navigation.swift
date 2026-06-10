@@ -40,7 +40,13 @@ extension AppState {
     /// a dead view. No-op if no usable prior entry exists.
     func navigateBack() {
         guard canGoBack else { return }
-        guard let index = usableEntryIndex(from: navigationIndex - 1, step: -1) else { return }
+        guard let index = usableEntryIndex(from: navigationIndex - 1, step: -1) else {
+            // Entries went stale since the flags were last computed (e.g. a
+            // worktree vanished without a navigation event) — refresh them so
+            // the dead button disables itself instead of staying enabled.
+            updateNavigationFlags()
+            return
+        }
         navigationIndex = index
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
         updateNavigationFlags()
@@ -51,7 +57,11 @@ extension AppState {
     /// on a dead view. No-op if no usable next entry exists.
     func navigateForward() {
         guard canGoForward else { return }
-        guard let index = usableEntryIndex(from: navigationIndex + 1, step: 1) else { return }
+        guard let index = usableEntryIndex(from: navigationIndex + 1, step: 1) else {
+            // See navigateBack: refresh stale flags on the dead-end path.
+            updateNavigationFlags()
+            return
+        }
         navigationIndex = index
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
         updateNavigationFlags()
@@ -77,7 +87,10 @@ extension AppState {
 
     /// Walk `navigationEntries` from `start` in `step` direction (+1/-1) and
     /// return the index of the first usable entry, or nil if none.
-    private func usableEntryIndex(
+    /// Internal (not private) because `updateNavigationFlags()` lives in
+    /// AppState.swift (next to its `private(set)` flags) and needs the walker
+    /// to compute usability-aware values.
+    func usableEntryIndex(
         from start: Int,
         step: Int,
         excluding archivedID: UUID? = nil

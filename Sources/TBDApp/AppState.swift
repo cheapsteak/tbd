@@ -146,11 +146,15 @@ final class AppState: ObservableObject {
     var isNavigating: Bool = false
 
     /// Refresh the @Published `canGoBack` / `canGoForward` flags from the index.
+    /// Usability-aware: a flag is only true when an actually-usable entry exists
+    /// in that direction, so the toolbar buttons don't render enabled when
+    /// back/forward would skip-walk past every remaining entry and no-op.
     /// Lives in the same file as the @Published properties so the `private(set)`
     /// setters are reachable.
     func updateNavigationFlags() {
-        let back = navigationIndex > 0
-        let forward = navigationIndex >= 0 && navigationIndex < navigationEntries.count - 1
+        let back = usableEntryIndex(from: navigationIndex - 1, step: -1) != nil
+        let forward = navigationIndex >= 0
+            && usableEntryIndex(from: navigationIndex + 1, step: 1) != nil
         if back != canGoBack { canGoBack = back }
         if forward != canGoForward { canGoForward = forward }
     }

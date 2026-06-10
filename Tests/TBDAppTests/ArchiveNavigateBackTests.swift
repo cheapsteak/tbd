@@ -191,6 +191,9 @@ struct ArchiveNavigateBackTests {
             state.selectedWorktreeIDs = [b]
             state.removeArchivedWorktreeFromState(id: b)
             #expect(state.selectedWorktreeIDs == [a])
+            // The only forward entry is the dead [B] — the toolbar forward
+            // button must render disabled, not as an enabled no-op.
+            #expect(state.canGoForward == false)
 
             state.navigateForward()
 
@@ -198,6 +201,59 @@ struct ArchiveNavigateBackTests {
             // the archived (now nonexistent) worktree or go empty.
             #expect(state.selectedWorktreeIDs == [a])
             #expect(state.selectionOrder == [a])
+        }
+    }
+
+    // MARK: - Back flag false when every prior entry is stale
+
+    @Test func archiveBackNav_withOnlyStaleEntriesBehind_disablesBack() {
+        withState { state in
+            let repoID = UUID()
+            let a = UUID()
+            let b = UUID()
+            let gone = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: a, repoID: repoID),
+                                        makeWorktree(id: b, repoID: repoID),
+                                        makeWorktree(id: gone, repoID: repoID)]]
+
+            // History: [gone], [A], [B] — then `gone` disappears and B is
+            // archived. Back-nav lands on [A]; the only entry behind it is
+            // the stale [gone], so canGoBack must be false.
+            state.selectedWorktreeIDs = [gone]
+            state.selectedWorktreeIDs = [a]
+            state.selectedWorktreeIDs = [b]
+            state.worktrees[repoID]?.removeAll { $0.id == gone }
+
+            state.removeArchivedWorktreeFromState(id: b)
+
+            #expect(state.selectedWorktreeIDs == [a])
+            #expect(state.canGoBack == false)
+        }
+    }
+
+    // MARK: - Stale-flag dead button disables itself on first click
+
+    @Test func navigateBack_withFlagsGoneStale_noOpsAndDisablesBack() {
+        withState { state in
+            let repoID = UUID()
+            let a = UUID()
+            let gone = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: a, repoID: repoID),
+                                        makeWorktree(id: gone, repoID: repoID)]]
+
+            // History: [gone], [A]; then `gone` vanishes with no navigation
+            // event (e.g. daemon poll), leaving canGoBack stale-true.
+            state.selectedWorktreeIDs = [gone]
+            state.selectedWorktreeIDs = [a]
+            #expect(state.canGoBack == true)
+            state.worktrees[repoID]?.removeAll { $0.id == gone }
+
+            state.navigateBack()
+
+            // No usable prior entry: selection untouched, and the dead
+            // button disables itself on the first click.
+            #expect(state.selectedWorktreeIDs == [a])
+            #expect(state.canGoBack == false)
         }
     }
 
