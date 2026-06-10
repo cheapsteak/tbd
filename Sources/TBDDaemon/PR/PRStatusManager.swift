@@ -10,13 +10,45 @@ public actor PRStatusManager {
 
     private var cache: [UUID: PRStatus] = [:]
 
+    /// Result cache for the per-PR required-check signal query, keyed by worktree id.
+    /// The `isRequired` flag is stable per commit and a settled check's conclusion doesn't
+    /// change on the same commit, so we can skip the query when nothing could have changed.
+    struct CheckSignalCacheEntry {
+        let headSha: String
+        let failing: Bool
+        let pending: Bool
+        let fetchedAt: Date
+    }
+    private var checkSignalCache: [UUID: CheckSignalCacheEntry] = [:]   // keyed by worktree id
+    private static let signalCacheTTL: TimeInterval = 600   // 10 min safety net
+
     public init() {}
 
     // MARK: - Public interface
 
     public func allStatuses() -> [UUID: PRStatus] { cache }
 
-    public func invalidate(worktreeID: UUID) { cache.removeValue(forKey: worktreeID) }
+    public func invalidate(worktreeID: UUID) {
+        cache.removeValue(forKey: worktreeID)
+        checkSignalCache.removeValue(forKey: worktreeID)
+    }
+
+    /// Whether the per-check signal query must run again, or the cached result can be reused.
+    /// Re-fetch when: no cache; the head commit changed (new push); a required check was still
+    /// pending last time (in-flight, may have changed); or the cache is older than `ttl`
+    /// (safety net for a same-commit manual re-run).
+    static func shouldRefetchSignals(
+        cached: CheckSignalCacheEntry?,
+        currentSha: String,
+        now: Date,
+        ttl: TimeInterval
+    ) -> Bool {
+        guard let cached else { return true }
+        if cached.headSha != currentSha { return true }
+        if cached.pending { return true }
+        if now.timeIntervalSince(cached.fetchedAt) > ttl { return true }
+        return false
+    }
 
     /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
     /// worktrees: list of (id, branch, upstreamBranch, worktreePath) for active non-main worktrees.
@@ -60,7 +92,15 @@ public actor PRStatusManager {
                 upstreamBranch: wt.upstreamBranch
             )
             if let node = candidates.compactMap({ byBranch[$0] }).first {
-                let signals = await computeRequiredCheckSignals(node: node, repoPath: repoPath)
+                let sha = node.headRefOid
+                let cached = checkSignalCache[wt.id]
+                let signals: (failing: Bool, pending: Bool)
+                if Self.shouldRefetchSignals(cached: cached, currentSha: sha, now: Date(), ttl: Self.signalCacheTTL) {
+                    signals = await computeRequiredCheckSignals(node: node, repoPath: repoPath)
+                    checkSignalCache[wt.id] = CheckSignalCacheEntry(headSha: sha, failing: signals.failing, pending: signals.pending, fetchedAt: Date())
+                } else {
+                    signals = (cached!.failing, cached!.pending)
+                }
                 cache[wt.id] = PRStatus(
                     number: node.number,
                     url: node.url,
@@ -117,7 +157,7 @@ public actor PRStatusManager {
         )
         for candidate in candidates {
             let args = ["pr", "view", candidate,
-                        "--json", "number,url,state,mergeStateStatus,reviewDecision,isDraft"]
+                        "--json", "number,url,state,mergeStateStatus,reviewDecision,isDraft,headRefOid"]
             guard let output = await runGH(args: args, repoPath: repoPath),
                   let data = output.data(using: .utf8),
                   let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
@@ -151,6 +191,7 @@ public actor PRStatusManager {
                                      requiredChecksPending: signals.pending)
             )
             cache[worktreeID] = status
+            checkSignalCache[worktreeID] = CheckSignalCacheEntry(headSha: obj.headRefOid, failing: signals.failing, pending: signals.pending, fetchedAt: Date())
             return status
         }
 
@@ -340,6 +381,7 @@ public actor PRStatusManager {
         public let mergeStateStatus: String
         public let reviewDecision: String   // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or ""
         public let headRefName: String
+        public let headRefOid: String
         public let createdAt: String        // ISO 8601, e.g. "2026-03-24T15:58:27Z"
         public let isDraft: Bool
         public let statusCheckRollupState: String?
@@ -363,12 +405,14 @@ public actor PRStatusManager {
                   let createdAt = node["createdAt"] as? String else { return nil }
             let reviewDecision = node["reviewDecision"] as? String ?? ""
             let isDraft = node["isDraft"] as? Bool ?? false
+            let headRefOid = node["headRefOid"] as? String ?? ""
             let statusCheckRollup = node["statusCheckRollup"] as? [String: Any]
             let statusCheckRollupState = statusCheckRollup?["state"] as? String
             return PRNode(number: number, url: url, state: state,
                           mergeStateStatus: mergeStateStatus,
                           reviewDecision: reviewDecision,
                           headRefName: headRefName,
+                          headRefOid: headRefOid,
                           createdAt: createdAt,
                           isDraft: isDraft,
                           statusCheckRollupState: statusCheckRollupState)
@@ -384,7 +428,7 @@ public actor PRStatusManager {
             pullRequests(first: 100, states: [OPEN, MERGED, CLOSED],
                          orderBy: {field: CREATED_AT, direction: DESC}) {
               nodes {
-                number url state mergeStateStatus reviewDecision headRefName createdAt isDraft
+                number url state mergeStateStatus reviewDecision headRefName headRefOid createdAt isDraft
                 statusCheckRollup { state }
               }
             }
@@ -539,6 +583,7 @@ private struct GHPRViewResult: Codable {
     let mergeStateStatus: String
     let reviewDecision: String?
     let isDraft: Bool
+    let headRefOid: String
 }
 
 public enum PRStatusError: Error {

@@ -555,4 +555,88 @@ struct PRStatusManagerTests {
         let all = await manager.allStatuses()
         #expect(all[id] == nil)
     }
+
+    // MARK: - shouldRefetchSignals (per-check signal cache decision)
+
+    private static let baseDate = Date(timeIntervalSince1970: 1_000_000)
+    private static let testTTL: TimeInterval = 600
+
+    @Test("shouldRefetchSignals returns true when there is no cache")
+    func shouldRefetchWithNilCache() {
+        let result = PRStatusManager.shouldRefetchSignals(
+            cached: nil,
+            currentSha: "abc123",
+            now: Self.baseDate,
+            ttl: Self.testTTL
+        )
+        #expect(result == true)
+    }
+
+    @Test("shouldRefetchSignals returns true when the head commit SHA changed")
+    func shouldRefetchOnDifferentSha() {
+        let cached = PRStatusManager.CheckSignalCacheEntry(
+            headSha: "old-sha",
+            failing: false,
+            pending: false,
+            fetchedAt: Self.baseDate
+        )
+        let result = PRStatusManager.shouldRefetchSignals(
+            cached: cached,
+            currentSha: "new-sha",
+            now: Self.baseDate,
+            ttl: Self.testTTL
+        )
+        #expect(result == true)
+    }
+
+    @Test("shouldRefetchSignals returns true when a required check was pending last time")
+    func shouldRefetchWhenPending() {
+        let cached = PRStatusManager.CheckSignalCacheEntry(
+            headSha: "abc123",
+            failing: false,
+            pending: true,
+            fetchedAt: Self.baseDate
+        )
+        let result = PRStatusManager.shouldRefetchSignals(
+            cached: cached,
+            currentSha: "abc123",
+            now: Self.baseDate,
+            ttl: Self.testTTL
+        )
+        #expect(result == true)
+    }
+
+    @Test("shouldRefetchSignals returns false on a settled same-commit hit within ttl (skip)")
+    func shouldNotRefetchOnSettledHit() {
+        let cached = PRStatusManager.CheckSignalCacheEntry(
+            headSha: "abc123",
+            failing: true,
+            pending: false,
+            fetchedAt: Self.baseDate
+        )
+        let result = PRStatusManager.shouldRefetchSignals(
+            cached: cached,
+            currentSha: "abc123",
+            now: Self.baseDate.addingTimeInterval(Self.testTTL - 1),
+            ttl: Self.testTTL
+        )
+        #expect(result == false)
+    }
+
+    @Test("shouldRefetchSignals returns true when the cache is older than ttl")
+    func shouldRefetchWhenStale() {
+        let cached = PRStatusManager.CheckSignalCacheEntry(
+            headSha: "abc123",
+            failing: true,
+            pending: false,
+            fetchedAt: Self.baseDate
+        )
+        let result = PRStatusManager.shouldRefetchSignals(
+            cached: cached,
+            currentSha: "abc123",
+            now: Self.baseDate.addingTimeInterval(Self.testTTL + 1),
+            ttl: Self.testTTL
+        )
+        #expect(result == true)
+    }
 }
