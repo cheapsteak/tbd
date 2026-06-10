@@ -109,11 +109,15 @@ final class AppState: ObservableObject {
                     }
                 }
             }
-            persistSelectionOrder()
         }
     }
     /// Tracks the order of selected worktrees for split view rendering (cmd+click order).
-    @Published var selectionOrder: [UUID] = []
+    /// Persists to UserDefaults on every change (gated on `isInitialStateLoaded`) so the
+    /// final, correctly-ordered value is always what gets saved — regardless of whether
+    /// the change came from a user selection, back/forward navigation, or startup restore.
+    @Published var selectionOrder: [UUID] = [] {
+        didSet { persistSelectionOrder() }
+    }
     /// Selected repo ID — set when a repo header is clicked, shows archived worktrees in content pane.
     @Published var selectedRepoID: UUID? = nil {
         didSet {
@@ -720,10 +724,17 @@ final class AppState: ObservableObject {
         let validSet = Set(validWorktreeIDs)
         let filteredIDs = savedIDs.filter { validSet.contains($0) }
         guard !filteredIDs.isEmpty else { return }
+        // Suppress navigation recording: this is a startup restore, not a
+        // user navigation action. The selectedWorktreeIDs didSet calls
+        // recordNavigation with Set-iteration order; gating on isNavigating
+        // prevents that scrambled entry from polluting the history.
+        isNavigating = true
+        defer { isNavigating = false }
         // Set the IDs — didSet rebuilds selectionOrder in Set-iteration order.
         selectedWorktreeIDs = Set(filteredIDs)
         // Explicitly restore the saved order, overriding the non-deterministic
         // Set-iteration order that the didSet produced.
+        // The selectionOrder.didSet will persist this corrected order.
         selectionOrder = filteredIDs
     }
 

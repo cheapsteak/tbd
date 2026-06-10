@@ -3,9 +3,26 @@ import Foundation
 import TBDShared
 @testable import TBDApp
 
+// MARK: - Helpers
+
+@MainActor
+private func makeIsolatedAppState() -> (AppState, String) {
+    let suiteName = "com.tbd.tests.deeplink.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    return (AppState(userDefaults: defaults), suiteName)
+}
+
+@MainActor
+private func tearDown(_ suiteName: String) {
+    UserDefaults().removePersistentDomain(forName: suiteName)
+}
+
+// MARK: - Tests
+
 @MainActor
 @Test func handle_knownActiveUUID_selectsWorktree() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
     let id = UUID()
     let repoID = UUID()
@@ -24,7 +41,8 @@ import TBDShared
 
 @MainActor
 @Test func handle_unknownUUID_doesNotMutateSelection() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
     appState.worktrees = [:]
     appState.archivedLookupOverride = { _ in [] }
@@ -39,7 +57,8 @@ import TBDShared
 
 @MainActor
 @Test func handle_malformedURL_doesNotMutateSelection() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
     let id = UUID()
     let repoID = UUID()
@@ -59,7 +78,8 @@ import TBDShared
 
 @MainActor
 @Test func handle_archivedUUID_opensArchivedPaneAndHighlightsRow() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
     let repoID = UUID()
     let archivedID = UUID()
@@ -148,7 +168,8 @@ import TBDShared
 
 @MainActor
 @Test func navigateToWorktree_afterInitialLoad_doesNotBuffer() async {
-    let appState = AppState()
+    let (appState, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     appState.isInitialStateLoaded = true
     appState.archivedLookupOverride = { _ in [] }
     appState.worktrees = [:]
