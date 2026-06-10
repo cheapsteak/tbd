@@ -35,22 +35,88 @@ extension AppState {
         updateNavigationFlags()
     }
 
-    /// Move back one entry in the history and apply it. No-op if no prior entry.
+    /// Move back to the nearest usable prior entry and apply it. Skips stale
+    /// entries (archived/gone worktrees, removed repos) so back never lands on
+    /// a dead view. No-op if no usable prior entry exists.
     func navigateBack() {
         guard canGoBack else { return }
-        navigationIndex -= 1
-        let entry = navigationEntries[navigationIndex]
-        withNavigating { applyNavigationEntry(entry) }
+        guard let index = usableEntryIndex(from: navigationIndex - 1, step: -1) else {
+            // Entries went stale since the flags were last computed (e.g. a
+            // worktree vanished without a navigation event) — refresh them so
+            // the dead button disables itself instead of staying enabled.
+            updateNavigationFlags()
+            return
+        }
+        navigationIndex = index
+        withNavigating { applyNavigationEntry(navigationEntries[index]) }
         updateNavigationFlags()
     }
 
-    /// Move forward one entry in the history and apply it. No-op if no next entry.
+    /// Move forward to the nearest usable next entry and apply it. Skips stale
+    /// entries (archived/gone worktrees, removed repos) so forward never lands
+    /// on a dead view. No-op if no usable next entry exists.
     func navigateForward() {
         guard canGoForward else { return }
-        navigationIndex += 1
-        let entry = navigationEntries[navigationIndex]
-        withNavigating { applyNavigationEntry(entry) }
+        guard let index = usableEntryIndex(from: navigationIndex + 1, step: 1) else {
+            // See navigateBack: refresh stale flags on the dead-end path.
+            updateNavigationFlags()
+            return
+        }
+        navigationIndex = index
+        withNavigating { applyNavigationEntry(navigationEntries[index]) }
         updateNavigationFlags()
+    }
+
+    /// Navigate back to the most recent usable history entry after `archivedID`
+    /// was archived. Walks backwards from the current index, skipping entries
+    /// that reference the archived worktree or worktrees that no longer exist,
+    /// and applies the first usable one. Returns `false` (leaving selection
+    /// untouched) when no usable entry exists, so callers can fall back to the
+    /// plain empty-selection behavior.
+    func navigateBackPastArchived(_ archivedID: UUID) -> Bool {
+        guard navigationIndex >= 0, !navigationEntries.isEmpty else { return false }
+        let start = min(navigationIndex, navigationEntries.count - 1)
+        guard let index = usableEntryIndex(from: start, step: -1, excluding: archivedID) else {
+            return false
+        }
+        navigationIndex = index
+        withNavigating { applyNavigationEntry(navigationEntries[index]) }
+        updateNavigationFlags()
+        return true
+    }
+
+    /// Walk `navigationEntries` from `start` in `step` direction (+1/-1) and
+    /// return the index of the first usable entry, or nil if none.
+    /// Internal (not private) because `updateNavigationFlags()` lives in
+    /// AppState.swift (next to its `private(set)` flags) and needs the walker
+    /// to compute usability-aware values.
+    func usableEntryIndex(
+        from start: Int,
+        step: Int,
+        excluding archivedID: UUID? = nil
+    ) -> Int? {
+        var index = start
+        while index >= 0 && index < navigationEntries.count {
+            if isUsableEntry(navigationEntries[index], excluding: archivedID) { return index }
+            index += step
+        }
+        return nil
+    }
+
+    /// Whether a history entry is still a valid landing spot: worktree entries
+    /// must not reference `archivedID` (when given) and every referenced
+    /// worktree must still exist; repo entries must reference a repo we still
+    /// know about.
+    private func isUsableEntry(_ entry: NavigationEntry, excluding archivedID: UUID? = nil) -> Bool {
+        switch entry {
+        case .worktrees(let ids):
+            guard !ids.isEmpty else { return false }
+            if let archivedID, ids.contains(archivedID) { return false }
+            let existing = Set(worktrees.values.flatMap { $0 }.map(\.id))
+            return ids.allSatisfy { existing.contains($0) }
+        case .repo(let id):
+            return repos.contains { $0.id == id }
+        }
     }
 
     /// Run `block` with `isNavigating` set so the resulting selection mutations
