@@ -430,6 +430,30 @@ struct PRStatusManagerTests {
         #expect(PRStatusManager.parseOwnerRepo(fromURL: "https://example.com/not-a-pr") == nil)
     }
 
+    // MARK: - GraphQL query builders
+
+    /// A malformed (unbalanced) GraphQL query is rejected by the server at parse time,
+    /// which silently trips the conservative "assume failing" fallback and forces a red icon.
+    /// Guard the brace balance here so that can't regress.
+    @Test("isRequired query builders produce brace-balanced GraphQL")
+    func checkQueriesAreBraceBalanced() {
+        for query in [
+            PRStatusManager.requiredChecksQuery(owner: "o", name: "r", number: 21539),
+            PRStatusManager.prCheckDetailQuery(owner: "o", name: "r", number: 21539)
+        ] {
+            let opens = query.filter { $0 == "{" }.count
+            let closes = query.filter { $0 == "}" }.count
+            #expect(opens == closes, "unbalanced braces (\(opens) open vs \(closes) close) in: \(query)")
+        }
+    }
+
+    @Test("isRequired query embeds the PR number in both required positions")
+    func checkQueriesEmbedNumber() {
+        let query = PRStatusManager.requiredChecksQuery(owner: "o", name: "r", number: 21539)
+        #expect(query.contains("pullRequest(number: 21539)"))
+        #expect(query.contains("isRequired(pullRequestNumber: 21539)"))
+    }
+
     @Test("allStatuses reflects cache after manual seed")
     func cacheRoundTrip() async {
         let manager = PRStatusManager()

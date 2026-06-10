@@ -264,6 +264,32 @@ public actor PRStatusManager {
         return (owner: String(parts[0]), name: String(parts[1]))
     }
 
+    /// GraphQL query for a single PR's last-commit check contexts with per-check `isRequired`.
+    /// The literal `number` must appear in both `pullRequest(number:)` and `isRequired(pullRequestNumber:)`.
+    static func requiredChecksQuery(owner: String, name: String, number: Int) -> String {
+        """
+        { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
+          commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+            __typename
+            ... on CheckRun { conclusion isRequired(pullRequestNumber: \(number)) }
+            ... on StatusContext { state isRequired(pullRequestNumber: \(number)) }
+          } } } } } } } } }
+        """
+    }
+
+    /// Like `requiredChecksQuery` but also fetches the aggregate `statusCheckRollup.state`
+    /// (for pending detection) — used by the single-PR refresh path.
+    static func prCheckDetailQuery(owner: String, name: String, number: Int) -> String {
+        """
+        { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
+          commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
+            __typename
+            ... on CheckRun { conclusion isRequired(pullRequestNumber: \(number)) }
+            ... on StatusContext { state isRequired(pullRequestNumber: \(number)) }
+          } } } } } } } } }
+        """
+    }
+
     /// Priority for choosing between multiple PRs on the same branch.
     /// Higher value = preferred.
     private static func prPriority(_ ghState: String) -> Int {
@@ -370,14 +396,7 @@ public actor PRStatusManager {
         number: Int,
         repoPath: String
     ) async -> Bool {
-        let query = """
-        { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
-          commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
-            __typename
-            ... on CheckRun { conclusion isRequired(pullRequestNumber: \(number)) }
-            ... on StatusContext { state isRequired(pullRequestNumber: \(number)) }
-          } } } } } } } }
-        """
+        let query = Self.requiredChecksQuery(owner: owner, name: name, number: number)
         let args = ["api", "graphql", "-f", "query=\(query)"]
         guard let result = await runGHResult(args: args, repoPath: repoPath),
               result.exitStatus == 0,
@@ -400,14 +419,7 @@ public actor PRStatusManager {
         guard let ownerRepo = Self.parseOwnerRepo(fromURL: url) else {
             return (nil, true)
         }
-        let query = """
-        { repository(owner: "\(ownerRepo.owner)", name: "\(ownerRepo.name)") { pullRequest(number: \(number)) {
-          commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
-            __typename
-            ... on CheckRun { conclusion isRequired(pullRequestNumber: \(number)) }
-            ... on StatusContext { state isRequired(pullRequestNumber: \(number)) }
-          } } } } } } } }
-        """
+        let query = Self.prCheckDetailQuery(owner: ownerRepo.owner, name: ownerRepo.name, number: number)
         let args = ["api", "graphql", "-f", "query=\(query)"]
         guard let result = await runGHResult(args: args, repoPath: repoPath),
               result.exitStatus == 0,
