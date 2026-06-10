@@ -87,8 +87,12 @@ struct StatusBarView: View {
                 repos: appState.repos,
                 selectedRepoID: appState.selectedRepoID
             ) {
-                Text(label)
-                    .foregroundStyle(.secondary)
+                Button(action: { appState.revealSelectionInSidebar() }) {
+                    Text(label)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Reveal in sidebar")
             }
             Spacer()
             if let info = selectedWorktreeInfo {
