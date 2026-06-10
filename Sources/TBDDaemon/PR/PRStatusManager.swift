@@ -10,17 +10,15 @@ public actor PRStatusManager {
 
     private var cache: [UUID: PRStatus] = [:]
 
-    /// Result cache for the per-PR required-check signal query, keyed by worktree id.
-    /// The `isRequired` flag is stable per commit and a settled check's conclusion doesn't
-    /// change on the same commit, so we can skip the query when nothing could have changed.
-    struct CheckSignalCacheEntry {
+    /// Cached per-worktree classification of which check NAMES are required, keyed by the head
+    /// commit SHA it was computed for. Only the `isRequired` classification is stable per commit;
+    /// the live `(failing, pending)` signal must be recomputed from fresh check states every poll
+    /// (a check's conclusion/status changes on the SAME commit), so it is NEVER cached.
+    struct RequiredChecksClassification {
         let headSha: String
-        let failing: Bool
-        let pending: Bool
-        let fetchedAt: Date
+        let isRequiredByName: [String: Bool]
     }
-    private var checkSignalCache: [UUID: CheckSignalCacheEntry] = [:]   // keyed by worktree id
-    private static let signalCacheTTL: TimeInterval = 600   // 10 min safety net
+    private var requiredChecksCache: [UUID: RequiredChecksClassification] = [:]
 
     public init() {}
 
@@ -30,24 +28,7 @@ public actor PRStatusManager {
 
     public func invalidate(worktreeID: UUID) {
         cache.removeValue(forKey: worktreeID)
-        checkSignalCache.removeValue(forKey: worktreeID)
-    }
-
-    /// Whether the per-check signal query must run again, or the cached result can be reused.
-    /// Re-fetch when: no cache; the head commit changed (new push); a required check was still
-    /// pending last time (in-flight, may have changed); or the cache is older than `ttl`
-    /// (safety net for a same-commit manual re-run).
-    static func shouldRefetchSignals(
-        cached: CheckSignalCacheEntry?,
-        currentSha: String,
-        now: Date,
-        ttl: TimeInterval
-    ) -> Bool {
-        guard let cached else { return true }
-        if cached.headSha != currentSha { return true }
-        if cached.pending { return true }
-        if now.timeIntervalSince(cached.fetchedAt) > ttl { return true }
-        return false
+        requiredChecksCache.removeValue(forKey: worktreeID)
     }
 
     /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
@@ -92,15 +73,7 @@ public actor PRStatusManager {
                 upstreamBranch: wt.upstreamBranch
             )
             if let node = candidates.compactMap({ byBranch[$0] }).first {
-                let sha = node.headRefOid
-                let cached = checkSignalCache[wt.id]
-                let signals: (failing: Bool, pending: Bool)
-                if Self.shouldRefetchSignals(cached: cached, currentSha: sha, now: Date(), ttl: Self.signalCacheTTL) {
-                    signals = await computeRequiredCheckSignals(node: node, repoPath: repoPath)
-                    checkSignalCache[wt.id] = CheckSignalCacheEntry(headSha: sha, failing: signals.failing, pending: signals.pending, fetchedAt: Date())
-                } else {
-                    signals = (cached!.failing, cached!.pending)
-                }
+                let signals = await signalsForBatchNode(worktreeID: wt.id, node: node, repoPath: repoPath)
                 cache[wt.id] = PRStatus(
                     number: node.number,
                     url: node.url,
@@ -117,14 +90,14 @@ public actor PRStatusManager {
         }
     }
 
-    /// Compute the `(failing, pending)` required-check signals for a batch-matched PR node.
+    /// Compute the LIVE `(failing, pending)` required-check signals for a batch-matched PR node.
     ///
-    /// Cheap aggregate pre-filter, then the SAME per-check query/parse used by `refresh` so
-    /// both paths always agree:
+    /// Cheap aggregate pre-filter, then live per-check computation:
     /// - Not OPEN → `(false, false)`, no query.
     /// - Aggregate rollup indicates neither failing nor pending (SUCCESS/nil) → `(false, false)`, no query.
-    /// - Otherwise (any non-success aggregate) → run the per-check query and parse both signals.
-    private func computeRequiredCheckSignals(node: PRNode, repoPath: String) async -> (failing: Bool, pending: Bool) {
+    /// - Otherwise (any non-success aggregate) → fetch live check contexts and compute the signals
+    ///   from the cached `isRequired` classification (refreshing it only when needed).
+    private func signalsForBatchNode(worktreeID: UUID, node: PRNode, repoPath: String) async -> (failing: Bool, pending: Bool) {
         guard node.state == "OPEN",
               Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) else {
             return (false, false)
@@ -133,11 +106,14 @@ public actor PRStatusManager {
             // Can't query — be conservative and keep red.
             return (true, false)
         }
-        return await fetchRequiredCheckSignals(
+        return await liveCheckSignals(
+            worktreeID: worktreeID,
             owner: ownerRepo.owner,
             name: ownerRepo.name,
             number: node.number,
-            repoPath: repoPath
+            headSha: node.headRefOid,
+            repoPath: repoPath,
+            forceClassificationRefresh: false
         )
     }
 
@@ -164,16 +140,18 @@ public actor PRStatusManager {
                 continue
             }
 
-            // Fetch the per-check contexts (with `isRequired`) and parse BOTH the failing and
-            // pending signals from the SAME data — the identical computation used by `fetchAll`,
-            // so the two paths can never disagree.
+            // Recompute live `(failing, pending)` from fresh check states, force-refreshing the
+            // `isRequired` classification since this is the user-initiated path.
             let signals: (failing: Bool, pending: Bool)
             if let ownerRepo = Self.parseOwnerRepo(fromURL: obj.url) {
-                signals = await fetchRequiredCheckSignals(
+                signals = await liveCheckSignals(
+                    worktreeID: worktreeID,
                     owner: ownerRepo.owner,
                     name: ownerRepo.name,
                     number: obj.number,
-                    repoPath: repoPath
+                    headSha: obj.headRefOid,
+                    repoPath: repoPath,
+                    forceClassificationRefresh: true
                 )
             } else {
                 // Can't query — be conservative and keep red.
@@ -191,7 +169,6 @@ public actor PRStatusManager {
                                      requiredChecksPending: signals.pending)
             )
             cache[worktreeID] = status
-            checkSignalCache[worktreeID] = CheckSignalCacheEntry(headSha: obj.headRefOid, failing: signals.failing, pending: signals.pending, fetchedAt: Date())
             return status
         }
 
@@ -258,17 +235,48 @@ public actor PRStatusManager {
     /// StatusContext `state` values that count as a pending check.
     private static let pendingStatusContextStates: Set<String> = ["PENDING", "EXPECTED"]
 
-    /// Pure parse of a single PR's last-commit status-check contexts, returning BOTH
-    /// the failing and pending signals for *required* checks in one pass.
+    /// A single status-check context for one PR's last commit. Unifies the GraphQL `CheckRun`
+    /// and `StatusContext` shapes. `isRequired` is populated only when the query requested it
+    /// (the cheap live-state query omits it).
+    struct CheckContext {
+        let name: String          // CheckRun.name, or StatusContext.context
+        let status: String?       // CheckRun.status (nil for StatusContext)
+        let conclusion: String?   // CheckRun.conclusion (nil for StatusContext)
+        let state: String?        // StatusContext.state (nil for CheckRun)
+        let isRequired: Bool?     // present only when the query requested it
+    }
+
+    /// Whether a context counts as failing (regardless of required-ness).
+    static func contextIsFailing(_ ctx: CheckContext) -> Bool {
+        if let conclusion = ctx.conclusion, Self.failingCheckRunConclusions.contains(conclusion) {
+            return true
+        }
+        if let state = ctx.state, Self.failingStatusContextStates.contains(state) {
+            return true
+        }
+        return false
+    }
+
+    /// Whether a context counts as pending (regardless of required-ness).
+    static func contextIsPending(_ ctx: CheckContext) -> Bool {
+        if let status = ctx.status, Self.pendingCheckRunStatuses.contains(status), ctx.conclusion == nil {
+            return true
+        }
+        if let state = ctx.state, Self.pendingStatusContextStates.contains(state) {
+            return true
+        }
+        return false
+    }
+
+    /// Pure parse of a single PR's last-commit status-check contexts into `[CheckContext]`.
     ///
-    /// - failing: any required context with a failing CheckRun conclusion or failing StatusContext state.
-    /// - pending: any required context that is a CheckRun still running (status in the pending set and
-    ///   no conclusion yet) or a StatusContext in a pending state.
-    ///
-    /// Expects the JSON shape returned by the `isRequired` GraphQL query
-    /// (`data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes`).
+    /// Expects the JSON shape
+    /// (`data.repository.pullRequest.commits.nodes[].commit.statusCheckRollup.contexts.nodes`).
+    /// For each node: if it has a `name` it's a CheckRun (read `status`/`conclusion`); else its
+    /// `context` field names a StatusContext (read `state`). `isRequired` is read as `Bool?`
+    /// (absent → nil). Nodes with no name/context are skipped. Iterates all commit nodes.
     /// Throws `PRStatusError.invalidJSON` if the outer shape can't be parsed.
-    static func requiredCheckSignals(fromContextsJSON data: Data) throws -> (failing: Bool, pending: Bool) {
+    static func parseCheckContexts(fromJSON data: Data) throws -> [CheckContext] {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataObj = root["data"] as? [String: Any],
               let repository = dataObj["repository"] as? [String: Any],
@@ -278,8 +286,7 @@ public actor PRStatusManager {
             throw PRStatusError.invalidJSON
         }
 
-        var failing = false
-        var pending = false
+        var result: [CheckContext] = []
 
         for commitNode in commitNodes.compactMap({ $0 as? [String: Any] }) {
             guard let commit = commitNode["commit"] as? [String: Any],
@@ -290,32 +297,71 @@ public actor PRStatusManager {
             }
 
             for context in contextNodes.compactMap({ $0 as? [String: Any] }) {
-                guard context["isRequired"] as? Bool == true else { continue }
-
-                let conclusion = context["conclusion"] as? String
-                if let conclusion, Self.failingCheckRunConclusions.contains(conclusion) {
-                    failing = true
+                let isRequired = context["isRequired"] as? Bool
+                if let name = context["name"] as? String {
+                    // CheckRun
+                    result.append(CheckContext(
+                        name: name,
+                        status: context["status"] as? String,
+                        conclusion: context["conclusion"] as? String,
+                        state: nil,
+                        isRequired: isRequired
+                    ))
+                } else if let name = context["context"] as? String {
+                    // StatusContext
+                    result.append(CheckContext(
+                        name: name,
+                        status: nil,
+                        conclusion: nil,
+                        state: context["state"] as? String,
+                        isRequired: isRequired
+                    ))
                 }
-                if let state = context["state"] as? String,
-                   Self.failingStatusContextStates.contains(state) {
-                    failing = true
-                }
-
-                // CheckRun pending: still running AND has no conclusion yet.
-                if let status = context["status"] as? String,
-                   Self.pendingCheckRunStatuses.contains(status),
-                   conclusion == nil {
-                    pending = true
-                }
-                // StatusContext pending.
-                if let state = context["state"] as? String,
-                   Self.pendingStatusContextStates.contains(state) {
-                    pending = true
-                }
+                // else: no name/context — skip.
             }
         }
 
+        return result
+    }
+
+    /// Build name → isRequired for every context whose `isRequired` was returned by the query.
+    static func classification(from contexts: [CheckContext]) -> [String: Bool] {
+        var map: [String: Bool] = [:]
+        for ctx in contexts where ctx.isRequired != nil {
+            map[ctx.name] = ctx.isRequired
+        }
+        return map
+    }
+
+    /// Compute live `(failing, pending)` from check contexts. Required-ness comes ONLY from the
+    /// passed map, never from `ctx.isRequired`.
+    static func checkSignals(
+        contexts: [CheckContext],
+        isRequiredByName: [String: Bool]
+    ) -> (failing: Bool, pending: Bool) {
+        var failing = false
+        var pending = false
+        for ctx in contexts where isRequiredByName[ctx.name] == true {
+            if Self.contextIsFailing(ctx) { failing = true }
+            if Self.contextIsPending(ctx) { pending = true }
+        }
         return (failing: failing, pending: pending)
+    }
+
+    /// Whether the cached `isRequired` classification must be refreshed. True when the head SHA
+    /// changed, or any failing/pending context's name isn't yet classified (we only need
+    /// classification for checks that could affect the signal).
+    static func needsClassificationRefresh(
+        contexts: [CheckContext],
+        cachedSha: String?,
+        currentSha: String,
+        isRequiredByName: [String: Bool]
+    ) -> Bool {
+        if cachedSha != currentSha { return true }
+        for ctx in contexts where Self.contextIsFailing(ctx) || Self.contextIsPending(ctx) {
+            if isRequiredByName[ctx.name] == nil { return true }
+        }
+        return false
     }
 
     /// Parse `owner` and `name` from a PR URL like
@@ -328,28 +374,26 @@ public actor PRStatusManager {
         return (owner: String(parts[0]), name: String(parts[1]))
     }
 
-    /// GraphQL query for a single PR's last-commit check contexts with per-check `isRequired`.
-    /// The literal `number` must appear in both `pullRequest(number:)` and `isRequired(pullRequestNumber:)`.
-    static func requiredChecksQuery(owner: String, name: String, number: Int) -> String {
+    /// Live check contexts WITHOUT isRequired — run every poll (cheap).
+    static func checkContextsQuery(owner: String, name: String, number: Int) -> String {
         """
         { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
           commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
             __typename
-            ... on CheckRun { status conclusion isRequired(pullRequestNumber: \(number)) }
-            ... on StatusContext { state isRequired(pullRequestNumber: \(number)) }
+            ... on CheckRun { name status conclusion }
+            ... on StatusContext { context state }
           } } } } } } } } }
         """
     }
 
-    /// Like `requiredChecksQuery` but also fetches the aggregate `statusCheckRollup.state`
-    /// (for pending detection) — used by the single-PR refresh path.
-    static func prCheckDetailQuery(owner: String, name: String, number: Int) -> String {
+    /// Per-check isRequired classification — run only when (re)building the cache.
+    static func requiredCheckNamesQuery(owner: String, name: String, number: Int) -> String {
         """
         { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
-          commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { nodes {
+          commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
             __typename
-            ... on CheckRun { status conclusion isRequired(pullRequestNumber: \(number)) }
-            ... on StatusContext { state isRequired(pullRequestNumber: \(number)) }
+            ... on CheckRun { name isRequired(pullRequestNumber: \(number)) }
+            ... on StatusContext { context isRequired(pullRequestNumber: \(number)) }
           } } } } } } } } }
         """
     }
@@ -453,47 +497,78 @@ public actor PRStatusManager {
         return data
     }
 
-    /// Single shared per-check query used by BOTH `fetchAll` and `refresh`: query the per-check
-    /// `isRequired` data for one PR and parse the `(failing, pending)` signals from the same data.
-    /// Conservative: returns `(failing: true, pending: false)` on any failure (gh missing,
-    /// non-zero exit, parse failure) so we keep showing red rather than falsely flipping to
-    /// green/settled.
-    private func fetchRequiredCheckSignals(
+    /// Fetch the LIVE check contexts (no `isRequired`) for one PR. Returns nil on any failure.
+    private func fetchCheckContexts(
         owner: String,
         name: String,
         number: Int,
         repoPath: String
-    ) async -> (failing: Bool, pending: Bool) {
-        let query = Self.requiredChecksQuery(owner: owner, name: name, number: number)
+    ) async -> [CheckContext]? {
+        let query = Self.checkContextsQuery(owner: owner, name: name, number: number)
         let args = ["api", "graphql", "-f", "query=\(query)"]
         guard let result = await runGHResult(args: args, repoPath: repoPath),
               result.exitStatus == 0,
               let data = Self.graphQLOutputData(stdout: result.stdout),
-              let signals = try? Self.requiredCheckSignals(fromContextsJSON: data) else {
-            logger.debug("isRequired query failed for PR #\(number, privacy: .public); assuming required checks failing")
-            return (failing: true, pending: false)
-        }
-        return signals
-    }
-
-    /// Pure extraction of the aggregate `statusCheckRollup.state` from the isRequired query shape.
-    static func rollupState(fromContextsJSON data: Data) -> String? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let dataObj = root["data"] as? [String: Any],
-              let repository = dataObj["repository"] as? [String: Any],
-              let pullRequest = repository["pullRequest"] as? [String: Any],
-              let commits = pullRequest["commits"] as? [String: Any],
-              let commitNodes = commits["nodes"] as? [Any] else {
+              let contexts = try? Self.parseCheckContexts(fromJSON: data) else {
+            logger.debug("check contexts query failed for PR #\(number, privacy: .public)")
             return nil
         }
-        for commitNode in commitNodes.compactMap({ $0 as? [String: Any] }) {
-            if let commit = commitNode["commit"] as? [String: Any],
-               let rollup = commit["statusCheckRollup"] as? [String: Any],
-               let state = rollup["state"] as? String {
-                return state
+        return contexts
+    }
+
+    /// Fetch the per-check `isRequired` classification (name → isRequired). Returns nil on failure.
+    private func fetchClassification(
+        owner: String,
+        name: String,
+        number: Int,
+        repoPath: String
+    ) async -> [String: Bool]? {
+        let query = Self.requiredCheckNamesQuery(owner: owner, name: name, number: number)
+        let args = ["api", "graphql", "-f", "query=\(query)"]
+        guard let result = await runGHResult(args: args, repoPath: repoPath),
+              result.exitStatus == 0,
+              let data = Self.graphQLOutputData(stdout: result.stdout),
+              let contexts = try? Self.parseCheckContexts(fromJSON: data) else {
+            logger.debug("isRequired classification query failed for PR #\(number, privacy: .public)")
+            return nil
+        }
+        return Self.classification(from: contexts)
+    }
+
+    /// Compute live `(failing, pending)` for one PR, using the cached `isRequired` classification
+    /// and refreshing that classification only when needed. `forceClassificationRefresh` is true
+    /// for the user-initiated refresh path so it always re-reads `isRequired`.
+    private func liveCheckSignals(
+        worktreeID: UUID,
+        owner: String,
+        name: String,
+        number: Int,
+        headSha: String,
+        repoPath: String,
+        forceClassificationRefresh: Bool
+    ) async -> (failing: Bool, pending: Bool) {
+        guard let contexts = await fetchCheckContexts(owner: owner, name: name, number: number, repoPath: repoPath) else {
+            return (true, false)   // conservative: keep red when we can't read live state
+        }
+        let cached = requiredChecksCache[worktreeID]
+        var map = cached?.isRequiredByName ?? [:]
+        let mustRefresh = forceClassificationRefresh
+            || Self.needsClassificationRefresh(
+                contexts: contexts,
+                cachedSha: cached?.headSha,
+                currentSha: headSha,
+                isRequiredByName: map
+            )
+        if mustRefresh {
+            if let fresh = await fetchClassification(owner: owner, name: name, number: number, repoPath: repoPath) {
+                map = fresh
+                requiredChecksCache[worktreeID] = RequiredChecksClassification(headSha: headSha, isRequiredByName: map)
+            } else {
+                // classification query failed — be conservative: treat failing/pending checks as required.
+                return (contexts.contains(where: Self.contextIsFailing), contexts.contains(where: Self.contextIsPending))
             }
         }
-        return nil
+        return Self.checkSignals(contexts: contexts, isRequiredByName: map)
     }
 
     private func runGH(args: [String], repoPath: String) async -> String? {

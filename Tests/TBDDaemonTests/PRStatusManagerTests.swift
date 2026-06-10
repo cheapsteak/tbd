@@ -398,103 +398,183 @@ struct PRStatusManagerTests {
         #expect(candidates == ["feature/local", "tbd/upstream-feature"])
     }
 
-    // MARK: - Required-check parsing
+    // MARK: - parseCheckContexts
 
-    @Test("requiredCheckSignals reports failing when a required CheckRun is FAILURE")
-    func requiredCheckRunFailureIsRequiredFailing() throws {
+    @Test("parseCheckContexts parses a mixed CheckRun + StatusContext blob")
+    func parseCheckContextsMixed() throws {
         let json = """
         {
           "data": { "repository": { "pullRequest": { "commits": { "nodes": [
             { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
-              { "__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE", "isRequired": true }
+              { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE", "isRequired": true },
+              { "__typename": "StatusContext", "context": "ci/legacy", "state": "PENDING" }
             ] } } } }
           ] } } } }
         }
         """.data(using: .utf8)!
 
-        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
-        #expect(signals.failing == true)
-        #expect(signals.pending == false)
+        let contexts = try PRStatusManager.parseCheckContexts(fromJSON: json)
+        #expect(contexts.count == 2)
+
+        let build = contexts[0]
+        #expect(build.name == "build")
+        #expect(build.status == "COMPLETED")
+        #expect(build.conclusion == "FAILURE")
+        #expect(build.state == nil)
+        #expect(build.isRequired == true)
+
+        let legacy = contexts[1]
+        #expect(legacy.name == "ci/legacy")
+        #expect(legacy.status == nil)
+        #expect(legacy.conclusion == nil)
+        #expect(legacy.state == "PENDING")
+        #expect(legacy.isRequired == nil)
     }
 
-    @Test("requiredCheckSignals reports pending when a required CheckRun is IN_PROGRESS with no conclusion")
-    func requiredCheckRunInProgressIsPending() throws {
+    @Test("parseCheckContexts collects across multiple commit nodes and skips nameless nodes")
+    func parseCheckContextsMultipleCommitNodes() throws {
         let json = """
         {
           "data": { "repository": { "pullRequest": { "commits": { "nodes": [
             { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
-              { "__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": null, "isRequired": true }
+              { "__typename": "CheckRun", "name": "a", "status": "COMPLETED", "conclusion": "SUCCESS" },
+              { "__typename": "Other" }
+            ] } } } },
+            { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
+              { "__typename": "StatusContext", "context": "b", "state": "SUCCESS" }
             ] } } } }
           ] } } } }
         }
         """.data(using: .utf8)!
 
-        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
-        #expect(signals.failing == false)
-        #expect(signals.pending == true)
+        let contexts = try PRStatusManager.parseCheckContexts(fromJSON: json)
+        #expect(contexts.count == 2)
+        #expect(contexts.map(\.name) == ["a", "b"])
     }
 
-    @Test("requiredCheckSignals reports pending when a required StatusContext is PENDING")
-    func requiredStatusContextPendingIsPending() throws {
-        let json = """
-        {
-          "data": { "repository": { "pullRequest": { "commits": { "nodes": [
-            { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
-              { "__typename": "StatusContext", "state": "PENDING", "isRequired": true }
-            ] } } } }
-          ] } } } }
-        }
-        """.data(using: .utf8)!
-
-        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
-        #expect(signals.pending == true)
-        #expect(signals.failing == false)
-    }
-
-    @Test("requiredCheckSignals ignores non-required failing/running checks (core bug case)")
-    func nonRequiredFailingAndRunningWithRequiredSuccessIsNeither() throws {
-        let json = """
-        {
-          "data": { "repository": { "pullRequest": { "commits": { "nodes": [
-            { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
-              { "__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE", "isRequired": false },
-              { "__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": null, "isRequired": false },
-              { "__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS", "isRequired": true }
-            ] } } } }
-          ] } } } }
-        }
-        """.data(using: .utf8)!
-
-        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
-        #expect(signals.failing == false)
-        #expect(signals.pending == false)
-    }
-
-    @Test("requiredCheckSignals reports failing when a required StatusContext is ERROR")
-    func requiredStatusContextErrorIsRequiredFailing() throws {
-        let json = """
-        {
-          "data": { "repository": { "pullRequest": { "commits": { "nodes": [
-            { "commit": { "statusCheckRollup": { "contexts": { "nodes": [
-              { "__typename": "StatusContext", "state": "ERROR", "isRequired": true }
-            ] } } } }
-          ] } } } }
-        }
-        """.data(using: .utf8)!
-
-        let signals = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
-        #expect(signals.failing == true)
-        #expect(signals.pending == false)
-    }
-
-    @Test("requiredCheckSignals throws on malformed outer shape")
-    func requiredCheckSignalsThrowsOnBadJSON() {
+    @Test("parseCheckContexts throws on malformed outer shape")
+    func parseCheckContextsThrowsOnBadJSON() {
         let json = """
         { "data": { "nope": true } }
         """.data(using: .utf8)!
         #expect(throws: PRStatusError.self) {
-            _ = try PRStatusManager.requiredCheckSignals(fromContextsJSON: json)
+            _ = try PRStatusManager.parseCheckContexts(fromJSON: json)
         }
+    }
+
+    // MARK: - checkSignals
+
+    @Test("checkSignals reports failing for a required FAILURE CheckRun")
+    func checkSignalsRequiredFailure() {
+        let contexts = [
+            PRStatusManager.CheckContext(name: "build", status: "COMPLETED", conclusion: "FAILURE", state: nil, isRequired: nil)
+        ]
+        let signals = PRStatusManager.checkSignals(contexts: contexts, isRequiredByName: ["build": true])
+        #expect(signals.failing == true)
+        #expect(signals.pending == false)
+    }
+
+    @Test("checkSignals reports pending for a required IN_PROGRESS CheckRun with no conclusion")
+    func checkSignalsRequiredPending() {
+        let contexts = [
+            PRStatusManager.CheckContext(name: "build", status: "IN_PROGRESS", conclusion: nil, state: nil, isRequired: nil)
+        ]
+        let signals = PRStatusManager.checkSignals(contexts: contexts, isRequiredByName: ["build": true])
+        #expect(signals.failing == false)
+        #expect(signals.pending == true)
+    }
+
+    @Test("checkSignals ignores non-required failing/running checks (core bug case)")
+    func checkSignalsNonRequiredFailingRunningWithRequiredSuccess() {
+        let contexts = [
+            PRStatusManager.CheckContext(name: "lint", status: "COMPLETED", conclusion: "FAILURE", state: nil, isRequired: nil),
+            PRStatusManager.CheckContext(name: "flaky", status: "IN_PROGRESS", conclusion: nil, state: nil, isRequired: nil),
+            PRStatusManager.CheckContext(name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: nil, isRequired: nil)
+        ]
+        let map = ["lint": false, "flaky": false, "build": true]
+        let signals = PRStatusManager.checkSignals(contexts: contexts, isRequiredByName: map)
+        #expect(signals.failing == false)
+        #expect(signals.pending == false)
+    }
+
+    @Test("checkSignals uses the map not ctx.isRequired")
+    func checkSignalsUsesMapNotContextFlag() {
+        // The context claims isRequired: true, but the authoritative map says false.
+        let contexts = [
+            PRStatusManager.CheckContext(name: "build", status: "COMPLETED", conclusion: "FAILURE", state: nil, isRequired: true)
+        ]
+        let signals = PRStatusManager.checkSignals(contexts: contexts, isRequiredByName: ["build": false])
+        #expect(signals.failing == false)
+        #expect(signals.pending == false)
+    }
+
+    @Test("checkSignals reports failing for a required ERROR StatusContext")
+    func checkSignalsRequiredStatusContextError() {
+        let contexts = [
+            PRStatusManager.CheckContext(name: "ci/legacy", status: nil, conclusion: nil, state: "ERROR", isRequired: nil)
+        ]
+        let signals = PRStatusManager.checkSignals(contexts: contexts, isRequiredByName: ["ci/legacy": true])
+        #expect(signals.failing == true)
+        #expect(signals.pending == false)
+    }
+
+    // MARK: - classification
+
+    @Test("classification maps only contexts with a non-nil isRequired")
+    func classificationOnlyKnownContexts() {
+        let contexts = [
+            PRStatusManager.CheckContext(name: "build", status: nil, conclusion: nil, state: nil, isRequired: true),
+            PRStatusManager.CheckContext(name: "lint", status: nil, conclusion: nil, state: nil, isRequired: false),
+            PRStatusManager.CheckContext(name: "unknown", status: nil, conclusion: nil, state: nil, isRequired: nil)
+        ]
+        let map = PRStatusManager.classification(from: contexts)
+        #expect(map == ["build": true, "lint": false])
+    }
+
+    // MARK: - needsClassificationRefresh
+
+    @Test("needsClassificationRefresh returns true when the SHA changed")
+    func needsRefreshOnShaMismatch() {
+        let contexts = [
+            PRStatusManager.CheckContext(name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: nil, isRequired: nil)
+        ]
+        let needs = PRStatusManager.needsClassificationRefresh(
+            contexts: contexts, cachedSha: "old", currentSha: "new", isRequiredByName: ["build": true]
+        )
+        #expect(needs == true)
+    }
+
+    @Test("needsClassificationRefresh returns false when SHA matches and all failing/pending names are classified")
+    func needsRefreshFalseWhenAllClassified() {
+        let contexts = [
+            PRStatusManager.CheckContext(name: "build", status: "COMPLETED", conclusion: "FAILURE", state: nil, isRequired: nil)
+        ]
+        let needs = PRStatusManager.needsClassificationRefresh(
+            contexts: contexts, cachedSha: "sha", currentSha: "sha", isRequiredByName: ["build": true]
+        )
+        #expect(needs == false)
+    }
+
+    @Test("needsClassificationRefresh returns true when a failing context name is unclassified")
+    func needsRefreshTrueWhenFailingUnclassified() {
+        let contexts = [
+            PRStatusManager.CheckContext(name: "build", status: "COMPLETED", conclusion: "FAILURE", state: nil, isRequired: nil)
+        ]
+        let needs = PRStatusManager.needsClassificationRefresh(
+            contexts: contexts, cachedSha: "sha", currentSha: "sha", isRequiredByName: [:]
+        )
+        #expect(needs == true)
+    }
+
+    @Test("needsClassificationRefresh returns false when an unclassified context is passing")
+    func needsRefreshFalseWhenUnclassifiedPassing() {
+        let contexts = [
+            PRStatusManager.CheckContext(name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: nil, isRequired: nil)
+        ]
+        let needs = PRStatusManager.needsClassificationRefresh(
+            contexts: contexts, cachedSha: "sha", currentSha: "sha", isRequiredByName: [:]
+        )
+        #expect(needs == false)
     }
 
     // MARK: - parseOwnerRepo
@@ -516,11 +596,11 @@ struct PRStatusManagerTests {
     /// A malformed (unbalanced) GraphQL query is rejected by the server at parse time,
     /// which silently trips the conservative "assume failing" fallback and forces a red icon.
     /// Guard the brace balance here so that can't regress.
-    @Test("isRequired query builders produce brace-balanced GraphQL")
+    @Test("check query builders produce brace-balanced GraphQL")
     func checkQueriesAreBraceBalanced() {
         for query in [
-            PRStatusManager.requiredChecksQuery(owner: "o", name: "r", number: 21539),
-            PRStatusManager.prCheckDetailQuery(owner: "o", name: "r", number: 21539)
+            PRStatusManager.checkContextsQuery(owner: "o", name: "r", number: 21539),
+            PRStatusManager.requiredCheckNamesQuery(owner: "o", name: "r", number: 21539)
         ] {
             let opens = query.filter { $0 == "{" }.count
             let closes = query.filter { $0 == "}" }.count
@@ -528,9 +608,9 @@ struct PRStatusManagerTests {
         }
     }
 
-    @Test("isRequired query embeds the PR number in both required positions")
+    @Test("requiredCheckNamesQuery embeds the PR number in both required positions")
     func checkQueriesEmbedNumber() {
-        let query = PRStatusManager.requiredChecksQuery(owner: "o", name: "r", number: 21539)
+        let query = PRStatusManager.requiredCheckNamesQuery(owner: "o", name: "r", number: 21539)
         #expect(query.contains("pullRequest(number: 21539)"))
         #expect(query.contains("isRequired(pullRequestNumber: 21539)"))
     }
@@ -556,87 +636,4 @@ struct PRStatusManagerTests {
         #expect(all[id] == nil)
     }
 
-    // MARK: - shouldRefetchSignals (per-check signal cache decision)
-
-    private static let baseDate = Date(timeIntervalSince1970: 1_000_000)
-    private static let testTTL: TimeInterval = 600
-
-    @Test("shouldRefetchSignals returns true when there is no cache")
-    func shouldRefetchWithNilCache() {
-        let result = PRStatusManager.shouldRefetchSignals(
-            cached: nil,
-            currentSha: "abc123",
-            now: Self.baseDate,
-            ttl: Self.testTTL
-        )
-        #expect(result == true)
-    }
-
-    @Test("shouldRefetchSignals returns true when the head commit SHA changed")
-    func shouldRefetchOnDifferentSha() {
-        let cached = PRStatusManager.CheckSignalCacheEntry(
-            headSha: "old-sha",
-            failing: false,
-            pending: false,
-            fetchedAt: Self.baseDate
-        )
-        let result = PRStatusManager.shouldRefetchSignals(
-            cached: cached,
-            currentSha: "new-sha",
-            now: Self.baseDate,
-            ttl: Self.testTTL
-        )
-        #expect(result == true)
-    }
-
-    @Test("shouldRefetchSignals returns true when a required check was pending last time")
-    func shouldRefetchWhenPending() {
-        let cached = PRStatusManager.CheckSignalCacheEntry(
-            headSha: "abc123",
-            failing: false,
-            pending: true,
-            fetchedAt: Self.baseDate
-        )
-        let result = PRStatusManager.shouldRefetchSignals(
-            cached: cached,
-            currentSha: "abc123",
-            now: Self.baseDate,
-            ttl: Self.testTTL
-        )
-        #expect(result == true)
-    }
-
-    @Test("shouldRefetchSignals returns false on a settled same-commit hit within ttl (skip)")
-    func shouldNotRefetchOnSettledHit() {
-        let cached = PRStatusManager.CheckSignalCacheEntry(
-            headSha: "abc123",
-            failing: true,
-            pending: false,
-            fetchedAt: Self.baseDate
-        )
-        let result = PRStatusManager.shouldRefetchSignals(
-            cached: cached,
-            currentSha: "abc123",
-            now: Self.baseDate.addingTimeInterval(Self.testTTL - 1),
-            ttl: Self.testTTL
-        )
-        #expect(result == false)
-    }
-
-    @Test("shouldRefetchSignals returns true when the cache is older than ttl")
-    func shouldRefetchWhenStale() {
-        let cached = PRStatusManager.CheckSignalCacheEntry(
-            headSha: "abc123",
-            failing: true,
-            pending: false,
-            fetchedAt: Self.baseDate
-        )
-        let result = PRStatusManager.shouldRefetchSignals(
-            cached: cached,
-            currentSha: "abc123",
-            now: Self.baseDate.addingTimeInterval(Self.testTTL + 1),
-            ttl: Self.testTTL
-        )
-        #expect(result == true)
-    }
 }
