@@ -35,21 +35,25 @@ extension AppState {
         updateNavigationFlags()
     }
 
-    /// Move back one entry in the history and apply it. No-op if no prior entry.
+    /// Move back to the nearest usable prior entry and apply it. Skips stale
+    /// entries (archived/gone worktrees, removed repos) so back never lands on
+    /// a dead view. No-op if no usable prior entry exists.
     func navigateBack() {
         guard canGoBack else { return }
-        navigationIndex -= 1
-        let entry = navigationEntries[navigationIndex]
-        withNavigating { applyNavigationEntry(entry) }
+        guard let index = usableEntryIndex(from: navigationIndex - 1, step: -1) else { return }
+        navigationIndex = index
+        withNavigating { applyNavigationEntry(navigationEntries[index]) }
         updateNavigationFlags()
     }
 
-    /// Move forward one entry in the history and apply it. No-op if no next entry.
+    /// Move forward to the nearest usable next entry and apply it. Skips stale
+    /// entries (archived/gone worktrees, removed repos) so forward never lands
+    /// on a dead view. No-op if no usable next entry exists.
     func navigateForward() {
         guard canGoForward else { return }
-        navigationIndex += 1
-        let entry = navigationEntries[navigationIndex]
-        withNavigating { applyNavigationEntry(entry) }
+        guard let index = usableEntryIndex(from: navigationIndex + 1, step: 1) else { return }
+        navigationIndex = index
+        withNavigating { applyNavigationEntry(navigationEntries[index]) }
         updateNavigationFlags()
     }
 
@@ -59,29 +63,42 @@ extension AppState {
     /// and applies the first usable one. Returns `false` (leaving selection
     /// untouched) when no usable entry exists, so callers can fall back to the
     /// plain empty-selection behavior.
-    @discardableResult
     func navigateBackPastArchived(_ archivedID: UUID) -> Bool {
         guard navigationIndex >= 0, !navigationEntries.isEmpty else { return false }
         let start = min(navigationIndex, navigationEntries.count - 1)
-        for index in stride(from: start, through: 0, by: -1) {
-            let entry = navigationEntries[index]
-            guard isUsableEntry(entry, excluding: archivedID) else { continue }
-            navigationIndex = index
-            withNavigating { applyNavigationEntry(entry) }
-            updateNavigationFlags()
-            return true
+        guard let index = usableEntryIndex(from: start, step: -1, excluding: archivedID) else {
+            return false
         }
-        return false
+        navigationIndex = index
+        withNavigating { applyNavigationEntry(navigationEntries[index]) }
+        updateNavigationFlags()
+        return true
     }
 
-    /// Whether a history entry is still a valid landing spot once `archivedID`
-    /// is gone: worktree entries must not reference the archived ID and every
-    /// referenced worktree must still exist; repo entries must reference a
-    /// repo we still know about.
-    private func isUsableEntry(_ entry: NavigationEntry, excluding archivedID: UUID) -> Bool {
+    /// Walk `navigationEntries` from `start` in `step` direction (+1/-1) and
+    /// return the index of the first usable entry, or nil if none.
+    private func usableEntryIndex(
+        from start: Int,
+        step: Int,
+        excluding archivedID: UUID? = nil
+    ) -> Int? {
+        var index = start
+        while index >= 0 && index < navigationEntries.count {
+            if isUsableEntry(navigationEntries[index], excluding: archivedID) { return index }
+            index += step
+        }
+        return nil
+    }
+
+    /// Whether a history entry is still a valid landing spot: worktree entries
+    /// must not reference `archivedID` (when given) and every referenced
+    /// worktree must still exist; repo entries must reference a repo we still
+    /// know about.
+    private func isUsableEntry(_ entry: NavigationEntry, excluding archivedID: UUID? = nil) -> Bool {
         switch entry {
         case .worktrees(let ids):
-            guard !ids.isEmpty, !ids.contains(archivedID) else { return false }
+            guard !ids.isEmpty else { return false }
+            if let archivedID, ids.contains(archivedID) { return false }
             let existing = Set(worktrees.values.flatMap { $0 }.map(\.id))
             return ids.allSatisfy { existing.contains($0) }
         case .repo(let id):

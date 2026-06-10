@@ -175,6 +175,85 @@ struct ArchiveNavigateBackTests {
         }
     }
 
+    // MARK: - Forward after archive-back must not re-select the archived ID
+
+    @Test func forwardAfterArchiveBack_doesNotReselectArchivedWorktree() {
+        withState { state in
+            let repoID = UUID()
+            let a = UUID()
+            let b = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: a, repoID: repoID),
+                                        makeWorktree(id: b, repoID: repoID)]]
+
+            // History: [A], [B]; archive B auto-navigates back to [A] and
+            // leaves [B] as (stale) forward history.
+            state.selectedWorktreeIDs = [a]
+            state.selectedWorktreeIDs = [b]
+            state.removeArchivedWorktreeFromState(id: b)
+            #expect(state.selectedWorktreeIDs == [a])
+
+            state.navigateForward()
+
+            // Forward skips the dead [B] entry — selection must not become
+            // the archived (now nonexistent) worktree or go empty.
+            #expect(state.selectedWorktreeIDs == [a])
+            #expect(state.selectionOrder == [a])
+        }
+    }
+
+    // MARK: - navigateBack skips stale entries
+
+    @Test func navigateBack_skipsStaleEntries() {
+        withState { state in
+            let repoID = UUID()
+            let a = UUID()
+            let b = UUID()
+            let gone = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: a, repoID: repoID),
+                                        makeWorktree(id: b, repoID: repoID),
+                                        makeWorktree(id: gone, repoID: repoID)]]
+
+            // History: [A], [gone], [B] — then `gone` disappears.
+            state.selectedWorktreeIDs = [a]
+            state.selectedWorktreeIDs = [gone]
+            state.selectedWorktreeIDs = [b]
+            state.worktrees[repoID]?.removeAll { $0.id == gone }
+
+            state.navigateBack()
+
+            #expect(state.selectedWorktreeIDs == [a])
+            #expect(state.selectionOrder == [a])
+        }
+    }
+
+    // MARK: - navigateForward skips stale entries
+
+    @Test func navigateForward_skipsStaleEntries() {
+        withState { state in
+            let repoID = UUID()
+            let a = UUID()
+            let c = UUID()
+            let gone = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: a, repoID: repoID),
+                                        makeWorktree(id: c, repoID: repoID),
+                                        makeWorktree(id: gone, repoID: repoID)]]
+
+            // History: [A], [gone], [C] — then `gone` disappears.
+            state.selectedWorktreeIDs = [a]
+            state.selectedWorktreeIDs = [gone]
+            state.selectedWorktreeIDs = [c]
+            state.worktrees[repoID]?.removeAll { $0.id == gone }
+
+            state.navigateBack()    // lands on [A], skipping [gone]
+            #expect(state.selectedWorktreeIDs == [a])
+
+            state.navigateForward() // skips [gone], lands on [C]
+
+            #expect(state.selectedWorktreeIDs == [c])
+            #expect(state.selectionOrder == [c])
+        }
+    }
+
     // MARK: - Empty history: no crash
 
     @Test func emptyHistory_fallsBackToEmptySelection() {
