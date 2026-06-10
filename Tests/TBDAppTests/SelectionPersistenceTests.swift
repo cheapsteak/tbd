@@ -120,8 +120,8 @@ struct SelectionPersistenceTests {
         }
     }
 
-    @Test("restoreSavedSelection does not record a navigation history entry")
-    func restoreDoesNotRecordNavigation() {
+    @Test("restoreSavedSelection records exactly one navigation entry with correct saved order")
+    func restoreRecordsSingleCorrectlyOrderedNavigationEntry() {
         withIsolatedDefaults { defaults in
             let id1 = UUID()
             let id2 = UUID()
@@ -131,8 +131,10 @@ struct SelectionPersistenceTests {
             let state = AppState(userDefaults: defaults)
             state.restoreSavedSelection(validWorktreeIDs: [id1, id2])
 
-            // Navigation history should be empty — restore is not a user action.
-            #expect(state.navigationEntries.isEmpty)
+            // Exactly one entry must exist so cmd+[ can return to the restored
+            // selection after the user navigates elsewhere.
+            #expect(state.navigationEntries.count == 1)
+            #expect(state.navigationEntries.first == .worktrees([id1, id2]))
             // selectionOrder must reflect the saved order, not Set-iteration order.
             #expect(state.selectionOrder == [id1, id2])
         }

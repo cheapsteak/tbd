@@ -724,18 +724,22 @@ final class AppState: ObservableObject {
         let validSet = Set(validWorktreeIDs)
         let filteredIDs = savedIDs.filter { validSet.contains($0) }
         guard !filteredIDs.isEmpty else { return }
-        // Suppress navigation recording: this is a startup restore, not a
-        // user navigation action. The selectedWorktreeIDs didSet calls
-        // recordNavigation with Set-iteration order; gating on isNavigating
-        // prevents that scrambled entry from polluting the history.
+        // Suppress navigation recording while mutating state: the
+        // selectedWorktreeIDs didSet would call recordNavigation with
+        // Set-iteration order before we fix selectionOrder. Gate on
+        // isNavigating to block that scrambled entry.
         isNavigating = true
-        defer { isNavigating = false }
         // Set the IDs — didSet rebuilds selectionOrder in Set-iteration order.
         selectedWorktreeIDs = Set(filteredIDs)
         // Explicitly restore the saved order, overriding the non-deterministic
         // Set-iteration order that the didSet produced.
         // The selectionOrder.didSet will persist this corrected order.
         selectionOrder = filteredIDs
+        // Re-enable recording before the explicit recordNavigation call below.
+        isNavigating = false
+        // Record exactly one entry with the correct saved order so cmd+[ can
+        // return to the restored selection after the user navigates elsewhere.
+        recordNavigation(.worktrees(filteredIDs))
     }
 
     func stopPolling() {
