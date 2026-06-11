@@ -14,4 +14,14 @@ import Testing
 /// To add a new `TBD_HOME`-mutating suite, declare it inside an
 /// `extension TBDHomeSerialized { ... }` so it becomes a nested (and therefore
 /// serialized) child of this suite.
+///
+/// **Important — this domain only serializes suites WITHIN TBDDaemonTests.**
+/// All test targets (TBDSharedTests, TBDDaemonTests, TBDAppTests, …) compile
+/// into ONE process and Swift Testing runs suites across all targets in
+/// parallel. Suites in OTHER targets cannot nest here (cross-target imports
+/// are impossible), so they must never call `setenv("TBD_HOME")`. Use
+/// injection seams instead:
+/// - `TBDConstants.*(environment:)` — pass an explicit env dict
+/// - `ThemeStore(themesDirectory:)` — override the themes directory
+/// - `AppearanceSettings(userThemesDirectory:)` — override the themes lookup dir
 @Suite(.serialized) enum TBDHomeSerialized {}

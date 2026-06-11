@@ -59,7 +59,7 @@ final class AppearanceSettings: ObservableObject {
     /// effort detection at init — see `TmuxConfigStyleDetector`.
     @Published private(set) var hasTmuxStyleOverrides: Bool
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, userThemesDirectory: URL? = nil) {
         self.defaults = defaults
 
         // Font name — accept any non-empty string; resolution happens in `font`.
@@ -78,12 +78,14 @@ final class AppearanceSettings: ObservableObject {
         // before `ThemeStore.reloadFromDisk()` ever ran, silently reverting
         // the user to Tango on every relaunch. Filesystem check is intentional
         // (not a ThemeStore dependency) so this stays a pure init step.
+        // `userThemesDirectory` overrides the lookup directory for tests (same
+        // override pattern as `ThemeStore(themesDirectory:)`).
         let storedScheme = defaults.string(forKey: Keys.schemeID) ?? Defaults.schemeID
         let bundledHit = ColorSchemes.bundled.contains(where: { $0.id == storedScheme })
+        let themesDir = userThemesDirectory
+            ?? TBDConstants.configDir.appendingPathComponent("terminal-themes")
         let userFileHit = FileManager.default.fileExists(
-            atPath: TBDConstants.configDir
-                .appendingPathComponent("terminal-themes/\(storedScheme).json")
-                .path
+            atPath: themesDir.appendingPathComponent("\(storedScheme).json").path
         )
         self.schemeID = (bundledHit || userFileHit) ? storedScheme : Defaults.schemeID
 

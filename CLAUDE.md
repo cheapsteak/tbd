@@ -35,7 +35,9 @@ The database stores worktree display names, custom config, and notification hist
 - `TBD_HOME` redirects the base config directory (`~/tbd` by default). Every derived path (`socketPath`, `databasePath`, `pidFilePath`, `portFilePath`, `reposDir`) follows.
 - `TBD_SOCKET_PATH` overrides only the socket — an escape hatch for darwin's ~104-char `sun_path` limit when `TBD_HOME` is a deep tmp path.
 
-Tests that need filesystem isolation should `setenv("TBD_HOME", "/some/tmp/dir", 1)` (and optionally `TBD_SOCKET_PATH`) before any `TBDConstants.<path>` access. Tests that mutate `UserDefaults` should construct `AppState(userDefaults: UserDefaults(suiteName:))` and tear the suite down with `removePersistentDomain(forName:)` — `UserDefaults.standard` on this unbundled executable is the developer's real `TBDApp.plist`.
+Integration-style tests that exercise production code paths which internally read `TBD_HOME` — and thus cannot accept an explicit env dict — may use `setenv("TBD_HOME", "/some/tmp/dir", 1)` (and optionally `TBD_SOCKET_PATH`); for all other cases prefer the injection-seam approach, and see the next paragraph for where `setenv` is permitted. Tests that mutate `UserDefaults` should construct `AppState(userDefaults: UserDefaults(suiteName:))` and tear the suite down with `removePersistentDomain(forName:)` — `UserDefaults.standard` on this unbundled executable is the developer's real `TBDApp.plist`.
+
+For unit tests, prefer injection seams over `setenv`: pass an explicit env dict to `TBDConstants.*(environment:)`, override the themes directory via `ThemeStore(themesDirectory:)` or `AppearanceSettings(userThemesDirectory:)`. **`setenv("TBD_HOME", ...)` in tests is allowed ONLY inside suites nested under `TBDHomeSerialized` in `Tests/TBDDaemonTests`.** All test targets compile into one process and Swift Testing runs suites in parallel across all targets; an unserialized `setenv` in any other target races every concurrent suite — this was the root cause of a real CI flake in `ConstantsTests.derivedPathsFollowTBDHome`.
 
 ### Database migrations must update the shared model
 When adding a DB column in `Sources/TBDDaemon/Database/Database.swift`:
