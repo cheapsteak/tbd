@@ -39,11 +39,22 @@ extension RPCRouter {
         let existingBranchRef = useExistingBranch ? params.branch : nil
         await repoSerializer.submit(repoID: pending.repoID) {
             do {
-                try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef)
-                subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
-                    worktreeID: pending.id, repoID: pending.repoID,
-                    name: pending.name, path: pending.path
-                )))
+                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef)
+                switch completion {
+                case .ready:
+                    subs.broadcast(delta: .worktreeCreated(WorktreeDelta(
+                        worktreeID: pending.id, repoID: pending.repoID,
+                        name: pending.name, path: pending.path
+                    )))
+                case .preSessionPending:
+                    // The lifecycle already broadcast `.worktreeCreated` (and
+                    // `.terminalCreated` for the pre-session terminal) so the
+                    // app refreshes early; the detached phase-3 task spawns
+                    // the primary terminals OUTSIDE this serializer lane and
+                    // broadcasts their `.terminalCreated` deltas itself.
+                    // Broadcasting again here would duplicate the row.
+                    break
+                }
             } catch {
                 // completeCreateWorktree already deletes the DB row on failure.
                 // Broadcast an archive delta so clients remove the pending entry.

@@ -53,6 +53,14 @@ public struct WorktreeLifecycle: Sendable {
     public let subscriptions: StateSubscriptionManager?
     public let modelProfileResolver: ModelProfileResolver?
     public let pendingQuestions: PendingQuestionStore
+    /// How long to wait for a blocking `preSession` hook before giving up and
+    /// spawning the primary terminals anyway. Injectable for tests.
+    public let preSessionTimeout: TimeInterval
+    /// Poll interval for the preSession completion marker file.
+    public let preSessionPollInterval: TimeInterval
+
+    /// Default `preSession` hook timeout (production value).
+    public static let defaultPreSessionTimeout: TimeInterval = 600
 
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
@@ -66,7 +74,9 @@ public struct WorktreeLifecycle: Sendable {
         hooks: HookResolver,
         subscriptions: StateSubscriptionManager? = nil,
         modelProfileResolver: ModelProfileResolver? = nil,
-        pendingQuestions: PendingQuestionStore = PendingQuestionStore()
+        pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        preSessionTimeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
+        preSessionPollInterval: TimeInterval = 0.5
     ) {
         self.db = db
         self.git = git
@@ -75,5 +85,7 @@ public struct WorktreeLifecycle: Sendable {
         self.subscriptions = subscriptions
         self.modelProfileResolver = modelProfileResolver
         self.pendingQuestions = pendingQuestions
+        self.preSessionTimeout = preSessionTimeout
+        self.preSessionPollInterval = preSessionPollInterval
     }
 }

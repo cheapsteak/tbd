@@ -4,6 +4,20 @@ import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeLifecycle")
 
+/// Result of `completeCreateWorktree`. The pre-session path defers the
+/// primary terminal spawn to a background task so the caller's serializer
+/// lane isn't blocked for the duration of the hook (e.g. an `npm install`).
+public enum WorktreeCreateCompletion: Sendable {
+    /// All terminals were spawned inline; the worktree is `.active` and the
+    /// caller should broadcast `.worktreeCreated` (today's behavior).
+    case ready
+    /// A blocking `preSession` hook terminal was spawned. The lifecycle has
+    /// already broadcast `.worktreeCreated` + `.terminalCreated`; `phase3`
+    /// awaits the hook, spawns the primary terminals, and flips the worktree
+    /// to `.active`. The worktree stays `.creating` until it finishes.
+    case preSessionPending(phase3: Task<Void, Never>)
+}
+
 extension WorktreeLifecycle {
     // MARK: - Create
 
@@ -16,7 +30,12 @@ extension WorktreeLifecycle {
         // Pass the original branch ref (may include `origin/` prefix) through
         // so phase 2 can dispatch to the correct git command.
         let existingBranchRef = useExistingBranch ? branch : nil
-        try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef)
+        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef)
+        // Legacy synchronous contract: the returned worktree is fully set up.
+        // Await phase 3 inline when a preSession hook gated the primary spawn.
+        if case .preSessionPending(let phase3) = completion {
+            await phase3.value
+        }
         guard let completed = try await db.worktrees.get(id: pending.id) else {
             throw WorktreeLifecycleError.worktreeNotFound(pending.id)
         }
@@ -127,9 +146,15 @@ extension WorktreeLifecycle {
     /// Phase 2: Async. Performs git fetch, git worktree add, tmux setup,
     /// then updates status to `.active`. On failure, deletes the DB row.
     ///
+    /// When a `preSession` hook resolves, only the hook's terminal is created
+    /// here; the primary terminals are spawned by the returned
+    /// `.preSessionPending` task once the hook completes (or times out).
+    /// Phase-3 failures never delete the DB row — the checkout is valid.
+    ///
     /// When `existingBranchRef` is non-nil, the worktree is checked out from
     /// that existing ref (local or `origin/*`) — no fresh branch is created.
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil) async throws {
+    @discardableResult
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -200,18 +225,58 @@ extension WorktreeLifecycle {
                 resultPath = result.path
             }
 
-            // 5. Setup tmux terminals
-            try await setupTerminals(
+            // 5. Setup tmux terminals.
+            // 5a. Blocking preSession hook: spawn its terminal FIRST and gate
+            // the primary terminals on its completion marker. The wait runs in
+            // a background task so the caller's RepoSerializer lane is freed
+            // immediately — never block it for the duration of the hook.
+            if let preSession = try await spawnPreSessionTerminal(
+                worktree: worktree, repo: repo,
+                worktreePath: resultPath,
+                cols: cols, rows: rows
+            ) {
+                // Broadcast early so the app refreshes and shows the live hook
+                // output instead of the empty state. The RPC handler skips its
+                // own `.worktreeCreated` for the `.preSessionPending` result,
+                // so this stays a single broadcast.
+                subscriptions?.broadcast(delta: .worktreeCreated(WorktreeDelta(
+                    worktreeID: worktree.id, repoID: worktree.repoID,
+                    name: worktree.name, path: resultPath
+                )))
+                subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
+                    terminalID: preSession.terminalID,
+                    worktreeID: worktree.id,
+                    label: "pre-session"
+                )))
+                let phase3 = Task.detached { [self] in
+                    await runPreSessionPhase3(
+                        preSession: preSession,
+                        worktree: worktree, repo: repo,
+                        worktreePath: resultPath,
+                        skipClaude: skipClaude,
+                        initialPrompt: initialPrompt,
+                        cols: cols, rows: rows,
+                        markActiveOnCompletion: true
+                    )
+                }
+                return .preSessionPending(phase3: phase3)
+            }
+
+            // 5b. No preSession hook: spawn primary terminals inline
+            // (behavior identical to before the preSession hook existed).
+            _ = try await spawnPrimaryTerminals(
                 worktree: worktree, repo: repo,
                 worktreePath: resultPath,
                 skipClaude: skipClaude,
                 initialPrompt: initialPrompt,
                 cols: cols,
-                rows: rows
+                rows: rows,
+                preSessionTerminalID: nil
             )
 
             // 6. Update status to active
             try await db.worktrees.updateStatus(id: worktreeID, status: .active)
+            return .ready
 
         } catch {
             // On failure, delete the DB row
@@ -308,7 +373,13 @@ extension WorktreeLifecycle {
     }
 
     /// Sets up tmux windows and terminal records for a worktree.
-    /// Shared by `finishCreate` and `reviveWorktree`.
+    /// Used by `reviveWorktree` (and the no-hook create path via
+    /// `spawnPrimaryTerminals` directly).
+    ///
+    /// When a `preSession` hook resolves, its terminal is created first and
+    /// this method awaits the hook's completion marker INLINE before spawning
+    /// the primary terminals. (`completeCreateWorktree` does the same dance
+    /// with the wait detached instead — revive is a synchronous RPC.)
     ///
     /// When `archivedClaudeSessions` is provided (revive path), the first session ID
     /// is reused for the primary Claude terminal to restore the conversation, and any
@@ -321,6 +392,60 @@ extension WorktreeLifecycle {
         cols: Int? = nil,
         rows: Int? = nil
     ) async throws {
+        let worktreePath = worktreePath ?? worktree.path
+        guard let preSession = try await spawnPreSessionTerminal(
+            worktree: worktree, repo: repo,
+            worktreePath: worktreePath,
+            cols: cols, rows: rows
+        ) else {
+            // No preSession hook → identical behavior to today.
+            _ = try await spawnPrimaryTerminals(
+                worktree: worktree, repo: repo,
+                worktreePath: worktreePath,
+                skipClaude: skipClaude,
+                archivedClaudeSessions: archivedClaudeSessions,
+                initialPrompt: initialPrompt,
+                cols: cols, rows: rows,
+                preSessionTerminalID: nil
+            )
+            return
+        }
+        subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
+            terminalID: preSession.terminalID,
+            worktreeID: worktree.id,
+            label: "pre-session"
+        )))
+        // Status transitions stay with the caller (revive sets its own).
+        await runPreSessionPhase3(
+            preSession: preSession,
+            worktree: worktree, repo: repo,
+            worktreePath: worktreePath,
+            skipClaude: skipClaude,
+            archivedClaudeSessions: archivedClaudeSessions,
+            initialPrompt: initialPrompt,
+            cols: cols, rows: rows,
+            markActiveOnCompletion: false
+        )
+    }
+
+    /// Spawns the primary agent terminal, the parallel `setup` hook terminal,
+    /// and any archived-session restores; persists tab order + active tab and
+    /// kills the untracked initial tmux window. This is the pre-existing
+    /// `setupTerminals` body, parameterized by an optional already-created
+    /// pre-session terminal (slotted second in the tab order).
+    ///
+    /// Returns the created terminals as `(id, label)` pairs so phase 3 can
+    /// broadcast `.terminalCreated` for each.
+    @discardableResult
+    func spawnPrimaryTerminals(
+        worktree: Worktree, repo: Repo,
+        worktreePath: String? = nil, skipClaude: Bool,
+        archivedClaudeSessions: [String]? = nil,
+        initialPrompt: String? = nil,
+        cols: Int? = nil,
+        rows: Int? = nil,
+        preSessionTerminalID: UUID?
+    ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
         let worktreePath = worktreePath ?? worktree.path
@@ -456,6 +581,9 @@ extension WorktreeLifecycle {
             profileID: primaryProfileID,
             kind: primaryTerminalKind
         )
+        var createdTerminals: [(id: UUID, label: String)] = [
+            (id: plannedTerminalID1, label: primaryLabel)
+        ]
 
         // Create terminal 2: setup hook
         let plannedTerminalID2 = UUID()
@@ -489,6 +617,7 @@ extension WorktreeLifecycle {
             label: "setup",
             kind: .shell
         )
+        createdTerminals.append((id: plannedTerminalID2, label: "setup"))
 
         // Restore any archived Claude sessions that were not consumed by the
         // primary terminal.
@@ -550,15 +679,25 @@ extension WorktreeLifecycle {
                     profileID: resolvedProfile?.profileID,
                     kind: .claude
                 )
+                createdTerminals.append((id: plannedID, label: "Claude Code"))
             }
         }
 
-        try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: createdTerminalIDs)
+        // Tab order: [primary, (preSession), setup, archived restores…],
+        // active = primary. Without a pre-session terminal this is exactly
+        // the pre-existing [primary, setup, …] order.
+        var tabOrder = createdTerminalIDs
+        if let preSessionTerminalID {
+            tabOrder.insert(preSessionTerminalID, at: 1)
+        }
+        try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: tabOrder)
         try await db.worktrees.setActiveTabID(worktreeID: worktreeID, tabID: plannedTerminalID1)
 
         // Kill the untracked initial window that new-session created
         if let windowID = initialWindowID {
             try? await tmux.killWindow(server: tmuxServer, windowID: windowID)
         }
+
+        return createdTerminals
     }
 }
