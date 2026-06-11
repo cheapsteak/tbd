@@ -1,5 +1,12 @@
+import AppKit
 import SwiftUI
 import TBDShared
+
+private func adaptive(light: NSColor, dark: NSColor) -> Color {
+    Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+    })
+}
 
 struct WorktreeRowView: View {
     let worktree: Worktree
@@ -63,9 +70,14 @@ struct WorktreeRowView: View {
                 .frame(width: 12, height: 12)
         case .working:
             // Static asterisk (echoes Claude's ✳ working glyph) sized to match the 12×12 PR status icon.
+            // Light: terracotta #B05730 — readable on light sidebar (~#F1F1F1).
+            // Dark:  Claude coral #D97757 — readable on dark sidebar (~#1E1E1E).
             Image(systemName: "asterisk")
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(adaptive(
+                    light: NSColor(srgbRed: 176 / 255, green: 87 / 255, blue: 48 / 255, alpha: 1),
+                    dark: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1)
+                ))
                 .frame(width: 12, height: 12)
         case .notificationBadge(let n):
             Circle()
