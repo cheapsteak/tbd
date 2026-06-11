@@ -28,7 +28,7 @@ struct RowStatusIndicatorTests {
     }
 
     @Test(arguments: [NotificationType.error, .attentionNeeded, .focusRequest])
-    func highSeverityBadgeWinsOverWorkingSpinner(notification: NotificationType) {
+    func highSeverityBadgeWinsOverWorkingIcon(notification: NotificationType) {
         let result = RowStatusIndicator.resolve(
             isPending: false,
             isWorking: true,
@@ -40,7 +40,7 @@ struct RowStatusIndicatorTests {
     }
 
     @Test(arguments: [NotificationType.taskComplete, .responseComplete])
-    func lowSeverityBadgeYieldsToWorkingSpinner(notification: NotificationType) {
+    func lowSeverityBadgeYieldsToWorkingIcon(notification: NotificationType) {
         let result = RowStatusIndicator.resolve(
             isPending: false,
             isWorking: true,
@@ -62,7 +62,7 @@ struct RowStatusIndicatorTests {
         #expect(result == .pending)
     }
 
-    @Test func workingSpinnerHidesPRStatus() {
+    @Test func workingIconHidesPRStatus() {
         let result = RowStatusIndicator.resolve(
             isPending: false,
             isWorking: true,
