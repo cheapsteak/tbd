@@ -13,7 +13,7 @@ struct RowStatusIndicatorTests {
             isSuspended: true,
             hasPRStatus: true
         )
-        #expect(result == .pendingSpinner)
+        #expect(result == .pending)
     }
 
     @Test func workingWinsOverLowSeverityNotificationSuspendedAndPR() {
@@ -24,7 +24,7 @@ struct RowStatusIndicatorTests {
             isSuspended: true,
             hasPRStatus: true
         )
-        #expect(result == .workingSpinner)
+        #expect(result == .working)
     }
 
     @Test(arguments: [NotificationType.error, .attentionNeeded, .focusRequest])
@@ -48,7 +48,7 @@ struct RowStatusIndicatorTests {
             isSuspended: false,
             hasPRStatus: false
         )
-        #expect(result == .workingSpinner)
+        #expect(result == .working)
     }
 
     @Test func pendingWinsOverHighSeverityBadge() {
@@ -59,7 +59,7 @@ struct RowStatusIndicatorTests {
             isSuspended: false,
             hasPRStatus: false
         )
-        #expect(result == .pendingSpinner)
+        #expect(result == .pending)
     }
 
     @Test func workingSpinnerHidesPRStatus() {
@@ -70,7 +70,7 @@ struct RowStatusIndicatorTests {
             isSuspended: false,
             hasPRStatus: true
         )
-        #expect(result == .workingSpinner)
+        #expect(result == .working)
     }
 
     @Test func notificationWinsOverSuspendedAndPR() {

@@ -44,15 +44,6 @@ struct WorktreeRowView: View {
         return terminals.contains { $0.activityState == .working }
     }
 
-    /// Spinner sized to visually match the 12×12 PR status icon.
-    /// The small `ProgressView` is ~16pt; scale by 0.75 and pin the layout frame.
-    private func spinner() -> some View {
-        ProgressView()
-            .controlSize(.small)
-            .scaleEffect(0.75)
-            .frame(width: 12, height: 12)
-    }
-
     @ViewBuilder
     private func rowIcons() -> some View {
         // Resolved through RowStatusIndicator so at most one indicator renders.
@@ -64,8 +55,18 @@ struct WorktreeRowView: View {
             isSuspended: hasSuspendedTerminal,
             hasPRStatus: prPresentation != nil
         ) {
-        case .pendingSpinner, .workingSpinner:
-            spinner()
+        case .pending:
+            // Static dotted-circle sized to match the 12×12 PR status icon.
+            Image(systemName: "circle.dotted")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 12, height: 12)
+        case .working:
+            // Static asterisk (echoes Claude's ✳ working glyph) sized to match the 12×12 PR status icon.
+            Image(systemName: "asterisk")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 12, height: 12)
         case .notificationBadge(let n):
             Circle()
                 .fill(RowStatusIndicator.badgeColor(for: n))
