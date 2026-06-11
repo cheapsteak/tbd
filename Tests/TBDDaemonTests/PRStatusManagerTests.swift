@@ -561,34 +561,13 @@ struct PRStatusManagerTests {
         #expect(signals.pending == false)
     }
 
-    @Test("checkSignals with no required checks counts a failing check (unprotected repo fallback)")
-    func checkSignalsUnprotectedRepoFailing() {
+    @Test("checkSignals ignores all checks when none are required (stacked PR / unprotected base)")
+    func checkSignalsZeroRequiredIgnoresAllChecks() {
         let contexts = [
-            PRStatusManager.CheckContext(name: "build", status: "COMPLETED", conclusion: "FAILURE", state: nil, isRequired: false),
-            PRStatusManager.CheckContext(name: "lint", status: "COMPLETED", conclusion: "SUCCESS", state: nil, isRequired: false)
-        ]
-        let signals = PRStatusManager.checkSignals(contexts: contexts, aggregateRollupState: "FAILURE")
-        #expect(signals.failing == true)
-        #expect(signals.pending == false)
-    }
-
-    @Test("checkSignals with no required checks counts a running check as pending (unprotected repo fallback)")
-    func checkSignalsUnprotectedRepoPending() {
-        let contexts = [
+            PRStatusManager.CheckContext(name: "scoring", status: "COMPLETED", conclusion: "CANCELLED", state: nil, isRequired: false),
             PRStatusManager.CheckContext(name: "build", status: "IN_PROGRESS", conclusion: nil, state: nil, isRequired: false)
         ]
-        let signals = PRStatusManager.checkSignals(contexts: contexts, aggregateRollupState: "PENDING")
-        #expect(signals.failing == false)
-        #expect(signals.pending == true)
-    }
-
-    @Test("checkSignals with no required checks and all passing reports neither signal")
-    func checkSignalsUnprotectedRepoAllPassing() {
-        let contexts = [
-            PRStatusManager.CheckContext(name: "build", status: "COMPLETED", conclusion: "SUCCESS", state: nil, isRequired: false),
-            PRStatusManager.CheckContext(name: "ci/legacy", status: nil, conclusion: nil, state: "SUCCESS", isRequired: false)
-        ]
-        let signals = PRStatusManager.checkSignals(contexts: contexts, aggregateRollupState: nil)
+        let signals = PRStatusManager.checkSignals(contexts: contexts, aggregateRollupState: "FAILURE")
         #expect(signals.failing == false)
         #expect(signals.pending == false)
     }

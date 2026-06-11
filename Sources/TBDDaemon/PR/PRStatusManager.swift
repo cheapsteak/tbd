@@ -201,7 +201,7 @@ public actor PRStatusManager {
             if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
             // Uniform precedence: a failing required check is red and a pending required check
             // is yellow regardless of merge state. (When the PR has no required checks at all,
-            // the signals are computed from every check — see checkSignals.)
+            // both signals are false and mergeStateStatus below decides — see checkSignals.)
             if requiredChecksFailing { return .checksFailed }
             if requiredChecksPending { return .pending }
 
@@ -268,20 +268,14 @@ public actor PRStatusManager {
     }
 
     /// Compute the (failing, pending) signals for one PR's check contexts.
-    /// Required-ness comes from each context's own isRequired field (fetched in the same query).
-    /// When the PR has NO required checks (repo without branch protection), every check counts —
-    /// otherwise the icon could never reflect CI at all in unprotected repos.
-    /// `aggregateRollupState` covers the post-push window: EXPECTED means a required check
-    /// hasn't reported a context yet, so it can't be seen in `contexts`.
+    /// Only checks GitHub marks `isRequired` for this PR ever color the icon. A PR with no
+    /// required checks (stacked PR targeting an unprotected feature branch, or a repo without
+    /// branch protection) gets no CI coloring from checks — the mergeStateStatus refinement in
+    /// mapState decides instead, matching GitHub's own merge verdict.
+    /// `aggregateRollupState` EXPECTED covers the post-push window: a required check that
+    /// hasn't reported a context yet can't be seen in `contexts`.
     static func checkSignals(contexts: [CheckContext], aggregateRollupState: String?) -> (failing: Bool, pending: Bool) {
         let required = contexts.filter { $0.isRequired == true }
-        if required.isEmpty {
-            return (
-                contexts.contains(where: contextIsFailing),
-                contexts.contains(where: contextIsPending)
-                    || aggregateRollupState == "PENDING" || aggregateRollupState == "EXPECTED"
-            )
-        }
         return (
             required.contains(where: contextIsFailing),
             required.contains(where: contextIsPending) || aggregateRollupState == "EXPECTED"
