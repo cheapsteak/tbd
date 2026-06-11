@@ -605,8 +605,22 @@ public struct WorktreeListParams: Codable, Sendable {
     public let status: WorktreeStatus?
     public let limit: Int?
     public let offset: Int?
-    public init(repoID: UUID? = nil, status: WorktreeStatus? = nil, limit: Int? = nil, offset: Int? = nil) {
-        self.repoID = repoID; self.status = status; self.limit = limit; self.offset = offset
+    /// When true, the daemon omits archived worktrees from the result.
+    /// Optional (nil == false) for backward compatibility — old daemons
+    /// ignore the unknown key and return everything; old clients omit it.
+    public let excludeArchived: Bool?
+    public init(
+        repoID: UUID? = nil,
+        status: WorktreeStatus? = nil,
+        limit: Int? = nil,
+        offset: Int? = nil,
+        excludeArchived: Bool? = nil
+    ) {
+        self.repoID = repoID
+        self.status = status
+        self.limit = limit
+        self.offset = offset
+        self.excludeArchived = excludeArchived
     }
 }
 

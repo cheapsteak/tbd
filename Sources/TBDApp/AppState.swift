@@ -1136,11 +1136,14 @@ final class AppState: ObservableObject {
     }
 
     /// Refresh worktrees for all repos (or a specific repo).
-    /// Fetches both active and main worktrees.
+    /// Fetches active and main worktrees; archived rows are excluded here because
+    /// the archived view has its own paginated fetch (refreshArchivedWorktrees).
     func refreshWorktrees(repoID: UUID? = nil) async {
         do {
-            // Single RPC — fetch all worktrees (including archived)
-            let allWts = try await daemonClient.listWorktrees(repoID: repoID)
+            // Single RPC — fetch non-archived worktrees only.
+            // Absent rows satisfy reconcileTombstones identically to status==.archived
+            // (both confirm the tombstone), so tombstone reconciliation is unaffected.
+            let allWts = try await daemonClient.listWorktrees(repoID: repoID, excludeArchived: true)
             // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
             // stale poll predating an archive cannot resurrect the row.
             // Reconcile only on the unscoped path: a scoped allWts omits other repos'

@@ -59,7 +59,13 @@ extension RPCRouter {
 
     func handleWorktreeList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeListParams.self, from: paramsData)
-        var worktrees = try await db.worktrees.list(repoID: params.repoID, status: params.status, limit: params.limit, offset: params.offset)
+        var worktrees = try await db.worktrees.list(
+            repoID: params.repoID,
+            status: params.status,
+            excludeArchived: params.excludeArchived ?? false,
+            limit: params.limit,
+            offset: params.offset
+        )
         // Enrich archived worktrees with a real session-file count so the
         // client can filter on actual disk state, not stale stored IDs.
         //
