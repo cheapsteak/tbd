@@ -37,6 +37,8 @@ The database stores worktree display names, custom config, and notification hist
 
 Tests that need filesystem isolation should `setenv("TBD_HOME", "/some/tmp/dir", 1)` (and optionally `TBD_SOCKET_PATH`) before any `TBDConstants.<path>` access. Tests that mutate `UserDefaults` should construct `AppState(userDefaults: UserDefaults(suiteName:))` and tear the suite down with `removePersistentDomain(forName:)` — `UserDefaults.standard` on this unbundled executable is the developer's real `TBDApp.plist`.
 
+For unit tests, prefer injection seams over `setenv`: pass an explicit env dict to `TBDConstants.*(environment:)`, override the themes directory via `ThemeStore(themesDirectory:)` or `AppearanceSettings(userThemesDirectory:)`. **`setenv("TBD_HOME", ...)` in tests is allowed ONLY inside suites nested under `TBDHomeSerialized` in `Tests/TBDDaemonTests`.** All test targets compile into one process and Swift Testing runs suites in parallel across all targets; an unserialized `setenv` in any other target races every concurrent suite — this was the root cause of a real CI flake in `ConstantsTests.derivedPathsFollowTBDHome`.
+
 ### Database migrations must update the shared model
 When adding a DB column in `Sources/TBDDaemon/Database/Database.swift`:
 1. Add the column with a `.defaults(to:)` value in the migration
