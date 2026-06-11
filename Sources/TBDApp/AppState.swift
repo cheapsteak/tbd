@@ -782,6 +782,8 @@ final class AppState: ObservableObject {
             Task { [weak self] in await self?.loadModelProfiles() }
         case .terminalSessionUpdated(let d):
             applyTerminalSessionDelta(d)
+        case .terminalCreated(let d):
+            applyTerminalCreatedDelta(d)
         case .terminalActivityUpdated(let d):
             applyTerminalActivityDelta(d)
         case .worktreeMoved(let d):
