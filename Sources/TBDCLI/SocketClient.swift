@@ -98,8 +98,11 @@ struct SocketClient: Sendable {
             throw SocketClientError.sendFailed("Sent \(sent) of \(message.count) bytes")
         }
 
-        // Read response (read until we get a newline or connection closes)
-        var responseData = Data()
+        // Read response (read until we get a newline or connection closes).
+        // NewlineFrameScanner scans only the just-received bytes for 0x0A
+        // via memchr, avoiding the O(n²/chunk) re-scan that the previous
+        // Data.contains call performed on the entire accumulated buffer.
+        var scanner = NewlineFrameScanner()
         let bufferSize = 65536
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         defer { buffer.deallocate() }
@@ -112,17 +115,15 @@ struct SocketClient: Sendable {
             if bytesRead == 0 {
                 break // Connection closed
             }
-            responseData.append(buffer, count: bytesRead)
-            // Check if we got a newline (end of JSON response)
-            if responseData.contains(0x0A) {
+            scanner.append(buffer, count: bytesRead)
+            if scanner.hasNewline {
                 break
             }
         }
 
-        // Trim trailing newline
-        if let newlineIndex = responseData.firstIndex(of: 0x0A) {
-            responseData = responseData[responseData.startIndex..<newlineIndex]
-        }
+        // frameData is everything before the first newline; falls back to
+        // the full buffer when no newline was received (connection closed).
+        let responseData = scanner.frameData
 
         guard !responseData.isEmpty else {
             throw SocketClientError.invalidResponse
