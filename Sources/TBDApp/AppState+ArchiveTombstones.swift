@@ -8,11 +8,15 @@ extension AppState {
     nonisolated static let archiveTombstoneTTL: TimeInterval = 30
 
     /// Returns the tombstones that should still be kept. A tombstone is evicted
-    /// when the daemon confirms the archive (worktree reported `.archived` or
-    /// absent) or when it has outlived `archiveTombstoneTTL`.
+    /// when the daemon confirms the archive (worktree absent from the response, or
+    /// present with status `.archived`) or when it has outlived `archiveTombstoneTTL`.
     ///
-    /// - Parameter daemonWorktrees: the raw, unfiltered worktree list from the
-    ///   daemon (includes `.archived` rows).
+    /// - Parameter daemonWorktrees: the worktree list returned by the 2 s poll.
+    ///   The poll now passes `excludeArchived: true`, so archived rows are omitted
+    ///   and appear as absent (`.none` in `statusByID`). Both the `.archived` case
+    ///   and the `.none` case below map to "daemon confirmed gone", so tombstone
+    ///   semantics are identical whether the daemon returns the row with an
+    ///   `.archived` status or simply omits it.
     nonisolated static func reconcileTombstones(
         _ tombstones: [UUID: Date],
         daemonWorktrees: [Worktree],
