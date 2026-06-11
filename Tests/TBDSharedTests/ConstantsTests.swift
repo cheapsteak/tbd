@@ -4,14 +4,14 @@ import Foundation
 
 @Test func hookPathSetup() {
     let repoID = UUID(uuidString: "12345678-1234-1234-1234-123456789abc")!
-    let path = TBDConstants.hookPath(repoID: repoID, eventName: "setup")
-    #expect(path.hasSuffix("/repos/12345678-1234-1234-1234-123456789ABC/hooks/setup"))
+    let path = TBDConstants.hookPath(repoID: repoID, eventName: "setup", environment: ["TBD_HOME": "/tmp/tbd-hooks"])
+    #expect(path == "/tmp/tbd-hooks/repos/12345678-1234-1234-1234-123456789ABC/hooks/setup")
 }
 
 @Test func hookPathArchive() {
     let repoID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
-    let path = TBDConstants.hookPath(repoID: repoID, eventName: "archive")
-    #expect(path.hasSuffix("/repos/AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA/hooks/archive"))
+    let path = TBDConstants.hookPath(repoID: repoID, eventName: "archive", environment: ["TBD_HOME": "/tmp/tbd-hooks"])
+    #expect(path == "/tmp/tbd-hooks/repos/AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA/hooks/archive")
 }
 
 /// Tests for the environment-parameterized TBDConstants path functions.
@@ -23,7 +23,7 @@ import Foundation
 /// (the only permitted TBD_HOME-mutation domain in this process). Using
 /// env dictionaries makes these tests fully race-immune.
 @Suite struct ConfigDirEnvOverrideTests {
-    @Test func configDirFallsBackToHomeTbdWhenEnvEmpty() {
+    @Test func configDirFallsBackToHomeTbdWhenKeyAbsent() {
         let url = TBDConstants.configDir(environment: [:])
         let path = url.path
         #expect(path.contains(FileManager.default.homeDirectoryForCurrentUser.path))
@@ -69,6 +69,14 @@ import Foundation
 /// concurrent TBD_HOME value — other suites in TBDDaemonTests legitimately
 /// set TBD_HOME in parallel, so absolute-path assertions on production vars
 /// would be a race condition.
+///
+/// `configDir` is deliberately not smoke-tested here: it returns a URL whose
+/// path has no stable suffix under a concurrent TBD_HOME override (the value
+/// IS the override), so any suffix assertion would itself be a race condition.
+/// Its wiring is covered transitively by the derived-path vars below.
+///
+/// `socketPath` is safe to check with a suffix because no suite in this
+/// process sets TBD_SOCKET_PATH.
 @Suite struct ProductionVarSmokeSuite {
     @Test func databasePathSuffix() {
         #expect(TBDConstants.databasePath.hasSuffix("/state.db"))
@@ -84,5 +92,9 @@ import Foundation
 
     @Test func reposDirSuffix() {
         #expect(TBDConstants.reposDir.path.hasSuffix("/repos"))
+    }
+
+    @Test func socketPathSuffix() {
+        #expect(TBDConstants.socketPath.hasSuffix("/sock"))
     }
 }

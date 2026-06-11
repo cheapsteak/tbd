@@ -55,11 +55,15 @@ public enum TBDConstants {
     }
     public static var reposDir: URL { reposDir(environment: ProcessInfo.processInfo.environment) }
 
-    public static func hookPath(repoID: UUID, eventName: String) -> String {
-        reposDir
+    public static func hookPath(repoID: UUID, eventName: String, environment: [String: String]) -> String {
+        reposDir(environment: environment)
             .appendingPathComponent(repoID.uuidString)
             .appendingPathComponent("hooks")
             .appendingPathComponent(eventName)
             .path
+    }
+
+    public static func hookPath(repoID: UUID, eventName: String) -> String {
+        hookPath(repoID: repoID, eventName: eventName, environment: ProcessInfo.processInfo.environment)
     }
 }
