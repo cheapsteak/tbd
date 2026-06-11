@@ -210,11 +210,10 @@ extension WorktreeLifecycle {
     ///
     /// If the daemon restarts mid-wait, the row sits in `.creating` with a
     /// pre-session terminal record; `recoverCreatingWorktrees()` resumes the
-    /// wait at next startup. That resume path flips the row with a plain
-    /// `.markActive` — acceptable, but it skips `revive()`'s extra writes:
-    /// `archivedAt` stays set and `archivedClaudeSessions` are neither
-    /// restored into terminals nor cleared (they remain available for a
-    /// later archive/revive cycle).
+    /// wait at next startup. The recovery sweep detects the interrupted
+    /// revive (the row still carries `archivedClaudeSessions`) and resumes
+    /// with revive semantics: the archived sessions are restored into
+    /// terminals and the row finishes via `.revive(clearSessions: true)`.
     public func beginReviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> WorktreeReviveCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)

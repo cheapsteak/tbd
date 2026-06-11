@@ -162,11 +162,27 @@ struct PreSessionAppStateTests {
             _ = seedPreSessionOnly(state, worktreeID: worktreeID)
 
             // Phase 3 also broadcasts the parallel `setup` hook terminal —
-            // a plain shell must never steal the selection.
+            // it must never steal the selection.
             let setup = makeTerminal(worktreeID: worktreeID, label: "setup", kind: .shell)
             state.appendCreatedTerminal(setup)
 
             #expect(state.activeTabIndices[worktreeID] == nil)
+        }
+    }
+
+    @Test func shellPrimaryTerminalTakesSelectionFromPreSessionTab() {
+        withAppState { state in
+            let worktreeID = UUID()
+            _ = seedPreSessionOnly(state, worktreeID: worktreeID)
+
+            // skipClaude worktrees spawn a plain shell as the PRIMARY terminal
+            // (label "shell", kind .shell) — it must take the hand-off exactly
+            // like an agent terminal would.
+            let shell = makeTerminal(worktreeID: worktreeID, label: "shell", kind: .shell)
+            state.appendCreatedTerminal(shell)
+
+            #expect(state.activeTabIndices[worktreeID] == 1)
+            #expect(state.tabs[worktreeID]?[1].id == shell.id)
         }
     }
 
@@ -261,6 +277,18 @@ struct PreSessionAppStateTests {
             // Codex is also a primary.
             let codex = makeTerminal(worktreeID: worktreeID, label: "Codex", kind: .codex)
             #expect(state.shouldReconcileTabOrderFromDaemon(after: codex))
+        }
+    }
+
+    @Test func reconcileGateArmsForShellPrimaryWhenSkipClaude() {
+        withAppState { state in
+            let worktreeID = UUID()
+            let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
+            state.worktreeTabOrders[worktreeID] = [pre.id]
+            // skipClaude primary: kind .shell, label "shell" — still a primary,
+            // so the converging-from-creation re-fetch must arm.
+            let shell = makeTerminal(worktreeID: worktreeID, label: "shell", kind: .shell)
+            #expect(state.shouldReconcileTabOrderFromDaemon(after: shell))
         }
     }
 

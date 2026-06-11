@@ -1162,6 +1162,11 @@ final class AppState: ObservableObject {
                 tombstones: Set(recentlyArchivedWorktreeIDs.keys)
             )
 
+            // A revive that was gated by a blocking preSession hook lingers
+            // `.inFlight` until the daemon reports the row `.active` — this
+            // periodic refresh is where that flip is observed.
+            promoteRevivedWorktrees(observing: allWts)
+
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet
                 let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }

@@ -48,7 +48,8 @@ struct PreSessionHookTests {
         recorder: RecordedCommands? = nil,
         subscriptions: StateSubscriptionManager? = nil,
         timeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
-        windowIsDead: (@Sendable (String) -> Bool)? = nil
+        windowIsDead: (@Sendable (String) -> Bool)? = nil,
+        listWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil
     ) -> WorktreeLifecycle {
         var dryRunRecorder: (@Sendable ([String]) -> Void)?
         if let recorder {
@@ -60,7 +61,8 @@ struct PreSessionHookTests {
             tmux: TmuxManager(
                 dryRun: true,
                 dryRunRecorder: dryRunRecorder,
-                dryRunWindowIsDead: windowIsDead
+                dryRunWindowIsDead: windowIsDead,
+                dryRunListWindows: listWindows
             ),
             hooks: HookResolver(),
             subscriptions: subscriptions,
@@ -786,7 +788,12 @@ struct PreSessionHookTests {
         try writeMarker(worktreeID: wt.id, exitCode: 0)
         for task in resumed { await task.value }
 
-        #expect(try await db.worktrees.get(id: wt.id)?.status == .active)
+        // Mid-CREATE branch: no archived sessions, so recovery uses
+        // `.markActive` — plain status flip, no archive fields involved.
+        let after = try await db.worktrees.get(id: wt.id)
+        #expect(after?.status == .active)
+        #expect(after?.archivedAt == nil)
+        #expect(after?.archivedClaudeSessions == nil)
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         #expect(terminals.count == 3,
                 "resumed phase 3 must spawn the primary terminals")
@@ -794,6 +801,203 @@ struct PreSessionHookTests {
         #expect(terminals.contains { $0.label == "setup" })
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: wt.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath))
+    }
+
+    @Test func recoveryMidReviveRestoresAndClearsArchivedSessions() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        // Simulate a daemon that died mid-REVIVE-wait: beginReviveWorktree
+        // re-added the checkout, spawned the pre-session terminal, and flipped
+        // the row .archived → .creating — but its archive fields (archivedAt,
+        // archivedClaudeSessions) are only cleared in phase 3, so they're
+        // still set when the daemon dies.
+        let sessionID = UUID().uuidString
+        let checkout = tempDir.appendingPathComponent("revive-orphan")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "revorph", branch: "tbd/revorph",
+            path: checkout.path, tmuxServer: "tbd-test"
+        )
+        try await db.worktrees.archive(id: wt.id, claudeSessionIDs: [sessionID])
+        try await db.worktrees.updateStatus(id: wt.id, status: .creating)
+        _ = try await db.terminals.create(
+            id: UUID(), worktreeID: wt.id,
+            tmuxWindowID: "@mock-rev", tmuxPaneID: "%mock-rev",
+            label: "pre-session", kind: .shell
+        )
+
+        let resumed = await lifecycle.recoverCreatingWorktrees()
+        #expect(resumed.count == 1, "the stranded mid-revive wait must be resumed")
+
+        try writeMarker(worktreeID: wt.id, exitCode: 0)
+        for task in resumed { await task.value }
+
+        // Mid-REVIVE branch: recovery must finish with revive semantics —
+        // restore the archived session into the primary terminal, clear
+        // archivedAt, and clear archivedClaudeSessions so the next archive
+        // can't silently orphan the old transcript.
+        let after = try await db.worktrees.get(id: wt.id)
+        #expect(after?.status == .active)
+        #expect(after?.archivedAt == nil, "revive semantics must clear archivedAt")
+        #expect(after?.archivedClaudeSessions == nil,
+                "restored sessions must be cleared, not left to be overwritten on the next archive")
+        let terminals = try await db.terminals.list(worktreeID: wt.id)
+        let claude = terminals.first { $0.label == "Claude Code" }
+        #expect(claude?.claudeSessionID == sessionID,
+                "the primary Claude terminal must resume the archived transcript, not start fresh")
+    }
+
+    // MARK: - Reconcile must not kill live `.creating` windows
+
+    @Test func reconcileSparesCreatingWorktreePreSessionWindow() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = RecordedCommands()
+        // The tmux server reports the active agent window, the .creating
+        // worktree's pre-session window, and one genuinely orphaned window.
+        let lifecycle = makeLifecycle(db: db, recorder: recorder, listWindows: { _, _ in
+            [
+                (windowID: "@mock-agent", paneID: "%mock-agent"),
+                (windowID: "@mock-pre", paneID: "%mock-pre"),
+                (windowID: "@mock-orphan", paneID: "%mock-orphan"),
+            ]
+        })
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let server = TmuxManager.serverName(forRepoPath: repo.path)
+
+        // Active worktree at the main checkout path so `git worktree list`
+        // reports it and reconcile doesn't archive it as missing.
+        let active = try await db.worktrees.create(
+            repoID: repo.id, name: "main-wt", branch: "main",
+            path: repoDir.path, tmuxServer: server
+        )
+        _ = try await db.terminals.create(
+            id: UUID(), worktreeID: active.id,
+            tmuxWindowID: "@mock-agent", tmuxPaneID: "%mock-agent",
+            label: "Claude Code", kind: .claude
+        )
+        // A .creating worktree mid-pre-session-hook (e.g. a running npm
+        // install) — its window must survive the orphan cleanup pass.
+        let creating = try await db.worktrees.create(
+            repoID: repo.id, name: "hooked", branch: "tbd/hooked",
+            path: tempDir.appendingPathComponent("hooked").path,
+            tmuxServer: server, status: .creating
+        )
+        let preTerminal = try await db.terminals.create(
+            id: UUID(), worktreeID: creating.id,
+            tmuxWindowID: "@mock-pre", tmuxPaneID: "%mock-pre",
+            label: "pre-session", kind: .shell
+        )
+
+        try await lifecycle.reconcile(repoID: repo.id)
+
+        let kills = recorder.snapshot().filter { $0.contains("kill-window") }
+        #expect(!kills.contains { $0.contains("@mock-pre") },
+                "reconcile must not kill a .creating worktree's live pre-session window")
+        #expect(!kills.contains { $0.contains("@mock-agent") },
+                "tracked active windows must survive")
+        #expect(kills.contains { $0.contains("@mock-orphan") },
+                "genuinely untracked windows must still be cleaned up")
+        #expect(!recorder.snapshot().contains { $0.contains("kill-server") })
+        // The .creating row and its terminal are untouched.
+        #expect(try await db.worktrees.get(id: creating.id)?.status == .creating)
+        #expect(try await db.terminals.get(id: preTerminal.id) != nil)
+    }
+
+    @Test func reconcileKeepsServerWhenOnlyLiveRowIsCreating() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = RecordedCommands()
+        let lifecycle = makeLifecycle(db: db, recorder: recorder, listWindows: { _, _ in
+            [(windowID: "@mock-pre", paneID: "%mock-pre")]
+        })
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let server = TmuxManager.serverName(forRepoPath: repo.path)
+
+        // The repo's ONLY live row is .creating — the kill-server branch must
+        // not fire (it would take the running hook's window down with it).
+        let creating = try await db.worktrees.create(
+            repoID: repo.id, name: "solo-hooked", branch: "tbd/solo-hooked",
+            path: tempDir.appendingPathComponent("solo-hooked").path,
+            tmuxServer: server, status: .creating
+        )
+        _ = try await db.terminals.create(
+            id: UUID(), worktreeID: creating.id,
+            tmuxWindowID: "@mock-pre", tmuxPaneID: "%mock-pre",
+            label: "pre-session", kind: .shell
+        )
+
+        try await lifecycle.reconcile(repoID: repo.id)
+
+        #expect(!recorder.snapshot().contains { $0.contains("kill-server") },
+                "a repo whose only live worktree is .creating must keep its tmux server")
+        #expect(!recorder.snapshot().contains { $0.contains("kill-window") && $0.contains("@mock-pre") },
+                "the pre-session window must not be treated as an orphan")
+    }
+
+    @Test func recoveryThenReconcileLeavesResumedWaitIntact() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = RecordedCommands()
+        let lifecycle = makeLifecycle(db: db, recorder: recorder, listWindows: { _, _ in
+            [(windowID: "@mock-pre", paneID: "%mock-pre")]
+        })
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let server = TmuxManager.serverName(forRepoPath: repo.path)
+
+        // Daemon restarted mid-pre-session-wait: .creating row, checkout on
+        // disk, only the pre-session terminal.
+        let checkout = tempDir.appendingPathComponent("restart-survivor")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "survivor", branch: "tbd/survivor",
+            path: checkout.path, tmuxServer: server, status: .creating
+        )
+        _ = try await db.terminals.create(
+            id: UUID(), worktreeID: wt.id,
+            tmuxWindowID: "@mock-pre", tmuxPaneID: "%mock-pre",
+            label: "pre-session", kind: .shell
+        )
+
+        // Startup sequence: recovery sweep first, then per-repo reconcile —
+        // exactly what Daemon.start() runs.
+        let resumed = await lifecycle.recoverCreatingWorktrees()
+        #expect(resumed.count == 1)
+        try await lifecycle.reconcile(repoID: repo.id)
+
+        #expect(!recorder.snapshot().contains { $0.contains("kill-window") && $0.contains("@mock-pre") },
+                "the just-resumed pre-session window must survive the startup reconcile")
+        #expect(!recorder.snapshot().contains { $0.contains("kill-server") })
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .creating,
+                "the resumed wait must still be in flight after reconcile")
+
+        // The hook finishes after reconcile — the resumed wait completes.
+        try writeMarker(worktreeID: wt.id, exitCode: 0)
+        for task in resumed { await task.value }
+
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .active)
+        #expect(try await db.terminals.list(worktreeID: wt.id).count == 3)
+        #expect(try await db.notifications.unread(worktreeID: wt.id).isEmpty,
+                "no spurious paneKilled notification may be recorded")
     }
 
     @Test func recoveryDeletesCreatingRowWithoutCheckout() async throws {

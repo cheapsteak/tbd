@@ -18,7 +18,7 @@ Files must be executable (`chmod +x .worktree-hooks/setup`). They can be in any 
 
 ## `preSession` vs `setup`
 
-Both run on worktree creation, but they sequence differently:
+Both run on worktree creation — and again when an archived worktree is revived — but they sequence differently:
 
 - **`preSession` is blocking.** Its terminal is created first, and the agent (Claude/Codex/shell) does not spawn until the hook exits. Use it for anything the agent must not start without — copying `.env` files, writing local config, linking caches.
 - **`setup` is parallel.** It runs in its own terminal alongside the agent, which is already started. Use it for slow work the agent doesn't need on its first turn — `npm install`, warming build caches.
@@ -35,6 +35,7 @@ Hooks run with `cwd` set to the worktree path and receive these environment vari
 | --- | --- |
 | `TBD_EVENT` | `preSession`, `setup`, or `archive` |
 | `TBD_WORKTREE_ID` | UUID of the worktree |
+| `TBD_TERMINAL_ID` | UUID of the terminal the hook runs in (`preSession` and `setup` only — `archive` runs outside a terminal and does not receive it) |
 | `TBD_WORKTREE_NAME` | Worktree name (the stable checkout folder name, not the renameable display name) |
 | `TBD_WORKTREE_PATH` | Absolute path to the worktree checkout |
 | `TBD_REPO_PATH` | Absolute path to the source repo |

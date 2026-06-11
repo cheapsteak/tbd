@@ -305,9 +305,13 @@ struct SingleWorktreeView: View {
 private struct PreSessionSetupBanner: View {
     var body: some View {
         HStack(spacing: 6) {
-            ProgressView()
-                .controlSize(.small)
-                .scaleEffect(0.75)
+            // Static icon, deliberately not a ProgressView: a spinner forces
+            // continuous CoreAnimation commits for the whole hook duration
+            // (minutes) for zero information gain — same rationale as the
+            // static sidebar status icons (c8769a8).
+            Image(systemName: "hammer")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
                 .frame(width: 12, height: 12)
             Text("Pre-session setup running — the agent will start when it completes.")
                 .font(.caption)

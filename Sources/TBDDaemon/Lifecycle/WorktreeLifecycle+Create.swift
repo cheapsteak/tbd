@@ -235,8 +235,10 @@ extension WorktreeLifecycle {
                 worktreePath: resultPath,
                 cols: cols, rows: rows
             ) {
-                // Broadcast early so the app refreshes and shows the live hook
-                // output instead of the empty state. The RPC handler skips its
+                // Broadcast early. `.worktreeCreated` is for non-app clients —
+                // the app's handleDelta ignores it (default: break); what makes
+                // the app load and show the live hook terminal is the
+                // `.terminalCreated` delta below. The RPC handler skips its
                 // own `.worktreeCreated` for the `.preSessionPending` result,
                 // so this stays a single broadcast.
                 subscriptions?.broadcast(delta: .worktreeCreated(WorktreeDelta(

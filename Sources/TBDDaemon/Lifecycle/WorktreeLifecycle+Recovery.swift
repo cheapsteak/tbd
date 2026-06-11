@@ -25,8 +25,10 @@ extension WorktreeLifecycle {
     /// - Checkout exists and ONLY a pre-session terminal exists → the daemon
     ///   died mid-wait. The tmux server and the hook process survive daemon
     ///   restarts, so resume the wait: rebuild the `PreSessionSpawn` from the
-    ///   terminal record and run phase 3 in a detached task, exactly like the
-    ///   create path. Never blocks startup.
+    ///   terminal record and run phase 3 in a detached task. A row that still
+    ///   carries `archivedClaudeSessions` was mid-REVIVE — resume it with
+    ///   revive semantics (restore the sessions, then clear them); otherwise
+    ///   resume exactly like the create path. Never blocks startup.
     /// - Checkout exists but no terminals at all → the daemon died after
     ///   `git worktree add` but before any tmux spawn. There is no hook
     ///   window to resume and no terminals to keep; delete the row and let
@@ -45,9 +47,13 @@ extension WorktreeLifecycle {
 
             guard FileManager.default.fileExists(atPath: worktree.path) else {
                 logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — checkout missing at \(worktree.path, privacy: .public)")
-                try? await db.terminals.deleteForWorktree(worktreeID: worktree.id)
-                try? await db.tabs.deleteForWorktree(worktreeID: worktree.id)
-                try? await db.worktrees.delete(id: worktree.id)
+                do {
+                    try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
+                    try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                    try await db.worktrees.delete(id: worktree.id)
+                } catch {
+                    logger.warning("recovery: cleanup of missing-checkout worktree \(worktree.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                }
                 continue
             }
 
@@ -56,13 +62,21 @@ extension WorktreeLifecycle {
                 // final status flip was lost. Reconcile's dead-window pass
                 // will clean up any terminals whose windows didn't survive.
                 logger.info("recovery: activating .creating worktree \(worktree.id, privacy: .public) — primary terminals already exist")
-                try? await db.worktrees.updateStatus(id: worktree.id, status: .active)
+                do {
+                    try await db.worktrees.updateStatus(id: worktree.id, status: .active)
+                } catch {
+                    logger.warning("recovery: failed to activate worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
                 continue
             }
 
             guard let preSessionTerminal else {
                 logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — checkout exists but no terminals; reconcile will re-adopt it")
-                try? await db.worktrees.delete(id: worktree.id)
+                do {
+                    try await db.worktrees.delete(id: worktree.id)
+                } catch {
+                    logger.warning("recovery: failed to delete terminal-less worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
                 continue
             }
 
@@ -89,21 +103,29 @@ extension WorktreeLifecycle {
                     )
                 ) ?? ""
             )
-            logger.info("recovery: resuming pre-session wait for .creating worktree \(worktree.id, privacy: .public)")
+            // Distinguish an interrupted CREATE from an interrupted REVIVE:
+            // a mid-revive row still carries its archived Claude sessions
+            // (`beginReviveWorktree` only clears them in phase 3 via
+            // `.revive(clearSessions:)`). Resuming such a row with
+            // `.markActive` and no sessions would spawn a FRESH Claude
+            // session, and the next archive would unconditionally overwrite
+            // `archivedClaudeSessions` — silently losing the old transcript.
+            // So: restore the archived sessions and finish with revive
+            // semantics (flip `.active`, clear `archivedAt`, clear the
+            // session list). The other original params (skipClaude,
+            // initialPrompt, cols/rows) died with the previous daemon
+            // process — spawn with defaults.
+            let archivedSessions = worktree.archivedClaudeSessions ?? []
+            let isMidRevive = !archivedSessions.isEmpty
+            logger.info("recovery: resuming pre-session wait for .creating worktree \(worktree.id, privacy: .public) (\(isMidRevive ? "mid-revive" : "mid-create", privacy: .public))")
             let task = Task.detached { [self] in
-                // The original create/revive params (skipClaude, initialPrompt,
-                // cols/rows, archived sessions) died with the previous daemon
-                // process — spawn with defaults. For an interrupted revive
-                // this also means `.markActive` instead of `.revive`:
-                // `archivedAt` stays set and `archivedClaudeSessions` are
-                // neither restored nor cleared (they remain available for a
-                // later revive cycle); only the status flip is recovered.
                 await runPreSessionPhase3(
                     preSession: spawn,
                     worktree: worktree, repo: repo,
                     worktreePath: worktree.path,
                     skipClaude: false,
-                    completionAction: .markActive
+                    archivedClaudeSessions: isMidRevive ? archivedSessions : nil,
+                    completionAction: isMidRevive ? .revive(clearSessions: true) : .markActive
                 )
             }
             resumed.append(task)

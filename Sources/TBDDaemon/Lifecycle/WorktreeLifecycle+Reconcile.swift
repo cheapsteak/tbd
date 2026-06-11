@@ -202,20 +202,30 @@ extension WorktreeLifecycle {
             }
         }
 
-        // Clean up orphaned tmux windows — windows not tracked by any terminal (active or main)
+        // Clean up orphaned tmux windows — windows not tracked by any terminal
+        // (active, main, or creating). `.creating` worktrees count as live: a
+        // pre-session hook wait that's still in flight (or just resumed by the
+        // startup recovery sweep) owns a real tmux window, and phase 3 spawns
+        // primary/setup windows before the row flips `.active`. Treating those
+        // rows as dead would kill the hook mid-run (interrupting e.g. a running
+        // npm install), fire a spurious `.paneKilled` notification, and spawn
+        // the agent prematurely.
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         let activeWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
         let mainWorktreesForCleanup = try await db.worktrees.list(repoID: repoID, status: .main)
-        let allLiveWorktreesForCleanup = activeWorktrees + mainWorktreesForCleanup
+        let creatingWorktreesForCleanup = try await db.worktrees.list(repoID: repoID, status: .creating)
+        let allLiveWorktreesForCleanup = activeWorktrees + mainWorktreesForCleanup + creatingWorktreesForCleanup
         if allLiveWorktreesForCleanup.isEmpty {
-            // No live worktrees — kill the entire tmux server
+            // No live worktrees (including `.creating` ones) — kill the entire
+            // tmux server. A repo whose only live row is mid-pre-session must
+            // NOT land here, or the hook's window dies with the server.
             do {
                 try await tmux.killServer(server: tmuxServer)
             } catch {
                 logger.warning("reconcile: failed to kill tmux server \(tmuxServer, privacy: .public): \(error, privacy: .public)")
             }
         } else {
-            // Collect all tracked window IDs (active + main worktrees)
+            // Collect all tracked window IDs (active + main + creating worktrees)
             var trackedWindowIDs: Set<String> = []
             for wt in allLiveWorktreesForCleanup {
                 let terminals = try await db.terminals.list(worktreeID: wt.id)

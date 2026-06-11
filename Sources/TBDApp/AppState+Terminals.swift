@@ -24,6 +24,21 @@ extension AppState {
     /// pre-session tab?" decisions off this label.
     static let preSessionTerminalLabel = "pre-session"
 
+    /// Label the daemon assigns to the parallel `setup` hook terminal
+    /// (see spawnPrimaryTerminals in WorktreeLifecycle+Create).
+    static let setupTerminalLabel = "setup"
+
+    /// True when `terminal` is a PRIMARY terminal in the pre-session flow:
+    /// the tab the daemon makes active once the hook finishes. That's the
+    /// agent (Claude/Codex) or — with skipClaude — a plain shell; the only
+    /// non-primary phase-3 terminals are the pre-session hook tab itself and
+    /// the parallel `setup` hook window. Keyed off labels rather than kinds
+    /// because a skipClaude primary is kind `.shell`, same as `setup`.
+    func isPrimaryTerminal(_ terminal: Terminal) -> Bool {
+        terminal.label != Self.preSessionTerminalLabel
+            && terminal.label != Self.setupTerminalLabel
+    }
+
     /// True when a pre-session hook terminal exists in state for the worktree.
     /// Drives the sidebar "Running setup…" subtitle while the worktree is
     /// still `.creating`.
@@ -104,10 +119,11 @@ extension AppState {
             )
         }
 
-        // When the primary agent terminal arrives while the user is still on
-        // the pre-session hook tab, follow it. Any other active tab means the
-        // user navigated deliberately — leave the selection alone.
-        if terminal.kind == .claude || terminal.kind == .codex,
+        // When the primary terminal (agent, or shell with skipClaude) arrives
+        // while the user is still on the pre-session hook tab, follow it. Any
+        // other active tab means the user navigated deliberately — leave the
+        // selection alone. The parallel `setup` window never steals selection.
+        if isPrimaryTerminal(terminal),
            let activeID = activeTabTerminalID(worktreeID: worktreeID),
            activeID != terminal.id,
            self.terminal(id: activeID, in: worktreeID)?.label == Self.preSessionTerminalLabel,
@@ -135,13 +151,13 @@ extension AppState {
     }
 
     /// Gate for the converging-from-creation tab-order re-fetch: only a
-    /// primary agent terminal landing in a worktree that has a pre-session
-    /// hook terminal, while the cached order doesn't yet contain that
-    /// primary, warrants reconciling against the daemon's persisted order.
-    /// Anything else — user reorders, ordinary terminal creation, the
+    /// primary terminal (agent, or shell with skipClaude) landing in a
+    /// worktree that has a pre-session hook terminal, while the cached order
+    /// doesn't yet contain that primary, warrants reconciling against the
+    /// daemon's persisted order. Anything else — user reorders, the
     /// parallel `setup` shell — must leave the tab arrangement untouched.
     func shouldReconcileTabOrderFromDaemon(after terminal: Terminal) -> Bool {
-        (terminal.kind == .claude || terminal.kind == .codex)
+        isPrimaryTerminal(terminal)
             && hasPreSessionTerminal(worktreeID: terminal.worktreeID)
             && worktreeTabOrders[terminal.worktreeID]?.contains(terminal.id) != true
     }

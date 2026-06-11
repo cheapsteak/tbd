@@ -458,11 +458,14 @@ actor DaemonClient {
         )
     }
 
-    /// Revive an archived worktree.
-    func reviveWorktree(id: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws {
-        try await callVoidAsync(
+    /// Revive an archived worktree. Returns the revived worktree as the daemon
+    /// sees it when the RPC completes — still `.creating` while a blocking
+    /// `preSession` hook runs, `.active` otherwise.
+    func reviveWorktree(id: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> Worktree {
+        try await callAsync(
             method: RPCMethod.worktreeRevive,
-            params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows, preferredSessionID: preferredSessionID)
+            params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows, preferredSessionID: preferredSessionID),
+            resultType: Worktree.self
         )
     }
 
