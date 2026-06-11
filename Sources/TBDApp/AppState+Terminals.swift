@@ -117,6 +117,57 @@ extension AppState {
             // index needs to move, so skip setActiveTab's re-persist RPC.
             activeTabIndices[worktreeID] = newIdx
         }
+
+        // Converging-from-creation reconcile: the daemon's pre-session flow
+        // persists tab order [primary, preSession, setup] behind the app's
+        // back, but the order this app cached (loaded while only the
+        // pre-session tab existed) is just [preSession] — so plain appends
+        // would show [preSession, primary, setup] until restart. When the
+        // primary lands and the cached order doesn't know it yet, re-fetch
+        // the persisted order and re-sort. applyStoredOrder follows the
+        // active tab by ID, so neither the hand-off above nor a deliberate
+        // user selection is clobbered.
+        if shouldReconcileTabOrderFromDaemon(after: terminal) {
+            Task { [weak self] in
+                await self?.refreshStoredTabOrder(worktreeID: worktreeID)
+            }
+        }
+    }
+
+    /// Gate for the converging-from-creation tab-order re-fetch: only a
+    /// primary agent terminal landing in a worktree that has a pre-session
+    /// hook terminal, while the cached order doesn't yet contain that
+    /// primary, warrants reconciling against the daemon's persisted order.
+    /// Anything else — user reorders, ordinary terminal creation, the
+    /// parallel `setup` shell — must leave the tab arrangement untouched.
+    func shouldReconcileTabOrderFromDaemon(after terminal: Terminal) -> Bool {
+        (terminal.kind == .claude || terminal.kind == .codex)
+            && hasPreSessionTerminal(worktreeID: terminal.worktreeID)
+            && worktreeTabOrders[terminal.worktreeID]?.contains(terminal.id) != true
+    }
+
+    /// Re-fetch the daemon's persisted tab order for a worktree and re-sort
+    /// the in-memory tabs against it. Failure just logs — the order then
+    /// converges on the next full refresh or restart, exactly as before.
+    func refreshStoredTabOrder(worktreeID: UUID) async {
+        do {
+            let response = try await daemonClient.listTabs(worktreeID: worktreeID)
+            adoptPersistedTabOrder(worktreeID: worktreeID, order: response.order)
+        } catch {
+            logger.error("tab order re-fetch failed for \(worktreeID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Synchronous core of the converging-from-creation reconcile: adopt the
+    /// daemon's persisted tab order and re-sort via the same applyStoredOrder
+    /// path loadTabStates uses. Split from the fetch so tests (which can't
+    /// stub the concrete DaemonClient actor) can drive it with a fixture
+    /// order. An empty order means the daemon has nothing persisted — keep
+    /// the current in-memory arrangement.
+    func adoptPersistedTabOrder(worktreeID: UUID, order: [UUID]) {
+        guard !order.isEmpty else { return }
+        worktreeTabOrders[worktreeID] = order
+        applyStoredOrder(worktreeID: worktreeID)
     }
 
     // MARK: - Terminal Actions

@@ -256,7 +256,7 @@ extension WorktreeLifecycle {
                         skipClaude: skipClaude,
                         initialPrompt: initialPrompt,
                         cols: cols, rows: rows,
-                        markActiveOnCompletion: true
+                        completionAction: .markActive
                     )
                 }
                 return .preSessionPending(phase3: phase3)
@@ -370,62 +370,6 @@ extension WorktreeLifecycle {
         if command == defaultShell { return command }
         let escaped = command.replacingOccurrences(of: "'", with: "'\\''")
         return "'\(escaped)'; exec \(defaultShell)"
-    }
-
-    /// Sets up tmux windows and terminal records for a worktree.
-    /// Used by `reviveWorktree` (and the no-hook create path via
-    /// `spawnPrimaryTerminals` directly).
-    ///
-    /// When a `preSession` hook resolves, its terminal is created first and
-    /// this method awaits the hook's completion marker INLINE before spawning
-    /// the primary terminals. (`completeCreateWorktree` does the same dance
-    /// with the wait detached instead — revive is a synchronous RPC.)
-    ///
-    /// When `archivedClaudeSessions` is provided (revive path), the first session ID
-    /// is reused for the primary Claude terminal to restore the conversation, and any
-    /// additional sessions get their own terminal windows.
-    func setupTerminals(
-        worktree: Worktree, repo: Repo,
-        worktreePath: String? = nil, skipClaude: Bool,
-        archivedClaudeSessions: [String]? = nil,
-        initialPrompt: String? = nil,
-        cols: Int? = nil,
-        rows: Int? = nil
-    ) async throws {
-        let worktreePath = worktreePath ?? worktree.path
-        guard let preSession = try await spawnPreSessionTerminal(
-            worktree: worktree, repo: repo,
-            worktreePath: worktreePath,
-            cols: cols, rows: rows
-        ) else {
-            // No preSession hook → identical behavior to today.
-            _ = try await spawnPrimaryTerminals(
-                worktree: worktree, repo: repo,
-                worktreePath: worktreePath,
-                skipClaude: skipClaude,
-                archivedClaudeSessions: archivedClaudeSessions,
-                initialPrompt: initialPrompt,
-                cols: cols, rows: rows,
-                preSessionTerminalID: nil
-            )
-            return
-        }
-        subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
-            terminalID: preSession.terminalID,
-            worktreeID: worktree.id,
-            label: "pre-session"
-        )))
-        // Status transitions stay with the caller (revive sets its own).
-        await runPreSessionPhase3(
-            preSession: preSession,
-            worktree: worktree, repo: repo,
-            worktreePath: worktreePath,
-            skipClaude: skipClaude,
-            archivedClaudeSessions: archivedClaudeSessions,
-            initialPrompt: initialPrompt,
-            cols: cols, rows: rows,
-            markActiveOnCompletion: false
-        )
     }
 
     /// Spawns the primary agent terminal, the parallel `setup` hook terminal,
@@ -594,11 +538,17 @@ extension WorktreeLifecycle {
             appHookPath: TBDConstants.hookPath(repoID: worktree.repoID, eventName: HookEvent.setup.rawValue)
         )
         let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
-        // Inject TBD_TERMINAL_ID + TBD_WORKTREE_ID so setup hooks and any
-        // tooling they run can identify their owning terminal.
+        // Full hook environment per docs/worktree-hooks.md (matches the
+        // preSession and archive hooks). TBD_WORKTREE_NAME uses
+        // `worktree.name` for consistency with the archive hook's env.
         let setupEnv: [String: String] = [
             "TBD_WORKTREE_ID": worktreeID.uuidString,
             "TBD_TERMINAL_ID": plannedTerminalID2.uuidString,
+            "TBD_EVENT": HookEvent.setup.rawValue,
+            "TBD_WORKTREE_NAME": worktree.name,
+            "TBD_WORKTREE_PATH": worktreePath,
+            "TBD_REPO_PATH": repo.path,
+            "TBD_BRANCH": worktree.branch,
         ]
         let window2 = try await tmux.createWindow(
             server: tmuxServer,

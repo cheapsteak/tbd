@@ -11,6 +11,11 @@ public struct TmuxManager: Sendable {
     /// have been passed to tmux. Used by spawn / swap integration tests to assert
     /// command shapes without spawning an actual tmux server.
     public let dryRunRecorder: (@Sendable ([String]) -> Void)?
+    /// Optional test hook consulted by `windowExists` in dryRun mode: return
+    /// `true` for a window ID to simulate that window having been killed.
+    /// Without it, dryRun reports every window as alive, which makes paths
+    /// like the pre-session `.paneKilled` short-circuit untestable.
+    public let dryRunWindowIsDead: (@Sendable (String) -> Bool)?
 
     // Thread-safe counter for generating unique mock IDs
     private final class Counter: Sendable {
@@ -25,10 +30,11 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil) {
         self.dryRun = dryRun
         self.counter = Counter()
         self.dryRunRecorder = dryRunRecorder
+        self.dryRunWindowIsDead = dryRunWindowIsDead
     }
 
     // MARK: - Static Command Builders
@@ -358,7 +364,7 @@ public struct TmuxManager: Sendable {
 
     /// Check whether a tmux window exists by querying list-panes.
     public func windowExists(server: String, windowID: String) async -> Bool {
-        if dryRun { return true }
+        if dryRun { return !(dryRunWindowIsDead?(windowID) ?? false) }
         do {
             let args = ["-L", server, "list-panes", "-t", windowID]
             _ = try await runTmux(args)

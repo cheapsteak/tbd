@@ -123,12 +123,19 @@ extension RPCRouter {
 
     func handleWorktreeRevive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeReviveParams.self, from: paramsData)
-        let worktree = try await lifecycle.reviveWorktree(
+        // Non-blocking: when a preSession hook gates the primary terminals,
+        // this returns promptly with the row in `.creating` (which is what
+        // the app gates its pre-session UI on) and the detached phase-3 task
+        // finishes the revive in the background. Blocking here for up to the
+        // hook timeout (600s) would starve the RPC connection AND keep the
+        // row `.archived`, so the pre-session UI never showed.
+        let completion = try await lifecycle.beginReviveWorktree(
             worktreeID: params.worktreeID,
             cols: params.cols,
             rows: params.rows,
             preferredSessionID: params.preferredSessionID
         )
+        let worktree = completion.worktree
 
         subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
             worktreeID: worktree.id, repoID: worktree.repoID,

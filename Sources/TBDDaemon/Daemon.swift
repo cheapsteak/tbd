@@ -241,6 +241,13 @@ public final class Daemon: Sendable {
         } catch {
             daemonLogger.warning("breakCyclicParents failed at startup: \(error.localizedDescription, privacy: .public)")
         }
+        // Resolve worktree rows stranded in `.creating` by a daemon restart
+        // mid-pre-session-wait. Must run BEFORE the per-repo reconcile loop so
+        // orphaned rows are deleted/flipped first — reconcile only sees
+        // `.active` rows and would otherwise trip the UNIQUE path constraint
+        // re-adopting a stranded checkout. Resumed waits run detached and
+        // never block startup.
+        await lifecycle.recoverCreatingWorktrees()
         do {
             let repos = try await database.repos.list()
             for repo in repos {

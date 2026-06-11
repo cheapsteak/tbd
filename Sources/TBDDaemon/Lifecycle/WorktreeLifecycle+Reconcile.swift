@@ -106,7 +106,15 @@ extension WorktreeLifecycle {
         dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
 
         let gitPaths = Set(gitWorktrees.map(\.path))
-        let dbPaths = Set(dbWorktrees.map(\.path))
+        // Include `.creating` rows so a worktree whose pre-session phase-3
+        // wait is still in flight (status flips to .active only when the hook
+        // finishes) isn't "unknown" to the re-adopt pass below — re-adopting
+        // its path would violate the UNIQUE path constraint and abort this
+        // repo's reconcile.
+        let creatingPaths = Set(
+            (try await db.worktrees.list(repoID: repoID, status: .creating)).map(\.path)
+        )
+        let dbPaths = Set(dbWorktrees.map(\.path)).union(creatingPaths)
 
         // Mark missing worktrees as archived — also kill their tmux windows
         for wt in dbWorktrees where !gitPaths.contains(wt.path) {

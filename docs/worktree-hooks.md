@@ -35,7 +35,7 @@ Hooks run with `cwd` set to the worktree path and receive these environment vari
 | --- | --- |
 | `TBD_EVENT` | `preSession`, `setup`, or `archive` |
 | `TBD_WORKTREE_ID` | UUID of the worktree |
-| `TBD_WORKTREE_NAME` | Display name |
+| `TBD_WORKTREE_NAME` | Worktree name (the stable checkout folder name, not the renameable display name) |
 | `TBD_WORKTREE_PATH` | Absolute path to the worktree checkout |
 | `TBD_REPO_PATH` | Absolute path to the source repo |
 | `TBD_BRANCH` | Branch name |

@@ -25,6 +25,19 @@ enum PreSessionOutcome: Equatable, Sendable {
     case paneKilled
 }
 
+/// What `runPreSessionPhase3` does to the worktree row once the primary
+/// terminals are spawned. Phase 3 must always flip the status eventually —
+/// the row would otherwise be stuck in `.creating` forever.
+enum PreSessionCompletionAction: Sendable {
+    /// Create path: set status to `.active`.
+    case markActive
+    /// Revive path: `db.worktrees.revive(id:clearSessions:)` — flips to
+    /// `.active`, clears `archivedAt`, and (when `clearSessions` is true)
+    /// clears `archivedClaudeSessions`, preserving the legacy revive
+    /// semantics around session restoration.
+    case revive(clearSessions: Bool)
+}
+
 extension WorktreeLifecycle {
 
     // MARK: - Paths & command construction
@@ -106,10 +119,17 @@ extension WorktreeLifecycle {
             markerPath: markerPath,
             shell: defaultShell
         )
+        // Full hook environment per docs/worktree-hooks.md. TBD_WORKTREE_NAME
+        // uses `worktree.name` to match the archive hook's env (the display
+        // name can be renamed later; the folder name is the stable identity).
         let env: [String: String] = [
             "TBD_WORKTREE_ID": worktreeID.uuidString,
             "TBD_TERMINAL_ID": terminalID.uuidString,
             "TBD_EVENT": HookEvent.preSession.rawValue,
+            "TBD_WORKTREE_NAME": worktree.name,
+            "TBD_WORKTREE_PATH": worktreePath,
+            "TBD_REPO_PATH": repo.path,
+            "TBD_BRANCH": worktree.branch,
         ]
         let window = try await tmux.createWindow(
             server: tmuxServer,
@@ -149,6 +169,16 @@ extension WorktreeLifecycle {
 
     // MARK: - Phase 3: marker wait + primary spawn
 
+    /// Reads + deletes the marker file if present, returning the recorded
+    /// exit code. Returns nil when no marker exists yet.
+    private static func consumeMarker(atPath path: String) -> PreSessionOutcome? {
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        try? FileManager.default.removeItem(atPath: path)
+        let code = Int(content.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+        return .completed(exitCode: code)
+    }
+
     /// Polls for the completion marker. Short-circuits when the hook's tmux
     /// window disappears (user killed the pane). Reads + deletes the marker.
     func waitForPreSessionCompletion(
@@ -159,21 +189,29 @@ extension WorktreeLifecycle {
         while Date() < deadline {
             // Marker check first: if the hook finished and the user then
             // closed the pane, the recorded exit code wins.
-            if FileManager.default.fileExists(atPath: preSession.markerPath) {
-                let content = (try? String(
-                    contentsOfFile: preSession.markerPath, encoding: .utf8
-                )) ?? ""
-                try? FileManager.default.removeItem(atPath: preSession.markerPath)
-                let code = Int(content.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
-                return .completed(exitCode: code)
+            if let outcome = Self.consumeMarker(atPath: preSession.markerPath) {
+                return outcome
             }
             let windowAlive = await tmux.windowExists(
                 server: tmuxServer, windowID: preSession.windowID
             )
             if !windowAlive {
+                // Same-iteration race: the hook can write the marker after the
+                // fileExists check above and exit (closing the pane) before the
+                // windowExists check. Re-check the marker once so a hook that
+                // actually finished isn't misreported as a killed pane.
+                if let outcome = Self.consumeMarker(atPath: preSession.markerPath) {
+                    return outcome
+                }
                 return .paneKilled
             }
             try? await Task.sleep(nanoseconds: pollNanos)
+        }
+        // Deadline race: the marker may have landed during the final poll
+        // sleep. Honor a hook that finished (just barely too late) instead of
+        // reporting a timeout — and consume the marker so it never leaks.
+        if let outcome = Self.consumeMarker(atPath: preSession.markerPath) {
+            return outcome
         }
         return .timedOut
     }
@@ -183,8 +221,9 @@ extension WorktreeLifecycle {
     ///
     /// Never throws and never deletes the worktree row — by the time phase 3
     /// runs, the git checkout is valid. Spawn errors are logged + notified.
-    /// When `markActiveOnCompletion` is true (create path), the worktree status
-    /// is set to `.active` at the end no matter what happened.
+    /// `completionAction` decides the final status flip (`.markActive` on the
+    /// create path, `.revive` on the revive path); it always runs no matter
+    /// what happened, so the row never sticks in `.creating`.
     func runPreSessionPhase3(
         preSession: PreSessionSpawn,
         worktree: Worktree, repo: Repo,
@@ -193,11 +232,31 @@ extension WorktreeLifecycle {
         archivedClaudeSessions: [String]? = nil,
         initialPrompt: String? = nil,
         cols: Int? = nil, rows: Int? = nil,
-        markActiveOnCompletion: Bool
+        completionAction: PreSessionCompletionAction
     ) async {
         let outcome = await waitForPreSessionCompletion(
             preSession: preSession, tmuxServer: worktree.tmuxServer
         )
+        // The marker must never outlive the wait, whatever the outcome —
+        // `.completed` consumes it inside the wait; this catches any straggler
+        // written between the wait's last check and now.
+        try? FileManager.default.removeItem(atPath: preSession.markerPath)
+
+        // The worktree row can vanish mid-wait (repo remove cascades a
+        // deleteForRepo while phase 3 is parked on the marker). Spawning the
+        // primary terminals would then fail the terminal FK insert AFTER the
+        // tmux window (and its Claude process) was created — orphaning both.
+        // Bail out before any spawn: kill the pre-session window best-effort
+        // and clean the marker; there is no row left to flip or notify.
+        guard (try? await db.worktrees.get(id: worktree.id)) ?? nil != nil else {
+            logger.warning("phase-3: worktree \(worktree.id, privacy: .public) row disappeared mid-wait — skipping primary spawn and cleaning up")
+            try? await tmux.killWindow(
+                server: worktree.tmuxServer, windowID: preSession.windowID
+            )
+            try? FileManager.default.removeItem(atPath: preSession.markerPath)
+            return
+        }
+
         switch outcome {
         case .completed(exitCode: 0):
             logger.info("preSession hook completed for worktree \(worktree.id, privacy: .public)")
@@ -243,13 +302,16 @@ extension WorktreeLifecycle {
             )
         }
 
-        if markActiveOnCompletion {
-            // Never leave the worktree stuck in .creating — the checkout is valid.
-            do {
+        // Never leave the worktree stuck in .creating — the checkout is valid.
+        do {
+            switch completionAction {
+            case .markActive:
                 try await db.worktrees.updateStatus(id: worktree.id, status: .active)
-            } catch {
-                logger.error("phase-3 status update failed for worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            case .revive(let clearSessions):
+                try await db.worktrees.revive(id: worktree.id, clearSessions: clearSessions)
             }
+        } catch {
+            logger.error("phase-3 status update failed for worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 

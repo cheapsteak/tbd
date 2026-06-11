@@ -182,6 +182,116 @@ struct PreSessionAppStateTests {
         }
     }
 
+    // MARK: - Tab order convergence with the daemon's persisted order
+
+    @Test func tabOrderConvergesToDaemonPersistedOrderAfterPrimaryDelta() {
+        withAppState { state in
+            let worktreeID = UUID()
+            let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
+            // The full refresh triggered by the pre-session terminal's delta
+            // cached the daemon's phase-1 order: just the pre-session tab.
+            state.worktreeTabOrders[worktreeID] = [pre.id]
+
+            // Phase-3 deltas land: primary agent, then the parallel setup shell.
+            let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
+            let setup = makeTerminal(worktreeID: worktreeID, label: "setup", kind: .shell)
+            state.appendCreatedTerminal(claude)
+            state.appendCreatedTerminal(setup)
+
+            // Plain appends leave the diverged [preSession, primary, setup]…
+            #expect(state.tabs[worktreeID]?.map(\.id) == [pre.id, claude.id, setup.id])
+            // …and the primary append arms the re-fetch.
+            #expect(state.shouldReconcileTabOrderFromDaemon(after: claude))
+
+            // The re-fetch lands the daemon's persisted [primary, preSession, setup].
+            state.adoptPersistedTabOrder(worktreeID: worktreeID, order: [claude.id, pre.id, setup.id])
+
+            #expect(state.tabs[worktreeID]?.map(\.id) == [claude.id, pre.id, setup.id])
+            #expect(state.worktreeTabOrders[worktreeID] == [claude.id, pre.id, setup.id])
+            // The selection hand-off survives the re-sort: still on the primary.
+            #expect(state.activeTabIndices[worktreeID] == 0)
+        }
+    }
+
+    @Test func adoptPersistedTabOrderFollowsDeliberateUserSelectionByID() {
+        withAppState { state in
+            let worktreeID = UUID()
+            let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
+            state.worktreeTabOrders[worktreeID] = [pre.id]
+            let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
+            state.appendCreatedTerminal(claude)
+            // User deliberately clicked back to the pre-session tab before
+            // the order re-fetch landed.
+            state.activeTabIndices[worktreeID] = 0
+
+            state.adoptPersistedTabOrder(worktreeID: worktreeID, order: [claude.id, pre.id])
+
+            #expect(state.tabs[worktreeID]?.map(\.id) == [claude.id, pre.id])
+            // Selection follows the pre-session tab to its new index.
+            #expect(state.activeTabIndices[worktreeID] == 1)
+        }
+    }
+
+    @Test func adoptPersistedTabOrderIgnoresEmptyOrder() {
+        withAppState { state in
+            let worktreeID = UUID()
+            let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
+            state.worktreeTabOrders[worktreeID] = [pre.id]
+
+            state.adoptPersistedTabOrder(worktreeID: worktreeID, order: [])
+
+            // Nothing persisted daemon-side — keep the cached order and tabs.
+            #expect(state.worktreeTabOrders[worktreeID] == [pre.id])
+            #expect(state.tabs[worktreeID]?.map(\.id) == [pre.id])
+        }
+    }
+
+    // MARK: - Re-fetch gate branches
+
+    @Test func reconcileGateArmsForPrimaryMissingFromCachedOrder() {
+        withAppState { state in
+            let worktreeID = UUID()
+            let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
+            state.worktreeTabOrders[worktreeID] = [pre.id]
+            let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
+            #expect(state.shouldReconcileTabOrderFromDaemon(after: claude))
+            // Order not loaded at all yet counts as stale too.
+            state.worktreeTabOrders[worktreeID] = nil
+            #expect(state.shouldReconcileTabOrderFromDaemon(after: claude))
+            // Codex is also a primary.
+            let codex = makeTerminal(worktreeID: worktreeID, label: "Codex", kind: .codex)
+            #expect(state.shouldReconcileTabOrderFromDaemon(after: codex))
+        }
+    }
+
+    @Test func reconcileGateStaysOffForNonPrimaryTerminals() {
+        withAppState { state in
+            let worktreeID = UUID()
+            _ = seedPreSessionOnly(state, worktreeID: worktreeID)
+            let setup = makeTerminal(worktreeID: worktreeID, label: "setup", kind: .shell)
+            #expect(!state.shouldReconcileTabOrderFromDaemon(after: setup))
+        }
+    }
+
+    @Test func reconcileGateStaysOffWithoutPreSessionTerminal() {
+        withAppState { state in
+            let worktreeID = UUID()
+            state.terminals[worktreeID] = []
+            let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
+            #expect(!state.shouldReconcileTabOrderFromDaemon(after: claude))
+        }
+    }
+
+    @Test func reconcileGateStaysOffWhenCachedOrderAlreadyContainsPrimary() {
+        withAppState { state in
+            let worktreeID = UUID()
+            let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
+            let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
+            state.worktreeTabOrders[worktreeID] = [claude.id, pre.id]
+            #expect(!state.shouldReconcileTabOrderFromDaemon(after: claude))
+        }
+    }
+
     // MARK: - Sidebar subtitle
 
     @Test func hasPreSessionTerminalTrueWhenHookTerminalLoaded() {
