@@ -267,7 +267,15 @@ public struct WorktreeStore: Sendable {
     }
 
     /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
-    public func list(repoID: UUID? = nil, status: WorktreeStatus? = nil, limit: Int? = nil, offset: Int? = nil) async throws -> [Worktree] {
+    /// When `excludeArchived` is true, archived rows are excluded from the result.
+    /// This composes with `status`: both filters are applied when both are given.
+    public func list(
+        repoID: UUID? = nil,
+        status: WorktreeStatus? = nil,
+        excludeArchived: Bool = false,
+        limit: Int? = nil,
+        offset: Int? = nil
+    ) async throws -> [Worktree] {
         try await writer.read { db in
             var request = WorktreeRecord.all()
             if let repoID {
@@ -275,6 +283,9 @@ public struct WorktreeStore: Sendable {
             }
             if let status {
                 request = request.filter(Column("status") == status.rawValue)
+            }
+            if excludeArchived {
+                request = request.filter(Column("status") != WorktreeStatus.archived.rawValue)
             }
             if status == .archived {
                 request = request.order(Column("archivedAt").desc)

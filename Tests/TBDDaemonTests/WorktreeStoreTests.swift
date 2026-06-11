@@ -285,4 +285,103 @@ import TBDShared
         let page3 = try await db.worktrees.list(repoID: repo.id, status: .archived, limit: 2, offset: 4)
         #expect(page3.map(\.id) == [worktreeIDs[0]])
     }
+
+    // MARK: - excludeArchived filter
+
+    @Test func excludeArchivedTrueReturnsOnlyNonArchived() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+
+        let active = try await db.worktrees.create(
+            repoID: repo.id, name: "active", branch: "b-active",
+            path: "/tmp/active-\(UUID())", tmuxServer: "srv"
+        )
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main",
+            path: "/tmp/main-\(UUID())", tmuxServer: "srv"
+        )
+        let toArchive = try await db.worktrees.create(
+            repoID: repo.id, name: "archived-wt", branch: "b-arch",
+            path: "/tmp/arch-\(UUID())", tmuxServer: "srv"
+        )
+        try await db.worktrees.archive(id: toArchive.id)
+
+        let result = try await db.worktrees.list(repoID: repo.id, excludeArchived: true)
+        let ids = Set(result.map(\.id))
+        #expect(ids.contains(active.id))
+        #expect(ids.contains(main.id))
+        #expect(!ids.contains(toArchive.id))
+    }
+
+    @Test func excludeArchivedFalseReturnsEverything() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+
+        let active = try await db.worktrees.create(
+            repoID: repo.id, name: "active", branch: "b-active",
+            path: "/tmp/active-\(UUID())", tmuxServer: "srv"
+        )
+        let toArchive = try await db.worktrees.create(
+            repoID: repo.id, name: "archived-wt", branch: "b-arch",
+            path: "/tmp/arch-\(UUID())", tmuxServer: "srv"
+        )
+        try await db.worktrees.archive(id: toArchive.id)
+
+        // excludeArchived=false (the default) must return all rows
+        let result = try await db.worktrees.list(repoID: repo.id, excludeArchived: false)
+        let ids = Set(result.map(\.id))
+        #expect(ids.contains(active.id))
+        #expect(ids.contains(toArchive.id))
+    }
+
+    @Test func excludeArchivedComposesWithRepoIDFilter() async throws {
+        let db = try makeDB()
+        let repo1 = try await createRepo(db: db)
+        let repo2 = try await createRepo(db: db)
+
+        let active1 = try await db.worktrees.create(
+            repoID: repo1.id, name: "r1-active", branch: "b1",
+            path: "/tmp/r1a-\(UUID())", tmuxServer: "srv"
+        )
+        let arch1 = try await db.worktrees.create(
+            repoID: repo1.id, name: "r1-arch", branch: "b1-arch",
+            path: "/tmp/r1ar-\(UUID())", tmuxServer: "srv"
+        )
+        try await db.worktrees.archive(id: arch1.id)
+
+        let active2 = try await db.worktrees.create(
+            repoID: repo2.id, name: "r2-active", branch: "b2",
+            path: "/tmp/r2a-\(UUID())", tmuxServer: "srv"
+        )
+
+        let repo1Result = try await db.worktrees.list(repoID: repo1.id, excludeArchived: true)
+        let repo1IDs = Set(repo1Result.map(\.id))
+        #expect(repo1IDs.contains(active1.id))
+        #expect(!repo1IDs.contains(arch1.id))
+        #expect(!repo1IDs.contains(active2.id))
+    }
+
+    @Test func excludeArchivedOrderIsSortOrderAsc() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+
+        let wt1 = try await db.worktrees.create(
+            repoID: repo.id, name: "first", branch: "b1",
+            path: "/tmp/wt1-\(UUID())", tmuxServer: "srv"
+        )
+        let wt2 = try await db.worktrees.create(
+            repoID: repo.id, name: "second", branch: "b2",
+            path: "/tmp/wt2-\(UUID())", tmuxServer: "srv"
+        )
+        let arch = try await db.worktrees.create(
+            repoID: repo.id, name: "archived", branch: "b3",
+            path: "/tmp/arch-\(UUID())", tmuxServer: "srv"
+        )
+        try await db.worktrees.archive(id: arch.id)
+
+        let result = try await db.worktrees.list(repoID: repo.id, excludeArchived: true)
+        let ids = result.map(\.id)
+        #expect(ids == [wt1.id, wt2.id])
+        #expect(result.map(\.sortOrder) == [1, 2])
+    }
 }
