@@ -5,20 +5,23 @@ import os
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "PRStatusManager")
 
 /// In-memory cache of GitHub PR status per worktree.
-/// Fetches via `gh api graphql` — one call per `fetchAll`, one `gh pr view` per `refresh`.
+///
+/// `fetchAll` runs one batch GraphQL call for all viewer PRs, plus one combined per-PR
+/// GraphQL call (run concurrently) for each OPEN PR whose aggregate rollup isn't SUCCESS —
+/// that call returns the aggregate state, every check context with its `isRequired`
+/// flag, and a pagination flag in a single round trip. `refresh` runs
+/// `gh pr view` plus the same combined call for OPEN PRs. On transient fetch failure,
+/// callers keep the previous cached status instead of guessing.
 public actor PRStatusManager {
 
     private var cache: [UUID: PRStatus] = [:]
 
-    /// Cached per-worktree classification of which check NAMES are required, keyed by the head
-    /// commit SHA it was computed for. Only the `isRequired` classification is stable per commit;
-    /// the live `(failing, pending)` signal must be recomputed from fresh check states every poll
-    /// (a check's conclusion/status changes on the SAME commit), so it is NEVER cached.
-    struct RequiredChecksClassification {
-        let headSha: String
-        let isRequiredByName: [String: Bool]
-    }
-    private var requiredChecksCache: [UUID: RequiredChecksClassification] = [:]
+    /// Reentrancy guard: a previous poll still running means a new `fetchAll` is skipped
+    /// so two generations of batch data can't interleave their cache writes.
+    private var fetchAllInProgress = false
+
+    /// Set by `refresh()`/`invalidate()`; `fetchAll` won't overwrite newer data.
+    private var lastDirectUpdate: [UUID: Date] = [:]
 
     public init() {}
 
@@ -28,13 +31,17 @@ public actor PRStatusManager {
 
     public func invalidate(worktreeID: UUID) {
         cache.removeValue(forKey: worktreeID)
-        requiredChecksCache.removeValue(forKey: worktreeID)
+        lastDirectUpdate[worktreeID] = Date()   // an in-flight fetchAll must not resurrect the entry
     }
 
     /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
     /// worktrees: list of (id, branch, upstreamBranch, worktreePath) for active non-main worktrees.
     public func fetchAll(worktrees: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String)]) async {
         guard !worktrees.isEmpty else { return }
+        guard !fetchAllInProgress else { return }   // a previous poll is still running; skip to avoid interleaved generations
+        fetchAllInProgress = true
+        defer { fetchAllInProgress = false }
+        let batchStartedAt = Date()
         // All worktrees share one repo; any path works as gh's working directory for auth.
         let repoPath = worktrees[0].worktreePath
 
@@ -63,58 +70,62 @@ public actor PRStatusManager {
             }
         }
 
-        // Update cache for worktrees found in the batch.
+        // Collect matches first.
         // Do NOT clear entries for missing worktrees — the batch query is
         // limited to 100 PRs across all repos, so older PRs may not appear.
         // Those entries may have been populated by a targeted `refresh` call.
+        var matches: [(worktreeID: UUID, node: PRNode)] = []
         for wt in worktrees {
-            let candidates = Self.branchCandidates(
-                localBranch: wt.branch,
-                upstreamBranch: wt.upstreamBranch
-            )
+            let candidates = Self.branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch)
             if let node = candidates.compactMap({ byBranch[$0] }).first {
-                let signals = await signalsForBatchNode(worktreeID: wt.id, node: node, repoPath: repoPath)
-                cache[wt.id] = PRStatus(
-                    number: node.number,
-                    url: node.url,
-                    state: Self.mapState(
-                        ghState: node.state,
-                        mergeStateStatus: node.mergeStateStatus,
-                        reviewDecision: node.reviewDecision,
-                        isDraft: node.isDraft,
-                        requiredChecksFailing: signals.failing,
-                        requiredChecksPending: signals.pending
-                    )
-                )
+                matches.append((wt.id, node))
             }
         }
-    }
 
-    /// Compute the LIVE `(failing, pending)` required-check signals for a batch-matched PR node.
-    ///
-    /// Cheap aggregate pre-filter, then live per-check computation:
-    /// - Not OPEN → `(false, false)`, no query.
-    /// - Aggregate rollup indicates neither failing nor pending (SUCCESS/nil) → `(false, false)`, no query.
-    /// - Otherwise (any non-success aggregate) → fetch live check contexts and compute the signals
-    ///   from the cached `isRequired` classification (refreshing it only when needed).
-    private func signalsForBatchNode(worktreeID: UUID, node: PRNode, repoPath: String) async -> (failing: Bool, pending: Bool) {
-        guard node.state == "OPEN",
-              Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) else {
-            return (false, false)
+        // Fetch per-PR signals concurrently; only non-green OPEN PRs need the query.
+        let signalsByID = await withTaskGroup(of: (UUID, (failing: Bool, pending: Bool)?).self,
+                                              returning: [UUID: (failing: Bool, pending: Bool)?].self) { group in
+            for match in matches {
+                let node = match.node
+                let id = match.worktreeID
+                if node.state != "OPEN" || !Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) {
+                    group.addTask { (id, (failing: false, pending: false)) }
+                } else {
+                    group.addTask {
+                        (id, await self.fetchCheckSignals(url: node.url, number: node.number, repoPath: repoPath))
+                    }
+                }
+            }
+            var out: [UUID: (failing: Bool, pending: Bool)?] = [:]
+            for await (id, signals) in group { out[id] = signals }
+            return out
         }
-        guard let ownerRepo = Self.parseOwnerRepo(fromURL: node.url) else {
-            // Can't query — be conservative and keep red.
-            return (true, false)
+
+        for match in matches {
+            // A user-initiated refresh (or invalidate) landed after this batch's snapshot —
+            // its data is fresher than ours; don't clobber it.
+            if let direct = lastDirectUpdate[match.worktreeID], direct > batchStartedAt { continue }
+            let signals: (failing: Bool, pending: Bool)
+            if let fetched = signalsByID[match.worktreeID] ?? nil {
+                signals = fetched
+            } else if cache[match.worktreeID] != nil {
+                continue   // transient failure: keep the previous status rather than guessing
+            } else {
+                signals = Self.aggregateFallbackSignals(match.node.statusCheckRollupState)
+            }
+            cache[match.worktreeID] = PRStatus(
+                number: match.node.number,
+                url: match.node.url,
+                state: Self.mapState(
+                    ghState: match.node.state,
+                    mergeStateStatus: match.node.mergeStateStatus,
+                    reviewDecision: match.node.reviewDecision,
+                    isDraft: match.node.isDraft,
+                    requiredChecksFailing: signals.failing,
+                    requiredChecksPending: signals.pending
+                )
+            )
         }
-        return await liveCheckSignals(
-            worktreeID: worktreeID,
-            owner: ownerRepo.owner,
-            name: ownerRepo.name,
-            number: node.number,
-            headSha: node.headRefOid,
-            repoPath: repoPath,
-            forceClassificationRefresh: false
-        )
     }
 
     /// The aggregate rollup classifies a per-check query as worthwhile when it is NOT a settled
@@ -127,35 +138,25 @@ public actor PRStatusManager {
 
     /// Refresh a single worktree using `gh pr view`. Used for on-select refresh.
     public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, repoPath: String) async -> PRStatus? {
-        let candidates = Self.branchCandidates(
-            localBranch: branch,
-            upstreamBranch: upstreamBranch
-        )
+        let candidates = Self.branchCandidates(localBranch: branch, upstreamBranch: upstreamBranch)
         for candidate in candidates {
             let args = ["pr", "view", candidate,
-                        "--json", "number,url,state,mergeStateStatus,reviewDecision,isDraft,headRefOid"]
+                        "--json", "number,url,state,mergeStateStatus,reviewDecision,isDraft"]
             guard let output = await runGH(args: args, repoPath: repoPath),
                   let data = output.data(using: .utf8),
                   let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
                 continue
             }
 
-            // Recompute live `(failing, pending)` from fresh check states, force-refreshing the
-            // `isRequired` classification since this is the user-initiated path.
             let signals: (failing: Bool, pending: Bool)
-            if let ownerRepo = Self.parseOwnerRepo(fromURL: obj.url) {
-                signals = await liveCheckSignals(
-                    worktreeID: worktreeID,
-                    owner: ownerRepo.owner,
-                    name: ownerRepo.name,
-                    number: obj.number,
-                    headSha: obj.headRefOid,
-                    repoPath: repoPath,
-                    forceClassificationRefresh: true
-                )
+            if obj.state != "OPEN" {
+                signals = (false, false)   // mapState ignores signals for MERGED/CLOSED
+            } else if let fetched = await fetchCheckSignals(url: obj.url, number: obj.number, repoPath: repoPath) {
+                signals = fetched
+            } else if let cached = cache[worktreeID] {
+                return cached   // transient failure: keep the previous status rather than guessing
             } else {
-                // Can't query — be conservative and keep red.
-                signals = (true, false)
+                signals = (false, false)   // bootstrap with no data; the next poll corrects it
             }
 
             let status = PRStatus(
@@ -169,6 +170,7 @@ public actor PRStatusManager {
                                      requiredChecksPending: signals.pending)
             )
             cache[worktreeID] = status
+            lastDirectUpdate[worktreeID] = Date()
             return status
         }
 
@@ -197,27 +199,25 @@ public actor PRStatusManager {
         default:
             if isDraft || mergeStateStatus == "DRAFT" { return .draft }
             if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
+            // Uniform precedence: a failing required check is red and a pending required check
+            // is yellow regardless of merge state. (When the PR has no required checks at all,
+            // the signals are computed from every check — see checkSignals.)
+            if requiredChecksFailing { return .checksFailed }
+            if requiredChecksPending { return .pending }
 
             switch mergeStateStatus {
-            case "CLEAN", "HAS_HOOKS":
-                // Mergeable. A non-required check may be failing without blocking the merge → not red.
-                // Yellow only if a *required* check is still pending.
-                return requiredChecksPending ? .pending : .mergeable
+            case "CLEAN", "HAS_HOOKS", "UNSTABLE":
+                // UNSTABLE = mergeable with non-required checks failing → not red.
+                return .mergeable
             case "BLOCKED":
-                // Branch protection is blocking: a required check failing/missing, or a required review.
-                if requiredChecksPending { return .pending }       // a *required* check is still running
-                if requiredChecksFailing { return .checksFailed }  // a *required* check failed → red
-                if reviewDecision == "REVIEW_REQUIRED" { return .mergeable } // only blocker is the review → green
-                return .blocked
-            case "UNSTABLE":
-                // Mergeable; only non-required checks failing. Yellow only if a required check is still pending.
-                return requiredChecksPending ? .pending : .mergeable
+                // Checks are settled and passing; the only blocker is a not-yet-given review.
+                return reviewDecision == "REVIEW_REQUIRED" ? .mergeable : .blocked
             case "DIRTY", "BEHIND":
                 return .blocked
             case "UNKNOWN":
                 return .pending
             default:
-                return requiredChecksPending ? .pending : .blocked
+                return .blocked
             }
         }
     }
@@ -236,14 +236,13 @@ public actor PRStatusManager {
     private static let pendingStatusContextStates: Set<String> = ["PENDING", "EXPECTED"]
 
     /// A single status-check context for one PR's last commit. Unifies the GraphQL `CheckRun`
-    /// and `StatusContext` shapes. `isRequired` is populated only when the query requested it
-    /// (the cheap live-state query omits it).
+    /// and `StatusContext` shapes.
     struct CheckContext {
         let name: String          // CheckRun.name, or StatusContext.context
         let status: String?       // CheckRun.status (nil for StatusContext)
         let conclusion: String?   // CheckRun.conclusion (nil for StatusContext)
         let state: String?        // StatusContext.state (nil for CheckRun)
-        let isRequired: Bool?     // present only when the query requested it
+        let isRequired: Bool?     // absent in the JSON → nil
     }
 
     /// Whether a context counts as failing (regardless of required-ness).
@@ -268,15 +267,51 @@ public actor PRStatusManager {
         return false
     }
 
-    /// Pure parse of a single PR's last-commit status-check contexts into `[CheckContext]`.
+    /// Compute the (failing, pending) signals for one PR's check contexts.
+    /// Required-ness comes from each context's own isRequired field (fetched in the same query).
+    /// When the PR has NO required checks (repo without branch protection), every check counts —
+    /// otherwise the icon could never reflect CI at all in unprotected repos.
+    /// `aggregateRollupState` covers the post-push window: EXPECTED means a required check
+    /// hasn't reported a context yet, so it can't be seen in `contexts`.
+    static func checkSignals(contexts: [CheckContext], aggregateRollupState: String?) -> (failing: Bool, pending: Bool) {
+        let required = contexts.filter { $0.isRequired == true }
+        if required.isEmpty {
+            return (
+                contexts.contains(where: contextIsFailing),
+                contexts.contains(where: contextIsPending)
+                    || aggregateRollupState == "PENDING" || aggregateRollupState == "EXPECTED"
+            )
+        }
+        return (
+            required.contains(where: contextIsFailing),
+            required.contains(where: contextIsPending) || aggregateRollupState == "EXPECTED"
+        )
+    }
+
+    /// Signals derived from the aggregate rollup alone — used when per-check data is
+    /// unavailable (query failure) or incomplete (contexts truncated past first page).
+    /// The aggregate counts non-required checks too, so this can over-report; it is a
+    /// bootstrap/degraded mode, not the normal path.
+    static func aggregateFallbackSignals(_ rollupState: String?) -> (failing: Bool, pending: Bool) {
+        (["FAILURE", "ERROR"].contains(rollupState ?? ""),
+         ["PENDING", "EXPECTED"].contains(rollupState ?? ""))
+    }
+
+    /// Result of the combined per-PR check query.
+    struct PRCheckDetail {
+        let contexts: [CheckContext]
+        let rollupState: String?
+        let truncated: Bool   // contexts has more than one page; per-check view is incomplete
+    }
+
+    /// Pure parse of a single PR's last-commit status-check detail.
     ///
-    /// Expects the JSON shape
-    /// (`data.repository.pullRequest.commits.nodes[].commit.statusCheckRollup.contexts.nodes`).
-    /// For each node: if it has a `name` it's a CheckRun (read `status`/`conclusion`); else its
-    /// `context` field names a StatusContext (read `state`). `isRequired` is read as `Bool?`
-    /// (absent → nil). Nodes with no name/context are skipped. Iterates all commit nodes.
-    /// Throws `PRStatusError.invalidJSON` if the outer shape can't be parsed.
-    static func parseCheckContexts(fromJSON data: Data) throws -> [CheckContext] {
+    /// Walks `data.repository.pullRequest.commits.nodes[].commit.statusCheckRollup`: reads
+    /// `state`, `contexts.pageInfo.hasNextPage`, and the context nodes (CheckRun via
+    /// name/status/conclusion/isRequired; StatusContext via context/state/isRequired; nameless
+    /// nodes are skipped). Throws `PRStatusError.invalidJSON` if the outer shape can't be parsed.
+    /// A null `statusCheckRollup` (no checks at all) yields empty contexts, nil state, not truncated.
+    static func parsePRCheckDetail(fromJSON data: Data) throws -> PRCheckDetail {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataObj = root["data"] as? [String: Any],
               let repository = dataObj["repository"] as? [String: Any],
@@ -287,14 +322,23 @@ public actor PRStatusManager {
         }
 
         var result: [CheckContext] = []
+        var rollupState: String?
+        var truncated = false
 
         for commitNode in commitNodes.compactMap({ $0 as? [String: Any] }) {
             guard let commit = commitNode["commit"] as? [String: Any],
-                  let rollup = commit["statusCheckRollup"] as? [String: Any],
-                  let contexts = rollup["contexts"] as? [String: Any],
-                  let contextNodes = contexts["nodes"] as? [Any] else {
+                  let rollup = commit["statusCheckRollup"] as? [String: Any] else {
                 continue
             }
+            if let state = rollup["state"] as? String {
+                rollupState = state
+            }
+            guard let contexts = rollup["contexts"] as? [String: Any] else { continue }
+            if let pageInfo = contexts["pageInfo"] as? [String: Any],
+               pageInfo["hasNextPage"] as? Bool == true {
+                truncated = true
+            }
+            guard let contextNodes = contexts["nodes"] as? [Any] else { continue }
 
             for context in contextNodes.compactMap({ $0 as? [String: Any] }) {
                 let isRequired = context["isRequired"] as? Bool
@@ -321,47 +365,7 @@ public actor PRStatusManager {
             }
         }
 
-        return result
-    }
-
-    /// Build name → isRequired for every context whose `isRequired` was returned by the query.
-    static func classification(from contexts: [CheckContext]) -> [String: Bool] {
-        var map: [String: Bool] = [:]
-        for ctx in contexts where ctx.isRequired != nil {
-            map[ctx.name] = ctx.isRequired
-        }
-        return map
-    }
-
-    /// Compute live `(failing, pending)` from check contexts. Required-ness comes ONLY from the
-    /// passed map, never from `ctx.isRequired`.
-    static func checkSignals(
-        contexts: [CheckContext],
-        isRequiredByName: [String: Bool]
-    ) -> (failing: Bool, pending: Bool) {
-        var failing = false
-        var pending = false
-        for ctx in contexts where isRequiredByName[ctx.name] == true {
-            if Self.contextIsFailing(ctx) { failing = true }
-            if Self.contextIsPending(ctx) { pending = true }
-        }
-        return (failing: failing, pending: pending)
-    }
-
-    /// Whether the cached `isRequired` classification must be refreshed. True when the head SHA
-    /// changed, or any failing/pending context's name isn't yet classified (we only need
-    /// classification for checks that could affect the signal).
-    static func needsClassificationRefresh(
-        contexts: [CheckContext],
-        cachedSha: String?,
-        currentSha: String,
-        isRequiredByName: [String: Bool]
-    ) -> Bool {
-        if cachedSha != currentSha { return true }
-        for ctx in contexts where Self.contextIsFailing(ctx) || Self.contextIsPending(ctx) {
-            if isRequiredByName[ctx.name] == nil { return true }
-        }
-        return false
+        return PRCheckDetail(contexts: result, rollupState: rollupState, truncated: truncated)
     }
 
     /// Parse `owner` and `name` from a PR URL like
@@ -374,27 +378,20 @@ public actor PRStatusManager {
         return (owner: String(parts[0]), name: String(parts[1]))
     }
 
-    /// Live check contexts WITHOUT isRequired — run every poll (cheap).
-    static func checkContextsQuery(owner: String, name: String, number: Int) -> String {
+    /// Combined per-PR query: aggregate rollup state + every check context with its
+    /// isRequired flag + pagination flag, in one round trip.
+    /// The literal number must appear in both pullRequest(number:) and isRequired(pullRequestNumber:).
+    static func prCheckQuery(owner: String, name: String, number: Int) -> String {
         """
         { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
-          commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
-            __typename
-            ... on CheckRun { name status conclusion }
-            ... on StatusContext { context state }
-          } } } } } } } } }
-        """
-    }
-
-    /// Per-check isRequired classification — run only when (re)building the cache.
-    static func requiredCheckNamesQuery(owner: String, name: String, number: Int) -> String {
-        """
-        { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
-          commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
-            __typename
-            ... on CheckRun { name isRequired(pullRequestNumber: \(number)) }
-            ... on StatusContext { context isRequired(pullRequestNumber: \(number)) }
-          } } } } } } } } }
+          commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) {
+            pageInfo { hasNextPage }
+            nodes {
+              __typename
+              ... on CheckRun { name status conclusion isRequired(pullRequestNumber: \(number)) }
+              ... on StatusContext { context state isRequired(pullRequestNumber: \(number)) }
+            }
+          } } } } } } } }
         """
     }
 
@@ -425,7 +422,6 @@ public actor PRStatusManager {
         public let mergeStateStatus: String
         public let reviewDecision: String   // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or ""
         public let headRefName: String
-        public let headRefOid: String
         public let createdAt: String        // ISO 8601, e.g. "2026-03-24T15:58:27Z"
         public let isDraft: Bool
         public let statusCheckRollupState: String?
@@ -449,14 +445,12 @@ public actor PRStatusManager {
                   let createdAt = node["createdAt"] as? String else { return nil }
             let reviewDecision = node["reviewDecision"] as? String ?? ""
             let isDraft = node["isDraft"] as? Bool ?? false
-            let headRefOid = node["headRefOid"] as? String ?? ""
             let statusCheckRollup = node["statusCheckRollup"] as? [String: Any]
             let statusCheckRollupState = statusCheckRollup?["state"] as? String
             return PRNode(number: number, url: url, state: state,
                           mergeStateStatus: mergeStateStatus,
                           reviewDecision: reviewDecision,
                           headRefName: headRefName,
-                          headRefOid: headRefOid,
                           createdAt: createdAt,
                           isDraft: isDraft,
                           statusCheckRollupState: statusCheckRollupState)
@@ -465,14 +459,14 @@ public actor PRStatusManager {
 
     // MARK: - Shell helpers
 
-    private func runGHGraphQL(repoPath: String) async -> Data? {
+    private nonisolated func runGHGraphQL(repoPath: String) async -> Data? {
         let query = """
         {
           viewer {
             pullRequests(first: 100, states: [OPEN, MERGED, CLOSED],
                          orderBy: {field: CREATED_AT, direction: DESC}) {
               nodes {
-                number url state mergeStateStatus reviewDecision headRefName headRefOid createdAt isDraft
+                number url state mergeStateStatus reviewDecision headRefName createdAt isDraft
                 statusCheckRollup { state }
               }
             }
@@ -497,81 +491,32 @@ public actor PRStatusManager {
         return data
     }
 
-    /// Fetch the LIVE check contexts (no `isRequired`) for one PR. Returns nil on any failure.
-    private func fetchCheckContexts(
-        owner: String,
-        name: String,
-        number: Int,
-        repoPath: String
-    ) async -> [CheckContext]? {
-        let query = Self.checkContextsQuery(owner: owner, name: name, number: number)
+    /// One combined GraphQL round trip for a PR's check signals.
+    /// Returns nil on any failure (gh missing, non-zero exit, parse error) — callers keep
+    /// the previous cached status rather than guessing.
+    private nonisolated func fetchCheckSignals(url: String, number: Int, repoPath: String) async -> (failing: Bool, pending: Bool)? {
+        guard let ownerRepo = Self.parseOwnerRepo(fromURL: url) else {
+            logger.debug("Cannot parse owner/repo from PR URL \(url, privacy: .public)")
+            return nil
+        }
+        let query = Self.prCheckQuery(owner: ownerRepo.owner, name: ownerRepo.name, number: number)
         let args = ["api", "graphql", "-f", "query=\(query)"]
         guard let result = await runGHResult(args: args, repoPath: repoPath),
               result.exitStatus == 0,
               let data = Self.graphQLOutputData(stdout: result.stdout),
-              let contexts = try? Self.parseCheckContexts(fromJSON: data) else {
-            logger.debug("check contexts query failed for PR #\(number, privacy: .public)")
+              let detail = try? Self.parsePRCheckDetail(fromJSON: data) else {
+            logger.debug("Check signal query failed for PR #\(number, privacy: .public)")
             return nil
         }
-        return contexts
+        if detail.truncated {
+            // Can't see every check — trust the aggregate instead of a partial view.
+            logger.debug("PR #\(number, privacy: .public) has >100 check contexts; using aggregate fallback")
+            return Self.aggregateFallbackSignals(detail.rollupState)
+        }
+        return Self.checkSignals(contexts: detail.contexts, aggregateRollupState: detail.rollupState)
     }
 
-    /// Fetch the per-check `isRequired` classification (name → isRequired). Returns nil on failure.
-    private func fetchClassification(
-        owner: String,
-        name: String,
-        number: Int,
-        repoPath: String
-    ) async -> [String: Bool]? {
-        let query = Self.requiredCheckNamesQuery(owner: owner, name: name, number: number)
-        let args = ["api", "graphql", "-f", "query=\(query)"]
-        guard let result = await runGHResult(args: args, repoPath: repoPath),
-              result.exitStatus == 0,
-              let data = Self.graphQLOutputData(stdout: result.stdout),
-              let contexts = try? Self.parseCheckContexts(fromJSON: data) else {
-            logger.debug("isRequired classification query failed for PR #\(number, privacy: .public)")
-            return nil
-        }
-        return Self.classification(from: contexts)
-    }
-
-    /// Compute live `(failing, pending)` for one PR, using the cached `isRequired` classification
-    /// and refreshing that classification only when needed. `forceClassificationRefresh` is true
-    /// for the user-initiated refresh path so it always re-reads `isRequired`.
-    private func liveCheckSignals(
-        worktreeID: UUID,
-        owner: String,
-        name: String,
-        number: Int,
-        headSha: String,
-        repoPath: String,
-        forceClassificationRefresh: Bool
-    ) async -> (failing: Bool, pending: Bool) {
-        guard let contexts = await fetchCheckContexts(owner: owner, name: name, number: number, repoPath: repoPath) else {
-            return (true, false)   // conservative: keep red when we can't read live state
-        }
-        let cached = requiredChecksCache[worktreeID]
-        var map = cached?.isRequiredByName ?? [:]
-        let mustRefresh = forceClassificationRefresh
-            || Self.needsClassificationRefresh(
-                contexts: contexts,
-                cachedSha: cached?.headSha,
-                currentSha: headSha,
-                isRequiredByName: map
-            )
-        if mustRefresh {
-            if let fresh = await fetchClassification(owner: owner, name: name, number: number, repoPath: repoPath) {
-                map = fresh
-                requiredChecksCache[worktreeID] = RequiredChecksClassification(headSha: headSha, isRequiredByName: map)
-            } else {
-                // classification query failed — be conservative: treat failing/pending checks as required.
-                return (contexts.contains(where: Self.contextIsFailing), contexts.contains(where: Self.contextIsPending))
-            }
-        }
-        return Self.checkSignals(contexts: contexts, isRequiredByName: map)
-    }
-
-    private func runGH(args: [String], repoPath: String) async -> String? {
+    private nonisolated func runGH(args: [String], repoPath: String) async -> String? {
         guard let result = await runGHResult(args: args, repoPath: repoPath) else {
             return nil
         }
@@ -591,8 +536,8 @@ public actor PRStatusManager {
         return stdout.data(using: .utf8)
     }
 
-    private func runGHResult(args: [String], repoPath: String) async -> GHCommandResult? {
-        guard let ghPath = findGH() else {
+    private nonisolated func runGHResult(args: [String], repoPath: String) async -> GHCommandResult? {
+        guard let ghPath = Self.resolvedGHPath else {
             logger.debug("gh CLI not found in PATH")
             return nil
         }
@@ -627,7 +572,8 @@ public actor PRStatusManager {
         }
     }
 
-    private func findGH() -> String? {
+    /// Resolved once per process — gh's location doesn't change mid-process.
+    private static let resolvedGHPath: String? = {
         let candidates = ["/usr/local/bin/gh", "/opt/homebrew/bin/gh", "/usr/bin/gh"]
         for path in candidates {
             if FileManager.default.isExecutableFile(atPath: path) { return path }
@@ -640,7 +586,7 @@ public actor PRStatusManager {
             }
         }
         return nil
-    }
+    }()
 }
 
 private struct GHCommandResult {
@@ -658,7 +604,6 @@ private struct GHPRViewResult: Codable {
     let mergeStateStatus: String
     let reviewDecision: String?
     let isDraft: Bool
-    let headRefOid: String
 }
 
 public enum PRStatusError: Error {
