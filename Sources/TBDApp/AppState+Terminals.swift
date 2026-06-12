@@ -14,19 +14,21 @@ extension AppState {
     }
 
     func initialTabLabel(for terminal: Terminal) -> String? {
-        terminal.kind == .codex || terminal.label == "Codex" ? terminal.label : nil
+        terminal.kind == .codex || terminal.label == TerminalLabel.codex ? terminal.label : nil
     }
 
     // MARK: - Pre-session hook terminals
 
     /// Label the daemon assigns to the blocking `preSession` hook terminal
     /// (see WorktreeLifecycle+PreSession). The app keys "is this the
-    /// pre-session tab?" decisions off this label.
-    static let preSessionTerminalLabel = "pre-session"
+    /// pre-session tab?" decisions off this label. Canonical definition
+    /// lives in `TBDShared.TerminalLabel`.
+    static let preSessionTerminalLabel = TerminalLabel.preSession
 
     /// Label the daemon assigns to the parallel `setup` hook terminal
-    /// (see spawnPrimaryTerminals in WorktreeLifecycle+Create).
-    static let setupTerminalLabel = "setup"
+    /// (see spawnPrimaryTerminals in WorktreeLifecycle+Create). Canonical
+    /// definition lives in `TBDShared.TerminalLabel`.
+    static let setupTerminalLabel = TerminalLabel.setup
 
     /// True when `terminal` is a PRIMARY terminal in the pre-session flow:
     /// the tab the daemon makes active once the hook finishes. That's the
@@ -194,7 +196,7 @@ extension AppState {
     func handleTerminalInterrupt(terminalID: UUID) {
         guard let terminal = terminals.values.flatMap({ $0 })
             .first(where: { $0.id == terminalID }),
-              terminal.kind == .codex || terminal.label == "Codex"
+              terminal.kind == .codex || terminal.label == TerminalLabel.codex
         else {
             return
         }

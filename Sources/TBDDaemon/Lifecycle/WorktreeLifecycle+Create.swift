@@ -248,7 +248,7 @@ extension WorktreeLifecycle {
                 subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
                     terminalID: preSession.terminalID,
                     worktreeID: worktree.id,
-                    label: "pre-session"
+                    label: TerminalLabel.preSession
                 )))
                 let phase3 = Task.detached { [self] in
                     await runPreSessionPhase3(
@@ -452,7 +452,7 @@ extension WorktreeLifecycle {
             primarySensitiveEnv = [:]
             primarySessionID = nil
             primaryProfileID = nil
-            primaryLabel = "shell"
+            primaryLabel = TerminalLabel.shell
         case .codex:
             let codexHome = try CodexHomeManager().ensureProfilePlugin()
             primaryCommand = CodexSpawnCommandBuilder.build(initialPrompt: initialPrompt)
@@ -464,7 +464,7 @@ extension WorktreeLifecycle {
             primarySensitiveEnv = [:]
             primarySessionID = nil
             primaryProfileID = nil
-            primaryLabel = "Codex"
+            primaryLabel = TerminalLabel.codex
         case .claude:
             let archivedSession = archivedSessions.first
             let sessionUUID = archivedSession ?? UUID().uuidString
@@ -505,7 +505,7 @@ extension WorktreeLifecycle {
             ]
             primarySensitiveEnv = spawn.sensitiveEnv
             primaryProfileID = resolvedProfile?.profileID
-            primaryLabel = "Claude Code"
+            primaryLabel = TerminalLabel.claudeCode
         }
         let window1 = try await tmux.createWindow(
             server: tmuxServer,
@@ -566,10 +566,10 @@ extension WorktreeLifecycle {
             worktreeID: worktreeID,
             tmuxWindowID: window2.windowID,
             tmuxPaneID: window2.paneID,
-            label: "setup",
+            label: TerminalLabel.setup,
             kind: .shell
         )
-        createdTerminals.append((id: plannedTerminalID2, label: "setup"))
+        createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
 
         // Restore any archived Claude sessions that were not consumed by the
         // primary terminal.
@@ -626,12 +626,12 @@ extension WorktreeLifecycle {
                     worktreeID: worktreeID,
                     tmuxWindowID: window.windowID,
                     tmuxPaneID: window.paneID,
-                    label: "Claude Code",
+                    label: TerminalLabel.claudeCode,
                     claudeSessionID: sessionID,
                     profileID: resolvedProfile?.profileID,
                     kind: .claude
                 )
-                createdTerminals.append((id: plannedID, label: "Claude Code"))
+                createdTerminals.append((id: plannedID, label: TerminalLabel.claudeCode))
             }
         }
 

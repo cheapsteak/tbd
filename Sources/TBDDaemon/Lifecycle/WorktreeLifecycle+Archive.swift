@@ -289,7 +289,7 @@ extension WorktreeLifecycle {
             subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
                 terminalID: preSession.terminalID,
                 worktreeID: worktree.id,
-                label: "pre-session"
+                label: TerminalLabel.preSession
             )))
             // Flip to .creating AFTER the pre-session terminal exists so a
             // daemon crash in between leaves the row .archived (re-revivable)

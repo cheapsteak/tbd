@@ -343,9 +343,9 @@ extension WorktreeLifecycle {
                 envSettingOverrides: claudeEnvOverrides
             )
         } else {
-            // Shell or custom-cmd terminal. Plain shell terminals have label nil or "shell";
-            // custom-cmd terminals store the command string directly in label.
-            let cmd = (terminal.label == "shell" || terminal.label == nil) ? nil : terminal.label
+            // Shell or custom-cmd terminal. Plain shell terminals have label nil or
+            // TerminalLabel.shell; custom-cmd terminals store the command string directly in label.
+            let cmd = (terminal.label == TerminalLabel.shell || terminal.label == nil) ? nil : terminal.label
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,
                 freshSessionID: nil,

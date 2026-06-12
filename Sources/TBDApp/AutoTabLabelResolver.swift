@@ -34,7 +34,7 @@ enum AutoTabLabelResolver {
         }
 
         if terminal?.isCodexTerminal == true {
-            return "Codex"
+            return TerminalLabel.codex
         }
 
         return "Terminal \(fallbackIndex + 1)"

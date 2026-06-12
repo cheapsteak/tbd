@@ -145,7 +145,7 @@ extension WorktreeLifecycle {
             worktreeID: worktreeID,
             tmuxWindowID: window.windowID,
             tmuxPaneID: window.paneID,
-            label: "pre-session",
+            label: TerminalLabel.preSession,
             kind: .shell
         )
         // The pre-session terminal is the only tab until phase 3 runs.

@@ -120,7 +120,9 @@ extension AppState {
             let revived = try await daemonClient.reviveWorktree(id: id, cols: size.cols, rows: size.rows)
             settleReviveState(id: id, snapshot: snapshot, revived: revived)
             recentlyArchivedWorktreeIDs.removeValue(forKey: id)
-            await refreshWorktrees()
+            // No refreshWorktrees() here: the sidebar refresh arrives via the
+            // `.worktreeRevived` delta handler (AppState.swift handleDelta),
+            // same as createWorktree relies on its delta.
             await refreshArchivedWorktrees(repoID: snapshot.repoID)
         } catch {
             revivingArchived.removeValue(forKey: id)

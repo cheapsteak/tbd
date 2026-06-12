@@ -42,8 +42,8 @@ extension WorktreeLifecycle {
         var resumed: [Task<Void, Never>] = []
         for worktree in creating {
             let terminals = (try? await db.terminals.list(worktreeID: worktree.id)) ?? []
-            let preSessionTerminal = terminals.first { $0.label == "pre-session" }
-            let hasPrimaries = terminals.contains { $0.label != "pre-session" }
+            let preSessionTerminal = terminals.first { $0.label == TerminalLabel.preSession }
+            let hasPrimaries = terminals.contains { $0.label != TerminalLabel.preSession }
 
             guard FileManager.default.fileExists(atPath: worktree.path) else {
                 logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — checkout missing at \(worktree.path, privacy: .public)")
@@ -73,6 +73,8 @@ extension WorktreeLifecycle {
             guard let preSessionTerminal else {
                 logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — checkout exists but no terminals; reconcile will re-adopt it")
                 do {
+                    try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
+                    try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
                     try await db.worktrees.delete(id: worktree.id)
                 } catch {
                     logger.warning("recovery: failed to delete terminal-less worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")

@@ -1081,11 +1081,15 @@ struct PreSessionHookTests {
             repoID: repo.id, name: "bare", branch: "tbd/bare",
             path: checkout.path, tmuxServer: "tbd-test", status: .creating
         )
+        // A stray tab row (user-set label) must be cleaned up alongside the row.
+        try await db.tabs.setLabel(tabID: UUID(), worktreeID: wt.id, label: "stray")
 
         let resumed = await lifecycle.recoverCreatingWorktrees()
         #expect(resumed.isEmpty)
         #expect(try await db.worktrees.get(id: wt.id) == nil,
                 "a terminal-less .creating row must be deleted for reconcile to re-adopt")
+        #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).isEmpty,
+                "tab rows must be deleted with the worktree row")
     }
 }
 }
