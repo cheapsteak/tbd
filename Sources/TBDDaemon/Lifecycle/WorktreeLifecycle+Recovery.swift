@@ -33,6 +33,10 @@ extension WorktreeLifecycle {
     ///   `git worktree add` but before any tmux spawn. There is no hook
     ///   window to resume and no terminals to keep; delete the row and let
     ///   reconcile re-adopt the on-disk checkout as a fresh worktree.
+    /// - Checkout + pre-session terminal exist but the repo row is gone →
+    ///   the wait can never be resumed (phase 3 needs the repo) and nothing
+    ///   else ever resolves a `.creating` row, so skipping would strand it
+    ///   forever. Delete the row and its terminal/tab records.
     ///
     /// Returns the detached phase-3 resume tasks (for tests); the daemon
     /// ignores them.
@@ -83,7 +87,14 @@ extension WorktreeLifecycle {
             }
 
             guard let repo = (try? await db.repos.get(id: worktree.repoID)) ?? nil else {
-                logger.error("recovery: repo \(worktree.repoID, privacy: .public) missing for .creating worktree \(worktree.id, privacy: .public); skipping")
+                logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — repo \(worktree.repoID, privacy: .public) row is missing, so the pre-session wait can never be resumed")
+                do {
+                    try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
+                    try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
+                    try await db.worktrees.delete(id: worktree.id)
+                } catch {
+                    logger.warning("recovery: cleanup of repo-less worktree \(worktree.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                }
                 continue
             }
 

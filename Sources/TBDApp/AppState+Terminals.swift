@@ -154,12 +154,18 @@ extension AppState {
 
     /// Gate for the converging-from-creation tab-order re-fetch: only a
     /// primary terminal (agent, or shell with skipClaude) landing in a
-    /// worktree that has a pre-session hook terminal, while the cached order
-    /// doesn't yet contain that primary, warrants reconciling against the
-    /// daemon's persisted order. Anything else — user reorders, the
-    /// parallel `setup` shell — must leave the tab arrangement untouched.
+    /// worktree that is still `.creating` and has a pre-session hook
+    /// terminal, while the cached order doesn't yet contain that primary,
+    /// warrants reconciling against the daemon's persisted order. The
+    /// `.creating` requirement scopes the gate to the creation phase: the
+    /// pre-session tab outlives setup, so without it the gate could fire for
+    /// terminals created long after the worktree went `.active`. Anything
+    /// else — user reorders, the parallel `setup` shell, a worktree not in
+    /// state — must leave the tab arrangement untouched.
     func shouldReconcileTabOrderFromDaemon(after terminal: Terminal) -> Bool {
-        isPrimaryTerminal(terminal)
+        guard let worktree = findWorktree(id: terminal.worktreeID),
+              worktree.status == .creating else { return false }
+        return isPrimaryTerminal(terminal)
             && hasPreSessionTerminal(worktreeID: terminal.worktreeID)
             && worktreeTabOrders[terminal.worktreeID]?.contains(terminal.id) != true
     }

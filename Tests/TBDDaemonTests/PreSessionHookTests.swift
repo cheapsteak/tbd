@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -560,7 +561,46 @@ struct PreSessionHookTests {
                 "only the pre-session window may exist — no primary windows after the row vanished")
         let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: pending.id)
         #expect(!FileManager.default.fileExists(atPath: markerPath),
-                "marker must be cleaned up on the deleted-row early exit")
+                "the marker removed right after the wait must not reappear on the deleted-row early exit")
+    }
+
+    @Test func dbErrorDuringRowCheckDoesNotTearDownPreSessionWindow() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = RecordedCommands()
+        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
+        let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id)
+        guard case .preSessionPending(let phase3) = completion else {
+            Issue.record("expected .preSessionPending")
+            return
+        }
+        let terminalsBefore = try await db.terminals.list(worktreeID: pending.id)
+        let preTerminal = try #require(terminalsBefore.first)
+
+        // Close the underlying GRDB connection mid-wait so the phase-3 row
+        // existence check THROWS instead of returning nil. A thrown DB error
+        // is not proof the row is gone — phase 3 must take the spawn path,
+        // not the deleted-row teardown that kills the live pre-session
+        // window of a perfectly valid worktree. (The spawn attempt itself
+        // then fails on the closed DB and is logged/swallowed — what matters
+        // here is which branch the guard took.)
+        try db.writerForTests.close()
+        try writeMarker(worktreeID: pending.id, exitCode: 0)
+        await phase3.value
+
+        let kills = recorder.snapshot().filter { $0.contains("kill-window") }
+        #expect(!kills.contains { $0.contains(preTerminal.tmuxWindowID) },
+                "a transient DB error on the existence check must not kill the pre-session window")
+        let markerPath = WorktreeLifecycle.preSessionMarkerPath(worktreeID: pending.id)
+        #expect(!FileManager.default.fileExists(atPath: markerPath))
     }
 
     // MARK: - Legacy sync create + revive
@@ -1090,6 +1130,47 @@ struct PreSessionHookTests {
                 "a terminal-less .creating row must be deleted for reconcile to re-adopt")
         #expect(try await db.tabs.listForWorktree(worktreeID: wt.id).isEmpty,
                 "tab rows must be deleted with the worktree row")
+    }
+
+    @Test func recoveryDeletesCreatingRowWhoseRepoVanished() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = makeLifecycle(db: db)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        // A .creating row with a checkout on disk and a pre-session terminal,
+        // so recovery reaches the repo lookup (past the checkout-missing and
+        // no-terminals guards). Then orphan it: the repoID FK would either
+        // reject a made-up repoID or cascade-delete the worktree on
+        // `repos.remove`, so delete the repo row with foreign keys off —
+        // simulating a DB left inconsistent by an older daemon.
+        let checkout = tempDir.appendingPathComponent("repo-less")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "repoless", branch: "tbd/repoless",
+            path: checkout.path, tmuxServer: "tbd-test", status: .creating
+        )
+        _ = try await db.terminals.create(
+            id: UUID(), worktreeID: wt.id,
+            tmuxWindowID: "@mock-97", tmuxPaneID: "%mock-97",
+            label: "pre-session", kind: .shell
+        )
+        try await db.writerForTests.writeWithoutTransaction { sqlDB in
+            try sqlDB.execute(sql: "PRAGMA foreign_keys = OFF")
+            try sqlDB.execute(sql: "DELETE FROM repo WHERE id = ?", arguments: [repo.id.uuidString])
+            try sqlDB.execute(sql: "PRAGMA foreign_keys = ON")
+        }
+
+        let resumed = await lifecycle.recoverCreatingWorktrees()
+        #expect(resumed.isEmpty, "a repo-less .creating row cannot be resumed")
+        #expect(try await db.worktrees.get(id: wt.id) == nil,
+                "the stranded row must be deleted, not skipped forever")
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty,
+                "its terminal rows must be deleted with it")
     }
 }
 }

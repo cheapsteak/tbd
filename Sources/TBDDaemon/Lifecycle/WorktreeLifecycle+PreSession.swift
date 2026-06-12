@@ -246,14 +246,23 @@ extension WorktreeLifecycle {
         // deleteForRepo while phase 3 is parked on the marker). Spawning the
         // primary terminals would then fail the terminal FK insert AFTER the
         // tmux window (and its Claude process) was created — orphaning both.
-        // Bail out before any spawn: kill the pre-session window best-effort
-        // and clean the marker; there is no row left to flip or notify.
-        guard (try? await db.worktrees.get(id: worktree.id)) ?? nil != nil else {
+        // Bail out before any spawn: kill the pre-session window best-effort;
+        // the marker is already gone (removed above), and there is no row
+        // left to flip or notify. A thrown DB error is NOT proof the row is
+        // gone — treat it as transient and proceed with the spawn rather
+        // than tear down a valid worktree.
+        let rowExists: Bool
+        do {
+            rowExists = try await db.worktrees.get(id: worktree.id) != nil
+        } catch {
+            logger.warning("phase-3: worktree existence check failed for \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public) — assuming the row still exists and proceeding")
+            rowExists = true
+        }
+        guard rowExists else {
             logger.warning("phase-3: worktree \(worktree.id, privacy: .public) row disappeared mid-wait — skipping primary spawn and cleaning up")
             try? await tmux.killWindow(
                 server: worktree.tmuxServer, windowID: preSession.windowID
             )
-            try? FileManager.default.removeItem(atPath: preSession.markerPath)
             return
         }
 

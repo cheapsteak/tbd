@@ -51,6 +51,15 @@ struct PreSessionAppStateTests {
         )
     }
 
+    /// Seed a worktree row into app state (keyed by repoID, as
+    /// `findWorktree(id:)` expects) so status-scoped gates can resolve it.
+    @discardableResult
+    private func seedWorktree(_ state: AppState, status: WorktreeStatus) -> Worktree {
+        let wt = makeWorktree(status: status)
+        state.worktrees[wt.repoID] = [wt]
+        return wt
+    }
+
     // MARK: - terminalCreated append + dedupe
 
     @Test func appendCreatedTerminalAppendsTerminalAndTab() {
@@ -202,7 +211,9 @@ struct PreSessionAppStateTests {
 
     @Test func tabOrderConvergesToDaemonPersistedOrderAfterPrimaryDelta() {
         withAppState { state in
-            let worktreeID = UUID()
+            // The reconcile gate is scoped to the creation phase: the
+            // worktree must be known to app state and still `.creating`.
+            let worktreeID = seedWorktree(state, status: .creating).id
             let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
             // The full refresh triggered by the pre-session terminal's delta
             // cached the daemon's phase-1 order: just the pre-session tab.
@@ -266,7 +277,7 @@ struct PreSessionAppStateTests {
 
     @Test func reconcileGateArmsForPrimaryMissingFromCachedOrder() {
         withAppState { state in
-            let worktreeID = UUID()
+            let worktreeID = seedWorktree(state, status: .creating).id
             let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
             state.worktreeTabOrders[worktreeID] = [pre.id]
             let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
@@ -282,7 +293,7 @@ struct PreSessionAppStateTests {
 
     @Test func reconcileGateArmsForShellPrimaryWhenSkipClaude() {
         withAppState { state in
-            let worktreeID = UUID()
+            let worktreeID = seedWorktree(state, status: .creating).id
             let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
             state.worktreeTabOrders[worktreeID] = [pre.id]
             // skipClaude primary: kind .shell, label "shell" — still a primary,
@@ -294,7 +305,7 @@ struct PreSessionAppStateTests {
 
     @Test func reconcileGateStaysOffForNonPrimaryTerminals() {
         withAppState { state in
-            let worktreeID = UUID()
+            let worktreeID = seedWorktree(state, status: .creating).id
             _ = seedPreSessionOnly(state, worktreeID: worktreeID)
             let setup = makeTerminal(worktreeID: worktreeID, label: "setup", kind: .shell)
             #expect(!state.shouldReconcileTabOrderFromDaemon(after: setup))
@@ -303,7 +314,9 @@ struct PreSessionAppStateTests {
 
     @Test func reconcileGateStaysOffWithoutPreSessionTerminal() {
         withAppState { state in
-            let worktreeID = UUID()
+            // Worktree seeded as .creating so the missing pre-session
+            // terminal is the only conjunct that can turn the gate off.
+            let worktreeID = seedWorktree(state, status: .creating).id
             state.terminals[worktreeID] = []
             let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
             #expect(!state.shouldReconcileTabOrderFromDaemon(after: claude))
@@ -312,10 +325,37 @@ struct PreSessionAppStateTests {
 
     @Test func reconcileGateStaysOffWhenCachedOrderAlreadyContainsPrimary() {
         withAppState { state in
-            let worktreeID = UUID()
+            let worktreeID = seedWorktree(state, status: .creating).id
             let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
             let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
             state.worktreeTabOrders[worktreeID] = [claude.id, pre.id]
+            #expect(!state.shouldReconcileTabOrderFromDaemon(after: claude))
+        }
+    }
+
+    @Test func reconcileGateStaysOffOnceWorktreeIsActive() {
+        withAppState { state in
+            // Same shape as the arming case — primary delta, pre-session tab
+            // present, primary missing from the cached order — but the
+            // worktree already finished creating. A pre-session tab the user
+            // kept around must not re-arm the reconcile for terminals
+            // created after setup.
+            let worktreeID = seedWorktree(state, status: .active).id
+            let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
+            state.worktreeTabOrders[worktreeID] = [pre.id]
+            let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
+            #expect(!state.shouldReconcileTabOrderFromDaemon(after: claude))
+        }
+    }
+
+    @Test func reconcileGateStaysOffWhenWorktreeNotInState() {
+        withAppState { state in
+            // No worktree row seeded at all — the gate must resolve the
+            // worktree before trusting any other conjunct.
+            let worktreeID = UUID()
+            let pre = seedPreSessionOnly(state, worktreeID: worktreeID)
+            state.worktreeTabOrders[worktreeID] = [pre.id]
+            let claude = makeTerminal(worktreeID: worktreeID, label: "Claude Code", kind: .claude)
             #expect(!state.shouldReconcileTabOrderFromDaemon(after: claude))
         }
     }
