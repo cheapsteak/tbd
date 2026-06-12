@@ -200,6 +200,14 @@ struct SingleWorktreeView: View {
 
                 Divider()
 
+                // Thin header while a blocking pre-session hook runs and the
+                // user is watching it: the worktree is still `.creating`, so
+                // explain why no agent terminal exists yet.
+                if appState.showsPreSessionBanner(for: worktree) {
+                    PreSessionSetupBanner()
+                    Divider()
+                }
+
                 // Split layout view for the active tab's layout. Publish its
                 // measured size to MainAreaSizeKey so the daemon-side tmux
                 // resize matches the actual SwiftTerm pane area (tab bar +
@@ -285,6 +293,32 @@ struct SingleWorktreeView: View {
 
     private func closeTab(at index: Int) {
         appState.closeTab(worktreeID: worktreeID, index: index)
+    }
+}
+
+// MARK: - PreSessionSetupBanner
+
+/// Slim header bar shown above the terminal while a blocking `preSession`
+/// hook is still running (worktree `.creating`, pre-session tab active).
+/// Same visual idiom as the proxy-unreachable banner in TerminalPanelView,
+/// but informational rather than warning-toned.
+private struct PreSessionSetupBanner: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            // Static icon, deliberately not a ProgressView: a spinner forces
+            // continuous CoreAnimation commits for the whole hook duration
+            // (minutes) for zero information gain — same rationale as the
+            // static sidebar status icons (c8769a8).
+            Image(systemName: "hammer")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 12, height: 12)
+            Text("Pre-session setup running — the agent will start when it completes.")
+                .font(.caption)
+            Spacer()
+        }
+        .padding(8)
+        .background(Color.accentColor.opacity(0.15))
     }
 }
 

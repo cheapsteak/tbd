@@ -147,7 +147,7 @@ extension RPCRouter {
                 worktreeID: params.worktreeID,
                 tmuxWindowID: window.windowID,
                 tmuxPaneID: window.paneID,
-                label: "Codex",
+                label: TerminalLabel.codex,
                 claudeSessionID: nil,
                 profileID: nil,
                 kind: .codex
@@ -198,7 +198,7 @@ extension RPCRouter {
             } else {
                 appendSystemPrompt = nil
             }
-            label = "Claude Code"
+            label = TerminalLabel.claudeCode
         } else if let cmd = params.cmd {
             claudeSessionID = nil
             freshSessionID = nil
@@ -338,7 +338,7 @@ extension RPCRouter {
         )
 
         // Branch on terminal kind: codex stays codex; shell/claude become shell
-        if terminal.kind == .codex || terminal.label == "Codex" {
+        if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
             // Recreate as codex — preserve identity
             let codexHome = try CodexHomeManager().ensureProfilePlugin()
             var codexEnv: [String: String] = [:]
@@ -983,7 +983,7 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath
         )
-        if terminal.kind == .codex || terminal.label == "Codex" {
+        if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
             try await db.terminals.setActivityState(id: terminal.id, activityState: .idle)
         }
 
@@ -1001,7 +1001,7 @@ extension RPCRouter {
             sessionID: params.sessionID,
             transcriptPath: cleanedPath
         )))
-        if terminal.kind == .codex || terminal.label == "Codex" {
+        if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
             subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
                 terminalID: terminal.id,
                 worktreeID: terminal.worktreeID,
