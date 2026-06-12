@@ -3,16 +3,17 @@ import TBDShared
 
 /// The single status indicator a sidebar worktree row may display.
 enum RowStatusIndicator: Equatable {
-    case pendingSpinner
-    case workingSpinner
+    case pending
+    case working
     case notificationBadge(NotificationType)
     case suspended
     case prStatus
 
     /// Notifications at or above this `NotificationType.severity` outrank the
-    /// working spinner: errors and attention/focus requests must not be hidden
-    /// behind a spinner that can run for minutes. Lower-severity completion
-    /// badges yield to the spinner, so a stale "done" dot never masks active work.
+    /// working icon: errors and attention/focus requests must not be hidden
+    /// behind a working indicator that can show for minutes. Lower-severity
+    /// completion badges yield to the working icon, so a stale "done" dot
+    /// never masks active work.
     private static let highSeverityThreshold = 3
 
     /// Resolves which indicator (if any) a worktree row should show.
@@ -32,11 +33,11 @@ enum RowStatusIndicator: Equatable {
         hasPRStatus: Bool
     ) -> RowStatusIndicator? {
         if isPending {
-            return .pendingSpinner
+            return .pending
         } else if let notification, notification.severity >= highSeverityThreshold {
             return .notificationBadge(notification)
         } else if isWorking {
-            return .workingSpinner
+            return .working
         } else if let notification {
             return .notificationBadge(notification)
         } else if isSuspended {

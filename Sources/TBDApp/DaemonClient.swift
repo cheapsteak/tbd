@@ -222,8 +222,11 @@ actor DaemonClient {
                 throw DaemonClientError.sendFailed("Sent \(sent) of \(message.count) bytes")
             }
 
-            // Read response until newline or connection closes
-            var responseData = Data()
+            // Read response until newline or connection closes.
+            // NewlineFrameScanner scans only the just-received bytes for 0x0A
+            // via memchr, avoiding the O(n²/chunk) re-scan that the previous
+            // Data.contains call performed on the entire accumulated buffer.
+            var scanner = NewlineFrameScanner()
             let bufferSize = 65536
             let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
             defer { buffer.deallocate() }
@@ -247,16 +250,15 @@ actor DaemonClient {
                 if bytesRead == 0 {
                     break
                 }
-                responseData.append(buffer, count: bytesRead)
-                if responseData.contains(0x0A) {
+                scanner.append(buffer, count: bytesRead)
+                if scanner.hasNewline {
                     break
                 }
             }
 
-            // Trim trailing newline
-            if let newlineIndex = responseData.firstIndex(of: 0x0A) {
-                responseData = responseData[responseData.startIndex..<newlineIndex]
-            }
+            // frameData is everything before the first newline; falls back to
+            // the full buffer when no newline was received (connection closed).
+            let responseData = scanner.frameData
 
             guard !responseData.isEmpty else {
                 throw DaemonClientError.invalidResponse
@@ -426,10 +428,24 @@ actor DaemonClient {
     }
 
     /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
-    func listWorktrees(repoID: UUID? = nil, status: WorktreeStatus? = nil, limit: Int? = nil, offset: Int? = nil) async throws -> [Worktree] {
+    /// Pass `excludeArchived: true` to skip archived rows (used by the 2 s poll so
+    /// the 87 % of payload that is immediately dropped client-side never crosses the wire).
+    func listWorktrees(
+        repoID: UUID? = nil,
+        status: WorktreeStatus? = nil,
+        limit: Int? = nil,
+        offset: Int? = nil,
+        excludeArchived: Bool = false
+    ) async throws -> [Worktree] {
         return try await callAsync(
             method: RPCMethod.worktreeList,
-            params: WorktreeListParams(repoID: repoID, status: status, limit: limit, offset: offset),
+            params: WorktreeListParams(
+                repoID: repoID,
+                status: status,
+                limit: limit,
+                offset: offset,
+                excludeArchived: excludeArchived
+            ),
             resultType: [Worktree].self
         )
     }

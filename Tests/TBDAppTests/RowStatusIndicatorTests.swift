@@ -13,7 +13,7 @@ struct RowStatusIndicatorTests {
             isSuspended: true,
             hasPRStatus: true
         )
-        #expect(result == .pendingSpinner)
+        #expect(result == .pending)
     }
 
     @Test func workingWinsOverLowSeverityNotificationSuspendedAndPR() {
@@ -24,11 +24,11 @@ struct RowStatusIndicatorTests {
             isSuspended: true,
             hasPRStatus: true
         )
-        #expect(result == .workingSpinner)
+        #expect(result == .working)
     }
 
     @Test(arguments: [NotificationType.error, .attentionNeeded, .focusRequest])
-    func highSeverityBadgeWinsOverWorkingSpinner(notification: NotificationType) {
+    func highSeverityBadgeWinsOverWorkingIcon(notification: NotificationType) {
         let result = RowStatusIndicator.resolve(
             isPending: false,
             isWorking: true,
@@ -40,7 +40,7 @@ struct RowStatusIndicatorTests {
     }
 
     @Test(arguments: [NotificationType.taskComplete, .responseComplete])
-    func lowSeverityBadgeYieldsToWorkingSpinner(notification: NotificationType) {
+    func lowSeverityBadgeYieldsToWorkingIcon(notification: NotificationType) {
         let result = RowStatusIndicator.resolve(
             isPending: false,
             isWorking: true,
@@ -48,7 +48,7 @@ struct RowStatusIndicatorTests {
             isSuspended: false,
             hasPRStatus: false
         )
-        #expect(result == .workingSpinner)
+        #expect(result == .working)
     }
 
     @Test func pendingWinsOverHighSeverityBadge() {
@@ -59,10 +59,10 @@ struct RowStatusIndicatorTests {
             isSuspended: false,
             hasPRStatus: false
         )
-        #expect(result == .pendingSpinner)
+        #expect(result == .pending)
     }
 
-    @Test func workingSpinnerHidesPRStatus() {
+    @Test func workingIconHidesPRStatus() {
         let result = RowStatusIndicator.resolve(
             isPending: false,
             isWorking: true,
@@ -70,7 +70,7 @@ struct RowStatusIndicatorTests {
             isSuspended: false,
             hasPRStatus: true
         )
-        #expect(result == .workingSpinner)
+        #expect(result == .working)
     }
 
     @Test func notificationWinsOverSuspendedAndPR() {

@@ -4,87 +4,97 @@ import Foundation
 
 @Test func hookPathSetup() {
     let repoID = UUID(uuidString: "12345678-1234-1234-1234-123456789abc")!
-    let path = TBDConstants.hookPath(repoID: repoID, eventName: "setup")
-    #expect(path.hasSuffix("/repos/12345678-1234-1234-1234-123456789ABC/hooks/setup"))
+    let path = TBDConstants.hookPath(repoID: repoID, eventName: "setup", environment: ["TBD_HOME": "/tmp/tbd-hooks"])
+    #expect(path == "/tmp/tbd-hooks/repos/12345678-1234-1234-1234-123456789ABC/hooks/setup")
 }
 
 @Test func hookPathArchive() {
     let repoID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
-    let path = TBDConstants.hookPath(repoID: repoID, eventName: "archive")
-    #expect(path.hasSuffix("/repos/AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA/hooks/archive"))
+    let path = TBDConstants.hookPath(repoID: repoID, eventName: "archive", environment: ["TBD_HOME": "/tmp/tbd-hooks"])
+    #expect(path == "/tmp/tbd-hooks/repos/AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA/hooks/archive")
 }
 
-/// Run env-mutating tests serialized so they don't race each other. Each test
-/// snapshots the prior env value and restores it via defer.
-@Suite(.serialized)
-struct ConfigDirEnvOverrideTests {
-    private func withEnv(_ key: String, _ value: String?, _ body: () -> Void) {
-        let prior = ProcessInfo.processInfo.environment[key]
-        if let value {
-            setenv(key, value, 1)
-        } else {
-            unsetenv(key)
-        }
-        defer {
-            if let prior {
-                setenv(key, prior, 1)
-            } else {
-                unsetenv(key)
-            }
-        }
-        body()
-    }
-
-    @Test func configDirFallsBackToHomeTbdWhenEnvUnset() {
-        withEnv("TBD_HOME", nil) {
-            let path = TBDConstants.configDir.path
-            #expect(path.hasSuffix("/tbd"))
-            #expect(path.contains(FileManager.default.homeDirectoryForCurrentUser.path))
-        }
+/// Tests for the environment-parameterized TBDConstants path functions.
+///
+/// These tests pass explicit environment dictionaries instead of mutating the
+/// process-global TBD_HOME env var because all SPM test targets link into ONE
+/// process and Swift Testing runs suites in parallel. An unserialized setenv
+/// call in any target races TBDDaemonTests/TBDHomeSerializedSuites.swift
+/// (the only permitted TBD_HOME-mutation domain in this process). Using
+/// env dictionaries makes these tests fully race-immune.
+@Suite struct ConfigDirEnvOverrideTests {
+    @Test func configDirFallsBackToHomeTbdWhenKeyAbsent() {
+        let url = TBDConstants.configDir(environment: [:])
+        let path = url.path
+        #expect(path.contains(FileManager.default.homeDirectoryForCurrentUser.path))
+        #expect(path.hasSuffix("/tbd"))
     }
 
     @Test func configDirHonorsTBDHome() {
-        withEnv("TBD_HOME", "/tmp/tbd-test-config") {
-            #expect(TBDConstants.configDir.path == "/tmp/tbd-test-config")
-        }
+        let url = TBDConstants.configDir(environment: ["TBD_HOME": "/tmp/tbd-test-config"])
+        #expect(url.path == "/tmp/tbd-test-config")
     }
 
     @Test func emptyTBDHomeIsTreatedAsUnset() {
-        withEnv("TBD_HOME", "") {
-            let path = TBDConstants.configDir.path
-            #expect(path.hasSuffix("/tbd"))
-        }
+        let url = TBDConstants.configDir(environment: ["TBD_HOME": ""])
+        #expect(url.path.hasSuffix("/tbd"))
     }
 
     @Test func derivedPathsFollowTBDHome() {
-        withEnv("TBD_HOME", "/tmp/tbd-derived") {
-            withEnv("TBD_SOCKET_PATH", nil) {
-                #expect(TBDConstants.databasePath == "/tmp/tbd-derived/state.db")
-                #expect(TBDConstants.pidFilePath == "/tmp/tbd-derived/tbdd.pid")
-                #expect(TBDConstants.portFilePath == "/tmp/tbd-derived/port")
-                #expect(TBDConstants.reposDir.path == "/tmp/tbd-derived/repos")
-                #expect(TBDConstants.socketPath == "/tmp/tbd-derived/sock")
-            }
-        }
+        let env = ["TBD_HOME": "/tmp/tbd-derived"]
+        #expect(TBDConstants.databasePath(environment: env) == "/tmp/tbd-derived/state.db")
+        #expect(TBDConstants.pidFilePath(environment: env) == "/tmp/tbd-derived/tbdd.pid")
+        #expect(TBDConstants.portFilePath(environment: env) == "/tmp/tbd-derived/port")
+        #expect(TBDConstants.reposDir(environment: env).path == "/tmp/tbd-derived/repos")
+        #expect(TBDConstants.socketPath(environment: env) == "/tmp/tbd-derived/sock")
     }
 
     @Test func socketPathOverrideWinsOverTBDHome() {
-        withEnv("TBD_HOME", "/tmp/tbd-some-home") {
-            withEnv("TBD_SOCKET_PATH", "/tmp/short.sock") {
-                #expect(TBDConstants.socketPath == "/tmp/short.sock")
-                // Other paths still follow TBD_HOME — only socket is redirected.
-                #expect(TBDConstants.databasePath == "/tmp/tbd-some-home/state.db")
-            }
-        }
+        let env = ["TBD_HOME": "/tmp/tbd-some-home", "TBD_SOCKET_PATH": "/tmp/short.sock"]
+        #expect(TBDConstants.socketPath(environment: env) == "/tmp/short.sock")
+        // Other paths still follow TBD_HOME — only socket is redirected.
+        #expect(TBDConstants.databasePath(environment: env) == "/tmp/tbd-some-home/state.db")
     }
 
     @Test func socketPathOverrideAloneWorks() {
-        withEnv("TBD_HOME", nil) {
-            withEnv("TBD_SOCKET_PATH", "/tmp/lone.sock") {
-                #expect(TBDConstants.socketPath == "/tmp/lone.sock")
-                // Other paths still resolve to ~/tbd.
-                #expect(TBDConstants.databasePath.hasSuffix("/tbd/state.db"))
-            }
-        }
+        let env = ["TBD_SOCKET_PATH": "/tmp/lone.sock"]
+        #expect(TBDConstants.socketPath(environment: env) == "/tmp/lone.sock")
+        // Other paths still resolve to ~/tbd.
+        #expect(TBDConstants.databasePath(environment: env).hasSuffix("/tbd/state.db"))
+    }
+}
+
+/// Smoke-tests that the production computed vars are correctly wired to the
+/// parameterized functions. Uses suffix-only assertions so these hold under ANY
+/// concurrent TBD_HOME value — other suites in TBDDaemonTests legitimately
+/// set TBD_HOME in parallel, so absolute-path assertions on production vars
+/// would be a race condition.
+///
+/// `configDir` is deliberately not smoke-tested here: it returns a URL whose
+/// path has no stable suffix under a concurrent TBD_HOME override (the value
+/// IS the override), so any suffix assertion would itself be a race condition.
+/// Its wiring is covered transitively by the derived-path vars below.
+///
+/// `socketPath` is safe to check with a suffix because no suite in this
+/// process sets TBD_SOCKET_PATH.
+@Suite struct ProductionVarSmokeSuite {
+    @Test func databasePathSuffix() {
+        #expect(TBDConstants.databasePath.hasSuffix("/state.db"))
+    }
+
+    @Test func pidFilePathSuffix() {
+        #expect(TBDConstants.pidFilePath.hasSuffix("/tbdd.pid"))
+    }
+
+    @Test func portFilePathSuffix() {
+        #expect(TBDConstants.portFilePath.hasSuffix("/port"))
+    }
+
+    @Test func reposDirSuffix() {
+        #expect(TBDConstants.reposDir.path.hasSuffix("/repos"))
+    }
+
+    @Test func socketPathSuffix() {
+        #expect(TBDConstants.socketPath.hasSuffix("/sock"))
     }
 }

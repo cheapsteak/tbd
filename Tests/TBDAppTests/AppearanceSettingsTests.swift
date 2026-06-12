@@ -94,22 +94,20 @@ struct AppearanceSettingsTests {
         // Regression test: init used to reject any non-bundled id, which
         // silently clobbered legitimate user-theme selections back to Tango
         // on every relaunch (the on-disk file load races init).
-        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+        // Uses userThemesDirectory: injection instead of mutating TBD_HOME
+        // via setenv — all test targets share one process, so an unserialized
+        // setenv races TBDDaemonTests/TBDHomeSerializedSuites.swift.
+        let themesDir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("tbd-appearance-tests-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        setenv("TBD_HOME", home.path, 1)
-        defer {
-            try? FileManager.default.removeItem(at: home)
-            unsetenv("TBD_HOME")
-        }
-        let themesDir = home.appendingPathComponent("terminal-themes")
+            .appendingPathComponent("terminal-themes")
         try FileManager.default.createDirectory(at: themesDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: themesDir.deletingLastPathComponent()) }
         // Contents don't need to be a valid theme — init only checks file existence.
         try Data().write(to: themesDir.appendingPathComponent("my-theme.json"))
 
         withIsolatedDefaults { defaults in
             defaults.set("my-theme", forKey: "terminal.scheme.id")
-            let settings = AppearanceSettings(defaults: defaults)
+            let settings = AppearanceSettings(defaults: defaults, userThemesDirectory: themesDir)
             #expect(settings.schemeID == "my-theme")
         }
     }
