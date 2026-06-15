@@ -58,6 +58,11 @@ public struct WorktreeLifecycle: Sendable {
     public let preSessionTimeout: TimeInterval
     /// Poll interval for the preSession completion marker file.
     public let preSessionPollInterval: TimeInterval
+    /// Process-signal seam for the agent reaper. Injectable for tests.
+    public let processSignaller: ProcessSignaller
+    /// Reaper grace knobs (kept small in tests to avoid real sleeps).
+    public let reaperGraceAttempts: Int
+    public let reaperPollInterval: Duration
 
     /// Default `preSession` hook timeout (production value).
     public static let defaultPreSessionTimeout: TimeInterval = 600
@@ -76,7 +81,10 @@ public struct WorktreeLifecycle: Sendable {
         modelProfileResolver: ModelProfileResolver? = nil,
         pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
         preSessionTimeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
-        preSessionPollInterval: TimeInterval = 0.5
+        preSessionPollInterval: TimeInterval = 0.5,
+        processSignaller: ProcessSignaller = ProductionProcessSignaller(),
+        reaperGraceAttempts: Int = 30,
+        reaperPollInterval: Duration = .milliseconds(100)
     ) {
         self.db = db
         self.git = git
@@ -87,5 +95,22 @@ public struct WorktreeLifecycle: Sendable {
         self.pendingQuestions = pendingQuestions
         self.preSessionTimeout = preSessionTimeout
         self.preSessionPollInterval = preSessionPollInterval
+        self.processSignaller = processSignaller
+        self.reaperGraceAttempts = reaperGraceAttempts
+        self.reaperPollInterval = reaperPollInterval
+    }
+
+    /// The agent reaper composed from the injected tmux + signaller seams.
+    var reaper: AgentReaper {
+        AgentReaper(tmux: tmux, signaller: processSignaller,
+                    graceAttempts: reaperGraceAttempts, pollInterval: reaperPollInterval)
+    }
+
+    /// Kill a tmux window, then confirm the pane process actually died and
+    /// escalate (SIGTERM→SIGKILL) if it survived the SIGHUP (wedged agent).
+    func killWindowAndReap(server: String, windowID: String, paneID: String) async {
+        let panePID = Int32((try? await tmux.panePID(server: server, paneID: paneID)) ?? "")
+        try? await tmux.killWindow(server: server, windowID: windowID)
+        if let panePID { await reaper.escalateAfterHangup(panePID) }
     }
 }
