@@ -45,4 +45,31 @@ public struct AgentReaper: Sendable {
         guard let cmd = signaller.commandLine(pid) else { return false }
         return cmd.contains("claude-overlay.json") || cmd.contains("/TBD/plugin")
     }
+
+    /// SIGTERM → poll for `graceAttempts × pollInterval` → SIGKILL if still alive.
+    /// Used by the sweep (no prior SIGHUP) and by `escalateAfterHangup`.
+    func reap(_ pid: Int32) async {
+        signaller.terminate(pid)
+        for _ in 0..<graceAttempts {
+            if !signaller.isAlive(pid) { return }
+            try? await Task.sleep(for: pollInterval)
+        }
+        if signaller.isAlive(pid) {
+            logger.warning("reaper: pid \(pid, privacy: .public) survived SIGTERM — sending SIGKILL")
+            signaller.forceKill(pid)
+        }
+    }
+
+    /// Called right after `kill-window` (which already sent SIGHUP). A healthy
+    /// agent exits within the grace window — only a wedged one survives, and is
+    /// then escalated. No-op if the pid is already gone.
+    func escalateAfterHangup(_ pid: Int32) async {
+        for _ in 0..<graceAttempts {
+            if !signaller.isAlive(pid) { return }
+            try? await Task.sleep(for: pollInterval)
+        }
+        guard signaller.isAlive(pid) else { return }
+        logger.warning("reaper: agent pid \(pid, privacy: .public) survived kill-window SIGHUP — escalating")
+        await reap(pid)
+    }
 }
