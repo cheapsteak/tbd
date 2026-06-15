@@ -38,4 +38,16 @@ import Testing
         #expect(sig.terminated.isEmpty)
         #expect(sig.killed.isEmpty)
     }
+
+    @Test func reapServerChildrenRunsForOwnedChildren() async {
+        // Unit-level guard on the reaper method reconcile now calls before kill-server.
+        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
+        tmux.serverPIDs = ["tbd-x": 500]
+        sig.childrenByServer = [500: [77]]
+        sig.cmdlines = [77: "claude --plugin-dir /x/TBD/plugin"]
+        sig.behaviors = [77: .init(aliveAfterTerminate: false)]
+        let reaper = AgentReaper(tmux: tmux, signaller: sig, graceAttempts: 1, pollInterval: .milliseconds(1))
+        await reaper.reapServerChildren(server: "tbd-x")
+        #expect(sig.terminated == [77])
+    }
 }

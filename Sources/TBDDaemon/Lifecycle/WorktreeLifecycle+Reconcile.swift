@@ -120,14 +120,11 @@ extension WorktreeLifecycle {
         for wt in dbWorktrees where !gitPaths.contains(wt.path) {
             let terminals = try await db.terminals.list(worktreeID: wt.id)
             for terminal in terminals {
-                do {
-                    try await tmux.killWindow(
-                        server: wt.tmuxServer,
-                        windowID: terminal.tmuxWindowID
-                    )
-                } catch {
-                    logger.warning("reconcile: failed to kill window \(terminal.tmuxWindowID, privacy: .public): \(error, privacy: .public)")
-                }
+                await killWindowAndReap(
+                    server: wt.tmuxServer,
+                    windowID: terminal.tmuxWindowID,
+                    paneID: terminal.tmuxPaneID
+                )
             }
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
             try await db.tabs.deleteForWorktree(worktreeID: wt.id)
@@ -216,9 +213,12 @@ extension WorktreeLifecycle {
         let creatingWorktreesForCleanup = try await db.worktrees.list(repoID: repoID, status: .creating)
         let allLiveWorktreesForCleanup = activeWorktrees + mainWorktreesForCleanup + creatingWorktreesForCleanup
         if allLiveWorktreesForCleanup.isEmpty {
-            // No live worktrees (including `.creating` ones) — kill the entire
-            // tmux server. A repo whose only live row is mid-pre-session must
-            // NOT land here, or the hook's window dies with the server.
+            // No live worktrees (including `.creating` ones) — reap the
+            // server's agent processes first so a wedged one doesn't reparent
+            // to launchd, then kill the entire tmux server. A repo whose only
+            // live row is mid-pre-session must NOT land here, or the hook's
+            // window dies with the server.
+            await reaper.reapServerChildren(server: tmuxServer)
             do {
                 try await tmux.killServer(server: tmuxServer)
             } catch {
@@ -238,11 +238,11 @@ extension WorktreeLifecycle {
             do {
                 let tmuxWindows = try await tmux.listWindows(server: tmuxServer, session: "main")
                 for window in tmuxWindows where !trackedWindowIDs.contains(window.windowID) {
-                    do {
-                        try await tmux.killWindow(server: tmuxServer, windowID: window.windowID)
-                    } catch {
-                        logger.warning("reconcile: failed to kill orphaned window \(window.windowID, privacy: .public): \(error, privacy: .public)")
-                    }
+                    await killWindowAndReap(
+                        server: tmuxServer,
+                        windowID: window.windowID,
+                        paneID: window.paneID
+                    )
                 }
             } catch {
                 logger.warning("reconcile: failed to list tmux windows for server \(tmuxServer, privacy: .public): \(error, privacy: .public)")
