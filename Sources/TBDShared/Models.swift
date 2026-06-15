@@ -253,7 +253,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
 
 public extension Terminal {
     var isCodexTerminal: Bool {
-        kind == .codex || label == "Codex"
+        kind == .codex || label == TerminalLabel.codex
     }
 
     /// True only for Claude terminals whose session can be resumed through

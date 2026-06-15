@@ -782,6 +782,8 @@ final class AppState: ObservableObject {
             Task { [weak self] in await self?.loadModelProfiles() }
         case .terminalSessionUpdated(let d):
             applyTerminalSessionDelta(d)
+        case .terminalCreated(let d):
+            applyTerminalCreatedDelta(d)
         case .terminalActivityUpdated(let d):
             applyTerminalActivityDelta(d)
         case .worktreeMoved(let d):
@@ -1159,6 +1161,11 @@ final class AppState: ObservableObject {
                 from: allWts,
                 tombstones: Set(recentlyArchivedWorktreeIDs.keys)
             )
+
+            // A revive that was gated by a blocking preSession hook lingers
+            // `.inFlight` until the daemon reports the row `.active` — this
+            // periodic refresh is where that flip is observed.
+            promoteRevivedWorktrees(observing: allWts)
 
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet

@@ -11,6 +11,16 @@ public struct TmuxManager: Sendable {
     /// have been passed to tmux. Used by spawn / swap integration tests to assert
     /// command shapes without spawning an actual tmux server.
     public let dryRunRecorder: (@Sendable ([String]) -> Void)?
+    /// Optional test hook consulted by `windowExists` in dryRun mode: return
+    /// `true` for a window ID to simulate that window having been killed.
+    /// Without it, dryRun reports every window as alive, which makes paths
+    /// like the pre-session `.paneKilled` short-circuit untestable.
+    public let dryRunWindowIsDead: (@Sendable (String) -> Bool)?
+    /// Optional test hook consulted by `listWindows` in dryRun mode:
+    /// `(server, session)` → the window/pane pairs to report. Without it,
+    /// dryRun reports no windows, which makes reconcile's orphan-window
+    /// cleanup pass untestable.
+    public let dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])?
 
     // Thread-safe counter for generating unique mock IDs
     private final class Counter: Sendable {
@@ -25,10 +35,12 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil) {
         self.dryRun = dryRun
         self.counter = Counter()
         self.dryRunRecorder = dryRunRecorder
+        self.dryRunWindowIsDead = dryRunWindowIsDead
+        self.dryRunListWindows = dryRunListWindows
     }
 
     // MARK: - Static Command Builders
@@ -223,7 +235,10 @@ public struct TmuxManager: Sendable {
 
     /// Kills an entire tmux server and all its sessions.
     public func killServer(server: String) async throws {
-        if dryRun { return }
+        if dryRun {
+            dryRunRecorder?(["-L", server, "kill-server"])
+            return
+        }
         logger.info("killServer: killing tmux server \(server, privacy: .public)")
         try await runTmux(["-L", server, "kill-server"])
     }
@@ -265,8 +280,11 @@ public struct TmuxManager: Sendable {
     }
 
     public func killWindow(server: String, windowID: String) async throws {
-        if dryRun { return }
         let args = Self.killWindowCommand(server: server, windowID: windowID)
+        if dryRun {
+            dryRunRecorder?(args)
+            return
+        }
         try await runTmux(args)
     }
 
@@ -344,7 +362,7 @@ public struct TmuxManager: Sendable {
     }
 
     public func listWindows(server: String, session: String) async throws -> [(windowID: String, paneID: String)] {
-        if dryRun { return [] }
+        if dryRun { return dryRunListWindows?(server, session) ?? [] }
         let args = Self.listWindowsCommand(server: server, session: session)
         let output = try await runTmux(args)
         return output
@@ -358,7 +376,7 @@ public struct TmuxManager: Sendable {
 
     /// Check whether a tmux window exists by querying list-panes.
     public func windowExists(server: String, windowID: String) async -> Bool {
-        if dryRun { return true }
+        if dryRun { return !(dryRunWindowIsDead?(windowID) ?? false) }
         do {
             let args = ["-L", server, "list-panes", "-t", windowID]
             _ = try await runTmux(args)
