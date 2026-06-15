@@ -72,4 +72,24 @@ public struct AgentReaper: Sendable {
         logger.warning("reaper: agent pid \(pid, privacy: .public) survived kill-window SIGHUP — escalating")
         await reap(pid)
     }
+
+    /// Reap every structural orphan (gated by ownership) across the given servers.
+    public func sweep(servers: [String]) async {
+        for server in servers {
+            for pid in await findStructuralOrphans(server: server) where isTBDOwned(pid) {
+                logger.info("reaper: sweeping orphan pid \(pid, privacy: .public) on \(server, privacy: .public)")
+                await reap(pid)
+            }
+        }
+    }
+
+    /// Reap the server's owned child processes before the server itself is
+    /// killed, so they don't reparent to launchd and escape.
+    public func reapServerChildren(server: String) async {
+        guard let serverPID = await tmux.serverPID(server: server) else { return }
+        for pid in signaller.children(ofServerPID: serverPID) where isTBDOwned(pid) {
+            logger.info("reaper: reaping child pid \(pid, privacy: .public) before kill-server \(server, privacy: .public)")
+            await reap(pid)
+        }
+    }
 }

@@ -100,3 +100,43 @@ import Foundation
         #expect(sig.killed == [10])
     }
 }
+
+@Suite struct AgentReaperSweepTests {
+    private func reaper(_ tmux: FakeTmuxQuerier, _ sig: FakeProcessSignaller) -> AgentReaper {
+        AgentReaper(tmux: tmux, signaller: sig, graceAttempts: 1, pollInterval: .milliseconds(1))
+    }
+
+    @Test func sweepReapsOwnedOrphansAcrossServers() async {
+        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
+        tmux.serverPIDs = ["tbd-a": 100, "tbd-b": 200]
+        sig.childrenByServer = [100: [11, 12], 200: [21]]
+        tmux.panePIDs = ["tbd-a": [12], "tbd-b": []]      // 11 and 21 are orphans
+        // Both orphans carry the TBD fingerprint.
+        sig.cmdlines = [11: "claude --plugin-dir /x/TBD/plugin",
+                        21: "claude --settings /x/claude-overlay.json"]
+        sig.behaviors = [11: .init(aliveAfterTerminate: false), 21: .init(aliveAfterTerminate: false)]
+        await reaper(tmux, sig).sweep(servers: ["tbd-a", "tbd-b"])
+        #expect(Set(sig.terminated) == [11, 21])
+    }
+
+    @Test func sweepSkipsUnownedOrphans() async {
+        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
+        tmux.serverPIDs = ["tbd-a": 100]
+        sig.childrenByServer = [100: [11]]
+        tmux.panePIDs = ["tbd-a": []]                     // 11 is structurally an orphan
+        sig.cmdlines = [11: "claude --resume USERS-OWN"]  // but NOT TBD-owned
+        await reaper(tmux, sig).sweep(servers: ["tbd-a"])
+        #expect(sig.terminated.isEmpty)
+        #expect(sig.killed.isEmpty)
+    }
+
+    @Test func reapServerChildrenSignalsOwnedChildren() async {
+        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
+        tmux.serverPIDs = ["tbd-a": 100]
+        sig.childrenByServer = [100: [11, 12]]
+        sig.cmdlines = [11: "claude --plugin-dir /x/TBD/plugin", 12: "claude --resume USERS-OWN"]
+        sig.behaviors = [11: .init(aliveAfterTerminate: false)]
+        await reaper(tmux, sig).reapServerChildren(server: "tbd-a")
+        #expect(sig.terminated == [11])                   // only the owned child
+    }
+}
