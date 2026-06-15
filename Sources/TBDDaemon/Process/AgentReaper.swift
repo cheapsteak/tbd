@@ -40,10 +40,27 @@ public struct AgentReaper: Sendable {
         return Array(children.subtracting(panes))
     }
 
-    /// Defense-in-depth ownership check before any signal.
+    /// Defense-in-depth ownership check before any signal: true when the process
+    /// is a TBD-spawned agent (claude/codex) or carries a TBD spawn marker.
+    ///
+    /// `sweep`/`reapServerChildren` only ever see children of a known tbd-* server,
+    /// so parentage already establishes ownership; this gate additionally avoids
+    /// reaping a non-agent process a user detached inside a TBD shell pane (e.g.
+    /// `nohup make`, `node script.js`). We recognize the agent binary by the last
+    /// path component of argv[0] so a path merely containing "claude" won't match.
     func isTBDOwned(_ pid: Int32) -> Bool {
         guard let cmd = signaller.commandLine(pid) else { return false }
-        return cmd.contains("claude-overlay.json") || cmd.contains("/TBD/plugin")
+        if cmd.contains("claude-overlay.json") || cmd.contains("/TBD/plugin") { return true }
+        return Self.isAgentBinary(cmd)
+    }
+
+    /// True if the command line's argv[0] basename is `claude` or `codex`.
+    static func isAgentBinary(_ commandLine: String) -> Bool {
+        guard let arg0 = commandLine.split(whereSeparator: { $0 == " " || $0 == "\t" }).first else {
+            return false
+        }
+        let basename = arg0.split(separator: "/").last.map(String.init) ?? String(arg0)
+        return basename == "claude" || basename == "codex"
     }
 
     /// SIGTERM → poll for `graceAttempts × pollInterval` → SIGKILL if still alive.
@@ -77,7 +94,8 @@ public struct AgentReaper: Sendable {
     public func sweep(servers: [String]) async {
         for server in servers {
             for pid in await findStructuralOrphans(server: server) where isTBDOwned(pid) {
-                logger.info("reaper: sweeping orphan pid \(pid, privacy: .public) on \(server, privacy: .public)")
+                let cmd = signaller.commandLine(pid)?.prefix(60) ?? ""
+                logger.info("reaper: sweeping orphan pid \(pid, privacy: .public) on \(server, privacy: .public) [\(cmd, privacy: .public)]")
                 await reap(pid)
             }
         }

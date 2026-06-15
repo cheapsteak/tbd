@@ -55,11 +55,30 @@ import Foundation
         let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
         sig.cmdlines[11] = "claude --settings /Users/x/tbd/runtime/claude-overlay.json"
         sig.cmdlines[12] = "claude --plugin-dir /Users/x/Library/Application Support/TBD/plugin"
-        sig.cmdlines[13] = "claude --resume ABC"           // a user's own claude
+        sig.cmdlines[13] = "node /Users/x/script.js"       // a user's own non-agent process
         let r = reaper(tmux, sig)
         #expect(r.isTBDOwned(11) == true)
         #expect(r.isTBDOwned(12) == true)
         #expect(r.isTBDOwned(13) == false)
+    }
+
+    @Test func ownershipRecognizesAgentBinariesAndMarkers() {
+        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
+        sig.cmdlines[1] = "codex"
+        sig.cmdlines[2] = "/Users/x/.local/bin/codex --resume ABC"
+        sig.cmdlines[3] = "claude --resume ABC"
+        sig.cmdlines[4] = "claude --settings /x/claude-overlay.json"
+        sig.cmdlines[5] = "claude --plugin-dir /x/TBD/plugin"
+        sig.cmdlines[6] = "node script.js"
+        sig.cmdlines[7] = "/opt/homebrew/bin/make"
+        let r = reaper(tmux, sig)
+        #expect(r.isTBDOwned(1) == true)   // bare codex
+        #expect(r.isTBDOwned(2) == true)   // codex by path
+        #expect(r.isTBDOwned(3) == true)   // claude agent binary
+        #expect(r.isTBDOwned(4) == true)   // overlay marker
+        #expect(r.isTBDOwned(5) == true)   // plugin marker
+        #expect(r.isTBDOwned(6) == false)  // non-agent detached process
+        #expect(r.isTBDOwned(7) == false)  // non-agent binary, no markers
     }
 }
 
@@ -123,18 +142,29 @@ import Foundation
         let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
         tmux.serverPIDs = ["tbd-a": 100]
         sig.childrenByServer = [100: [11]]
-        tmux.panePIDs = ["tbd-a": []]                     // 11 is structurally an orphan
-        sig.cmdlines = [11: "claude --resume USERS-OWN"]  // but NOT TBD-owned
+        tmux.panePIDs = ["tbd-a": []]            // 11 is structurally an orphan
+        sig.cmdlines = [11: "/usr/bin/make -j8"] // but a user-detached non-agent process
         await reaper(tmux, sig).sweep(servers: ["tbd-a"])
         #expect(sig.terminated.isEmpty)
         #expect(sig.killed.isEmpty)
+    }
+
+    @Test func sweepReapsCodexOrphan() async {
+        let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
+        tmux.serverPIDs = ["tbd-a": 100]
+        sig.childrenByServer = [100: [11]]
+        tmux.panePIDs = ["tbd-a": []]                     // 11 is structurally an orphan
+        sig.cmdlines = [11: "/Users/x/.local/bin/codex --resume ABC"]
+        sig.behaviors = [11: .init(aliveAfterTerminate: false)]
+        await reaper(tmux, sig).sweep(servers: ["tbd-a"])
+        #expect(sig.terminated == [11])                   // codex orphan IS reaped
     }
 
     @Test func reapServerChildrenSignalsOwnedChildren() async {
         let tmux = FakeTmuxQuerier(); let sig = FakeProcessSignaller()
         tmux.serverPIDs = ["tbd-a": 100]
         sig.childrenByServer = [100: [11, 12]]
-        sig.cmdlines = [11: "claude --plugin-dir /x/TBD/plugin", 12: "claude --resume USERS-OWN"]
+        sig.cmdlines = [11: "claude --plugin-dir /x/TBD/plugin", 12: "node /Users/x/script.js"]
         sig.behaviors = [11: .init(aliveAfterTerminate: false)]
         await reaper(tmux, sig).reapServerChildren(server: "tbd-a")
         #expect(sig.terminated == [11])                   // only the owned child

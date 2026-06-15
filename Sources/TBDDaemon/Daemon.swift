@@ -268,8 +268,9 @@ public final class Daemon: Sendable {
             guard let repos = try? await database.repos.list() else { return [] }
             return Array(Set(repos.map { TmuxManager.serverName(forRepoPath: $0.path) }))
         }
-        await reaper.sweep(servers: await ownedServers())
         self.reaperTask = Task {
+            // Sweep once immediately (cold recovery), then every 60s.
+            await reaper.sweep(servers: await ownedServers())
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
                 guard !Task.isCancelled else { break }
@@ -362,7 +363,6 @@ public final class Daemon: Sendable {
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
         reaperTask?.cancel()
-        reaperTask = nil
 
         // Stop servers
         if let sock = socketServer {

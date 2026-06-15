@@ -1,5 +1,8 @@
 import Foundation
 import TBDShared
+import os
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "reaper")
 
 /// Errors that can occur during worktree lifecycle operations.
 public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedError {
@@ -110,7 +113,12 @@ public struct WorktreeLifecycle: Sendable {
     /// escalate (SIGTERM→SIGKILL) if it survived the SIGHUP (wedged agent).
     func killWindowAndReap(server: String, windowID: String, paneID: String) async {
         let panePID = Int32((try? await tmux.panePID(server: server, paneID: paneID)) ?? "")
-        try? await tmux.killWindow(server: server, windowID: windowID)
+        do {
+            try await tmux.killWindow(server: server, windowID: windowID)
+        } catch {
+            logger.warning("killWindow failed on \(server, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+        // Escalate even if killWindow threw — the pane process may still be alive.
         if let panePID { await reaper.escalateAfterHangup(panePID) }
     }
 }

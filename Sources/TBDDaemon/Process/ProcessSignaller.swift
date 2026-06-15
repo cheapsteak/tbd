@@ -65,7 +65,9 @@ public struct ProductionProcessSignaller: ProcessSignaller {
         p.arguments = args
         let pipe = Pipe()
         p.standardOutput = pipe
-        p.standardError = Pipe()
+        // Discard stderr to nullDevice: an undrained Pipe could deadlock if ps
+        // wrote enough to fill the pipe buffer while we block on stdout below.
+        p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()

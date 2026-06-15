@@ -22,7 +22,10 @@ import Testing
     /// A wedged pane process that survives kill-window's SIGHUP gets escalated.
     @Test func killWindowAndReapEscalatesSurvivor() async throws {
         let sig = FakeProcessSignaller()
-        // panePID in dryRun is "0" → Int32(0). Use 0's behavior to model survival.
+        // panePID in dryRun is "0" → Int32(0). This exercises the escalation path
+        // in isolation via the fake signaller's scripted behavior for pid 0 — it
+        // does NOT model the production dryRun path (production isAlive(0) returns
+        // false via the `guard pid > 0`, so only the fake escalates here).
         sig.behaviors[0] = .init(aliveInitially: true, aliveAfterTerminate: true, aliveAfterKill: false)
         let lifecycle = try makeLifecycle(signaller: sig)
         await lifecycle.killWindowAndReap(server: "tbd-x", windowID: "@1", paneID: "%1")
