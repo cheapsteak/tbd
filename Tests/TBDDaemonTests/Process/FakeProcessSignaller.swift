@@ -31,3 +31,10 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
     func children(ofServerPID serverPID: Int32) -> [Int32] { lock.withLock { childrenByServer[serverPID] ?? [] } }
     func commandLine(_ pid: Int32) -> String? { lock.withLock { cmdlines[pid] } }
 }
+
+final class FakeTmuxQuerier: TmuxProcessQuerying, @unchecked Sendable {
+    var serverPIDs: [String: Int32] = [:]
+    var panePIDs: [String: Set<Int32>] = [:]
+    func serverPID(server: String) async -> Int32? { serverPIDs[server] }
+    func livePanePIDs(server: String) async -> Set<Int32> { panePIDs[server] ?? [] }
+}
