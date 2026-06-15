@@ -8,6 +8,12 @@ import Foundation
     #expect(path == "/tmp/tbd-hooks/repos/12345678-1234-1234-1234-123456789ABC/hooks/setup")
 }
 
+@Test func hookPathPreSession() {
+    let repoID = UUID(uuidString: "12345678-1234-1234-1234-123456789abc")!
+    let path = TBDConstants.hookPath(repoID: repoID, eventName: "preSession", environment: ["TBD_HOME": "/tmp/tbd-hooks"])
+    #expect(path == "/tmp/tbd-hooks/repos/12345678-1234-1234-1234-123456789ABC/hooks/preSession")
+}
+
 @Test func hookPathArchive() {
     let repoID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
     let path = TBDConstants.hookPath(repoID: repoID, eventName: "archive", environment: ["TBD_HOME": "/tmp/tbd-hooks"])
