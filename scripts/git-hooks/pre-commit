@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Blocks committing skill-generated implementation plans into the tracked tree.
+#
+# Plans are local scratch artifacts (see docs/CLAUDE.md): they belong in the
+# gitignored docs/implementation-plans/ or docs/superpowers/plans/ and must not
+# be committed. This guard matches the writing-plans template header in the
+# STAGED CONTENT of newly-added files, so it catches a plan committed ANYWHERE
+# tracked — including one relocated to a non-ignored dir to dodge .gitignore
+# (the exact way this rule was bypassed before the guard existed).
+#
+# Scope: only newly *added* files (--diff-filter=A). Editing an already-tracked
+# file is never blocked. Rare intentional override: ALLOW_PLAN_COMMIT=1 git commit ...
+#
+# Install once via scripts/install-hooks.sh.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+if [ "${ALLOW_PLAN_COMMIT:-0}" = "1" ]; then
+  exit 0
+fi
+
+# Distinctive marker the writing-plans skill injects into every plan's header.
+marker="REQUIRED SUB-SKILL"
+
+# bash 3.2 (macOS) has no `mapfile`, and the hook runs under `set -u`; read the
+# staged file list with a portable while-loop and seed the array explicitly so
+# `${#offenders[@]}` stays legal when nothing matches.
+offenders=()
+while IFS= read -r file; do
+  case "$file" in
+    # Sanctioned gitignored plan dirs (defensive — they shouldn't be staged anyway).
+    docs/implementation-plans/*|docs/superpowers/plans/*) continue ;;
+  esac
+  case "$file" in *.md) ;; *) continue ;; esac
+  # Inspect the staged blob (exactly what would be committed), not the worktree.
+  if git show ":$file" 2>/dev/null | grep -qF "$marker"; then
+    offenders+=("$file")
+  fi
+done < <(git diff --cached --name-only --diff-filter=A)
+
+if [ ${#offenders[@]} -gt 0 ]; then
+  echo "[pre-commit] Refusing to commit implementation plan(s) into the tracked tree:" >&2
+  for f in "${offenders[@]}"; do echo "  - $f" >&2; done
+  echo "" >&2
+  echo "Implementation plans are local scratch artifacts (see docs/CLAUDE.md)." >&2
+  echo "Keep them in a gitignored location and do not stage them:" >&2
+  echo "    docs/implementation-plans/   or   docs/superpowers/plans/" >&2
+  echo "If the design is worth keeping, capture it in a docs/specs/<date>-<topic>-spec.md doc." >&2
+  echo "" >&2
+  echo "NOTE: a '.gitignore: paths are ignored' error means STOP — it is intent," >&2
+  echo "      not an obstacle. Do not relocate the plan to a tracked dir to force it in." >&2
+  echo "" >&2
+  echo "Rare intentional override: ALLOW_PLAN_COMMIT=1 git commit ..." >&2
+  exit 1
+fi
+
+exit 0
