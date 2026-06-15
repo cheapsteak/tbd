@@ -59,6 +59,7 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var sshRefreshTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
+    public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public let pidFile: PIDFile
     public let startTime: Date
@@ -261,6 +262,21 @@ public final class Daemon: Sendable {
             reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
         }
 
+        // 11a-reaper. Reap orphaned/wedged agent processes: sweep now, then periodically.
+        let reaper = AgentReaper(tmux: tmux, signaller: ProductionProcessSignaller())
+        let ownedServers: () async -> [String] = { [database] in
+            guard let repos = try? await database.repos.list() else { return [] }
+            return Array(Set(repos.map { TmuxManager.serverName(forRepoPath: $0.path) }))
+        }
+        await reaper.sweep(servers: await ownedServers())
+        self.reaperTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else { break }
+                await reaper.sweep(servers: await ownedServers())
+            }
+        }
+
         // 11a-pre. Prune per-session Claude `fallbackModel` overlay files
         // orphaned by crashes or teardown paths that didn't clean up. Keep only
         // files whose key matches a live terminal. Best-effort.
@@ -345,6 +361,8 @@ public final class Daemon: Sendable {
         sshRefreshTask?.cancel()
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
+        reaperTask?.cancel()
+        reaperTask = nil
 
         // Stop servers
         if let sock = socketServer {
