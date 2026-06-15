@@ -160,6 +160,16 @@ import Testing
     #expect(args == ["-L", "tbd-test", "list-panes", "-t", "%42", "-F", "#{pane_pid}"])
 }
 
+@Test func serverPIDQueryShape() {
+    #expect(TmuxManager.serverPIDQuery(server: "tbd-abc")
+        == ["-L", "tbd-abc", "display-message", "-p", "#{pid}"])
+}
+
+@Test func listAllPanePIDsCommandShape() {
+    #expect(TmuxManager.listAllPanePIDsCommand(server: "tbd-abc")
+        == ["-L", "tbd-abc", "list-panes", "-a", "-F", "#{pane_pid}"])
+}
+
 @Test func sendCommandWithEnter() {
     let args = TmuxManager.sendCommandArgs(server: "tbd-test", paneID: "%42", command: "/exit")
     #expect(args == ["-L", "tbd-test", "send-keys", "-t", "%42", "/exit", "Enter"])

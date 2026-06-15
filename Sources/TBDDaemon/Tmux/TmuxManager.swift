@@ -178,6 +178,14 @@ public struct TmuxManager: Sendable {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_pid}"]
     }
 
+    public static func serverPIDQuery(server: String) -> [String] {
+        ["-L", server, "display-message", "-p", "#{pid}"]
+    }
+
+    public static func listAllPanePIDsCommand(server: String) -> [String] {
+        ["-L", server, "list-panes", "-a", "-F", "#{pane_pid}"]
+    }
+
     /// send-keys without -l so "Enter" is interpreted as a key name, not literal text.
     public static func sendCommandArgs(server: String, paneID: String, command: String) -> [String] {
         ["-L", server, "send-keys", "-t", paneID, command, "Enter"]
@@ -350,6 +358,27 @@ public struct TmuxManager: Sendable {
         if dryRun { return "0" }
         let args = Self.panePIDQuery(server: server, paneID: paneID)
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The tmux server's own process pid (the parent of every pane process),
+    /// or nil if the server can't be queried (e.g. no sessions / not running).
+    public func serverPID(server: String) async -> Int32? {
+        if dryRun { return nil }
+        let args = Self.serverPIDQuery(server: server)
+        guard let out = try? await runTmux(args) else { return nil }
+        return Int32(out.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Every live pane's `pane_pid` across all sessions on the server.
+    public func livePanePIDs(server: String) async -> Set<Int32> {
+        if dryRun { return [] }
+        let args = Self.listAllPanePIDsCommand(server: server)
+        guard let out = try? await runTmux(args) else { return [] }
+        var pids: Set<Int32> = []
+        for line in out.split(separator: "\n") {
+            if let pid = Int32(line.trimmingCharacters(in: .whitespaces)) { pids.insert(pid) }
+        }
+        return pids
     }
 
     public func sendCommand(server: String, paneID: String, command: String) async throws {
