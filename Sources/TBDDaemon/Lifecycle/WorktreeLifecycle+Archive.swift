@@ -113,11 +113,13 @@ extension WorktreeLifecycle {
             archivedHeadSHA: capturedSHA
         )
 
-        // Kill all tmux windows for this worktree
+        // Kill all tmux windows for this worktree, reaping any wedged agent
+        // that survives kill-window's SIGHUP.
         for terminal in terminals {
-            try? await tmux.killWindow(
+            await killWindowAndReap(
                 server: worktree.tmuxServer,
-                windowID: terminal.tmuxWindowID
+                windowID: terminal.tmuxWindowID,
+                paneID: terminal.tmuxPaneID
             )
         }
 
