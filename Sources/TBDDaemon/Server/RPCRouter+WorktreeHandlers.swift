@@ -121,6 +121,29 @@ extension RPCRouter {
         return .ok()
     }
 
+    func handleWorktreeForget(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeForgetParams.self, from: paramsData)
+
+        // Capture the path before the row is deleted so the result can report
+        // the directory we deliberately left on disk.
+        let path = try await db.worktrees.get(id: params.worktreeID)?.path
+
+        try await lifecycle.forgetWorktree(worktreeID: params.worktreeID)
+
+        // Reuse the archive delta — from the client's perspective the row has
+        // left the active list, which is exactly what `.worktreeArchived`
+        // signals. (forget hard-deletes, so it never appears in the archived
+        // list either.)
+        subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(
+            worktreeID: params.worktreeID
+        )))
+
+        return try RPCResponse(result: WorktreeForgetResult(
+            worktreeID: params.worktreeID,
+            path: path ?? ""
+        ))
+    }
+
     func handleWorktreeRevive(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeReviveParams.self, from: paramsData)
         // Non-blocking: when a preSession hook gates the primary terminals,

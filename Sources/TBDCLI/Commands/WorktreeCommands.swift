@@ -11,6 +11,7 @@ struct WorktreeCommand: ParsableCommand {
             WorktreeList.self,
             WorktreeAdopt.self,
             WorktreeArchive.self,
+            WorktreeForget.self,
             WorktreeRevive.self,
             WorktreeRename.self,
             WorktreeReparent.self,
@@ -380,6 +381,51 @@ struct WorktreeArchive: AsyncParsableCommand {
             printJSON(["status": "archived", "id": worktreeID.uuidString])
         } else {
             print("Worktree archived.")
+        }
+    }
+}
+
+// MARK: - worktree forget
+
+struct WorktreeForget: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "forget",
+        abstract: "Stop tracking a worktree WITHOUT deleting its directory from disk",
+        discussion: """
+            Unlike `archive`, `forget` does not run `git worktree remove`, so the
+            worktree directory and all its files (including uncommitted and
+            gitignored content) stay exactly in place. The worktree is removed
+            from TBD entirely — it will not appear in either the active or
+            archived listings.
+
+            Note: a forgotten worktree whose directory lives under one of TBD's
+            own worktree prefixes may be re-adopted on the next reconcile.
+            """
+    )
+
+    @Argument(help: "Worktree name or ID")
+    var nameOrID: String
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        let worktreeID = try resolveWorktreeNameOrID(nameOrID, client: client)
+
+        let result: WorktreeForgetResult = try client.call(
+            method: RPCMethod.worktreeForget,
+            params: WorktreeForgetParams(worktreeID: worktreeID),
+            resultType: WorktreeForgetResult.self
+        )
+
+        if json {
+            printJSON(result)
+        } else {
+            print("Worktree forgotten (directory left in place).")
+            if !result.path.isEmpty {
+                print("  Path: \(result.path)")
+            }
         }
     }
 }
