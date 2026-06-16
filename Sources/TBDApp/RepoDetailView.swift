@@ -67,6 +67,14 @@ struct RepoSettingsView: View {
                     Divider()
                         .padding(.vertical, 4)
 
+                    EnvOverridesEditor(
+                        initial: repo.envOverrides,
+                        caption: "Overrides global; overridden by the repo's model profile."
+                    ) { await appState.setRepoEnvOverrides(repoID: repo.id, overrides: $0) }
+
+                    Divider()
+                        .padding(.vertical, 4)
+
                     RepoHooksSettingsView(repoID: repoID)
                 }
                 .padding()
