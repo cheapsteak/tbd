@@ -33,6 +33,7 @@ struct RepoDetailView: View {
                     .id(repoID)
             case .settings:
                 RepoSettingsView(repoID: repoID)
+                    .id(repoID)
             }
         }
     }
