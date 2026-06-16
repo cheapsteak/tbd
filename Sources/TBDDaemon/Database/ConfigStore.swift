@@ -14,13 +14,16 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// JSON-encoded `[String: ClaudeEnvValue]` overrides map. Nil/absent
     /// means no overrides — every setting falls back to its registry default.
     var claude_env_settings: String?
+    /// JSON-encoded `[String: String]` free-form env overrides (global scope).
+    var env_overrides: String?
 
     func toModel() -> Config {
         Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
             primaryAgentPreference: primary_agent_preference
                 .flatMap(PrimaryAgentPreference.init(rawValue:)) ?? .defaultValue,
-            envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings)
+            envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings),
+            envOverrides: EnvOverridesCoding.decode(env_overrides)
         )
     }
 }
@@ -81,6 +84,17 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET claude_env_settings = ? WHERE id = ?",
+                arguments: [json, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the global free-form env overrides. Empty clears the column.
+    public func setEnvOverrides(_ overrides: [String: String]) async throws {
+        let json = EnvOverridesCoding.encode(overrides)
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET env_overrides = ? WHERE id = ?",
                 arguments: [json, Self.singletonID]
             )
         }

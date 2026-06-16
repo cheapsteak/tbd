@@ -397,13 +397,17 @@ public struct Config: Codable, Sendable, Equatable {
     public var primaryAgentPreference: PrimaryAgentPreference
     /// Claude spawn-env setting overrides, keyed by `ClaudeEnvSetting.id`.
     public var envSettingOverrides: [String: ClaudeEnvValue]
+    /// Free-form env-var overrides applied to spawned sessions (global scope).
+    public var envOverrides: [String: String]
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
-                envSettingOverrides: [String: ClaudeEnvValue] = [:]) {
+                envSettingOverrides: [String: ClaudeEnvValue] = [:],
+                envOverrides: [String: String] = [:]) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
+        self.envOverrides = envOverrides
     }
 
     public init(from decoder: Decoder) throws {
@@ -415,6 +419,8 @@ public struct Config: Codable, Sendable, Equatable {
         ) ?? .defaultValue
         envSettingOverrides = try c.decodeIfPresent(
             [String: ClaudeEnvValue].self, forKey: .envSettingOverrides) ?? [:]
+        envOverrides = try c.decodeIfPresent(
+            [String: String].self, forKey: .envOverrides) ?? [:]
     }
 }
 
