@@ -108,6 +108,10 @@ struct EnvOverridesEditor: View {
         let overrides = committedOverrides()
         Task {
             await onSave(overrides)
+            // Reseed the displayed rows from the deduped map so duplicate-key
+            // rows collapse to match what was persisted, using the same
+            // sort/Row construction as the initializer for stable order.
+            rows = overrides.sorted { $0.key < $1.key }.map { Row(key: $0.key, value: $0.value) }
             isSaving = false
             withAnimation(.easeInOut(duration: 0.3)) { showSaved = true }
             try? await Task.sleep(for: .seconds(2))

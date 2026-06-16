@@ -291,13 +291,10 @@ extension WorktreeLifecycle {
         let claudeEnvOverrides = rebootConfig?.envSettingOverrides ?? [:]
         // Free-form env overrides applied to recreated agent panes (global <
         // repo < profile). Codex takes the merged map as-is; Claude layers the
-        // builder's auth/routing env on top; plain shells get nothing.
+        // builder's auth/routing env on top; plain shells get nothing. The repo
+        // record is fetched once here, but each agent branch performs its own
+        // merge so non-agent (shell/cmd) panes skip the work entirely.
         let rebootRepo = try? await db.repos.get(id: worktree.repoID)
-        let rebootGlobalRepoEnv = EnvOverrideResolver.merge(
-            global: rebootConfig?.envOverrides,
-            repo: rebootRepo?.envOverrides,
-            profile: nil
-        )
         let spawn: ClaudeSpawnCommandBuilder.Result
         // Per-branch free-form env layered into the recreated pane; defaults to
         // none (plain shells stay clean).
@@ -320,6 +317,11 @@ extension WorktreeLifecycle {
             let codexHome = try CodexHomeManager().ensureProfilePlugin()
             env["CODEX_HOME"] = codexHome.path
             // Codex: the merged free-form overrides ARE the entire sensitive env.
+            let rebootGlobalRepoEnv = EnvOverrideResolver.merge(
+                global: rebootConfig?.envOverrides,
+                repo: rebootRepo?.envOverrides,
+                profile: nil
+            )
             primarySensitiveEnv = rebootGlobalRepoEnv
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,
