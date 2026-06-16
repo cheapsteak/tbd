@@ -128,6 +128,25 @@ struct TerminalPanelView: View {
             logger.debug("proxy unreachable for terminal \(terminalID, privacy: .public) base=\(baseURL, privacy: .public) detail=\(result.detail ?? "nil", privacy: .public)")
         }
     }
+
+    /// Builds the environment for the SwiftTerm PTY that runs the tmux attach client.
+    ///
+    /// The viewer environment must have `TMUX` and `TMUX_PANE` removed to prevent
+    /// nested-attach errors. When TBD.app itself is launched from inside a tmux session
+    /// (e.g., running `scripts/restart.sh` from a TBD pane), the parent environment
+    /// contains these variables. tmux's `attach` client refuses with:
+    /// "sessions should be nested with care, unset $TMUX to force" (exit 1) if run
+    /// in a nested context. The attach client must always be a fresh top-level tmux client.
+    ///
+    /// - Parameter base: Base environment dict (typically ProcessInfo.processInfo.environment)
+    /// - Returns: Cleaned environment with TMUX/TMUX_PANE removed and TERM set to xterm-256color
+    nonisolated static func makeViewerEnvironment(base: [String: String]) -> [String: String] {
+        var env = base
+        env.removeValue(forKey: "TMUX")
+        env.removeValue(forKey: "TMUX_PANE")
+        env["TERM"] = "xterm-256color"
+        return env
+    }
 }
 
 // MARK: - TerminalPanelRepresentable
@@ -306,9 +325,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
             debugLog("PANEL: Starting: \(tmuxPath) \(processArgs.joined(separator: " "))")
 
-            // Inherit environment with proper TERM
-            var env = ProcessInfo.processInfo.environment
-            env["TERM"] = "xterm-256color"
+            // Build viewer environment with TMUX/TMUX_PANE scrubbed and TERM set correctly
+            let env = TerminalPanelView.makeViewerEnvironment(base: ProcessInfo.processInfo.environment)
             let envPairs = env.map { "\($0.key)=\($0.value)" }
 
             let process = LocalProcess(delegate: self)
