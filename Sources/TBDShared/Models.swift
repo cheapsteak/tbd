@@ -297,6 +297,8 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     /// id namespace is profile-specific (bedrock/proxy/oauth differ), so this
     /// lives on the profile, not globally. nil/empty = no fallback configured.
     public var fallbackModels: [String]?
+    /// Free-form env-var overrides applied to spawned sessions (profile scope).
+    public var envOverrides: [String: String]
     public var createdAt: Date
     public var lastUsedAt: Date?
 
@@ -304,6 +306,7 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
                 baseURL: String? = nil, model: String? = nil,
                 awsRegion: String? = nil, awsProfile: String? = nil,
                 fallbackModels: [String]? = nil,
+                envOverrides: [String: String] = [:],
                 createdAt: Date = Date(), lastUsedAt: Date? = nil) {
         self.id = id
         self.name = name
@@ -313,12 +316,14 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         self.awsRegion = awsRegion
         self.awsProfile = awsProfile
         self.fallbackModels = fallbackModels
+        self.envOverrides = envOverrides
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, kind, baseURL, model, awsRegion, awsProfile, fallbackModels, createdAt, lastUsedAt
+        case id, name, kind, baseURL, model, awsRegion, awsProfile, fallbackModels
+        case envOverrides, createdAt, lastUsedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -331,6 +336,8 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         awsRegion = try c.decodeIfPresent(String.self, forKey: .awsRegion)
         awsProfile = try c.decodeIfPresent(String.self, forKey: .awsProfile)
         fallbackModels = try c.decodeIfPresent([String].self, forKey: .fallbackModels)
+        envOverrides = try c.decodeIfPresent(
+            [String: String].self, forKey: .envOverrides) ?? [:]
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
     }

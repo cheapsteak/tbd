@@ -16,6 +16,9 @@ public struct ResolvedModelProfile: Sendable, Equatable {
     /// Ordered fallback model ids for the Claude `fallbackModel` setting.
     /// nil/empty = no fallback configured for this profile.
     public let fallbackModels: [String]?
+    /// Free-form env overrides carried by this profile (profile scope). Merged
+    /// into the spawned session's env under `global < repo < profile` precedence.
+    public let envOverrides: [String: String]
 }
 
 public struct ModelProfileResolver: Sendable {
@@ -66,7 +69,8 @@ public struct ModelProfileResolver: Sendable {
             secret: secret,
             awsRegion: row.awsRegion,
             awsProfile: row.awsProfile,
-            fallbackModels: row.fallbackModels
+            fallbackModels: row.fallbackModels,
+            envOverrides: row.envOverrides
         )
     }
 
