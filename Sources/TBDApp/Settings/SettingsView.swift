@@ -130,6 +130,13 @@ struct GeneralSettingsTab: View {
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
             }
 
+            Section {
+                EnvOverridesEditor(
+                    initial: appState.globalEnvOverrides,
+                    caption: "Applied to every spawned Claude/Codex session. Repo and model-profile overrides take precedence."
+                ) { await appState.setGlobalEnvOverrides($0) }
+            }
+
             Section("Experimental") {
                 Toggle("Auto-suspend idle Claude when switching worktrees", isOn: $autoSuspend)
                     .help("Experimental: exit idle Claude instances when you switch away and resume them when you switch back, freeing memory. Off by default — may interrupt long-running work.")

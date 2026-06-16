@@ -357,6 +357,9 @@ final class AppState: ObservableObject {
     @Published var modelProfiles: [ModelProfileWithUsage] = []
     @Published var defaultProfileID: UUID? = nil
     @Published var primaryAgentPreference: PrimaryAgentPreference = .defaultValue
+    /// Global free-form env overrides (config scope). Loaded from the daemon
+    /// alongside `defaultProfileID` via `loadModelProfiles()`.
+    @Published var globalEnvOverrides: [String: String] = [:]
     /// Terminals where the user has dismissed the proxy-unreachable banner.
     /// Cleared on app relaunch (in-memory only — banners are advisory).
     @Published var dismissedProxyWarnings: Set<UUID> = []

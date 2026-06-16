@@ -433,6 +433,15 @@ extension WorktreeLifecycle {
             }
         }
 
+        // Free-form env overrides: global < repo < profile. Applied to both
+        // Claude and Codex. For Claude the builder's auth/routing env is layered
+        // on top (below), so it can't be clobbered. See docs/env-overrides.md.
+        let mergedEnvOverrides = EnvOverrideResolver.merge(
+            global: config.envOverrides,
+            repo: repo.envOverrides,
+            profile: resolvedProfile?.envOverrides
+        )
+
         // Create terminal 1: primary agent (or shell if skipped).
         let plannedTerminalID1 = UUID()
         var createdTerminalIDs = [plannedTerminalID1]
@@ -461,7 +470,7 @@ extension WorktreeLifecycle {
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
                 "CODEX_HOME": codexHome.path,
             ]
-            primarySensitiveEnv = [:]
+            primarySensitiveEnv = mergedEnvOverrides
             primarySessionID = nil
             primaryProfileID = nil
             primaryLabel = TerminalLabel.codex
@@ -503,7 +512,9 @@ extension WorktreeLifecycle {
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
             ]
-            primarySensitiveEnv = spawn.sensitiveEnv
+            // Layer the builder's auth/routing env ON TOP of free-form overrides
+            // so auth/routing stays final and free-form vars can't clobber it.
+            primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
             primaryProfileID = resolvedProfile?.profileID
             primaryLabel = TerminalLabel.claudeCode
         }
@@ -617,7 +628,8 @@ extension WorktreeLifecycle {
                     cwd: worktreePath,
                     shellCommand: spawn.command,
                     env: perTermEnv,
-                    sensitiveEnv: spawn.sensitiveEnv,
+                    // Same free-form-under-auth layering as the primary terminal.
+                    sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
                     cols: resolvedCols,
                     rows: resolvedRows
                 )

@@ -287,8 +287,18 @@ extension WorktreeLifecycle {
             server: worktree.tmuxServer, session: "main", cwd: worktree.path
         )
 
-        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
+        let rebootConfig = try? await db.config.get()
+        let claudeEnvOverrides = rebootConfig?.envSettingOverrides ?? [:]
+        // Free-form env overrides applied to recreated agent panes (global <
+        // repo < profile). Codex takes the merged map as-is; Claude layers the
+        // builder's auth/routing env on top; plain shells get nothing. The repo
+        // record is fetched once here, but each agent branch performs its own
+        // merge so non-agent (shell/cmd) panes skip the work entirely.
+        let rebootRepo = try? await db.repos.get(id: worktree.repoID)
         let spawn: ClaudeSpawnCommandBuilder.Result
+        // Per-branch free-form env layered into the recreated pane; defaults to
+        // none (plain shells stay clean).
+        var primarySensitiveEnv: [String: String] = [:]
         var env: [String: String] = [:]
         // Always announce the worktree to recreated panes. Without this, the
         // pane inherits whatever TBD_WORKTREE_ID the tmux server was spawned
@@ -306,6 +316,13 @@ extension WorktreeLifecycle {
             // presence of a captured session ID during reboot recovery.
             let codexHome = try CodexHomeManager().ensureProfilePlugin()
             env["CODEX_HOME"] = codexHome.path
+            // Codex: the merged free-form overrides ARE the entire sensitive env.
+            let rebootGlobalRepoEnv = EnvOverrideResolver.merge(
+                global: rebootConfig?.envOverrides,
+                repo: rebootRepo?.envOverrides,
+                profile: nil
+            )
+            primarySensitiveEnv = rebootGlobalRepoEnv
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,
                 freshSessionID: nil,
@@ -342,6 +359,14 @@ extension WorktreeLifecycle {
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides
             )
+            // Claude: layer the builder's auth/routing env ON TOP of the merged
+            // free-form overrides (incl. this terminal's profile scope) so auth wins.
+            let mergedEnvOverrides = EnvOverrideResolver.merge(
+                global: rebootConfig?.envOverrides,
+                repo: rebootRepo?.envOverrides,
+                profile: resolvedProfile?.envOverrides
+            )
+            primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
         } else {
             // Shell or custom-cmd terminal. Plain shell terminals have label nil or
             // TerminalLabel.shell; custom-cmd terminals store the command string directly in label.
@@ -365,7 +390,7 @@ extension WorktreeLifecycle {
                 cwd: worktree.path,
                 shellCommand: spawn.command,
                 env: env,
-                sensitiveEnv: spawn.sensitiveEnv
+                sensitiveEnv: primarySensitiveEnv
             )
         } catch {
             // If we just bootstrapped the server and createWindow failed, the

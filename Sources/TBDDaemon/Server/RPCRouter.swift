@@ -198,6 +198,12 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileSetPrimaryAgentPreference(request.paramsData)
             case RPCMethod.modelProfileSetRepoOverride:
                 return try await handleModelProfileSetRepoOverride(request.paramsData)
+            case RPCMethod.configSetEnvOverrides:
+                return try await handleConfigSetEnvOverrides(request.paramsData)
+            case RPCMethod.repoSetEnvOverrides:
+                return try await handleRepoSetEnvOverrides(request.paramsData)
+            case RPCMethod.modelProfileSetEnvOverrides:
+                return try await handleModelProfileSetEnvOverrides(request.paramsData)
             case RPCMethod.modelProfileFetchUsage:
                 return try await handleModelProfileFetchUsage(request.paramsData)
             case RPCMethod.modelProfileHealthCheck:

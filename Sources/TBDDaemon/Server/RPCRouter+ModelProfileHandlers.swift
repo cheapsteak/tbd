@@ -35,7 +35,8 @@ extension RPCRouter {
         return try RPCResponse(result: ModelProfileListResult(
             profiles: result,
             defaultID: config.defaultProfileID,
-            primaryAgentPreference: config.primaryAgentPreference
+            primaryAgentPreference: config.primaryAgentPreference,
+            globalEnvOverrides: config.envOverrides
         ))
     }
 

@@ -25,6 +25,9 @@ extension AppState {
             if result.primaryAgentPreference != primaryAgentPreference {
                 primaryAgentPreference = result.primaryAgentPreference
             }
+            if result.globalEnvOverrides != globalEnvOverrides {
+                globalEnvOverrides = result.globalEnvOverrides
+            }
         } catch {
             logger.error("Failed to list model profiles: \(error, privacy: .public)")
             handleConnectionError(error)
@@ -162,6 +165,49 @@ extension AppState {
         } catch {
             logger.error("Failed to set repo profile override: \(error, privacy: .public)")
             showAlert("Failed to set repo profile: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - Env Overrides
+
+    /// Set or clear the global free-form env overrides.
+    func setGlobalEnvOverrides(_ overrides: [String: String]) async {
+        do {
+            try await daemonClient.setGlobalEnvOverrides(overrides)
+            globalEnvOverrides = overrides
+        } catch {
+            logger.error("Failed to set global env overrides: \(error, privacy: .public)")
+            showAlert("Failed to set env overrides: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set or clear a repo's free-form env overrides.
+    func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async {
+        do {
+            try await daemonClient.setRepoEnvOverrides(repoID: repoID, overrides: overrides)
+            if let idx = repos.firstIndex(where: { $0.id == repoID }) {
+                var repo = repos[idx]
+                repo.envOverrides = overrides
+                repos[idx] = repo
+            }
+        } catch {
+            logger.error("Failed to set repo env overrides: \(error, privacy: .public)")
+            showAlert("Failed to set env overrides: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set or clear a model profile's free-form env overrides.
+    func setProfileEnvOverrides(profileID: UUID, overrides: [String: String]) async {
+        do {
+            try await daemonClient.setProfileEnvOverrides(profileID: profileID, overrides: overrides)
+            if let idx = modelProfiles.firstIndex(where: { $0.profile.id == profileID }) {
+                var profile = modelProfiles[idx].profile
+                profile.envOverrides = overrides
+                modelProfiles[idx] = ModelProfileWithUsage(profile: profile, usage: modelProfiles[idx].usage)
+            }
+        } catch {
+            logger.error("Failed to set profile env overrides: \(error, privacy: .public)")
+            showAlert("Failed to set env overrides: \(error.localizedDescription)", isError: true)
         }
     }
 

@@ -164,6 +164,159 @@ struct ModelProfileSpawnTests {
         #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
+    // MARK: - Spawn: Codex free-form env overrides (branch-test rule)
+
+    /// Build a lifecycle + recorder fixture. Unlike `makeFixture`, this exposes
+    /// the `WorktreeLifecycle` so tests can drive `spawnPrimaryTerminals`
+    /// directly — the chokepoint where the env-injection branches live. A real
+    /// `ModelProfileResolver` is attached so the Claude branch resolves the
+    /// worktree's effective profile (Codex tests ignore it — Codex resolves no
+    /// profile).
+    private func makeLifecycleFixture() -> (WorktreeLifecycle, TBDDatabase, TmuxRecorder) {
+        let recorder = TmuxRecorder()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let db = try! TBDDatabase(inMemory: true)
+        let resolver = ModelProfileResolver(
+            profiles: db.modelProfiles, repos: db.repos, config: db.config
+        )
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            modelProfileResolver: resolver
+        )
+        return (lifecycle, db, recorder)
+    }
+
+    /// Codex's primary spawn carries the merged free-form env overrides
+    /// (global ∪ repo) via tmux `-e KEY=VALUE`. Covers the
+    /// `primarySensitiveEnv = mergedEnvOverrides` branch in spawnPrimaryTerminals.
+    @Test("spawn: Codex primary receives merged global+repo env overrides via -e")
+    func codexReceivesMergedEnvOverrides() async throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
+        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        defer {
+            unsetenv("TBD_TEST_CODEX_HOME")
+            try? FileManager.default.removeItem(at: codexHome)
+        }
+
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.codex)
+        try await db.config.setEnvOverrides(["FOO": "bar"])
+        try await db.repos.setEnvOverrides(id: repo.id, overrides: ["REPO_VAR": "rv"])
+        // Re-fetch so the repo passed to spawnPrimaryTerminals carries its
+        // freshly-persisted envOverrides (the spawn reads repo.envOverrides
+        // from the argument, not the DB).
+        let freshRepo = try #require(try await db.repos.get(id: repo.id))
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: freshRepo, skipClaude: false, preSessionTerminalID: nil
+        )
+
+        // Both scopes reach the Codex pane as sensitive -e env.
+        #expect(recorder.joinedAll.contains("FOO=bar"))
+        #expect(recorder.joinedAll.contains("REPO_VAR=rv"))
+    }
+
+    /// With no env overrides configured, the Codex primary spawn injects no
+    /// sensitive `-e` env at all (the empty-config off branch).
+    @Test("spawn: empty config → Codex primary gets no -e env overrides")
+    func codexEmptyConfigInjectsNothing() async throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
+        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        defer {
+            unsetenv("TBD_TEST_CODEX_HOME")
+            try? FileManager.default.removeItem(at: codexHome)
+        }
+
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.codex)
+        // No global or repo env overrides configured.
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false, preSessionTerminalID: nil
+        )
+
+        // The Codex `new-window` call exists and carries no `-e` env flag.
+        let codexCall = try #require(recorder.calls.first {
+            $0.contains("new-window") && ($0.last?.contains("codex") ?? false)
+        })
+        #expect(!codexCall.contains("-e"))
+        #expect(!recorder.joinedAll.contains("FOO=bar"))
+    }
+
+    // MARK: - Spawn: Claude free-form env overrides (branch-test rule)
+
+    /// Claude's primary spawn carries the merged free-form env overrides from
+    /// all three scopes (global ∪ repo ∪ resolved-profile) via tmux
+    /// `-e KEY=VALUE`. Covers the
+    /// `primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv)`
+    /// branch in spawnPrimaryTerminals.
+    @Test("spawn: Claude primary receives merged global+repo+profile env overrides via -e")
+    func claudeReceivesMergedEnvOverrides() async throws {
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.claude)
+
+        // Profile scope: an OAuth profile carrying a free-form var, set as the
+        // global default so resolve(repoID:) returns it for this worktree.
+        let profile = try await seedOAuthProfile(db, name: "WithEnv")
+        try await db.modelProfiles.setEnvOverrides(id: profile.id, overrides: ["PROFILE_VAR": "pv"])
+        try await db.config.setDefaultProfileID(profile.id)
+
+        // Global + repo scopes.
+        try await db.config.setEnvOverrides(["GLOBAL_VAR": "gv"])
+        try await db.repos.setEnvOverrides(id: repo.id, overrides: ["REPO_VAR": "rv"])
+        // Re-fetch so the repo passed in carries its persisted envOverrides
+        // (the spawn reads repo.envOverrides from the argument, not the DB).
+        let freshRepo = try #require(try await db.repos.get(id: repo.id))
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: freshRepo, skipClaude: false, preSessionTerminalID: nil
+        )
+
+        // All three scopes reach the Claude pane as sensitive -e env.
+        #expect(recorder.joinedAll.contains("GLOBAL_VAR=gv"))
+        #expect(recorder.joinedAll.contains("REPO_VAR=rv"))
+        #expect(recorder.joinedAll.contains("PROFILE_VAR=pv"))
+    }
+
+    /// The Claude builder's structured auth/routing env is layered ON TOP of the
+    /// free-form overrides, so a free-form var that collides with an auth var
+    /// cannot win. Exercises the auth-final invariant at the real spawn site
+    /// (not just `Dictionary.merging` in isolation): a Bedrock profile sets
+    /// AWS_REGION=us-west-2 while a free-form override tries AWS_REGION=us-east-1.
+    @Test("spawn: Claude auth/routing env wins over a free-form collision")
+    func claudeAuthEnvWinsOverFreeFormCollision() async throws {
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.claude)
+
+        // Bedrock profile emits AWS_REGION=us-west-2 + CLAUDE_CODE_USE_BEDROCK=1
+        // from its structured auth/routing fields. Its free-form override
+        // deliberately collides on AWS_REGION.
+        let bedrock = try await db.modelProfiles.create(
+            name: "Bedrock", kind: .bedrock, awsRegion: "us-west-2"
+        )
+        try await db.modelProfiles.setEnvOverrides(id: bedrock.id, overrides: ["AWS_REGION": "us-east-1"])
+        try await db.config.setDefaultProfileID(bedrock.id)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false, preSessionTerminalID: nil
+        )
+
+        // Builder's structured AWS_REGION is final; the free-form value loses.
+        #expect(recorder.joinedAll.contains("AWS_REGION=us-west-2"))
+        #expect(!recorder.joinedAll.contains("AWS_REGION=us-east-1"))
+        #expect(recorder.joinedAll.contains("CLAUDE_CODE_USE_BEDROCK=1"))
+    }
+
     // MARK: - Spawn: fallbackModels overlay routing
 
     @Test("spawn: profile WITHOUT fallbackModels uses the global overlay path")
