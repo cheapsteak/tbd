@@ -61,6 +61,8 @@ briefing here
 EOF
 ```
 
+**Where the new branch starts:** `tbd worktree create` always bases the new branch on the repo's **default branch from origin**, never on the caller's branch. It best-effort `git fetch`es, then branches off `origin/<default>` (e.g. `origin/main`), falling back to the local `<default>` only if the remote ref is missing. `--position` (child/sibling/root) controls only where the worktree sits in the UI tree — never the git base. So a worker spawned from a feature branch still starts clean off `origin/main`; to build on unmerged work, land that work on the default branch first (then rebase the new worktree onto it).
+
 ### Spawn worker worktrees from an orchestrator (most common fan-out)
 
 The default `--position=child` nests the new worktree under the caller. This
@@ -78,6 +80,7 @@ some parent and you want to spawn a peer alongside yourself — not when you
 want to spawn workers under yourself.
 
 Use `--position=root` to force the new worktree to be top-level.
+Remember all three positions only affect UI-tree placement — every new worktree branches off the default branch regardless (see above).
 
 ### Reparent a worktree
 
