@@ -164,6 +164,82 @@ struct ModelProfileSpawnTests {
         #expect(!recorder.joinedAll.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
+    // MARK: - Spawn: Codex free-form env overrides (branch-test rule)
+
+    /// Build a lifecycle + recorder fixture. Unlike `makeFixture`, this exposes
+    /// the `WorktreeLifecycle` so tests can drive `spawnPrimaryTerminals`
+    /// directly — the chokepoint where the Codex env branch lives.
+    private func makeLifecycleFixture() -> (WorktreeLifecycle, TBDDatabase, TmuxRecorder) {
+        let recorder = TmuxRecorder()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let db = try! TBDDatabase(inMemory: true)
+        let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        return (lifecycle, db, recorder)
+    }
+
+    /// Codex's primary spawn carries the merged free-form env overrides
+    /// (global ∪ repo) via tmux `-e KEY=VALUE`. Covers the
+    /// `primarySensitiveEnv = mergedEnvOverrides` branch in spawnPrimaryTerminals.
+    @Test("spawn: Codex primary receives merged global+repo env overrides via -e")
+    func codexReceivesMergedEnvOverrides() async throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
+        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        defer {
+            unsetenv("TBD_TEST_CODEX_HOME")
+            try? FileManager.default.removeItem(at: codexHome)
+        }
+
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.codex)
+        try await db.config.setEnvOverrides(["FOO": "bar"])
+        try await db.repos.setEnvOverrides(id: repo.id, overrides: ["REPO_VAR": "rv"])
+        // Re-fetch so the repo passed to spawnPrimaryTerminals carries its
+        // freshly-persisted envOverrides (the spawn reads repo.envOverrides
+        // from the argument, not the DB).
+        let freshRepo = try #require(try await db.repos.get(id: repo.id))
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: freshRepo, skipClaude: false, preSessionTerminalID: nil
+        )
+
+        // Both scopes reach the Codex pane as sensitive -e env.
+        #expect(recorder.joinedAll.contains("FOO=bar"))
+        #expect(recorder.joinedAll.contains("REPO_VAR=rv"))
+    }
+
+    /// With no env overrides configured, the Codex primary spawn injects no
+    /// sensitive `-e` env at all (the empty-config off branch).
+    @Test("spawn: empty config → Codex primary gets no -e env overrides")
+    func codexEmptyConfigInjectsNothing() async throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-home-\(UUID().uuidString)")
+        setenv("TBD_TEST_CODEX_HOME", codexHome.path, 1)
+        defer {
+            unsetenv("TBD_TEST_CODEX_HOME")
+            try? FileManager.default.removeItem(at: codexHome)
+        }
+
+        let (lifecycle, db, recorder) = makeLifecycleFixture()
+        defer { Task { await cleanup(db) } }
+        let (repo, wt) = try await seedRepoAndWorktree(db)
+        try await db.config.setPrimaryAgentPreference(.codex)
+        // No global or repo env overrides configured.
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: wt, repo: repo, skipClaude: false, preSessionTerminalID: nil
+        )
+
+        // The Codex `new-window` call exists and carries no `-e` env flag.
+        let codexCall = try #require(recorder.calls.first {
+            $0.contains("new-window") && ($0.last?.contains("codex") ?? false)
+        })
+        #expect(!codexCall.contains("-e"))
+        #expect(!recorder.joinedAll.contains("FOO=bar"))
+    }
+
     // MARK: - Spawn: fallbackModels overlay routing
 
     @Test("spawn: profile WITHOUT fallbackModels uses the global overlay path")
