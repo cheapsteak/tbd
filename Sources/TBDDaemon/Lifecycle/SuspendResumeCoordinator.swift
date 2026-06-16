@@ -378,7 +378,16 @@ public actor SuspendResumeCoordinator {
             }
         }
 
-        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
+        let resumeConfig = try? await db.config.get()
+        let claudeEnvOverrides = resumeConfig?.envSettingOverrides ?? [:]
+        // Free-form env overrides (global < repo < profile), layered under the
+        // builder's auth/routing env below so resumed sessions keep them too.
+        let resumeRepo = try? await db.repos.get(id: worktree.repoID)
+        let mergedEnvOverrides = EnvOverrideResolver.merge(
+            global: resumeConfig?.envOverrides,
+            repo: resumeRepo?.envOverrides,
+            profile: resolvedProfile?.envOverrides
+        )
         // resolveOverlayPath never throws — it degrades to the global hooks-only
         // overlay if the per-session write fails, so resume always proceeds.
         let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
@@ -415,7 +424,7 @@ public actor SuspendResumeCoordinator {
                 server: server, session: "main",
                 cwd: worktree.path, shellCommand: spawn.command,
                 env: resumeEnv,
-                sensitiveEnv: spawn.sensitiveEnv
+                sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
             )
             try await db.terminals.updateTmuxIDs(
                 id: terminal.id, windowID: window.windowID, paneID: window.paneID

@@ -89,6 +89,11 @@ extension RPCRouter {
         // Look up repo once for system prompt env vars and Claude session setup
         let repo = try await db.repos.get(id: worktree.repoID)
 
+        // Fetch config once for both the typed Claude env overrides and the
+        // free-form env overrides (global < repo < profile). The profile scope
+        // is folded in per-branch once the profile is resolved.
+        let createConfig = try? await db.config.get()
+
         // Pre-mint the terminal ID so we can inject it into the spawned env
         // as TBD_TERMINAL_ID. Claude's SessionStart hook (registered via the
         // TBD overlay file) reads this env var to route session events back
@@ -132,12 +137,20 @@ extension RPCRouter {
                 codexEnv["COLORFGBG"] = colorFgBg
             }
 
+            // Codex: the merged free-form overrides ARE the entire sensitive env.
+            // No profile is resolved for Codex, so the profile scope is nil.
+            let codexEnvOverrides = EnvOverrideResolver.merge(
+                global: createConfig?.envOverrides,
+                repo: repo?.envOverrides,
+                profile: nil
+            )
             let window = try await tmux.createWindow(
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
                 shellCommand: CodexSpawnCommandBuilder.build(initialPrompt: params.prompt),
                 env: codexEnv,
+                sensitiveEnv: codexEnvOverrides,
                 cols: resolvedCols,
                 rows: resolvedRows
             )
@@ -211,7 +224,7 @@ extension RPCRouter {
             label = nil
         }
 
-        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
+        let claudeEnvOverrides = createConfig?.envSettingOverrides ?? [:]
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: params.resumeSessionID,
             freshSessionID: freshSessionID,
@@ -236,13 +249,27 @@ extension RPCRouter {
             envSettingOverrides: claudeEnvOverrides
         )
 
+        // For Claude terminals, layer the builder's auth/routing env ON TOP of
+        // the merged free-form overrides (global < repo < profile) so auth wins.
+        // Shell/custom-cmd terminals are out of scope and get no overrides.
+        let primarySensitiveEnv: [String: String]
+        if isClaudeType {
+            let mergedEnvOverrides = EnvOverrideResolver.merge(
+                global: createConfig?.envOverrides,
+                repo: repo?.envOverrides,
+                profile: resolvedProfile?.envOverrides
+            )
+            primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
+        } else {
+            primarySensitiveEnv = spawn.sensitiveEnv
+        }
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
             shellCommand: spawn.command,
             env: env,
-            sensitiveEnv: spawn.sensitiveEnv,
+            sensitiveEnv: primarySensitiveEnv,
             cols: resolvedCols,
             rows: resolvedRows
         )
@@ -350,12 +377,23 @@ extension RPCRouter {
             // TBD_TEST_CODEX_HOME test-isolation override flow through.
             codexEnv["CODEX_HOME"] = codexHome.path
 
+            // Codex: re-apply the merged free-form overrides (global < repo) so a
+            // recreated Codex pane keeps them. No profile is resolved here, so the
+            // profile scope is nil.
+            let recreateConfig = try? await db.config.get()
+            let recreateRepo = try? await db.repos.get(id: worktree.repoID)
+            let codexEnvOverrides = EnvOverrideResolver.merge(
+                global: recreateConfig?.envOverrides,
+                repo: recreateRepo?.envOverrides,
+                profile: nil
+            )
             let window = try await tmux.createWindow(
                 server: worktree.tmuxServer,
                 session: "main",
                 cwd: worktree.path,
                 shellCommand: CodexSpawnCommandBuilder.command,
                 env: codexEnv,
+                sensitiveEnv: codexEnvOverrides,
                 cols: resolvedCols,
                 rows: resolvedRows
             )
@@ -598,7 +636,15 @@ extension RPCRouter {
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
 
-        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
+        let swapConfig = try? await db.config.get()
+        let claudeEnvOverrides = swapConfig?.envSettingOverrides ?? [:]
+        // Free-form env overrides for the swapped-in Claude pane (global < repo <
+        // new profile), layered under the builder's auth/routing env below.
+        let mergedEnvOverrides = EnvOverrideResolver.merge(
+            global: swapConfig?.envOverrides,
+            repo: repo?.envOverrides,
+            profile: resolved?.envOverrides
+        )
         let spawn: ClaudeSpawnCommandBuilder.Result
         let storedSessionID: String
         let scheduleRecapture: Bool
@@ -669,7 +715,7 @@ extension RPCRouter {
             cwd: worktree.path,
             shellCommand: spawn.command,
             env: env,
-            sensitiveEnv: spawn.sensitiveEnv,
+            sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
             cols: resolvedCols,
             rows: resolvedRows
         )
