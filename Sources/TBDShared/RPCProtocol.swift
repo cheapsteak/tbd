@@ -151,6 +151,9 @@ public enum RPCMethod {
     public static let worktreeSetActiveTab = "worktree.setActiveTab"
     public static let appearanceUpdateColorFgBg = "appearance.updateColorFgBg"
     public static let repoListBranches = "repo.listBranches"
+    public static let configSetEnvOverrides       = "config.setEnvOverrides"
+    public static let repoSetEnvOverrides         = "repo.setEnvOverrides"
+    public static let modelProfileSetEnvOverrides = "modelProfile.setEnvOverrides"
 }
 
 // MARK: - Branch Listing
@@ -788,6 +791,32 @@ public struct ClaudeSpawnPreferences: Codable, Sendable, Equatable {
     public let settingOverrides: [String: ClaudeEnvValue]?
     public init(settingOverrides: [String: ClaudeEnvValue]? = nil) {
         self.settingOverrides = settingOverrides
+    }
+}
+
+/// Params for `config.setEnvOverrides` — the global free-form env overrides.
+public struct SetGlobalEnvOverridesParams: Codable, Sendable, Equatable {
+    public let overrides: [String: String]
+    public init(overrides: [String: String]) { self.overrides = overrides }
+}
+
+/// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.
+public struct SetRepoEnvOverridesParams: Codable, Sendable, Equatable {
+    public let repoID: UUID
+    public let overrides: [String: String]
+    public init(repoID: UUID, overrides: [String: String]) {
+        self.repoID = repoID
+        self.overrides = overrides
+    }
+}
+
+/// Params for `modelProfile.setEnvOverrides` — per-profile free-form env overrides.
+public struct SetProfileEnvOverridesParams: Codable, Sendable, Equatable {
+    public let profileID: UUID
+    public let overrides: [String: String]
+    public init(profileID: UUID, overrides: [String: String]) {
+        self.profileID = profileID
+        self.overrides = overrides
     }
 }
 
