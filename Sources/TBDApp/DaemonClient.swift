@@ -650,6 +650,30 @@ actor DaemonClient {
         )
     }
 
+    /// Push the global free-form env overrides to the daemon.
+    func setGlobalEnvOverrides(_ overrides: [String: String]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetEnvOverrides,
+            params: SetGlobalEnvOverridesParams(overrides: overrides)
+        )
+    }
+
+    /// Set or clear a repo's free-form env overrides.
+    func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.repoSetEnvOverrides,
+            params: SetRepoEnvOverridesParams(repoID: repoID, overrides: overrides)
+        )
+    }
+
+    /// Set or clear a model profile's free-form env overrides.
+    func setProfileEnvOverrides(profileID: UUID, overrides: [String: String]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileSetEnvOverrides,
+            params: SetProfileEnvOverridesParams(profileID: profileID, overrides: overrides)
+        )
+    }
+
     /// Manually suspend a single Claude terminal.
     func terminalSuspend(terminalID: UUID) async throws {
         try await callVoidAsync(

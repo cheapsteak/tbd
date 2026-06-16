@@ -420,14 +420,19 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let profiles: [ModelProfileWithUsage]
     public let defaultID: UUID?
     public let primaryAgentPreference: PrimaryAgentPreference
+    /// The global free-form env overrides (config scope). Carried alongside the
+    /// other config-derived fields so the app loads it in one round-trip.
+    public let globalEnvOverrides: [String: String]
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
-        primaryAgentPreference: PrimaryAgentPreference = .defaultValue
+        primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
+        globalEnvOverrides: [String: String] = [:]
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
         self.primaryAgentPreference = primaryAgentPreference
+        self.globalEnvOverrides = globalEnvOverrides
     }
 
     public init(from decoder: Decoder) throws {
@@ -438,6 +443,10 @@ public struct ModelProfileListResult: Codable, Sendable {
             PrimaryAgentPreference.self,
             forKey: .primaryAgentPreference
         ) ?? .defaultValue
+        globalEnvOverrides = try c.decodeIfPresent(
+            [String: String].self,
+            forKey: .globalEnvOverrides
+        ) ?? [:]
     }
 }
 
