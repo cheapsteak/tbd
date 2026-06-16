@@ -55,7 +55,11 @@ public struct ProductionProcessSignaller: ProcessSignaller {
     }
 
     public func commandLine(_ pid: Int32) -> String? {
-        Self.runPS(["-o", "command=", "-p", String(pid)])?
+        // `-ww` disables column-width truncation. Without it, some macOS
+        // versions cap the command column at the terminal/`COLUMNS` width even
+        // when stdout is a pipe, clipping the TBD fingerprint markers off the
+        // tail of a long `claude`/`codex` invocation.
+        Self.runPS(["-ww", "-o", "command=", "-p", String(pid)])?
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

@@ -49,7 +49,13 @@ public struct AgentReaper: Sendable {
     /// `nohup make`, `node script.js`). We recognize the agent binary by the last
     /// path component of argv[0] so a path merely containing "claude" won't match.
     func isTBDOwned(_ pid: Int32) -> Bool {
-        guard let cmd = signaller.commandLine(pid) else { return false }
+        isTBDOwned(commandLine: signaller.commandLine(pid))
+    }
+
+    /// Ownership check against an already-fetched command line, so callers that
+    /// also need the command line (e.g. `sweep`'s log) can avoid a second `ps`.
+    func isTBDOwned(commandLine cmd: String?) -> Bool {
+        guard let cmd else { return false }
         if cmd.contains("claude-overlay.json") || cmd.contains("/TBD/plugin") { return true }
         return Self.isAgentBinary(cmd)
     }
@@ -93,9 +99,12 @@ public struct AgentReaper: Sendable {
     /// Reap every structural orphan (gated by ownership) across the given servers.
     public func sweep(servers: [String]) async {
         for server in servers {
-            for pid in await findStructuralOrphans(server: server) where isTBDOwned(pid) {
-                let cmd = signaller.commandLine(pid)?.prefix(60) ?? ""
-                logger.info("reaper: sweeping orphan pid \(pid, privacy: .public) on \(server, privacy: .public) [\(cmd, privacy: .public)]")
+            for pid in await findStructuralOrphans(server: server) {
+                // Fetch the command line once: used for both the ownership gate
+                // and the log line below.
+                let cmd = signaller.commandLine(pid)
+                guard isTBDOwned(commandLine: cmd) else { continue }
+                logger.info("reaper: sweeping orphan pid \(pid, privacy: .public) on \(server, privacy: .public) [\(cmd?.prefix(60) ?? "", privacy: .public)]")
                 await reap(pid)
             }
         }
