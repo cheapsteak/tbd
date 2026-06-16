@@ -533,6 +533,15 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "model_profiles", column: "fallback_models", type: .text)
         }
 
+        // Free-form env-var overrides applied to spawned Claude/Codex sessions.
+        // One JSON-encoded `[String: String]` per scope. Nullable so existing
+        // rows decode as "no overrides". See docs/env-overrides.md.
+        migrator.registerMigration("v31_env_overrides") { db in
+            try db.addColumnIfMissing(table: "config",         column: "env_overrides", type: .text)
+            try db.addColumnIfMissing(table: "repo",           column: "env_overrides", type: .text)
+            try db.addColumnIfMissing(table: "model_profiles", column: "env_overrides", type: .text)
+        }
+
         return migrator
     }
 }
