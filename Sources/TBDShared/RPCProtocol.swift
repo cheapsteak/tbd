@@ -87,6 +87,7 @@ public enum RPCMethod {
     public static let worktreeRename = "worktree.rename"
     public static let worktreeReorder = "worktree.reorder"
     public static let worktreeMove = "worktree.move"
+    public static let worktreeForget = "worktree.forget"
     public static let terminalCreate = "terminal.create"
     public static let terminalList = "terminal.list"
     public static let terminalSend = "terminal.send"
@@ -697,6 +698,24 @@ public struct WorktreeMoveParams: Codable, Sendable {
         self.worktreeID = worktreeID
         self.newParentID = newParentID
         self.newSortOrder = newSortOrder
+    }
+}
+
+/// Params for `worktree.forget`: remove a worktree from TBD's tracking without
+/// deleting its on-disk directory (no `git worktree remove`).
+public struct WorktreeForgetParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+/// Result for `worktree.forget`. Echoes the forgotten worktree's id and the
+/// path that was deliberately left in place on disk.
+public struct WorktreeForgetResult: Codable, Sendable {
+    public let worktreeID: UUID
+    public let path: String
+    public init(worktreeID: UUID, path: String) {
+        self.worktreeID = worktreeID
+        self.path = path
     }
 }
 
