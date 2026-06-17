@@ -96,6 +96,11 @@ public final class Daemon: Sendable {
     /// daemon. A tmux server hosting dozens of pty panes can exhaust 256
     /// descriptors and `exit(1)`, taking every session with it.
     ///
+    /// Modern macOS shells default to 524,288. Large monorepos (e.g. Elastic
+    /// Path's commerce-manager with ~18k directories) cause Claude CLI to walk
+    /// past 10k file descriptors during startup, so a ceiling around the macOS
+    /// shell default keeps spawned `claude` processes from hitting that wall.
+    ///
     /// Best-effort: a `getrlimit`/`setrlimit` failure is logged and ignored —
     /// the daemon must still start. Returns the resulting limit (for tests).
     @discardableResult
@@ -105,7 +110,7 @@ public final class Daemon: Sendable {
             daemonLogger.warning("getrlimit(RLIMIT_NOFILE) failed: \(String(cString: strerror(errno)), privacy: .public)")
             return limit
         }
-        let target = min(limit.rlim_max, rlim_t(8192))
+        let target = min(limit.rlim_max, rlim_t(524_288))
         if limit.rlim_cur < target {
             let previous = limit.rlim_cur
             limit.rlim_cur = target
