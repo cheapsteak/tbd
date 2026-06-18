@@ -117,9 +117,53 @@ struct PRStatusManagerTests {
         #expect(status == .mergeable)
     }
 
-    @Test("maps UNSTABLE to .checksFailed")
-    func mapsUnstable() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeStateStatus: "UNSTABLE")
+    @Test("maps OPEN + UNSTABLE + FAILURE checks to .mergeable (non-required checks failing)")
+    func mapsUnstableWithFailingChecksToMergeable() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE",
+            statusCheckRollupState: "FAILURE"
+        )
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps OPEN + UNSTABLE + SUCCESS checks to .mergeable")
+    func mapsUnstableWithSuccessChecksToMergeable() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE",
+            statusCheckRollupState: "SUCCESS"
+        )
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps OPEN + UNSTABLE + PENDING checks to .pending (pending wins)")
+    func mapsUnstableWithPendingChecksToPending() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE",
+            statusCheckRollupState: "PENDING"
+        )
+        #expect(status == .pending)
+    }
+
+    @Test("maps OPEN + UNSTABLE + nil checks to .mergeable")
+    func mapsUnstableWithNilChecksToMergeable() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE",
+            statusCheckRollupState: nil
+        )
+        #expect(status == .mergeable)
+    }
+
+    @Test("maps OPEN + BLOCKED + FAILURE checks to .checksFailed (required-check failure stays red)")
+    func mapsBlockedWithFailingChecksToChecksFailed() {
+        let status = PRStatusManager.mapState(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            statusCheckRollupState: "FAILURE"
+        )
         #expect(status == .checksFailed)
     }
 
