@@ -129,6 +129,12 @@ private struct PinnedTerminalCell: View {
                         .font(.caption)
                         .fontWeight(.medium)
                         .lineLimit(1)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            appState.navigateToActiveWorktree(terminal.worktreeID, terminalID: terminal.id)
+                        }
+                        .cursor(.pointingHand)
+                        .help("Go to \(worktree.displayName)")
                 }
                 Spacer()
             }
