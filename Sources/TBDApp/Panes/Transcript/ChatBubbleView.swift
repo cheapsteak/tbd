@@ -25,19 +25,18 @@ struct ChatBubbleView: View {
     private var roleLabel: String { isUser ? "You" : "Claude" }
 
     var body: some View {
-        HStack(spacing: 0) {
-            if isUser { Spacer(minLength: 52) }
-
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
-                roleHeader
-                bubbleBody
-            }
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-
-            if !isUser { Spacer(minLength: 52) }
+        // Flattened row wrapper (issue #129 per-row layout-depth): the prior
+        // `HStack { Spacer ; column.frame(maxWidth:.infinity) ; Spacer }` is
+        // layout-equivalent to a single column that fills width and reserves the
+        // 52pt opposite-side gutter via padding. Dropping the outer HStack +
+        // Spacer removes a StackLayout node from every bubble row's measure pass.
+        VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
+            roleHeader
+            bubbleBody
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        .padding(isUser ? .leading : .trailing, 52)
+        .padding(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
     }
 
     @ViewBuilder
@@ -53,7 +52,7 @@ struct ChatBubbleView: View {
                 Text(ts.absoluteShort).font(.caption2).foregroundStyle(.tertiary)
             }
         }
-        .padding(.horizontal, 4)
+        .padding(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4))
     }
 
     private var bubbleBody: some View {
@@ -81,8 +80,7 @@ struct ChatBubbleView: View {
                 }
             }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 8)
+        .padding(EdgeInsets(top: 8, leading: 11, bottom: 8, trailing: 11))
         .background(
             isUser
                 ? Color.accentColor.opacity(0.15)
@@ -98,8 +96,7 @@ struct ChatBubbleView: View {
                 Text(language)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
+                    .padding(EdgeInsets(top: 2, leading: 6, bottom: 2, trailing: 6))
                     .background(Color(nsColor: .quaternaryLabelColor).opacity(0.5))
                     .clipShape(Capsule())
             }
