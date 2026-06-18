@@ -48,9 +48,13 @@ struct ActivityRowChrome<Header: View>: View {
             }
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Flattened (issue #129 per-row layout-depth): the inner HStack's greedy
+        // `Spacer(minLength: 8)` already stretches the row to full width, so the
+        // prior `.frame(maxWidth: .infinity, alignment: .leading)` was a redundant
+        // _FlexFrameLayout (proven pixel-identical when removed). Dropping it
+        // removes a flex-frame + its explicitAlignment recursion from every
+        // tool/thinking/system row's measure pass. Padding pair → single EdgeInsets.
+        .padding(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
         .background(Color(nsColor: .windowBackgroundColor).opacity(hovering ? 0.65 : 0.4))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
@@ -99,5 +103,49 @@ struct PreviewFileButton: View {
         .buttonStyle(.plain)
         .padding(.top, 4)
         .help("Open \(path) in viewer")
+    }
+}
+
+// MARK: - Preview
+
+/// Exercises the ActivityRowChrome layout after the per-row flattening
+/// (issue #129). Uses `PreviewProvider` (not the `#Preview` macro) so the
+/// file still compiles under bare `swift build` — the SPM toolchain doesn't
+/// ship the `PreviewsMacros` plugin that Xcode injects.
+struct ActivityRowChrome_Previews: PreviewProvider {
+    static let sampleTS = Date(timeIntervalSinceReferenceDate: 800_000_000)
+
+    static var previews: some View {
+        VStack(spacing: 0) {
+            ActivityRowChrome(
+                icon: "hammer",
+                timestamp: sampleTS,
+                onOpen: {}
+            ) {
+                Text("Bash: swift build")
+            }
+            ActivityRowChrome(
+                icon: "brain",
+                timestamp: nil,
+                onOpen: {}
+            ) {
+                Text("Thinking…")
+            }
+            ActivityRowChrome(
+                icon: "info.circle",
+                timestamp: sampleTS,
+                onOpen: {}
+            ) {
+                Text("System: context window at 80 %")
+            }
+            ActivityRowChrome(
+                icon: "doc.text",
+                timestamp: nil,
+                onOpen: {}
+            ) {
+                Text("Read: Sources/TBDApp/Panes/Transcript/ChatBubbleView.swift")
+            }
+        }
+        .frame(width: 560)
     }
 }
