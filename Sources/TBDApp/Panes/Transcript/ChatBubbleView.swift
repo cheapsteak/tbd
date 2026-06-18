@@ -35,8 +35,16 @@ struct ChatBubbleView: View {
             bubbleBody
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-        .padding(isUser ? .leading : .trailing, 52)
-        .padding(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+        // Single EdgeInsets folds the 52pt opposite-side gutter into the 4/12
+        // chrome insets (12 + 52 = 64) — one _PaddingLayout instead of two,
+        // per bubble row. Nested uniform paddings compose additively, so this
+        // is layout-identical to the prior two-`.padding` chain.
+        .padding(EdgeInsets(
+            top: 4,
+            leading: isUser ? 64 : 12,
+            bottom: 4,
+            trailing: isUser ? 12 : 64
+        ))
     }
 
     @ViewBuilder
