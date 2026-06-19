@@ -127,7 +127,9 @@ public actor PRStatusManager {
         default:
             if isDraft || mergeStateStatus == "DRAFT" { return .draft }
             if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
-            if Self.isFailingStatusCheckRollup(statusCheckRollupState) { return .checksFailed }
+            // UNSTABLE = mergeable despite failing/pending NON-required checks (a failing *required*
+            // check surfaces as BLOCKED instead). Defer to the UNSTABLE arm so it isn't flagged red here.
+            if mergeStateStatus != "UNSTABLE", Self.isFailingStatusCheckRollup(statusCheckRollupState) { return .checksFailed }
 
             switch mergeStateStatus {
             case "CLEAN", "HAS_HOOKS":
@@ -140,7 +142,7 @@ public actor PRStatusManager {
             case "DIRTY", "BEHIND":
                 return .blocked
             case "UNSTABLE":
-                return .checksFailed
+                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
             case "UNKNOWN":
                 return .pending
             default:
