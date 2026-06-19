@@ -397,4 +397,193 @@ struct PRStatusManagerTests {
         let all = await manager.allStatuses()
         #expect(all[id] == nil)
     }
+
+    // MARK: - Reason computation
+
+    @Test("computeReason returns 'Merged' for merged state")
+    func reasonForMerged() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "MERGED",
+            mergeStateStatus: "UNKNOWN",
+            reviewDecision: "",
+            isDraft: false,
+            statusCheckRollupState: nil
+        )
+        #expect(reason == "Merged")
+    }
+
+    @Test("computeReason returns 'Closed' for closed state")
+    func reasonForClosed() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "CLOSED",
+            mergeStateStatus: "UNKNOWN",
+            reviewDecision: "",
+            isDraft: false,
+            statusCheckRollupState: nil
+        )
+        #expect(reason == "Closed")
+    }
+
+    @Test("computeReason returns 'Draft' for draft PRs")
+    func reasonForDraft() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            reviewDecision: "",
+            isDraft: true,
+            statusCheckRollupState: nil
+        )
+        #expect(reason == "Draft")
+    }
+
+    @Test("computeReason returns 'Ready to merge' for mergeable state")
+    func reasonForMergeable() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            reviewDecision: "",
+            isDraft: false,
+            statusCheckRollupState: nil
+        )
+        #expect(reason == "Ready to merge")
+    }
+
+    @Test("computeReason returns 'Merge conflicts' for DIRTY merge state")
+    func reasonForConflicts() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "DIRTY",
+            reviewDecision: "",
+            isDraft: false,
+            statusCheckRollupState: nil
+        )
+        #expect(reason == "Merge conflicts")
+    }
+
+    @Test("computeReason returns 'Behind base branch' for BEHIND merge state")
+    func reasonForBehind() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BEHIND",
+            reviewDecision: "",
+            isDraft: false,
+            statusCheckRollupState: nil
+        )
+        #expect(reason == "Behind base branch")
+    }
+
+    @Test("computeReason returns 'Checks failing' for failed status checks")
+    func reasonForFailingChecks() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            reviewDecision: "",
+            isDraft: false,
+            statusCheckRollupState: "FAILURE"
+        )
+        #expect(reason == "Checks failing")
+    }
+
+    @Test("computeReason returns 'Checks pending' for pending status checks")
+    func reasonForPendingChecks() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            reviewDecision: "",
+            isDraft: false,
+            statusCheckRollupState: "PENDING"
+        )
+        #expect(reason == "Checks pending")
+    }
+
+    @Test("computeReason returns 'Changes requested' for CHANGES_REQUESTED review decision")
+    func reasonForChangesRequested() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "CHANGES_REQUESTED",
+            isDraft: false,
+            statusCheckRollupState: nil
+        )
+        #expect(reason == "Changes requested")
+    }
+
+    @Test("computeReason returns 'Ready to merge' for REVIEW_REQUIRED with no other blocker (green state)")
+    func reasonForReviewRequired() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "REVIEW_REQUIRED",
+            isDraft: false,
+            statusCheckRollupState: nil
+        )
+        // REVIEW_REQUIRED with passing checks is actually mergeable (green), never shows a red/yellow warning
+        #expect(reason == "Ready to merge")
+    }
+
+    // MARK: - Unified state+reason pairs (critical consistency tests)
+
+    @Test("BLOCKED + REVIEW_REQUIRED + passing checks → (.mergeable, 'Ready to merge')")
+    func stateAndReasonBlockedReviewRequiredMergeable() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "REVIEW_REQUIRED",
+            statusCheckRollupState: "SUCCESS"
+        )
+        #expect(state == .mergeable)
+        #expect(reason == "Ready to merge")
+    }
+
+    @Test("UNSTABLE + nil checks → (.mergeable, 'Ready to merge')")
+    func stateAndReasonUnstableNilChecksMergeable() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE",
+            statusCheckRollupState: nil
+        )
+        #expect(state == .mergeable)
+        #expect(reason == "Ready to merge")
+    }
+
+    @Test("UNSTABLE + SUCCESS checks → (.mergeable, 'Ready to merge')")
+    func stateAndReasonUnstableSuccessMergeable() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE",
+            statusCheckRollupState: "SUCCESS"
+        )
+        #expect(state == .mergeable)
+        #expect(reason == "Ready to merge")
+    }
+
+    @Test("CLEAN + no pending checks → (.mergeable, 'Ready to merge')")
+    func stateAndReasonCleanMergeable() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN"
+        )
+        #expect(state == .mergeable)
+        #expect(reason == "Ready to merge")
+    }
+
+    @Test("DIRTY → (.blocked, 'Merge conflicts')")
+    func stateAndReasonDirtyConflicts() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "DIRTY"
+        )
+        #expect(state == .blocked)
+        #expect(reason == "Merge conflicts")
+    }
+
+    @Test("BEHIND → (.blocked, 'Behind base branch')")
+    func stateAndReasonBehind() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BEHIND"
+        )
+        #expect(state == .blocked)
+        #expect(reason == "Behind base branch")
+    }
 }
