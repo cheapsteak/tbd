@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self]
     )
 }
 
@@ -175,6 +175,58 @@ struct TerminalFocus: AsyncParsableCommand {
         )
 
         print(activate ? "Focused (activated)." : "Focus push sent.")
+    }
+}
+
+// MARK: - terminal pin
+
+struct TerminalPin: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "pin",
+        abstract: "Pin a terminal to the dock"
+    )
+
+    @Argument(help: "Terminal ID")
+    var terminal: String
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+        try client.callVoid(
+            method: RPCMethod.terminalSetPin,
+            params: TerminalSetPinParams(terminalID: terminalID, pinned: true)
+        )
+
+        print("Terminal pinned.")
+    }
+}
+
+// MARK: - terminal unpin
+
+struct TerminalUnpin: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "unpin",
+        abstract: "Unpin a terminal from the dock"
+    )
+
+    @Argument(help: "Terminal ID")
+    var terminal: String
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+        try client.callVoid(
+            method: RPCMethod.terminalSetPin,
+            params: TerminalSetPinParams(terminalID: terminalID, pinned: false)
+        )
+
+        print("Terminal unpinned.")
     }
 }
 
