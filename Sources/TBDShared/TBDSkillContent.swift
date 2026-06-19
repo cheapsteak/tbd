@@ -100,6 +100,15 @@ tbd terminal send --terminal <id> --text "..." [--submit]
 tbd terminal output <id> [--lines N]
 ```
 
+### Pin / unpin a terminal
+
+Pin a terminal to keep it docked and quickly reachable; unpin to remove it from the dock.
+
+```bash
+tbd terminal pin <id>
+tbd terminal unpin <id>
+```
+
 ### Pull the user's attention to a worker's tab
 
 Use when an orchestrator wants the user to look at a specific child tab (e.g. a
