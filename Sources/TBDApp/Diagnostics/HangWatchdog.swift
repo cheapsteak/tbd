@@ -70,7 +70,7 @@ struct HangWatchdogSnapshot: Equatable {
 /// `mach_absolute_time` + `DispatchSourceTimer` only — no APIs that require
 /// `Bundle.main.bundleIdentifier` (TBDApp is unbundled — see CLAUDE.md).
 final class HangWatchdog: @unchecked Sendable {
-    static let shared = HangWatchdog()
+    static let shared = HangWatchdog(thresholdMs: HangWatchdog.thresholdMs(from: ProcessInfo.processInfo.environment))
 
     // MARK: Configuration
 
@@ -268,6 +268,21 @@ final class HangWatchdog: @unchecked Sendable {
     }
 
     // MARK: - Pure helpers (testable)
+
+    /// Resolve the hang threshold from the process environment. Reads
+    /// `TBD_HANG_THRESHOLD_MS`: a valid positive integer overrides the
+    /// default so a measurement run can surface sub-second stalls (e.g. set
+    /// it to 150 to catch the streaming-scroll freeze in issue #129). Absent,
+    /// empty, non-numeric, or zero falls back to `defaultThresholdMs`. Pure —
+    /// tests pass a synthetic dictionary, no `setenv`.
+    static func thresholdMs(from environment: [String: String]) -> UInt64 {
+        guard let raw = environment["TBD_HANG_THRESHOLD_MS"],
+              let parsed = UInt64(raw.trimmingCharacters(in: .whitespaces)),
+              parsed > 0 else {
+            return defaultThresholdMs
+        }
+        return parsed
+    }
 
     /// Decide whether this tick should log a transition. Pure — depends only
     /// on its arguments, not on `self` or any global state. Tests call this

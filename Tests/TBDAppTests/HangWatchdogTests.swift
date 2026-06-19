@@ -69,4 +69,31 @@ struct HangWatchdogTests {
         #expect(HangWatchdogSnapshot.empty.capturedAt == .distantPast)
         #expect(HangWatchdogSnapshot.empty.focusedTerminalIDShort == nil)
     }
+
+    // MARK: - thresholdMs(from:) — env override branches
+
+    @Test func thresholdMs_absent_isDefault() {
+        // No env var set → default 1000 ms (production launch).
+        #expect(HangWatchdog.thresholdMs(from: [:]) == 1000)
+    }
+
+    @Test func thresholdMs_validPositive_overrides() {
+        // A valid positive integer is honored so a run can catch sub-second stalls.
+        #expect(HangWatchdog.thresholdMs(from: ["TBD_HANG_THRESHOLD_MS": "150"]) == 150)
+    }
+
+    @Test func thresholdMs_invalid_isDefault() {
+        // Non-numeric junk falls back to the default rather than crashing.
+        #expect(HangWatchdog.thresholdMs(from: ["TBD_HANG_THRESHOLD_MS": "abc"]) == 1000)
+    }
+
+    @Test func thresholdMs_zero_isDefault() {
+        // Zero is not a usable threshold (every tick would be "hung") → default.
+        #expect(HangWatchdog.thresholdMs(from: ["TBD_HANG_THRESHOLD_MS": "0"]) == 1000)
+    }
+
+    @Test func thresholdMs_empty_isDefault() {
+        // Empty string → default.
+        #expect(HangWatchdog.thresholdMs(from: ["TBD_HANG_THRESHOLD_MS": ""]) == 1000)
+    }
 }
