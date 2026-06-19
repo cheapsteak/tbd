@@ -69,6 +69,13 @@ public actor PRStatusManager {
                         reviewDecision: node.reviewDecision,
                         isDraft: node.isDraft,
                         statusCheckRollupState: node.statusCheckRollupState
+                    ),
+                    reason: Self.computeReason(
+                        ghState: node.state,
+                        mergeStateStatus: node.mergeStateStatus,
+                        reviewDecision: node.reviewDecision,
+                        isDraft: node.isDraft,
+                        statusCheckRollupState: node.statusCheckRollupState
                     )
                 )
             }
@@ -90,14 +97,21 @@ public actor PRStatusManager {
                 continue
             }
 
+            let state = Self.mapState(ghState: obj.state,
+                                        mergeStateStatus: obj.mergeStateStatus,
+                                        reviewDecision: obj.reviewDecision ?? "",
+                                        isDraft: obj.isDraft,
+                                        statusCheckRollupState: obj.statusCheckRollup?.state)
+            let reason = Self.computeReason(ghState: obj.state,
+                                             mergeStateStatus: obj.mergeStateStatus,
+                                             reviewDecision: obj.reviewDecision ?? "",
+                                             isDraft: obj.isDraft,
+                                             statusCheckRollupState: obj.statusCheckRollup?.state)
             let status = PRStatus(
                 number: obj.number,
                 url: obj.url,
-                state: Self.mapState(ghState: obj.state,
-                                     mergeStateStatus: obj.mergeStateStatus,
-                                     reviewDecision: obj.reviewDecision ?? "",
-                                     isDraft: obj.isDraft,
-                                     statusCheckRollupState: obj.statusCheckRollup?.state)
+                state: state,
+                reason: reason
             )
             cache[worktreeID] = status
             return status
@@ -114,6 +128,68 @@ public actor PRStatusManager {
 
     // MARK: - State mapping (internal but static for testability)
 
+    /// Unified function that produces both state and reason in one pass.
+    /// This is the single source of truth — both mapState() and computeReason()
+    /// delegate to this to prevent drift.
+    public static func mapStateAndReason(
+        ghState: String,
+        mergeStateStatus: String,
+        reviewDecision: String = "",
+        isDraft: Bool = false,
+        statusCheckRollupState: String? = nil
+    ) -> (state: PRMergeableState, reason: String) {
+        switch ghState {
+        case "MERGED":
+            return (.merged, "Merged")
+        case "CLOSED":
+            return (.closed, "Closed")
+        default:
+            if isDraft || mergeStateStatus == "DRAFT" { return (.draft, "Draft") }
+            if reviewDecision == "CHANGES_REQUESTED" { return (.changesRequested, "Changes requested") }
+            // UNSTABLE = mergeable despite failing/pending NON-required checks (a failing *required*
+            // check surfaces as BLOCKED instead). Defer to the UNSTABLE arm so it isn't flagged red here.
+            if mergeStateStatus != "UNSTABLE", Self.isFailingStatusCheckRollup(statusCheckRollupState) {
+                return (.checksFailed, "Checks failing")
+            }
+
+            switch mergeStateStatus {
+            case "CLEAN", "HAS_HOOKS":
+                if Self.isPendingStatusCheckRollup(statusCheckRollupState) {
+                    return (.pending, "Checks pending")
+                } else {
+                    return (.mergeable, "Ready to merge")
+                }
+            case "BLOCKED":
+                if Self.isPendingStatusCheckRollup(statusCheckRollupState) {
+                    return (.pending, "Checks pending")
+                }
+                // Only blocker is a required (but not-yet-given) review while checks pass → ready to merge, show green.
+                if reviewDecision == "REVIEW_REQUIRED" {
+                    return (.mergeable, "Ready to merge")
+                }
+                return (.blocked, "Blocked")
+            case "DIRTY":
+                return (.blocked, "Merge conflicts")
+            case "BEHIND":
+                return (.blocked, "Behind base branch")
+            case "UNSTABLE":
+                if Self.isPendingStatusCheckRollup(statusCheckRollupState) {
+                    return (.pending, "Checks pending")
+                } else {
+                    return (.mergeable, "Ready to merge")
+                }
+            case "UNKNOWN":
+                return (.pending, "Checks pending")
+            default:
+                if Self.isPendingStatusCheckRollup(statusCheckRollupState) {
+                    return (.pending, "Checks pending")
+                } else {
+                    return (.blocked, "Blocked")
+                }
+            }
+        }
+    }
+
     public static func mapState(
         ghState: String,
         mergeStateStatus: String,
@@ -121,34 +197,13 @@ public actor PRStatusManager {
         isDraft: Bool = false,
         statusCheckRollupState: String? = nil
     ) -> PRMergeableState {
-        switch ghState {
-        case "MERGED": return .merged
-        case "CLOSED": return .closed
-        default:
-            if isDraft || mergeStateStatus == "DRAFT" { return .draft }
-            if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
-            // UNSTABLE = mergeable despite failing/pending NON-required checks (a failing *required*
-            // check surfaces as BLOCKED instead). Defer to the UNSTABLE arm so it isn't flagged red here.
-            if mergeStateStatus != "UNSTABLE", Self.isFailingStatusCheckRollup(statusCheckRollupState) { return .checksFailed }
-
-            switch mergeStateStatus {
-            case "CLEAN", "HAS_HOOKS":
-                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
-            case "BLOCKED":
-                if Self.isPendingStatusCheckRollup(statusCheckRollupState) { return .pending }
-                // Only blocker is a required (but not-yet-given) review while checks pass → ready to merge, show green.
-                if reviewDecision == "REVIEW_REQUIRED" { return .mergeable }
-                return .blocked
-            case "DIRTY", "BEHIND":
-                return .blocked
-            case "UNSTABLE":
-                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .mergeable
-            case "UNKNOWN":
-                return .pending
-            default:
-                return Self.isPendingStatusCheckRollup(statusCheckRollupState) ? .pending : .blocked
-            }
-        }
+        return Self.mapStateAndReason(
+            ghState: ghState,
+            mergeStateStatus: mergeStateStatus,
+            reviewDecision: reviewDecision,
+            isDraft: isDraft,
+            statusCheckRollupState: statusCheckRollupState
+        ).state
     }
 
     private static func isFailingStatusCheckRollup(_ state: String?) -> Bool {
@@ -159,6 +214,24 @@ public actor PRStatusManager {
     private static func isPendingStatusCheckRollup(_ state: String?) -> Bool {
         guard let state else { return false }
         return ["EXPECTED", "PENDING"].contains(state)
+    }
+
+    /// Compute human-readable reason string for the PR merge state.
+    /// Delegates to mapStateAndReason() for the single source of truth.
+    public static func computeReason(
+        ghState: String,
+        mergeStateStatus: String,
+        reviewDecision: String = "",
+        isDraft: Bool = false,
+        statusCheckRollupState: String? = nil
+    ) -> String {
+        return Self.mapStateAndReason(
+            ghState: ghState,
+            mergeStateStatus: mergeStateStatus,
+            reviewDecision: reviewDecision,
+            isDraft: isDraft,
+            statusCheckRollupState: statusCheckRollupState
+        ).reason
     }
 
     /// Priority for choosing between multiple PRs on the same branch.

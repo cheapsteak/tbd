@@ -541,17 +541,33 @@ public enum PRMergeableState: String, Codable, Sendable {
     case mergeable          // GitHub considers it clean (checks + reviews satisfied)
     case merged             // PR was merged
     case closed             // PR was closed without merging
+
+    /// Human-readable reason for this state (fallback when PRStatus.reason is nil).
+    public var displayReason: String {
+        switch self {
+        case .pending:          return "Checks pending"
+        case .blocked:          return "Blocked"
+        case .changesRequested: return "Changes requested"
+        case .draft:            return "Draft"
+        case .checksFailed:     return "Checks failing"
+        case .mergeable:        return "Ready to merge"
+        case .merged:           return "Merged"
+        case .closed:           return "Closed"
+        }
+    }
 }
 
 public struct PRStatus: Codable, Sendable, Equatable {
     public let number: Int
     public let url: String
     public let state: PRMergeableState
+    public let reason: String?
 
-    public init(number: Int, url: String, state: PRMergeableState) {
+    public init(number: Int, url: String, state: PRMergeableState, reason: String? = nil) {
         self.number = number
         self.url = url
         self.state = state
+        self.reason = reason
     }
 }
 
