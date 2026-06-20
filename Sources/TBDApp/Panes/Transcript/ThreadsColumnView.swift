@@ -30,50 +30,35 @@ struct ThreadsColumnView: View {
 
     private var mainRow: some View {
         rowChrome(isSelected: selectedID == nil) {
-            HStack(spacing: 6) {
-                Image(systemName: "bubble.left.and.bubble.right")
-                    .foregroundStyle(.secondary)
-                Text("Main conversation")
-                    .font(.callout)
-            }
+            Text("Main conversation")
+                .font(.callout)
         }
         .onTapGesture { appState.historyThreadPath[worktreeID] = [] }
     }
 
     private func threadRow(_ thread: SessionThread) -> some View {
         rowChrome(isSelected: selectedID == thread.id) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Image(systemName: "sparkles")
-                        .foregroundStyle(.secondary)
-                    Text(thread.description ?? "(no description)")
-                        .font(.callout)
-                        .lineLimit(2)
-                }
-                HStack(spacing: 4) {
-                    if let agentType = thread.agentType, !agentType.isEmpty {
-                        Text(agentType)
-                            .font(.caption2)
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Color(nsColor: .quaternaryLabelColor).opacity(0.5))
-                            .clipShape(Capsule())
-                            .foregroundStyle(.secondary)
-                    }
-                    Text("\(thread.itemCount) events")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    if thread.isError {
-                        Text("error")
-                            .font(.caption2)
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Color.red.opacity(0.2))
-                            .clipShape(Capsule())
-                            .foregroundStyle(.red)
-                    }
-                }
-            }
+            label(for: thread)
+                .font(.callout)
+                .lineLimit(2)
+                .truncationMode(.tail)
         }
         .onTapGesture { appState.historyThreadPath[worktreeID] = [thread.id] }
+    }
+
+    /// A single inline run of plain text: the agent name (de-emphasized) at the
+    /// start, then the description, then a subtle error marker. No icon, badge,
+    /// or event count — the column reads as a list of labels.
+    private func label(for thread: SessionThread) -> Text {
+        var text = Text("")
+        if let agentType = thread.agentType, !agentType.isEmpty {
+            text = Text("\(agentType) ").foregroundColor(.secondary)
+        }
+        text = text + Text(thread.description ?? "(no description)")
+        if thread.isError {
+            text = text + Text("  error").foregroundColor(.red)
+        }
+        return text
     }
 
     @ViewBuilder
@@ -83,6 +68,7 @@ struct ThreadsColumnView: View {
             .padding(.vertical, 3)
             .contentShape(Rectangle())
             .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+            .listRowSeparator(.hidden)
             .listRowBackground(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
     }
 }
