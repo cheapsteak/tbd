@@ -11,7 +11,6 @@ struct AgentCard: View {
     let timestamp: Date?
     let terminalID: UUID?
 
-    @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
     @Environment(\.navigateToThread) private var navigateToThread
 
     private struct Input: Decodable {
@@ -36,16 +35,7 @@ struct AgentCard: View {
         ActivityRowChrome(
             icon: "sparkles",
             timestamp: timestamp,
-            onOpen: {
-                // Subagent cards navigate in-place to the subagent thread
-                // (History column / Live drill path). Fallback to the overlay
-                // only where no pane injects navigation (removed in Task 7).
-                if let navigateToThread {
-                    navigateToThread(id)
-                } else {
-                    openTranscriptOverlay?(id)
-                }
-            }
+            onOpen: { navigateToThread?(id) }
         ) {
             HStack(spacing: 6) {
                 Text("Agent")
