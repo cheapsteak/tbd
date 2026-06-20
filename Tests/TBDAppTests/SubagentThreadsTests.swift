@@ -152,3 +152,21 @@ struct ThreadsColumnVisibilityTests {
         #expect(shouldShowThreadsColumn(one) == true)
     }
 }
+
+@Suite("ThreadBackButtonGate")
+struct ThreadBackButtonGateTests {
+    private func task(_ id: String, _ desc: String) -> TranscriptItem {
+        .toolCall(id: id, name: "Task", inputJSON: "{\"description\":\"\(desc)\"}",
+                  inputTruncatedTo: nil, result: nil,
+                  subagent: Subagent(agentID: "a", agentType: nil,
+                                     items: [.assistantText(id: "s", text: "y", timestamp: nil, usage: nil)]),
+                  timestamp: nil, usage: nil)
+    }
+
+    @Test("no back label at Main; label present when drilled")
+    func gate() {
+        let items = [task("t1", "Angle A")]
+        #expect(threadLabel(root: items, path: []) == nil)        // Main: no back button
+        #expect(threadLabel(root: items, path: ["t1"]) == "Angle A") // drilled: back button + label
+    }
+}
