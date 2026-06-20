@@ -369,7 +369,9 @@ public actor SuspendResumeCoordinator {
         // It returns the bootstrap window ID ONLY when it created a new session;
         // we must kill that placeholder after the real window exists (killing it
         // earlier collapses the only-window session and exits the server). This
-        // mirrors the bootstrap dance in recreateAfterReboot.
+        // deferred-kill bootstrap dance is what lets on-demand Resume be the sole
+        // post-reboot recovery path now that reconcile parks instead of recreating
+        // (#284).
         let bootstrapWindowID: String?
         do {
             bootstrapWindowID = try await tmux.ensureServer(
