@@ -367,6 +367,8 @@ final class AppState: ObservableObject {
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
     @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
+    @Published var historyThreadPath: [UUID: [String]] = [:]   // worktreeID → subagent drill path
+    @Published var liveThreadPath: [UUID: [String]] = [:]      // terminalID → subagent drill path
     @Published var sessionTranscriptLoading: Set<String> = []
 
     /// Raw most-recent-first log of recently-visited worktrees, the recency

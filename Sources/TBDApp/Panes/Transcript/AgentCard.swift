@@ -2,7 +2,7 @@ import SwiftUI
 import TBDShared
 
 /// Header-only renderer for the `Task` / `Agent` subagent-dispatch tool.
-/// Click opens the overlay with the subagent's nested transcript (see #129).
+/// Click drills into the subagent's thread in-place via \.navigateToThread (was an overlay; see #129).
 struct AgentCard: View {
     let id: String
     let inputJSON: String
@@ -11,7 +11,7 @@ struct AgentCard: View {
     let timestamp: Date?
     let terminalID: UUID?
 
-    @Environment(\.openTranscriptOverlay) private var openTranscriptOverlay
+    @Environment(\.navigateToThread) private var navigateToThread
 
     private struct Input: Decodable {
         let description: String?
@@ -35,7 +35,7 @@ struct AgentCard: View {
         ActivityRowChrome(
             icon: "sparkles",
             timestamp: timestamp,
-            onOpen: { openTranscriptOverlay?(id) }
+            onOpen: { navigateToThread?(id) }
         ) {
             HStack(spacing: 6) {
                 Text("Agent")
