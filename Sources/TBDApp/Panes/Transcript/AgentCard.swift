@@ -2,7 +2,7 @@ import SwiftUI
 import TBDShared
 
 /// Header-only renderer for the `Task` / `Agent` subagent-dispatch tool.
-/// Click opens the overlay with the subagent's nested transcript (see #129).
+/// Click drills into the subagent's thread in-place via \.navigateToThread (was an overlay; see #129).
 struct AgentCard: View {
     let id: String
     let inputJSON: String
