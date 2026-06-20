@@ -135,3 +135,20 @@ struct SubagentThreadsTests {
         #expect(threadLabel(root: [outer], path: ["t1", "t1a"]) == "Inner")
     }
 }
+
+@Suite("ThreadsColumnVisibility")
+struct ThreadsColumnVisibilityTests {
+    @Test("hidden with zero subagents, shown with ≥1")
+    func gate() {
+        let none: [TranscriptItem] = [.userPrompt(id: "u", text: "x", timestamp: nil)]
+        #expect(shouldShowThreadsColumn(none) == false)
+
+        let one: [TranscriptItem] = [.toolCall(
+            id: "t1", name: "Task", inputJSON: "{\"description\":\"d\"}",
+            inputTruncatedTo: nil, result: nil,
+            subagent: Subagent(agentID: "a", agentType: nil,
+                               items: [.assistantText(id: "s", text: "y", timestamp: nil, usage: nil)]),
+            timestamp: nil, usage: nil)]
+        #expect(shouldShowThreadsColumn(one) == true)
+    }
+}
