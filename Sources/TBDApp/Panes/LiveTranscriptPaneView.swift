@@ -58,6 +58,10 @@ struct LiveTranscriptPaneView: View {
         return appState.sessionTranscripts[sid] ?? []
     }
 
+    private var path: [String] {
+        appState.liveThreadPath[terminalID] ?? []
+    }
+
     /// Process-lifetime cache of the perf-harness config. The process
     /// environment is stable for the process lifetime, so resolve it ONCE
     /// (mirroring the `HangWatchdog.shared` pattern) rather than re-parsing on
@@ -77,7 +81,7 @@ struct LiveTranscriptPaneView: View {
         TranscriptPerfHarness.displayedMessages(
             harnessActive: harnessConfig != nil,
             harness: harnessMessages,
-            real: messages
+            real: resolveThread(root: messages, path: path)
         )
     }
 
@@ -166,6 +170,9 @@ struct LiveTranscriptPaneView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 TranscriptItemsView(items: displayedMessages, terminalID: terminalID, atBottom: $atBottom)
+                    .environment(\.navigateToThread) { id in
+                        appState.liveThreadPath[terminalID, default: []].append(id)
+                    }
             }
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .overlay(alignment: .bottomLeading) {
@@ -325,6 +332,7 @@ struct LiveTranscriptPaneView: View {
         // Detect session rollover.
         if let last = lastSessionID, last != sid {
             hasShownInitialMessages = false
+            liveThreadPathReset()
         }
         lastSessionID = sid
 
@@ -369,6 +377,12 @@ struct LiveTranscriptPaneView: View {
         let pollElapsed = ContinuousClock.now - pollStart
         let pollMs = Int(pollElapsed.components.seconds * 1000 + pollElapsed.components.attoseconds / 1_000_000_000_000_000)
         Self.perfLog.debug("pollOnce.end sid=\(sidShort, privacy: .public) elapsed_ms=\(pollMs, privacy: .public) changed=\(changed, privacy: .public) count=\(finalCount, privacy: .public)")
+    }
+
+    /// Clears the subagent drill path for this terminal — called on session
+    /// rollover (/clear, /compact, suspend/resume) so a new session opens on Main.
+    private func liveThreadPathReset() {
+        appState.liveThreadPath[terminalID] = []
     }
 
     private func messagesEqual(_ a: [TranscriptItem], _ b: [TranscriptItem]) -> Bool {
