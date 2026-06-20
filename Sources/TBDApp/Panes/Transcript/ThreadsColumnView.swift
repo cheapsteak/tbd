@@ -50,15 +50,13 @@ struct ThreadsColumnView: View {
     /// start, then the description, then a subtle error marker. No icon, badge,
     /// or event count — the column reads as a list of labels.
     private func label(for thread: SessionThread) -> Text {
-        var text = Text("")
-        if let agentType = thread.agentType, !agentType.isEmpty {
-            text = Text("\(agentType) ").foregroundColor(.secondary)
-        }
-        text = text + Text(thread.description ?? "(no description)")
-        if thread.isError {
-            text = text + Text("  error").foregroundColor(.red)
-        }
-        return text
+        let agent: Text = {
+            guard let agentType = thread.agentType, !agentType.isEmpty else { return Text("") }
+            return Text("\(agentType) ").foregroundColor(.secondary)
+        }()
+        let description = Text(thread.description ?? "(no description)")
+        let error = thread.isError ? Text("  error").foregroundColor(.red) : Text("")
+        return agent + description + error
     }
 
     @ViewBuilder
