@@ -128,6 +128,40 @@ struct TranscriptParserTests {
         #expect(subagent?.items.count == 2, "subagent should have its own user prompt + assistant text")
     }
 
+    @Test func subagent_attached_for_Agent_named_tool() throws {
+        let projectDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("parser-sub-agent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: projectDir) }
+
+        let sessionID = "SESSION2"
+        let parentPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
+        let subDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
+        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
+        let subPath = subDir.appendingPathComponent("agent-AGENTX2.jsonl").path
+
+        let parent = [
+            #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"explore"}}]}}"#,
+            #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T10:00:30Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent","content":"agent done"}]},"toolUseResult":{"agentId":"AGENTX2","agentType":"feature-dev:code-explorer"}}"#,
+        ].joined(separator: "\n")
+        try parent.write(toFile: parentPath, atomically: true, encoding: .utf8)
+
+        let sub = [
+            #"{"type":"user","isSidechain":true,"uuid":"sub-u1","timestamp":"2026-05-05T10:00:05Z","message":{"role":"user","content":"go explore"}}"#,
+            #"{"type":"assistant","isSidechain":true,"uuid":"sub-a1","timestamp":"2026-05-05T10:00:10Z","message":{"role":"assistant","content":[{"type":"text","text":"on it"}]}}"#,
+        ].joined(separator: "\n")
+        try sub.write(toFile: subPath, atomically: true, encoding: .utf8)
+
+        let items = TranscriptParser.parse(filePath: parentPath)
+        #expect(items.count == 1)
+        guard case .toolCall(_, let name, _, _, _, let subagent, _, _) = items[0] else {
+            Issue.record("expected .toolCall"); return
+        }
+        #expect(name == "Agent")
+        #expect(subagent?.agentID == "AGENTX2")
+        #expect(subagent?.items.count == 2, "subagent should have its own user prompt + assistant text")
+    }
+
     @Test func subagent_meta_provides_agent_type() throws {
         let projectDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("parser-sub-meta-\(UUID().uuidString)")

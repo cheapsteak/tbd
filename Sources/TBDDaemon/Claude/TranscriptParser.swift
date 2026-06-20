@@ -210,7 +210,7 @@ enum TranscriptParser {
                         let result = toolResultsByID[toolID]
 
                         var subagent: Subagent? = nil
-                        if name == "Task", let agentID = agentIDByToolUseID[toolID] {
+                        if (name == "Task" || name == "Agent"), let agentID = agentIDByToolUseID[toolID] {
                             subagent = resolveSubagent(
                                 agentID: agentID,
                                 subagentsDir: subagentsDir,
