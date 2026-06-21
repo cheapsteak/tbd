@@ -256,22 +256,23 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
 /// NSHostingView be the first responder for clicks, drags inside a row reach
 /// the SwiftUI `.textSelection(.enabled)` text instead of selecting the row.
 private final class TranscriptTableView: NSTableView {
-    // Let the hosted SwiftUI view handle mouse-down/drag for text selection.
-    // We deliberately do NOT call super for in-row drags; AppKit's default
-    // `mouseDown` starts row selection tracking which would swallow the drag.
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let row = self.row(at: point)
-        if row >= 0 {
-            // Forward to the hosting view so SwiftUI text selection sees the
-            // drag. hitTest finds the deepest NSView (the NSHostingView's
-            // internal text view) under the cursor.
-            if let target = hitTest(convert(event.locationInWindow, from: nil)) {
-                target.mouseDown(with: event)
-                return
-            }
-        }
-        super.mouseDown(with: event)
+    // Allow clicks/drags inside a row to reach the hosted SwiftUI text view
+    // (e.g. for `.textSelection(.enabled)`) instead of being swallowed for row
+    // selection / first-responder tracking.
+    //
+    // NSTableView normally rejects hosted subviews as the proposed first
+    // responder and claims the click for itself (row selection tracking).
+    // Returning true here lets AppKit deliver the event to the deepest hit
+    // view — the NSHostingView's internal text view — through its OWN, normal
+    // event routing. We do NOT manually forward events (no `mouseDown` +
+    // `hitTest().mouseDown(event)`); that created mutual recursion between the
+    // table and the hosting view's responder-chain forwarding and overflowed
+    // the stack (#129 live-test crash).
+    override func validateProposedFirstResponder(
+        _ responder: NSResponder,
+        for event: NSEvent?
+    ) -> Bool {
+        true
     }
 }
 
