@@ -1433,6 +1433,20 @@ final class AppState: ObservableObject {
         defaults.object(forKey: enableTranscriptKey) as? Bool ?? false
     }
 
+    /// UserDefaults key for the `@AppStorage` toggle in Settings → Experimental
+    /// that swaps the live-transcript pane to the AppKit-virtualized list
+    /// (NSTableView + NSHostingView) — O(visible) reconciliation instead of the
+    /// LazyVStack's O(N) per change, eliminating the large-transcript mount/scroll
+    /// freeze (issue #129). Trade-off: in-row text selection is dropped. Opt-in,
+    /// fails closed (LazyVStack) so production is unchanged.
+    static let useVirtualizedTranscriptKey = "useVirtualizedTranscript"
+
+    /// Fail-closed read of the virtualized-transcript toggle for non-View callers.
+    /// Defaults false when untouched, matching the `@AppStorage` default.
+    static func virtualizedTranscriptEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: useVirtualizedTranscriptKey) as? Bool ?? false
+    }
+
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
     nonisolated static func claudeEnvKey(_ settingID: String) -> String {
         "claudeEnvSetting.\(settingID)"

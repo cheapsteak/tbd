@@ -58,12 +58,15 @@ struct TranscriptItemsView: View {
         return String(id.uuidString.suffix(4))
     }
 
-    /// THROWAWAY SPIKE gate (issue #129). When `TBD_VIRT_TRANSCRIPT == "1"`,
-    /// `bodyView` renders the AppKit-virtualized `VirtualizedTranscriptList`
-    /// instead of the `LazyVStack { ForEach }`. Pure so it's unit-testable
-    /// (see `TranscriptVirtualizationGateTests`). Off by default → production
-    /// `LazyVStack` path is byte-for-byte unchanged.
-    static func useVirtualizedTranscript(_ environment: [String: String]) -> Bool {
+    /// Env override for the virtualized-transcript gate (issue #129). When
+    /// `TBD_VIRT_TRANSCRIPT == "1"`, the live-transcript pane renders the
+    /// AppKit-virtualized `VirtualizedTranscriptList` instead of the
+    /// `LazyVStack { ForEach }`, regardless of the Settings toggle — a forced
+    /// override for the perf harness / testing. The user-facing opt-in is the
+    /// `AppState.useVirtualizedTranscriptKey` toggle, OR'd with this in
+    /// `LiveTranscriptPaneView`. Pure so it's unit-testable (see
+    /// `TranscriptVirtualizationGateTests`). Off by default.
+    static func virtualizedTranscriptEnvOverride(_ environment: [String: String]) -> Bool {
         environment["TBD_VIRT_TRANSCRIPT"] == "1"
     }
 
@@ -85,13 +88,13 @@ struct TranscriptItemsView: View {
                 }
             }
         }()
-        // Production path: LazyVStack { ForEach }. The THROWAWAY SPIKE gate
-        // (#129) that swapped in `VirtualizedTranscriptList` was moved UP to
+        // Production path: LazyVStack { ForEach }. The virtualization gate
+        // (#129) that swaps in `VirtualizedTranscriptList` lives UP in
         // `LiveTranscriptPaneView.transcriptWithAutoscroll`, because a
         // virtualizer must OWN its scrolling — nested inside the pane's SwiftUI
         // `ScrollView` it was proposed unbounded height and never got a
-        // viewport. The `useVirtualizedTranscript` helper stays here (it's the
-        // shared gate, unit-tested). This body is byte-identical to pre-spike.
+        // viewport. The `virtualizedTranscriptEnvOverride` helper stays here
+        // (it's the env override, unit-tested). This body is the production path.
         LazyVStack(alignment: .leading, spacing: 4) {
             ForEach(nodes) { node in
                 SelectableTranscriptRow(node: node, terminalID: terminalID)

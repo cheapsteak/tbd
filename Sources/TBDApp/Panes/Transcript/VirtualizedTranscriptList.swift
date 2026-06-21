@@ -3,10 +3,15 @@ import SwiftUI
 import TBDShared
 import os
 
-// THROWAWAY SPIKE (issue #129). Goal: prove an AppKit virtualizing list can
-// replace the transcript's `LazyVStack { ForEach }` so only ~visible rows are
-// realized/reconciled per content change (O(visible)) instead of SwiftUI's
-// `ForEach.applyNodes` reconciling ALL N rows (O(N)).
+// Experimental, opt-in (default OFF) AppKit-virtualized transcript list (issue
+// #129). Gated by the Settings → Experimental "Virtualized transcript" toggle
+// (and the `TBD_VIRT_TRANSCRIPT=1` env override for the perf harness). Goal: an
+// AppKit virtualizing list replaces the transcript's `LazyVStack { ForEach }`
+// so only ~visible rows are realized/reconciled per content change (O(visible))
+// instead of SwiftUI's `ForEach.applyNodes` reconciling ALL N rows (O(N)) —
+// eliminating the large-transcript mount/scroll freeze. Default-off so the
+// production path is the untouched `LazyVStack`; merged to soak-test in real
+// sessions.
 //
 // List class chosen: view-based NSTableView with usesAutomaticRowHeights.
 // Rationale: variable, self-sizing row heights are NSTableView's documented
@@ -19,9 +24,14 @@ import os
 // AskUserQuestion buttons) instead of being swallowed for row selection:
 // selectionHighlightStyle = .none and rows are non-selectable for AppKit's
 // purposes. (In-row text selection is intentionally dropped — see RowHost.)
+//
+// Known item to validate on real sessions: click-through to the hosted SwiftUI
+// controls (tool-row buttons, file links, AskUserQuestion) — see the
+// `TranscriptTableView` / `validateProposedFirstResponder` note below.
 
 /// `NSViewRepresentable` wrapping an `NSScrollView`+`NSTableView` that hosts one
-/// `TranscriptRow` per `TranscriptRenderNode`. Behind `TBD_VIRT_TRANSCRIPT=1`.
+/// `TranscriptRow` per `TranscriptRenderNode`. Enabled by the Settings →
+/// Experimental "Virtualized transcript" toggle or `TBD_VIRT_TRANSCRIPT=1`.
 @MainActor
 struct VirtualizedTranscriptList: NSViewRepresentable {
     let nodes: [TranscriptRenderNode]
@@ -309,8 +319,8 @@ private final class HostingTableCellView: NSTableCellView {
 /// SwiftUI wrapper hosting one `TranscriptRow`.
 ///
 /// In-row text selection is intentionally DROPPED for the virtualized path
-/// (#129 spike decision): not freezing matters more than in-row selection, and
-/// the AppKit `NSTableView`-vs-hosted-text drag conflict made in-row selection
+/// (#129): not freezing matters more than in-row selection, and the AppKit
+/// `NSTableView`-vs-hosted-text drag conflict made in-row selection
 /// unworkable without a crashing event hack (the `mouseDown` forwarding that
 /// caused the SIGSEGV recursion). `\.transcriptTextSelection` defaults to
 /// false, so no `.textSelection(.enabled)`/NSTextField materializes (no

@@ -36,6 +36,7 @@ struct GeneralSettingsTab: View {
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = false
+    @AppStorage(AppState.useVirtualizedTranscriptKey) private var useVirtualizedTranscript: Bool = false
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
@@ -142,6 +143,8 @@ struct GeneralSettingsTab: View {
                     .help("Experimental: exit idle Claude instances when you switch away and resume them when you switch back, freeing memory. Off by default — may interrupt long-running work.")
                 Toggle("Live transcript pane", isOn: $enableTranscript)
                     .help("Experimental: show a chat-style live transcript pane for Claude sessions. Off by default — may freeze the app on very large transcripts.")
+                Toggle("Virtualized transcript (no text selection)", isOn: $useVirtualizedTranscript)
+                    .help("Experimental: render the live transcript with an AppKit virtualizing list so large transcripts don't freeze the app. Trade-off: you can't select/copy text inside a message. Off by default; takes effect when you reopen or switch to a transcript pane.")
             }
         }
         .formStyle(.grouped)

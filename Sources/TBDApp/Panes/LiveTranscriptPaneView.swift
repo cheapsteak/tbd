@@ -38,6 +38,12 @@ struct LiveTranscriptPaneView: View {
     /// reusing the cache makes equal-content passes O(1).
     @State private var virtNodeCache = TranscriptNodeCache()
 
+    /// User's opt-in for the AppKit-virtualized transcript list (Settings →
+    /// Experimental, issue #129). `@AppStorage` so flipping the toggle
+    /// re-renders this pane live (no relaunch). OR'd with the env override in
+    /// `useVirtualizedTranscript`.
+    @AppStorage(AppState.useVirtualizedTranscriptKey) private var virtualizedTranscriptSetting = false
+
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
@@ -172,18 +178,29 @@ struct LiveTranscriptPaneView: View {
     /// production: the `TranscriptPerfHarness.autoscrollGate` (which equals
     /// `atBottom` when the harness is off) and one silent `.debug` fire/skip log
     /// per append.
+    /// Whether to render the AppKit-virtualized transcript list instead of the
+    /// production SwiftUI `ScrollView`/`LazyVStack`. True when EITHER the env
+    /// override is set (perf harness / forced testing) OR the user has opted in
+    /// via Settings → Experimental. Fails closed (false) so production is the
+    /// untouched `LazyVStack` path. `@AppStorage` makes a toggle flip re-render
+    /// this pane live — no relaunch.
+    private var useVirtualizedTranscript: Bool {
+        TranscriptItemsView.virtualizedTranscriptEnvOverride(ProcessInfo.processInfo.environment)
+            || virtualizedTranscriptSetting
+    }
+
     @ViewBuilder
     private var transcriptWithAutoscroll: some View {
-        // THROWAWAY SPIKE gate (#129): behind TBD_VIRT_TRANSCRIPT=1, replace the
-        // SwiftUI `ScrollViewReader`/`ScrollView` ENTIRELY with the AppKit
-        // virtualizer. The virtualizer must OWN its scrolling — nested inside a
-        // SwiftUI `ScrollView` it is proposed unbounded height and never gets a
-        // bounded viewport, so `viewFor` is never called → blank. Gating UP here
+        // Virtualization gate (#129): when enabled, replace the SwiftUI
+        // `ScrollViewReader`/`ScrollView` ENTIRELY with the AppKit virtualizer.
+        // The virtualizer must OWN its scrolling — nested inside a SwiftUI
+        // `ScrollView` it is proposed unbounded height and never gets a bounded
+        // viewport, so `viewFor` is never called → blank. Gating UP here
         // (instead of inside `TranscriptItemsView`) gives the representable a
         // bounded `.frame(maxWidth:.infinity, maxHeight:.infinity)` to fill.
-        // When the flag is unset, the production `ScrollView` path below runs
+        // When the gate is off, the production `ScrollView` path below runs
         // byte-for-byte unchanged.
-        if TranscriptItemsView.useVirtualizedTranscript(ProcessInfo.processInfo.environment) {
+        if useVirtualizedTranscript {
             VirtualizedTranscriptList(
                 nodes: virtNodeCache.nodes(for: displayedMessages),
                 terminalID: terminalID
