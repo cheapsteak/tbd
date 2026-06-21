@@ -184,28 +184,28 @@ final class CLIInstallerCoordinator {
         // Re-arm the launch prompt for any future unintended deletion.
         notInstalledDismissed = false
 
+        // No success confirmation when the install is fully usable — the prompt
+        // is gone and `tbd` just works, so a "done!" alert is pure noise. Only
+        // surface a follow-up when there's an action left: the install dir isn't
+        // on PATH, so the user still needs to add the export line.
+        guard !result.onPath else { return }
+
         let alert = NSAlert()
         alert.alertStyle = .informational
-        if result.onPath {
-            alert.messageText = "tbd installed"
-            alert.informativeText = "`tbd` is now available at \(result.installPath). You can run it from any terminal."
-            alert.addButton(withTitle: "OK")
-        } else {
-            alert.messageText = "tbd installed — one more step"
-            let rc = result.suggestedShellRC ?? "your shell rc file"
-            let line = result.exportLine ?? ""
-            alert.informativeText = """
-            `tbd` is now available at \(result.installPath).
+        alert.messageText = "tbd installed — one more step"
+        let rc = result.suggestedShellRC ?? "your shell rc file"
+        let line = result.exportLine ?? ""
+        alert.informativeText = """
+        `tbd` is now available at \(result.installPath).
 
-            \(installDir) is not on your shell's PATH. Add this line to \(rc) and restart your shell:
+        \(installDir) is not on your shell's PATH. Add this line to \(rc) and restart your shell:
 
-            \(line)
-            """
-            alert.addButton(withTitle: "Copy export line")
-            alert.addButton(withTitle: "OK")
-        }
+        \(line)
+        """
+        alert.addButton(withTitle: "Copy export line")
+        alert.addButton(withTitle: "OK")
         let response = alert.runModal()
-        if !result.onPath, response == .alertFirstButtonReturn, let line = result.exportLine {
+        if response == .alertFirstButtonReturn, let line = result.exportLine {
             let pb = NSPasteboard.general
             pb.clearContents()
             pb.setString(line, forType: .string)
