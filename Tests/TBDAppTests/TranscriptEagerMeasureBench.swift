@@ -105,7 +105,7 @@ struct TranscriptEagerMeasureBench {
             let medianMs = median(sorted)
 
             print(String(
-                format: "BENCH N=%d iters=%d min=%.2f ms median=%.2f ms",
+                format: "BENCH N=%d samples=%d min=%.2f ms median=%.2f ms",
                 count, samplesMs.count, minMs, medianMs
             ))
             fflush(stdout)
