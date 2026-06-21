@@ -3,15 +3,16 @@ import SwiftUI
 import TBDShared
 import os
 
-// Experimental, opt-in (default OFF) AppKit-virtualized transcript list (issue
-// #129). Gated by the Settings → Experimental "Virtualized transcript" toggle
-// (and the `TBD_VIRT_TRANSCRIPT=1` env override for the perf harness). Goal: an
-// AppKit virtualizing list replaces the transcript's `LazyVStack { ForEach }`
-// so only ~visible rows are realized/reconciled per content change (O(visible))
-// instead of SwiftUI's `ForEach.applyNodes` reconciling ALL N rows (O(N)) —
-// eliminating the large-transcript mount/scroll freeze. Default-off so the
-// production path is the untouched `LazyVStack`; merged to soak-test in real
-// sessions.
+// AppKit-virtualized transcript list (issue #129). This is the DEFAULT renderer
+// whenever the (separately opt-in, default-off) live-transcript pane is enabled;
+// the Settings → Experimental "Virtualized transcript" toggle defaults ON, and
+// the `TBD_VIRT_TRANSCRIPT=1` env override forces it on for the perf harness.
+// Goal: an AppKit virtualizing list replaces the transcript's
+// `LazyVStack { ForEach }` so only ~visible rows are realized/reconciled per
+// content change (O(visible)) instead of SwiftUI's `ForEach.applyNodes`
+// reconciling ALL N rows (O(N)) — eliminating the large-transcript mount/scroll
+// freeze. Turning the toggle OFF selects the untouched `LazyVStack` renderer
+// (which restores in-row text selection at the cost of the freeze fix).
 //
 // List class chosen: view-based NSTableView with usesAutomaticRowHeights.
 // Rationale: variable, self-sizing row heights are NSTableView's documented

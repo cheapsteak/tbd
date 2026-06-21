@@ -43,13 +43,13 @@ struct TranscriptVirtualizationGateTests {
     // developer's real `TBDApp.plist` (`.standard`); torn down with
     // `removePersistentDomain(forName:)` per CLAUDE.md.
 
-    @Test("setting fails closed (false) when the toggle is untouched")
-    func settingDefaultsFalseWhenUnset() {
+    @Test("setting defaults ON (true) when the toggle is untouched")
+    func settingDefaultsTrueWhenUnset() {
         let suite = "TranscriptVirtualizationGateTests.unset"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        #expect(AppState.virtualizedTranscriptEnabled(defaults: defaults) == false)
+        #expect(AppState.virtualizedTranscriptEnabled(defaults: defaults) == true)
     }
 
     @Test("setting true when the toggle is on")

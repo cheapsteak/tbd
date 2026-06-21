@@ -36,7 +36,7 @@ struct GeneralSettingsTab: View {
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = false
-    @AppStorage(AppState.useVirtualizedTranscriptKey) private var useVirtualizedTranscript: Bool = false
+    @AppStorage(AppState.useVirtualizedTranscriptKey) private var useVirtualizedTranscript: Bool = true
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""

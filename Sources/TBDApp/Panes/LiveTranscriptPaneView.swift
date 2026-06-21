@@ -38,11 +38,13 @@ struct LiveTranscriptPaneView: View {
     /// reusing the cache makes equal-content passes O(1).
     @State private var virtNodeCache = TranscriptNodeCache()
 
-    /// User's opt-in for the AppKit-virtualized transcript list (Settings →
-    /// Experimental, issue #129). `@AppStorage` so flipping the toggle
+    /// User's selection for the AppKit-virtualized transcript list (Settings →
+    /// Experimental, issue #129). Defaults ON: when the (opt-in) live-transcript
+    /// pane is enabled, the virtualized renderer is the default; turning this OFF
+    /// selects the LazyVStack renderer. `@AppStorage` so flipping the toggle
     /// re-renders this pane live (no relaunch). OR'd with the env override in
     /// `useVirtualizedTranscript`.
-    @AppStorage(AppState.useVirtualizedTranscriptKey) private var virtualizedTranscriptSetting = false
+    @AppStorage(AppState.useVirtualizedTranscriptKey) private var virtualizedTranscriptSetting = true
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")

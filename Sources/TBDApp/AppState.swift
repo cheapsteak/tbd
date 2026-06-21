@@ -1437,14 +1437,20 @@ final class AppState: ObservableObject {
     /// that swaps the live-transcript pane to the AppKit-virtualized list
     /// (NSTableView + NSHostingView) — O(visible) reconciliation instead of the
     /// LazyVStack's O(N) per change, eliminating the large-transcript mount/scroll
-    /// freeze (issue #129). Trade-off: in-row text selection is dropped. Opt-in,
-    /// fails closed (LazyVStack) so production is unchanged.
+    /// freeze (issue #129). Trade-off: in-row text selection is dropped.
+    /// Defaults ON: when the (separately opt-in) live-transcript pane is enabled,
+    /// the virtualized renderer is the default because the freeze fix matters
+    /// more than in-row text selection. Explicitly turning the toggle OFF selects
+    /// the LazyVStack renderer.
     static let useVirtualizedTranscriptKey = "useVirtualizedTranscript"
 
-    /// Fail-closed read of the virtualized-transcript toggle for non-View callers.
-    /// Defaults false when untouched, matching the `@AppStorage` default.
+    /// Read of the virtualized-transcript toggle for non-View callers.
+    /// Defaults ON (returns true) when the user has never touched the toggle, so
+    /// the virtualized renderer is the default for the (opt-in) transcript pane;
+    /// matches the `@AppStorage` default. Explicitly setting the toggle false
+    /// selects the LazyVStack renderer.
     static func virtualizedTranscriptEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: useVirtualizedTranscriptKey) as? Bool ?? false
+        defaults.object(forKey: useVirtualizedTranscriptKey) as? Bool ?? true
     }
 
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.

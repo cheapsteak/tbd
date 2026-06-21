@@ -62,10 +62,12 @@ struct TranscriptItemsView: View {
     /// `TBD_VIRT_TRANSCRIPT == "1"`, the live-transcript pane renders the
     /// AppKit-virtualized `VirtualizedTranscriptList` instead of the
     /// `LazyVStack { ForEach }`, regardless of the Settings toggle — a forced
-    /// override for the perf harness / testing. The user-facing opt-in is the
-    /// `AppState.useVirtualizedTranscriptKey` toggle, OR'd with this in
+    /// override for the perf harness / testing. The user-facing renderer setting
+    /// is the `AppState.useVirtualizedTranscriptKey` toggle (which defaults ON
+    /// when the live-transcript pane is enabled), OR'd with this in
     /// `LiveTranscriptPaneView`. Pure so it's unit-testable (see
-    /// `TranscriptVirtualizationGateTests`). Off by default.
+    /// `TranscriptVirtualizationGateTests`). The env override itself is off by
+    /// default — it's independent of the setting default.
     static func virtualizedTranscriptEnvOverride(_ environment: [String: String]) -> Bool {
         environment["TBD_VIRT_TRANSCRIPT"] == "1"
     }
