@@ -1,11 +1,17 @@
 import SwiftUI
 import TBDShared
 
-/// One row of the transcript. Constant view-shape: always a `VStack` with a
-/// content subview and an optional inlined `ContextUsageBadge`. The internal
-/// `switch` on `node.kind` lives behind this struct's type boundary so the
-/// parent `ForEach`'s body is homogeneous — see issue #129 / the
-/// transcript-render-node design doc.
+/// One row of the transcript. The view shape adapts to whether a usage badge
+/// is present: `content` is returned bare for the common badge-less row, and is
+/// wrapped in a `VStack` (content above an inlined `ContextUsageBadge`) only
+/// when `node.badgeUsage` is non-nil. Dropping the wrapper `VStack` from
+/// badge-less rows removes a redundant per-row `StackLayout` node from the
+/// measure pass — the dominant symbol in the issue #129 activation freeze.
+/// ForEach homogeneity is preserved: the parent `ForEach` still sees a single
+/// `SelectableTranscriptRow`/`TranscriptRow` type. Both the internal `switch`
+/// on `node.kind` and the badge `_ConditionalContent` live behind this struct's
+/// `some View` type boundary — see issue #129 / the transcript-render-node
+/// design doc.
 struct TranscriptRow: View {
     let node: TranscriptRenderNode
     let terminalID: UUID?
@@ -28,13 +34,36 @@ struct TranscriptRow: View {
 
     @ViewBuilder
     private var rowBody: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            content
-            if let usage = node.badgeUsage {
+        // Per-row layout-depth flattening (issue #129 / continuing PR #278):
+        // the wrapper VStack exists ONLY to stack an optional ContextUsageBadge
+        // under the content. The vast majority of rows have no badge
+        // (badgeUsage == nil), so returning `content` bare drops a redundant
+        // StackLayout node from every badge-less row's measure pass — the
+        // dominant symbol in the #129 activation-freeze spindump. Homogeneity
+        // of the parent ForEach is unaffected: it still sees a single
+        // SelectableTranscriptRow type; this _ConditionalContent lives entirely
+        // behind TranscriptRow's `some View` boundary.
+        //
+        // Trade-off: because the whole body is now a _ConditionalContent, when a
+        // node's badgeUsage flips nil↔non-nil (the badge migrates row→row as new
+        // usage arrives during streaming) SwiftUI rebuilds the `content` subtree
+        // rather than just toggling the badge. This is acceptable because (a) a
+        // badgeUsage change also changes the node's digest, so the ForEach already
+        // re-realizes that row in the unflattened baseline — the flatten doesn't
+        // add re-realization frequency, only changes what's rebuilt within it; and
+        // (b) the badge attaches to the latest usage-carrying item (see
+        // TranscriptRenderNode.swift), almost always a stateless `.assistantText`
+        // chat bubble — and #129 already moved inline expand/collapse @State out to
+        // overlays, so no meaningful per-row state is lost on the toggle.
+        if let usage = node.badgeUsage {
+            VStack(alignment: .leading, spacing: 2) {
+                content
                 ContextUsageBadge(total: usage.contextTotal)
                     .padding(.leading, 12)
                     .padding(.top, 2)
             }
+        } else {
+            content
         }
     }
 
