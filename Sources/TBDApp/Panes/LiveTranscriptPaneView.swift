@@ -31,6 +31,13 @@ struct LiveTranscriptPaneView: View {
     /// Empty and unused in production.
     @State private var harnessMessages: [TranscriptItem] = []
 
+    /// Memoizes `transcriptRenderNodes(from:)` for the virtualized (#129 spike)
+    /// path the same way `TranscriptItemsView` does for the production
+    /// `LazyVStack`. Without it, the virtualized branch rebuilt all N nodes on
+    /// every body pass (O(N) main-thread work → residual sub-second stalls);
+    /// reusing the cache makes equal-content passes O(1).
+    @State private var virtNodeCache = TranscriptNodeCache()
+
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
@@ -178,7 +185,7 @@ struct LiveTranscriptPaneView: View {
         // byte-for-byte unchanged.
         if TranscriptItemsView.useVirtualizedTranscript(ProcessInfo.processInfo.environment) {
             VirtualizedTranscriptList(
-                nodes: transcriptRenderNodes(from: displayedMessages),
+                nodes: virtNodeCache.nodes(for: displayedMessages),
                 terminalID: terminalID
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)

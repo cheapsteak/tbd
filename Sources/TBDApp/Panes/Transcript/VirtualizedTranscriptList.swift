@@ -14,9 +14,11 @@ import os
 // autolayout-fit), and NSTableView only realizes visible rows + a small
 // overscan. NSCollectionView would require a compositional list layout with
 // estimated heights to self-size variable content — strictly more risk for no
-// extra payoff here. We disable the table's own selection so mouse drags reach
-// the hosted SwiftUI text (#244 text selection): selectionHighlightStyle =
-// .none and rows are non-selectable for AppKit's purposes.
+// extra payoff here. We disable the table's own selection so plain CLICKS reach
+// the hosted SwiftUI controls (tool-row overlay buttons, file-link buttons,
+// AskUserQuestion buttons) instead of being swallowed for row selection:
+// selectionHighlightStyle = .none and rows are non-selectable for AppKit's
+// purposes. (In-row text selection is intentionally dropped — see RowHost.)
 
 /// `NSViewRepresentable` wrapping an `NSScrollView`+`NSTableView` that hosts one
 /// `TranscriptRow` per `TranscriptRenderNode`. Behind `TBD_VIRT_TRANSCRIPT=1`.
@@ -39,9 +41,9 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
         tableView.usesAutomaticRowHeights = true
         tableView.rowSizeStyle = .custom
         tableView.intercellSpacing = NSSize(width: 0, height: 4)
-        // Disable the table's own selection so a mouse drag inside a row
-        // selects TEXT (reaching the hosted SwiftUI `.textSelection`), not the
-        // row. This is THE #244 gating risk.
+        // Disable the table's own selection so a click inside a row reaches the
+        // hosted SwiftUI controls (tool-row overlay buttons, file-link buttons,
+        // AskUserQuestion buttons) instead of being claimed for row selection.
         tableView.selectionHighlightStyle = .none
         tableView.allowsEmptySelection = true
         tableView.allowsMultipleSelection = false
@@ -243,7 +245,7 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
         }
 
         // No row selection: returning false keeps AppKit from claiming the
-        // click/drag for row selection so it reaches the hosted text.
+        // click for row selection so it reaches the hosted SwiftUI controls.
         func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
             false
         }
@@ -253,17 +255,19 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
 /// NSTableView subclass that yields hit-testing to its hosted SwiftUI content.
 /// Default NSTableView mouse handling can begin a row-tracking drag; by not
 /// implementing row selection (delegate returns false) and letting the cell's
-/// NSHostingView be the first responder for clicks, drags inside a row reach
-/// the SwiftUI `.textSelection(.enabled)` text instead of selecting the row.
+/// NSHostingView be the first responder for clicks, a click inside a row reaches
+/// the hosted SwiftUI controls (tool-row overlay buttons, file-link buttons,
+/// AskUserQuestion buttons) instead of selecting the row.
 private final class TranscriptTableView: NSTableView {
-    // Allow clicks/drags inside a row to reach the hosted SwiftUI text view
-    // (e.g. for `.textSelection(.enabled)`) instead of being swallowed for row
-    // selection / first-responder tracking.
+    // Allow clicks inside a row to reach the hosted SwiftUI controls (buttons,
+    // links) instead of being swallowed for row selection / first-responder
+    // tracking. This is about delivering plain CLICKS to hosted controls — NOT
+    // text selection, which the virtualized path intentionally drops (#129).
     //
     // NSTableView normally rejects hosted subviews as the proposed first
     // responder and claims the click for itself (row selection tracking).
     // Returning true here lets AppKit deliver the event to the deepest hit
-    // view — the NSHostingView's internal text view — through its OWN, normal
+    // view — the NSHostingView's hosted control — through its OWN, normal
     // event routing. We do NOT manually forward events (no `mouseDown` +
     // `hitTest().mouseDown(event)`); that created mutual recursion between the
     // table and the hosting view's responder-chain forwarding and overflowed
@@ -276,9 +280,7 @@ private final class TranscriptTableView: NSTableView {
     }
 }
 
-/// `NSTableCellView` hosting one `TranscriptRow` via `NSHostingView`. Owns the
-/// per-row hover gate so `.textSelection(.enabled)` materializes on hover
-/// exactly like production's `SelectableTranscriptRow`.
+/// `NSTableCellView` hosting one `TranscriptRow` via `NSHostingView`.
 private final class HostingTableCellView: NSTableCellView {
     private var hostingView: NSHostingView<RowHost>?
 
@@ -304,20 +306,21 @@ private final class HostingTableCellView: NSTableCellView {
     }
 }
 
-/// SwiftUI wrapper that mirrors `SelectableTranscriptRow`: owns per-row hover
-/// state and flips `\.transcriptTextSelection` true on hover so
-/// `.textSelection(.enabled)` is materialized only for the hovered row — the
-/// same #120-preserving behavior as production.
+/// SwiftUI wrapper hosting one `TranscriptRow`.
+///
+/// In-row text selection is intentionally DROPPED for the virtualized path
+/// (#129 spike decision): not freezing matters more than in-row selection, and
+/// the AppKit `NSTableView`-vs-hosted-text drag conflict made in-row selection
+/// unworkable without a crashing event hack (the `mouseDown` forwarding that
+/// caused the SIGSEGV recursion). `\.transcriptTextSelection` defaults to
+/// false, so no `.textSelection(.enabled)`/NSTextField materializes (no
+/// drag-select) and the per-row hover churn is gone too.
 private struct RowHost: View {
     let node: TranscriptRenderNode
     let terminalID: UUID?
 
-    @State private var isHovered = false
-
     var body: some View {
         TranscriptRow(node: node, terminalID: terminalID)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .environment(\.transcriptTextSelection, isHovered)
-            .onHover { isHovered = $0 }
     }
 }
