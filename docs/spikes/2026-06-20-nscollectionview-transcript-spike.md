@@ -1,9 +1,33 @@
 # Spike: AppKit virtualized transcript list (issue #129)
 
-Date: 2026-06-20 — branch `spike-nscollectionview-transcript`
-Status: THROWAWAY prototype. Compiles, gate unit-tested. Interactive
-verification (virtualization count, text selection, bottom-pin) is pending a
-human GUI run — see launch recipe + open risks below.
+Date: 2026-06-20 (spike) / 2026-06-21 (live verification) — branch `spike-nscollectionview-transcript`
+Status: THROWAWAY prototype, LIVE-VERIFIED. **Verdict: virtualization GO, in-row
+text selection NO-GO via clean approaches** — see "Live verification results"
+below. The branch is a record, not for merge.
+
+## TL;DR verdict
+
+- **Virtualization works and is a big win.** With 500 preseeded rows the table
+  realized only **82 distinct rows** (visible + the bottom set after pin), and the
+  mount came up **fast with no freeze** — where the production `LazyVStack` path
+  hard-freezes for ~3.9 s reconciling all 500 (`ForEachState.applyNodes`). This is
+  the O(N)→O(visible) win #129 needs.
+- **In-row text selection is the blocker (#244).** The only implementation that
+  delivered drag-select (a manual `mouseDown` → forward) caused **infinite
+  recursion → SIGSEGV** (NSHostingView's responder chain forwards the event back
+  up to the table's `mouseDown`). The clean, non-recursive fix
+  (`validateProposedFirstResponder` + no forward) stops the crash **but selection
+  stops working** — the drag never reaches the hosted SwiftUI text. A diagnostic
+  that force-enabled `.textSelection` (bypassing the hover gate) **still** didn't
+  select, proving it's not hover routing but the deeper `NSTableView`-owns-the-mouse
+  vs hosted-text-wants-the-drag conflict. Making selection robust would require a
+  substantial custom event-tracking layer (manually driving the hosted text view's
+  selection without recursion) — not a quick win.
+- **Residual cost:** ~104 sub-second watchdog stalls during the run, from the pane
+  rebuilding `transcriptRenderNodes(from:)` O(N) per update (no cache) plus each
+  visible cell's own `NSHostingView` automatic-row-height SwiftUI layout. Tuning,
+  not a blocker for the virtualization question, but note the per-visible-cell
+  hosting overhead is real (≈visible-count hosting views, recycled — not 500).
 
 ## Goal (go/no-go)
 
@@ -142,9 +166,74 @@ path):
 - **Bottom-pin precision:** the 40pt `isNearBottom` threshold and the
   `DispatchQueue.main.async` re-pin are coarse; fine for go/no-go.
 
-## Verdict criteria
+## Live verification results (2026-06-21)
 
-GO if: realize count ≈ visible (not 500) **and** in-row text selection works.
-NO-GO (or needs more work) if text selection cannot be made to win the drag from
-NSTableView row tracking — that would mean the #244 fix doesn't survive the AppKit
-list, which is the whole reason this proof point gates the decision.
+Verified interactively with the perf harness (`TBD_VIRT_TRANSCRIPT=1` +
+`TBD_TRANSCRIPT_PERF_HARNESS=1`, preseed 500, `TBD_PERF_ROW_REALIZE=1`).
+
+**Render plumbing — two non-obvious bugs had to be fixed before anything showed:**
+1. *Reentrancy → blank.* `updateNSView` mutated the table (`reloadData`/`insertRows`)
+   synchronously inside SwiftUI's update pass → "reentrant operation in its
+   NSTableView delegate" → AppKit dropped the reload → `viewFor` never fired
+   (`virt.realize=0`), blank. Fix: defer a coalesced apply via `DispatchQueue.main.async`
+   (commit `0a41330`).
+2. *Nested scroll → blank.* The gate originally swapped the virtualizer in *inside*
+   `TranscriptItemsView`, which lives inside the pane's SwiftUI `ScrollView`. A
+   SwiftUI `ScrollView` proposes UNBOUNDED height to its content, so the
+   `NSViewRepresentable` never got a bounded viewport → no visible region → blank.
+   Fix: move the gate up to `LiveTranscriptPaneView.transcriptWithAutoscroll` so the
+   virtualizer *replaces* the `ScrollView` and fills the pane (commit `d95f6be`).
+
+   Lesson: a virtualizer must own its scrolling; never nest it in a SwiftUI ScrollView.
+
+**Proof point 1 — virtualization: ✅ CONFIRMED.** 82 distinct `virt.realize` rows
+out of 500 (rows 0–28 at top, 471+ at bottom after force-pin), no mount freeze.
+Production `LazyVStack` on the same 500 = a 3.9 s `ForEachState.applyNodes` freeze.
+
+**Proof point 2 — in-row text selection (#244): ❌ BLOCKED.**
+- The first attempt (`TranscriptTableView.mouseDown` → `hitTest` → forward the event
+  to the hosted view) *did* select text live, but then **crashed**: SIGSEGV, "stack
+  size exceeded due to excessive recursion", **27,948 levels** of
+  `TranscriptTableView.mouseDown → NSHostingView.mouseDown → forwardMethod → …`. The
+  hosted view's responder chain forwards the unhandled event back up to the table's
+  `mouseDown`, which forwards down again — unbounded mutual recursion (commit `f6b245f`
+  removed it).
+- The clean replacement (`validateProposedFirstResponder` returns true; no manual
+  forward; `selectionHighlightStyle=.none`, `shouldSelectRow=false`) **does not
+  crash but also does not select** — the drag never reaches the hosted text.
+- Diagnostic: forcing `.environment(\.transcriptTextSelection, true)` (selection
+  always-on, bypassing the hover gate) **still didn't select** → the cause is NOT
+  `.onHover` not firing; it's the deeper conflict that `NSTableView` owns the mouse
+  (each row is a separate `NSHostingView` that never becomes first responder / never
+  receives the down→dragged→up sequence). Note: even if solved, selection still can't
+  span rows (each cell is its own text view) — but that matches production, which
+  already gates selection to a single hovered row.
+
+**Proof point 3 — bottom-pin / streaming:** appends rendered and the view re-pinned
+to bottom (realize log showed bottom rows + injected rows). Not stress-tested;
+adequate-looking for the spike, coarse (40pt threshold).
+
+## Verdict & paths forward
+
+**Virtualization is proven and high-value; in-row text selection is a genuine
+blocker via every clean approach tried.** The approach is NOT adoptable as-is.
+
+Options for whoever picks this up (ranked):
+1. **SwiftUI-only windowing (lowest risk).** Keep the `LazyVStack` but cap rendered
+   items (e.g. last N + "load earlier", drop far-offscreen rows) so reconciliation N
+   is bounded without AppKit. Lower ceiling than true virtualization, but **preserves
+   native text selection** and avoids the entire #244 event conflict.
+2. **Virtualize + replace drag-select with a copy affordance.** Adopt the NSTableView
+   virtualizer (the big perf win) but drop in-row drag-select in favor of a per-message
+   "copy" button / "copy message" action — sidesteps the table-vs-text event conflict
+   entirely. UX change; needs product sign-off.
+3. **Custom event layer to make drag-select work (highest effort/risk).** Manually
+   drive the hosted text view's selection from the table's mouse events without
+   recursion (own tracking loop / explicit first-responder management). Uncertain it
+   can be made robust; this is the part the spike showed is hard.
+4. **Drop virtualization; pursue cheaper #129 levers** (node-array churn, per-update
+   cost) and accept O(N) reconciliation — only viable if windowing (#1) isn't enough.
+
+Recommendation: pursue **#1 (windowing)** first as a lower-risk partial fix, and only
+take on **#3** if true unbounded virtualization with full drag-select is a hard
+requirement.
