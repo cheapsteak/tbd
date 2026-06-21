@@ -167,6 +167,34 @@ struct LiveTranscriptPaneView: View {
     /// per append.
     @ViewBuilder
     private var transcriptWithAutoscroll: some View {
+        // THROWAWAY SPIKE gate (#129): behind TBD_VIRT_TRANSCRIPT=1, replace the
+        // SwiftUI `ScrollViewReader`/`ScrollView` ENTIRELY with the AppKit
+        // virtualizer. The virtualizer must OWN its scrolling — nested inside a
+        // SwiftUI `ScrollView` it is proposed unbounded height and never gets a
+        // bounded viewport, so `viewFor` is never called → blank. Gating UP here
+        // (instead of inside `TranscriptItemsView`) gives the representable a
+        // bounded `.frame(maxWidth:.infinity, maxHeight:.infinity)` to fill.
+        // When the flag is unset, the production `ScrollView` path below runs
+        // byte-for-byte unchanged.
+        if TranscriptItemsView.useVirtualizedTranscript(ProcessInfo.processInfo.environment) {
+            VirtualizedTranscriptList(
+                nodes: transcriptRenderNodes(from: displayedMessages),
+                terminalID: terminalID
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The virtualizer self-manages bottom-pin, so report at-bottom to
+            // keep the jump-to-bottom button hidden during the spike.
+            .onAppear { atBottom = true }
+        } else {
+            standardTranscriptScrollView
+        }
+    }
+
+    /// Production live-transcript scroll path (flag-off). Extracted verbatim so
+    /// the spike gate above can swap the whole `ScrollViewReader` out; the
+    /// modifier chain below is unchanged from pre-spike main.
+    @ViewBuilder
+    private var standardTranscriptScrollView: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 TranscriptItemsView(items: displayedMessages, terminalID: terminalID, atBottom: $atBottom)

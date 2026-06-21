@@ -85,17 +85,14 @@ struct TranscriptItemsView: View {
                 }
             }
         }()
-        // THROWAWAY SPIKE gate (#129): swap in the AppKit virtualizer behind
-        // TBD_VIRT_TRANSCRIPT=1. When unset, the LazyVStack path below runs
-        // unchanged.
-        if Self.useVirtualizedTranscript(ProcessInfo.processInfo.environment) {
-            VirtualizedTranscriptList(nodes: nodes, terminalID: terminalID)
-                // Drive the at-bottom signal: the virtualizer self-manages
-                // bottom-pin, so report at-bottom to keep the jump button
-                // hidden during the spike.
-                .onAppear { atBottom?.wrappedValue = true }
-        } else {
-            LazyVStack(alignment: .leading, spacing: 4) {
+        // Production path: LazyVStack { ForEach }. The THROWAWAY SPIKE gate
+        // (#129) that swapped in `VirtualizedTranscriptList` was moved UP to
+        // `LiveTranscriptPaneView.transcriptWithAutoscroll`, because a
+        // virtualizer must OWN its scrolling — nested inside the pane's SwiftUI
+        // `ScrollView` it was proposed unbounded height and never got a
+        // viewport. The `useVirtualizedTranscript` helper stays here (it's the
+        // shared gate, unit-tested). This body is byte-identical to pre-spike.
+        LazyVStack(alignment: .leading, spacing: 4) {
             ForEach(nodes) { node in
                 SelectableTranscriptRow(node: node, terminalID: terminalID)
             }
@@ -114,9 +111,8 @@ struct TranscriptItemsView: View {
                 .frame(height: 1)
                 .onAppear { atBottom?.wrappedValue = true }
                 .onDisappear { atBottom?.wrappedValue = false }
-            }
-            .padding(.vertical, 8)
         }
+        .padding(.vertical, 8)
     }
 }
 
