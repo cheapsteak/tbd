@@ -58,6 +58,15 @@ struct TranscriptItemsView: View {
         return String(id.uuidString.suffix(4))
     }
 
+    /// THROWAWAY SPIKE gate (issue #129). When `TBD_VIRT_TRANSCRIPT == "1"`,
+    /// `bodyView` renders the AppKit-virtualized `VirtualizedTranscriptList`
+    /// instead of the `LazyVStack { ForEach }`. Pure so it's unit-testable
+    /// (see `TranscriptVirtualizationGateTests`). Off by default → production
+    /// `LazyVStack` path is byte-for-byte unchanged.
+    static func useVirtualizedTranscript(_ environment: [String: String]) -> Bool {
+        environment["TBD_VIRT_TRANSCRIPT"] == "1"
+    }
+
     var body: some View {
         let intervalState = TranscriptSignposts.signposter.beginInterval("transcript.items.body")
         defer { TranscriptSignposts.signposter.endInterval("transcript.items.body", intervalState) }
@@ -76,7 +85,17 @@ struct TranscriptItemsView: View {
                 }
             }
         }()
-        LazyVStack(alignment: .leading, spacing: 4) {
+        // THROWAWAY SPIKE gate (#129): swap in the AppKit virtualizer behind
+        // TBD_VIRT_TRANSCRIPT=1. When unset, the LazyVStack path below runs
+        // unchanged.
+        if Self.useVirtualizedTranscript(ProcessInfo.processInfo.environment) {
+            VirtualizedTranscriptList(nodes: nodes, terminalID: terminalID)
+                // Drive the at-bottom signal: the virtualizer self-manages
+                // bottom-pin, so report at-bottom to keep the jump button
+                // hidden during the spike.
+                .onAppear { atBottom?.wrappedValue = true }
+        } else {
+            LazyVStack(alignment: .leading, spacing: 4) {
             ForEach(nodes) { node in
                 SelectableTranscriptRow(node: node, terminalID: terminalID)
             }
@@ -95,8 +114,9 @@ struct TranscriptItemsView: View {
                 .frame(height: 1)
                 .onAppear { atBottom?.wrappedValue = true }
                 .onDisappear { atBottom?.wrappedValue = false }
+            }
+            .padding(.vertical, 8)
         }
-        .padding(.vertical, 8)
     }
 }
 
