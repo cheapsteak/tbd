@@ -50,6 +50,10 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
         let column = NSTableColumn(identifier: .init("transcript"))
         column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
+        // Single full-width column: the table column must track the table's
+        // width so each row's NSHostingView gets a real width to autolayout
+        // against (usesAutomaticRowHeights derives row height from that width).
+        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
 
         tableView.dataSource = coordinator
         tableView.delegate = coordinator
@@ -62,9 +66,17 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.documentView = tableView
         scrollView.automaticallyAdjustsContentInsets = false
+        // The table is the documentView; make it track the scrollView's width so
+        // it always has a non-zero frame to lay rows out in. Without this the
+        // table can be measured at zero width, automatic row heights collapse,
+        // and rows never become visible → blank.
+        tableView.autoresizingMask = [.width, .height]
 
         // Initial load pins to bottom (newest content visible), matching the
         // production transcript which starts scrolled to the latest item.
+        // Note: makeNSView often runs with empty `nodes` (the harness/data
+        // arrives via updateNSView → scheduleUpdate), so this reload may be a
+        // no-op; the deferred apply then populates + re-pins to bottom.
         tableView.reloadData()
         DispatchQueue.main.async {
             coordinator.scrollToBottomIfNeeded(force: true)
@@ -75,7 +87,15 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.terminalID = terminalID
-        coordinator.update(to: nodes)
+        // CRITICAL: do NOT mutate the NSTableView synchronously here. This runs
+        // inside SwiftUI's update/layout pass; calling reloadData/insertRows now
+        // re-enters AppKit's table-view layout reentrantly. AppKit detects the
+        // reentrancy ("Application performed a reentrant operation in its
+        // NSTableView delegate"), the warning fires, and the reload is dropped —
+        // numberOfRows/viewFor never realize → blank render. Defer the apply to
+        // the next main-runloop turn so it runs OUTSIDE the SwiftUI pass. Coalesce
+        // rapid updates: stash the latest nodes and only apply once per turn.
+        coordinator.scheduleUpdate(to: nodes)
     }
 
     /// Owns the data array, the table, and bottom-pin state. Acts as both
@@ -86,6 +106,17 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
         var terminalID: UUID?
         weak var tableView: NSTableView?
 
+        /// Latest nodes awaiting a deferred apply. A non-nil value means a
+        /// main-runloop apply is already scheduled; we just overwrite the payload
+        /// so only the newest array is applied (coalescing rapid updates).
+        private var pendingNodes: [TranscriptRenderNode]?
+
+        /// Above this many appended rows in one update we fall back to
+        /// `reloadData()` instead of `insertRows`. Bulk `insertRows` of
+        /// automatic-height rows is heavy/fragile; the initial empty→N
+        /// population (potentially hundreds of rows) should reload once.
+        nonisolated private static let maxIncrementalInsert = 32
+
         nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
         nonisolated private static let realizeLoggingEnabled =
             ProcessInfo.processInfo.environment["TBD_PERF_ROW_REALIZE"] == "1"
@@ -95,6 +126,21 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
         }
 
         // MARK: Data update
+
+        /// Coalesce + defer the table mutation out of SwiftUI's update pass.
+        /// Stores the latest nodes; if no apply is yet scheduled, schedules one
+        /// for the next main-runloop turn. Repeated calls within the same turn
+        /// just replace the payload so we apply only the newest array once.
+        func scheduleUpdate(to newNodes: [TranscriptRenderNode]) {
+            let alreadyScheduled = pendingNodes != nil
+            pendingNodes = newNodes
+            guard alreadyScheduled == false else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let latest = self.pendingNodes else { return }
+                self.pendingNodes = nil
+                self.update(to: latest)
+            }
+        }
 
         /// Diff the incoming node array against the current one and apply the
         /// minimal table mutation. The common streaming case is a pure append
@@ -110,8 +156,16 @@ struct VirtualizedTranscriptList: NSViewRepresentable {
             let wasNearBottom = isNearBottom()
             let old = nodes
 
-            if newNodes.count > old.count, Array(newNodes.prefix(old.count)) == old {
-                // Pure append. Insert just the new tail.
+            let appendCount = newNodes.count - old.count
+            if appendCount > 0,
+               appendCount <= Self.maxIncrementalInsert,
+               Array(newNodes.prefix(old.count)) == old {
+                // Small streaming append on top of an existing array: insert just
+                // the new tail so existing rows' hosting views stay alive and only
+                // the newly visible rows realize. Reserve insertRows for genuine
+                // small appends — bulk-inserting hundreds of automatic-height rows
+                // is heavy/fragile, so the large initial population (empty → N)
+                // takes the reloadData path below instead.
                 let insertedRange = old.count ..< newNodes.count
                 nodes = newNodes
                 tableView.insertRows(
