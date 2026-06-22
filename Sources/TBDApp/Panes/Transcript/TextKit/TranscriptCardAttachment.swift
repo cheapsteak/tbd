@@ -26,7 +26,8 @@ final class TranscriptCardAttachment: NSTextAttachment {
     ) -> NSTextAttachmentViewProvider? {
         // Pass the card directly so the provider never needs to access
         // @MainActor state after construction (TextKit calls loadView on
-        // the main thread, but Swift 6 can't verify that statically).
+        // the main thread, but Swift 6 can't verify that statically because
+        // NSTextAttachmentViewProvider overrides are nonisolated in the SDK).
         let provider = TranscriptCardViewProvider(
             textAttachment: self,
             parentView: parentView,
@@ -44,12 +45,16 @@ final class TranscriptCardAttachment: NSTextAttachment {
 ///
 /// TextKit 2 calls `loadView()` and `attachmentBounds` on the main thread.
 /// The card is captured at construction time from the `@MainActor` context of
-/// `viewProvider(for:location:textContainer:)` so that the provider's own
-/// nonisolated methods never need to reach back into `@MainActor` state. (#129)
+/// `viewProvider(for:location:textContainer:)` and stored in a `_SendableBox`
+/// because `NSTextAttachmentViewProvider` override methods are nonisolated in
+/// the SDK — Swift 6 cannot statically verify the main-thread guarantee, even
+/// when the subclass is annotated `@MainActor`. The box includes a runtime
+/// precondition so any accidental off-main read traps loudly. (#129)
 final class TranscriptCardViewProvider: NSTextAttachmentViewProvider {
     // Captured on the main actor at construction; only ever read on the main
-    // thread by TextKit. Using @unchecked Sendable on the wrapper avoids the
-    // Swift 6 Sending diagnostic while preserving the real guarantee.
+    // thread by TextKit. The _SendableBox suppresses the Swift 6 Sending
+    // diagnostic; the runtime precondition inside the box enforces the
+    // thread constraint that the type system cannot express statically.
     private let _card: _SendableBox<AnyView>
 
     init(
@@ -64,7 +69,8 @@ final class TranscriptCardViewProvider: NSTextAttachmentViewProvider {
     }
 
     override func loadView() {
-        view = NSHostingView(rootView: _card.value)
+        let card = _card.mainThreadValue
+        view = MainActor.assumeIsolated { NSHostingView(rootView: card) }
     }
 
     override func attachmentBounds(
@@ -74,22 +80,21 @@ final class TranscriptCardViewProvider: NSTextAttachmentViewProvider {
         proposedLineFragment: CGRect,
         position: CGPoint
     ) -> CGRect {
-        let width = TranscriptCardSizing.width(forLineFragmentWidth: proposedLineFragment.width)
-        let hostingView: NSHostingView<AnyView>
-        if let existing = view as? NSHostingView<AnyView> {
-            hostingView = existing
-        } else {
-            loadView()
-            // swiftlint:disable:next force_cast
-            hostingView = view as! NSHostingView<AnyView>
+        if view == nil { loadView() }
+        // swiftlint:disable:next force_cast
+        let hostingView = view as! NSHostingView<AnyView>
+        let lineWidth = proposedLineFragment.width
+        return MainActor.assumeIsolated {
+            let width = TranscriptCardSizing.width(forLineFragmentWidth: lineWidth)
+            let height = TranscriptCardSizing.fittingHeight(of: hostingView, width: width)
+            return CGRect(x: 0, y: 0, width: width, height: height)
         }
-        let height = TranscriptCardSizing.fittingHeight(of: hostingView, width: width)
-        return CGRect(x: 0, y: 0, width: width, height: height)
     }
 }
 
 /// Shared layout math for card attachments: full-width minus insets, and
 /// fitting-height with a 44 pt fallback when SwiftUI reports zero. (#129)
+@MainActor
 enum TranscriptCardSizing {
     static func width(forLineFragmentWidth lineWidth: CGFloat, insets: CGFloat = 8) -> CGFloat {
         max(lineWidth - insets * 2, 1)
@@ -105,11 +110,16 @@ enum TranscriptCardSizing {
 
 // MARK: - Private helpers
 
-/// Wraps a value in an `@unchecked Sendable` box so it can cross concurrency
-/// domains within the TextKit provider pattern. The caller is responsible for
-/// ensuring accesses are on the appropriate thread (main thread for all
-/// NSTextAttachmentViewProvider callbacks). (#129)
+/// Wraps a value in an `@unchecked Sendable` box so it can cross the
+/// concurrency boundary imposed by `NSTextAttachmentViewProvider`'s nonisolated
+/// override contract. Access via `mainThreadValue` which traps if called off
+/// the main thread, making a latent misuse immediately visible. (#129)
 private final class _SendableBox<T>: @unchecked Sendable {
-    let value: T
+    private let value: T
     init(_ value: T) { self.value = value }
+
+    var mainThreadValue: T {
+        dispatchPrecondition(condition: .onQueue(.main))
+        return value
+    }
 }
