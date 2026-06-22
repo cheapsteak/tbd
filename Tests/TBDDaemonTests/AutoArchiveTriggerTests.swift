@@ -61,6 +61,11 @@ actor FiredBox {
 
         let after = try await db.worktrees.get(id: wt.id)
         #expect(after?.status == .archived)
+
+        let notifications = try await db.notifications.unread(worktreeID: wt.id)
+        #expect(notifications.count == 1)
+        #expect(notifications.first?.type == .taskComplete)
+        #expect(notifications.first?.message?.contains("#5") == true)
     }
 
     @Test func doesNotArchiveWhenEffectiveOff() async throws {
