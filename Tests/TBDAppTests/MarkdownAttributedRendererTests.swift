@@ -45,6 +45,20 @@ struct MarkdownAttributedRendererTests {
         #expect(traits?.contains(.bold) == true)
     }
 
+    @Test("h1 uses the heading font (larger, semibold)")
+    func heading() {
+        let s = MarkdownAttributedRenderer.render("# Title")
+        let f = s.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect((f?.pointSize ?? 0) > TranscriptTextTheme.chatBubble.bodyFont.pointSize)
+    }
+
+    @Test("unordered list renders a bullet and the item text")
+    func list() {
+        let s = MarkdownAttributedRenderer.render("- one\n- two").string
+        #expect(s.contains("one") && s.contains("two"))
+        #expect(s.contains("•") || s.contains("-"))
+    }
+
     // MARK: - Helpers
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {

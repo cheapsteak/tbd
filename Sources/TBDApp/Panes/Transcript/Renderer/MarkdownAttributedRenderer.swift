@@ -75,6 +75,94 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
         return inner
     }
 
+    // MARK: - Block visitors
+
+    mutating func visitParagraph(_ p: Paragraph) -> NSAttributedString {
+        let inner = NSMutableAttributedString()
+        for child in p.children { inner.append(visit(child)) }
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = theme.paragraphSpacing
+        return paragraph(inner, style: style)
+    }
+
+    mutating func visitHeading(_ h: Heading) -> NSAttributedString {
+        let inner = NSMutableAttributedString()
+        for child in h.children { inner.append(visit(child)) }
+        let headFont = theme.headingFont(level: h.level)
+        let full = NSRange(location: 0, length: inner.length)
+        inner.addAttribute(.font, value: headFont, range: full)
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = theme.paragraphSpacing
+        return paragraph(inner, style: style)
+    }
+
+    mutating func visitUnorderedList(_ list: UnorderedList) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        for child in list.children { out.append(visit(child)) }
+        return out
+    }
+
+    mutating func visitOrderedList(_ list: OrderedList) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        var counter = Int(list.startIndex)
+        for child in list.children {
+            if let item = child as? ListItem {
+                out.append(visitListItem(item, marker: "\(counter). "))
+                counter += 1
+            } else {
+                out.append(visit(child))
+            }
+        }
+        return out
+    }
+
+    mutating func visitListItem(_ item: ListItem) -> NSAttributedString {
+        visitListItem(item, marker: "• ")
+    }
+
+    mutating func visitBlockQuote(_ b: BlockQuote) -> NSAttributedString {
+        let inner = NSMutableAttributedString()
+        for child in b.children { inner.append(visit(child)) }
+        let full = NSRange(location: 0, length: inner.length)
+        inner.addAttribute(.foregroundColor, value: theme.blockquoteColor, range: full)
+        let style = NSMutableParagraphStyle()
+        style.headIndent = theme.listIndent
+        style.firstLineHeadIndent = theme.listIndent
+        style.paragraphSpacing = theme.paragraphSpacing
+        return paragraph(inner, style: style)
+    }
+
+    mutating func visitThematicBreak(_ b: ThematicBreak) -> NSAttributedString {
+        let rule = NSMutableAttributedString(string: "————————")
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = theme.paragraphSpacing
+        style.alignment = .center
+        return paragraph(rule, style: style)
+    }
+
+    // MARK: - Block helper
+
+    /// Applies `style` to all of `inner` and appends a newline. `NSMutableAttributedString`
+    /// is a reference type, so this is safe to call without `inout`.
+    private func paragraph(_ inner: NSMutableAttributedString, style: NSMutableParagraphStyle) -> NSAttributedString {
+        let full = NSRange(location: 0, length: inner.length)
+        inner.addAttribute(.paragraphStyle, value: style, range: full)
+        inner.append(NSAttributedString(string: "\n"))
+        return inner
+    }
+
+    private mutating func visitListItem(_ item: ListItem, marker: String) -> NSAttributedString {
+        let inner = NSMutableAttributedString(string: marker)
+        for child in item.children { inner.append(visit(child)) }
+        let style = NSMutableParagraphStyle()
+        style.firstLineHeadIndent = 0
+        style.headIndent = theme.listIndent
+        style.paragraphSpacing = theme.paragraphSpacing * 0.5
+        return paragraph(inner, style: style)
+    }
+
+    // MARK: - Inline helpers
+
     private mutating func traited(_ markup: any Markup, _ trait: NSFontDescriptor.SymbolicTraits) -> NSAttributedString {
         let inner = NSMutableAttributedString()
         for child in markup.children { inner.append(visit(child)) }
