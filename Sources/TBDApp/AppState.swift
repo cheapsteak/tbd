@@ -1482,6 +1482,18 @@ final class AppState: ObservableObject {
         defaults.object(forKey: enableTranscriptKey) as? Bool ?? false
     }
 
+    /// UserDefaults key for the second-stage gate: when the experimental
+    /// transcript is enabled, this picks the TextKit 2 / STTextView renderer
+    /// over the SwiftUI `LiveTranscriptPaneView`. Defaults false. (#129)
+    static let useTextKitTranscriptKey = "useTextKitTranscript"
+
+    /// Fail-closed read of the TextKit 2 transcript toggle for non-View callers
+    /// (the View layer uses `@AppStorage` directly). Only meaningful when
+    /// `transcriptFeatureEnabled` is also true.
+    static func useTextKitTranscript(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: useTextKitTranscriptKey) as? Bool ?? false
+    }
+
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
     nonisolated static func claudeEnvKey(_ settingID: String) -> String {
         "claudeEnvSetting.\(settingID)"
