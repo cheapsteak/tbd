@@ -23,6 +23,29 @@ struct TranscriptDocumentTests {
         #expect(doc.storage.string.contains("first") && doc.storage.string.contains("second"))
     }
 
+    @Test("messageBlocks yields user/assistant blocks in order, omits tool cards")
+    func messageBlocksRolesAndOrder() {
+        let doc = TranscriptDocument(context: ctx())
+        doc.rebuild([
+            .makeUserPrompt(id: "u1", text: "a question"),
+            .makeAssistantText(id: "a1", text: "an answer"),
+            .makeToolCall(id: "t1", name: "Bash", inputJSON: "{}")
+        ])
+        let blocks = doc.messageBlocks
+        // Tool card (.other) is omitted; user + assistant remain in order.
+        #expect(blocks.map(\.role) == [.user, .assistant])
+        // Each block range is non-empty and within storage bounds.
+        for block in blocks {
+            #expect(block.range.length > 0)
+            #expect(NSMaxRange(block.range) <= doc.storage.length)
+        }
+        // The user block's body range excludes the "You" header label.
+        let userRange = blocks[0].range
+        let userBody = (doc.storage.string as NSString).substring(with: userRange)
+        #expect(userBody.contains("a question"))
+        #expect(!userBody.hasPrefix("You"))
+    }
+
     @Test("rebuild resets the document with a fresh set of nodes")
     func rebuildResetsDocument() {
         let doc = TranscriptDocument(context: ctx())

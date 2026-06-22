@@ -21,10 +21,31 @@ enum TranscriptDocumentBuilder {
 
         case let .chatBubble(item):
             let out = NSMutableAttributedString()
-            out.append(roleHeader(for: item))
+            let isUser: Bool
+            if case .userPrompt = item { isUser = true } else { isUser = false }
+            let header = roleHeader(for: item)
+            out.append(header)
+            // Body range starts after the header; the bubble chrome wraps only
+            // this span (header label sits above the bubble, as in ChatBubbleView).
+            let bodyStart = header.length
             out.append(MarkdownAttributedRenderer.render(bodyText(for: item)))
             appendBadge(node.badgeUsage, into: out)
+            let bodyEnd = out.length
             out.append(NSAttributedString(string: "\n"))
+            // Lay the user prompt over to the right (narrower, right-aligned) so
+            // its drawn bubble mirrors `ChatBubbleView`'s right-aligned blue
+            // bubble; the assistant block stays full-width for its bordered card.
+            // (#129)
+            if isUser { applyUserAlignment(to: out) }
+            // Stamp the role on the body so the text view draws a bubble behind it.
+            if bodyEnd > bodyStart {
+                let role: BubbleRole = isUser ? .user : .assistant
+                out.addAttribute(
+                    .transcriptBubbleRole,
+                    value: role.attributeValue,
+                    range: NSRange(location: bodyStart, length: bodyEnd - bodyStart)
+                )
+            }
             return out
 
         case let .subagentSummary(_, count, agentType):
@@ -59,7 +80,59 @@ enum TranscriptDocumentBuilder {
         }
     }
 
+    /// Classifies a render node for chat-bubble background drawing. Only
+    /// `.chatBubble` nodes get a user/assistant bubble; everything else draws
+    /// its own chrome (tool cards) or none. (#129)
+    static func bubbleRole(for node: TranscriptRenderNode) -> BubbleRole {
+        guard case let .chatBubble(item) = node.kind else { return .other }
+        if case .userPrompt = item { return .user }
+        return .assistant
+    }
+
+    /// Character length of the role-header prefix ("You\n" / "Claude\n") a
+    /// chat-bubble fragment begins with. The renderer subtracts this from the
+    /// block's range so the drawn bubble wraps only the body — the header label
+    /// sits ABOVE/outside the bubble, mirroring `ChatBubbleView`. Non-bubble
+    /// nodes have no header. (#129)
+    static func headerLength(for node: TranscriptRenderNode) -> Int {
+        guard case let .chatBubble(item) = node.kind else { return 0 }
+        let isUser: Bool
+        if case .userPrompt = item { isUser = true } else { isUser = false }
+        // Matches `roleHeader`: "<label>\n".
+        return (isUser ? "You" : "Claude").count + 1
+    }
+
     // MARK: - Private helpers
+
+    /// Width fraction of the content column the user prompt's text may occupy.
+    /// The drawn bubble hugs the right edge, so the remaining gutter sits on the
+    /// LEFT — mirroring `ChatBubbleView`'s right-aligned narrower user bubble.
+    private static let userBubbleWidthFraction: CGFloat = 0.62
+
+    /// Right-aligns the whole user message (header + body) and pushes its text
+    /// into the right portion of the column via a head indent, so the segment
+    /// union the renderer draws a bubble around lands on the right and is
+    /// narrower than full width. We rewrite each run's paragraph style rather
+    /// than blanket-replacing so list indents etc. from the markdown renderer
+    /// are preserved while gaining `.right` alignment + the left gutter.
+    private static func applyUserAlignment(to out: NSMutableAttributedString) {
+        let full = NSRange(location: 0, length: out.length)
+        // Approximate the content column width; the head indent is resolved as a
+        // fraction of it. 680pt matches the transcript content column / harness
+        // width. Slightly conservative so wrapping doesn't overflow the bubble.
+        let columnWidth: CGFloat = 680
+        let leftGutter = columnWidth * (1 - userBubbleWidthFraction)
+        out.enumerateAttribute(.paragraphStyle, in: full, options: []) { value, range, _ in
+            let style = (value as? NSParagraphStyle).map {
+                // swiftlint:disable:next force_cast
+                $0.mutableCopy() as! NSMutableParagraphStyle
+            } ?? NSMutableParagraphStyle()
+            style.alignment = .right
+            style.headIndent = max(style.headIndent, leftGutter)
+            style.firstLineHeadIndent = max(style.firstLineHeadIndent, leftGutter)
+            out.addAttribute(.paragraphStyle, value: style, range: range)
+        }
+    }
 
     /// Extracts the plain text body from a chat-bubble item. Mirrors the
     /// `text` computed var in `ChatBubbleView` (userPrompt → second payload,

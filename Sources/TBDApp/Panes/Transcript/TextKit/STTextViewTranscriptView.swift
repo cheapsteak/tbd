@@ -140,6 +140,15 @@ struct STTextViewTranscriptView: NSViewRepresentable {
 
             previousNodes = nodes
 
+            // Repaint bubble chrome. TextKit 2 lays out the changed range
+            // asynchronously, so a synchronous redraw would read stale segment
+            // frames; redraw now AND on the next runloop turn (after layout
+            // settles) so the bubbles track the new text extent. (#129)
+            (textView as? ReadOnlySTTextView)?.setBubblesNeedDisplay()
+            DispatchQueue.main.async { [weak textView] in
+                (textView as? ReadOnlySTTextView)?.setBubblesNeedDisplay()
+            }
+
             if wasAtBottom {
                 // DEFER the bottom-pin scroll (mirrors makeNSView's deferred
                 // initial scroll). `applyEdit` mutated the adopted storage inside
@@ -225,6 +234,119 @@ struct STTextViewTranscriptView: NSViewRepresentable {
     }
 }
 
+// MARK: - BubbleBackgroundView
+
+/// Draws chat-bubble chrome BEHIND the transcript text: a right-aligned filled
+/// blue bubble for each user prompt and a full-width bordered rounded card for
+/// each assistant message, mirroring `ChatBubbleView`. It owns no text — it
+/// scans the OWNING text view's rendered storage for `.transcriptBubbleRole`
+/// runs and asks the `NSTextLayoutManager` for each run's on-screen rect every
+/// draw pass, so it stays correct across streaming edits and rebuilds without a
+/// side reference to the document. Carrying the role in the attributed string
+/// means any path rendering the same storage (including the headless visual
+/// harness) draws identical bubbles. (#129)
+@MainActor
+final class BubbleBackgroundView: NSView {
+    private weak var textView: STTextView?
+
+    /// Internal padding between a block's text and its drawn bubble edge,
+    /// matching `ChatBubbleView`'s ~11pt horizontal / 8pt vertical chrome insets.
+    private let hInset: CGFloat = 11
+    private let vInset: CGFloat = 8
+    private let cornerRadius: CGFloat = 10
+
+    init(textView: STTextView?) {
+        self.textView = textView
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Wires the owning text view after `super.init` (when `self` is available).
+    func adopt(textView: STTextView) {
+        self.textView = textView
+    }
+
+    // Flipped so segment frames (top-left origin, in text-view coordinates) map
+    // straight through without a y-flip.
+    override var isFlipped: Bool { true }
+
+    // Bubbles are purely decorative; never intercept clicks/selection.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let textView,
+              let contentStorage = textView.textContentManager as? NSTextContentStorage,
+              let storage = contentStorage.textStorage else { return }
+        let layoutManager = textView.textLayoutManager
+
+        let userFill = NSColor.controlAccentColor.withAlphaComponent(0.15)
+        let assistantFill = NSColor.controlBackgroundColor
+        let assistantStroke = NSColor.separatorColor
+
+        let full = NSRange(location: 0, length: storage.length)
+        storage.enumerateAttribute(.transcriptBubbleRole, in: full, options: []) { value, range, _ in
+            guard let raw = value as? String, let role = BubbleRole(attributeValue: raw),
+                  range.length > 0,
+                  let textRange = textRange(for: range, in: contentStorage),
+                  var rect = boundingRect(of: textRange, layoutManager: layoutManager) else { return }
+
+            // Grow the tight text union out to the bubble's chrome insets.
+            rect = rect.insetBy(dx: -hInset, dy: -vInset)
+            // Keep within the drawing bounds horizontally so the rounded edge is
+            // never clipped flat against the view edge.
+            rect.origin.x = max(rect.origin.x, 1)
+            if rect.maxX > bounds.width - 1 {
+                rect.size.width = bounds.width - 1 - rect.origin.x
+            }
+
+            let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+            switch role {
+            case .user:
+                userFill.setFill()
+                path.fill()
+            case .assistant:
+                assistantFill.setFill()
+                path.fill()
+                path.lineWidth = 1
+                assistantStroke.setStroke()
+                path.stroke()
+            case .other:
+                break
+            }
+        }
+    }
+
+    /// Converts a character `NSRange` into a TextKit 2 `NSTextRange` via the
+    /// content manager's document-start offset arithmetic.
+    private func textRange(for range: NSRange, in contentManager: NSTextContentManager) -> NSTextRange? {
+        let docStart = contentManager.documentRange.location
+        guard let start = contentManager.location(docStart, offsetBy: range.location),
+              let end = contentManager.location(start, offsetBy: range.length) else { return nil }
+        return NSTextRange(location: start, end: end)
+    }
+
+    /// Unions the standard text segment frames over `textRange` to a single
+    /// bounding rect (in text-view coordinates), or `nil` if no segments laid out.
+    private func boundingRect(of textRange: NSTextRange, layoutManager: NSTextLayoutManager) -> CGRect? {
+        var union: CGRect?
+        layoutManager.enumerateTextSegments(
+            in: textRange,
+            type: .standard,
+            options: .rangeNotRequired
+        ) { _, segmentFrame, _, _ in
+            union = union.map { $0.union(segmentFrame) } ?? segmentFrame
+            return true
+        }
+        return union
+    }
+}
+
 // MARK: - ReadOnlySTTextView
 
 /// A truly read-only `STTextView`: selectable and copyable, but it can neither
@@ -249,8 +371,22 @@ struct STTextViewTranscriptView: NSViewRepresentable {
 /// override the `open` drop-destination seams so any residual drop is a no-op.
 /// This keeps text selection + copy fully working. (#129)
 final class ReadOnlySTTextView: STTextView {
+    /// Chat-bubble chrome painted BEHIND the text. Inserted as the bottom-most
+    /// subview so STTextView's own (clear-backed) content layer lets it show
+    /// through under the selectable text. Owned here — not by the representable —
+    /// so EVERY path that builds a `ReadOnlySTTextView` (including the headless
+    /// visual-compare harness) gets identical bubble drawing. (#129)
+    private let bubbleView: BubbleBackgroundView
+
     override init(frame frameRect: NSRect) {
+        bubbleView = BubbleBackgroundView(textView: nil)
         super.init(frame: frameRect)
+        bubbleView.adopt(textView: self)
+        bubbleView.autoresizingMask = [.width, .height]
+        bubbleView.frame = bounds
+        // `.below` with a nil sibling puts it at the back of the subview stack,
+        // behind STTextView's content/selection views.
+        addSubview(bubbleView, positioned: .below, relativeTo: nil)
         // STTextView's `init` adds the press-to-drag recognizer and registers
         // dragged types; `super.init` has now run, so undo both here.
         for recognizer in gestureRecognizers where recognizer is NSPressGestureRecognizer {
@@ -262,6 +398,21 @@ final class ReadOnlySTTextView: STTextView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Marks the bubble chrome for repaint. Called after every streaming edit
+    /// (the text content changed, so the drawn bubbles must follow).
+    func setBubblesNeedDisplay() {
+        bubbleView.frame = bounds
+        bubbleView.needsDisplay = true
+    }
+
+    override func layout() {
+        super.layout()
+        // Keep the bubble overlay covering the full (scrollable) text extent and
+        // repaint as layout settles so bubbles track re-wrapping on resize.
+        bubbleView.frame = bounds
+        bubbleView.needsDisplay = true
     }
 
     // Refuse every drop (defense in depth in case dragged types are

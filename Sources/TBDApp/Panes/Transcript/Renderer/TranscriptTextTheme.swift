@@ -14,6 +14,10 @@ struct TranscriptTextTheme {
     let tableBorderColor: NSColor
     let tableHeaderBold: Bool
     let paragraphSpacing: CGFloat
+    /// Tight vertical spacing BETWEEN list items, well under `paragraphSpacing`.
+    /// Mirrors `ChatBubbleView`'s `.listItem { markdownMargin(top: .em(0.35)) }`
+    /// so lists read tight like the SwiftUI transcript, not airy. (#129)
+    let listItemSpacing: CGFloat
     let listIndent: CGFloat
     private let headingScale: [CGFloat]   // index 0 == h1
 
@@ -42,6 +46,7 @@ struct TranscriptTextTheme {
             tableBorderColor: NSColor.secondaryLabelColor.withAlphaComponent(0.3),
             tableHeaderBold: true,
             paragraphSpacing: 16,
+            listItemSpacing: 4,
             listIndent: 24,
             headingScale: [1.4, 1.2, 1.05, 1.0, 1.0, 1.0]
         )

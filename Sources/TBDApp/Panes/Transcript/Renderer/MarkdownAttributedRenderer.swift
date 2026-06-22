@@ -170,11 +170,25 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
 
     private mutating func visitListItem(_ item: ListItem, marker: String) -> NSAttributedString {
         let inner = NSMutableAttributedString(string: marker)
-        for child in item.children { inner.append(visit(child)) }
+        // Render the item's content INLINE rather than via `visit(child)`. A
+        // list item's text is wrapped by swift-markdown in a `Paragraph`, and
+        // `visitParagraph` stamps the full 16pt inter-paragraph spacing plus a
+        // trailing newline onto it — so visiting children directly produced a
+        // double paragraph break and an airy ~16pt gap between every list item
+        // (issue #129). Pulling the inline children out keeps items tight.
+        for child in item.children {
+            if let paragraph = child as? Paragraph {
+                for inline in paragraph.children { inner.append(visit(inline)) }
+            } else {
+                inner.append(visit(child))
+            }
+        }
         let style = NSMutableParagraphStyle()
         style.firstLineHeadIndent = 0
         style.headIndent = theme.listIndent
-        style.paragraphSpacing = theme.paragraphSpacing * 0.5
+        // Tight inter-item spacing to match the SwiftUI list (`markdownMargin
+        // top: .em(0.35)`), not the full inter-paragraph spacing.
+        style.paragraphSpacing = theme.listItemSpacing
         return paragraph(inner, style: style)
     }
 
