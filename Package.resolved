@@ -1,5 +1,5 @@
 {
-  "originHash" : "6ebf41beb952f187440ec3dcaebee7ad6c5e65b852409658d919d27e12dc9392",
+  "originHash" : "5bf712a7060c2751b573b0efb5d3fd4f8e6698db796c19a7ed0d559602675bbb",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -62,6 +62,15 @@
       "state" : {
         "revision" : "6675bc0ff86e61436e615df6fc5174e043e57924",
         "version" : "1.4.1"
+      }
+    },
+    {
+      "identity" : "swift-markdown",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-markdown",
+      "state" : {
+        "revision" : "7d9a5ce307528578dfa777d505496bd5f544ad94",
+        "version" : "0.7.3"
       }
     },
     {
