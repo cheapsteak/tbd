@@ -37,11 +37,30 @@ struct STTextViewTranscriptPaneView: View {
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
     nonisolated private static let perfLog = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
+    private static let diagLog = Logger(subsystem: "com.tbd.app", category: "textkit-pane")
 
     nonisolated private static let bodyLogged = OSAllocatedUnfairLock<Set<UUID>>(initialState: [])
 
     nonisolated private static func shortID(_ s: String) -> String {
         return String(s.suffix(4))
+    }
+
+    /// Returns the role label and a ≤50-char text prefix for a TranscriptItem.
+    private static func diagLabel(_ item: TranscriptItem) -> (role: String, text: String) {
+        switch item {
+        case .userPrompt(_, let t, _):
+            return ("user", String(t.prefix(50)))
+        case .assistantText(_, let t, _, _):
+            return ("assistant", String(t.prefix(50)))
+        case .thinking(_, let t, _):
+            return ("thinking", String(t.prefix(50)))
+        case .systemReminder(_, _, let t, _):
+            return ("system", String(t.prefix(50)))
+        case .toolCall(_, let name, _, _, _, _, _, _):
+            return ("tool", name)
+        case .slashCommand(_, let name, _, _):
+            return ("slash", name)
+        }
     }
 
     private var terminal: Terminal? {
@@ -184,6 +203,12 @@ struct STTextViewTranscriptPaneView: View {
         // Without a session, fall back to terminalID so the empty/placeholder
         // states still have a stable identity. (#129)
         .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
+        // Diag: log the composed pane identity each time textKitTranscript is evaluated. (#129)
+        .onAppear {
+            let tidShort = String(terminalID.uuidString.suffix(4))
+            let sid = currentSessionID ?? "nil"
+            Self.diagLog.debug("paneIdentity term=\(tidShort, privacy: .public) sid=\(sid, privacy: .public)")
+        }
         .overlay(alignment: .bottomLeading) {
             jumpToBottomButton
                 .animation(.easeInOut(duration: 0.2), value: atBottom)
@@ -224,6 +249,31 @@ struct STTextViewTranscriptPaneView: View {
         Self.perfLog.debug("textkit.view.appear sid=\(sidShort, privacy: .public) count=\(displayedMessages.count, privacy: .public)")
         let tidShort = String(terminalID.uuidString.suffix(4))
         let count = displayedMessages.count
+
+        // Diag: log session resolution on appear so a capture can identify which
+        // session this terminal resolved to and how. (#129)
+        let sid = currentSessionID
+        let rootCount = sid.map { appState.sessionTranscripts[$0]?.count ?? 0 } ?? 0
+        let threadPath = path
+        let resolved = resolveThread(root: messages, path: threadPath)
+        Self.diagLog.debug(
+            "resolve sid term=\(tidShort, privacy: .public) sid=\(sid ?? "nil", privacy: .public) lastSessionID=\(self.lastSessionID ?? "nil", privacy: .public) source=terminal.claudeSessionID"
+        )
+        Self.diagLog.debug(
+            "messages term=\(tidShort, privacy: .public) sid=\(sid ?? "nil", privacy: .public) rootCount=\(rootCount, privacy: .public)"
+        )
+        Self.diagLog.debug(
+            "thread term=\(tidShort, privacy: .public) pathCount=\(threadPath.count, privacy: .public) path=\(threadPath.joined(separator: ","), privacy: .public) displayedCount=\(resolved.count, privacy: .public)"
+        )
+        if let first = resolved.first {
+            let (role, text) = Self.diagLabel(first)
+            Self.diagLog.debug("displayed.first term=\(tidShort, privacy: .public) role=\(role, privacy: .public) text=\(text, privacy: .public)")
+        }
+        if let last = resolved.last, resolved.count > 1 {
+            let (role, text) = Self.diagLabel(last)
+            Self.diagLog.debug("displayed.last term=\(tidShort, privacy: .public) role=\(role, privacy: .public) text=\(text, privacy: .public)")
+        }
+
         HangWatchdog.shared.recordContext { snap in
             snap.focusedTerminalIDShort = tidShort
             snap.transcriptItemCount = count
@@ -292,7 +342,12 @@ struct STTextViewTranscriptPaneView: View {
     private func pollOnce(failureCount: inout Int) async {
         guard let sid = currentSessionID else { return }
         let sidShort = Self.shortID(sid)
+        let tidShort = String(terminalID.uuidString.suffix(4))
         Self.perfLog.debug("textkit.pollOnce.start sid=\(sidShort, privacy: .public)")
+        // Diag: log session resolution on each poll so we can track which sid is in use. (#129)
+        Self.diagLog.debug(
+            "resolve sid term=\(tidShort, privacy: .public) sid=\(sid, privacy: .public) lastSessionID=\(self.lastSessionID ?? "nil", privacy: .public) source=terminal.claudeSessionID"
+        )
         let pollStart = ContinuousClock.now
         var changed = false
         var finalCount = 0
@@ -300,7 +355,21 @@ struct STTextViewTranscriptPaneView: View {
         // Detect session rollover.
         if let last = lastSessionID, last != sid {
             hasShownInitialMessages = false
+            // Diag: rollover fired — sid changed from last to current. (#129)
+            Self.diagLog.debug(
+                "rollover term=\(tidShort, privacy: .public) last=\(last, privacy: .public) current=\(sid, privacy: .public) action=reset"
+            )
             liveThreadPathReset()
+        } else if lastSessionID == nil {
+            // Diag: first poll, no prior sid to compare. (#129)
+            Self.diagLog.debug(
+                "rollover term=\(tidShort, privacy: .public) last=nil current=\(sid, privacy: .public) action=skip-nil"
+            )
+        } else {
+            // Diag: sid unchanged — rollover guard skipped. (#129)
+            Self.diagLog.debug(
+                "rollover term=\(tidShort, privacy: .public) last=\(lastSessionID ?? "nil", privacy: .public) current=\(sid, privacy: .public) action=skip-same"
+            )
         }
         lastSessionID = sid
 
@@ -335,6 +404,28 @@ struct STTextViewTranscriptPaneView: View {
             }
             TranscriptSignposts.signposter.endInterval("transcript.swap", swapInterval)
             changed = didChange
+            // Diag: log message source, thread resolution, and displayed head/tail
+            // after each successful poll so we can identify which conversation is
+            // rendering in this terminal. Only log on change to reduce noise. (#129)
+            if didChange {
+                let rootCount = appState.sessionTranscripts[resolvedSID]?.count ?? 0
+                Self.diagLog.debug(
+                    "messages term=\(tidShort, privacy: .public) sid=\(resolvedSID, privacy: .public) rootCount=\(rootCount, privacy: .public)"
+                )
+                let threadPath = path
+                let resolved = resolveThread(root: messages, path: threadPath)
+                Self.diagLog.debug(
+                    "thread term=\(tidShort, privacy: .public) pathCount=\(threadPath.count, privacy: .public) path=\(threadPath.joined(separator: ","), privacy: .public) displayedCount=\(resolved.count, privacy: .public)"
+                )
+                if let first = resolved.first {
+                    let (role, text) = Self.diagLabel(first)
+                    Self.diagLog.debug("displayed.first term=\(tidShort, privacy: .public) role=\(role, privacy: .public) text=\(text, privacy: .public)")
+                }
+                if let last = resolved.last, resolved.count > 1 {
+                    let (role, text) = Self.diagLabel(last)
+                    Self.diagLog.debug("displayed.last term=\(tidShort, privacy: .public) role=\(role, privacy: .public) text=\(text, privacy: .public)")
+                }
+            }
         } catch {
             failureCount += 1
             Self.log.debug("textkit transcript poll failed: \(error.localizedDescription, privacy: .public)")

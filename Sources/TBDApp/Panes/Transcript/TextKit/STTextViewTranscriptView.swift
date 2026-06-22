@@ -10,6 +10,7 @@ import os
 @MainActor
 struct STTextViewTranscriptView: NSViewRepresentable {
     private static let log = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
+    private static let diagLog = Logger(subsystem: "com.tbd.app", category: "textkit-pane")
 
     let context: TranscriptCardContext
     @Binding var atBottom: Bool
@@ -18,7 +19,11 @@ struct STTextViewTranscriptView: NSViewRepresentable {
     let nodesProvider: @MainActor () -> [TranscriptRenderNode]
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(document: TranscriptDocument(context: context))
+        // Diag: log coordinator creation so we can track Coordinator lifecycle vs
+        // session rollovers (a fresh Coordinator means PaneIdentity changed). (#129)
+        let tidShort = String((context.terminalID?.uuidString ?? "").suffix(4))
+        Self.diagLog.debug("coordinator.create term=\(tidShort, privacy: .public)")
+        return Coordinator(document: TranscriptDocument(context: context))
     }
 
     func makeNSView(context ctx: Context) -> NSScrollView {
@@ -75,6 +80,9 @@ struct STTextViewTranscriptView: NSViewRepresentable {
             textView.scrollToEndOfDocument(nil)
         }
         Self.log.debug("textkit.pane.installed length=\(coordinator.document.length, privacy: .public)")
+        // Diag: log NSView installation with initial node count for lifecycle tracing. (#129)
+        let tidShort = String((context.terminalID?.uuidString ?? "").suffix(4))
+        Self.diagLog.debug("makeNSView term=\(tidShort, privacy: .public) initialNodeCount=\(nodes.count, privacy: .public)")
         return scrollView
     }
 
