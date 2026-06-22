@@ -59,6 +59,22 @@ struct MarkdownAttributedRendererTests {
         #expect(s.contains("•") || s.contains("-"))
     }
 
+    @Test("blockquote keeps nested link color while coloring plain prose secondary")
+    func blockquoteNestedColors() {
+        let s = MarkdownAttributedRenderer.render("> see [x](https://e.com)")
+        let ns = s.string as NSString
+        // The link run keeps its link attribute AND linkColor (not blockquoteColor).
+        let xRange = ns.range(of: "x")
+        #expect(s.attribute(.link, at: xRange.location, effectiveRange: nil) != nil)
+        let xColor = s.attribute(.foregroundColor, at: xRange.location, effectiveRange: nil) as? NSColor
+        #expect(xColor == NSColor.linkColor)
+        #expect(xColor != TranscriptTextTheme.chatBubble.blockquoteColor)
+        // Plain prose in the blockquote gets the secondary blockquote color.
+        let seeRange = ns.range(of: "see")
+        let seeColor = s.attribute(.foregroundColor, at: seeRange.location, effectiveRange: nil) as? NSColor
+        #expect(seeColor == TranscriptTextTheme.chatBubble.blockquoteColor)
+    }
+
     // MARK: - Helpers
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {

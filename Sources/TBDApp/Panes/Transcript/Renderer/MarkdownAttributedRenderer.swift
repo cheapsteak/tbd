@@ -123,8 +123,13 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
     mutating func visitBlockQuote(_ b: BlockQuote) -> NSAttributedString {
         let inner = NSMutableAttributedString()
         for child in b.children { inner.append(visit(child)) }
+        // Color only runs that didn't set their own foreground color, so nested
+        // links keep linkColor and inline-code keeps its tint (mirrors the
+        // render-level body-color back-fill). Blanket-coloring would clobber them.
         let full = NSRange(location: 0, length: inner.length)
-        inner.addAttribute(.foregroundColor, value: theme.blockquoteColor, range: full)
+        inner.enumerateAttribute(.foregroundColor, in: full, options: []) { value, range, _ in
+            if value == nil { inner.addAttribute(.foregroundColor, value: theme.blockquoteColor, range: range) }
+        }
         let style = NSMutableParagraphStyle()
         style.headIndent = theme.listIndent
         style.firstLineHeadIndent = theme.listIndent
