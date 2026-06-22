@@ -361,6 +361,30 @@ public actor SuspendResumeCoordinator {
             return
         }
 
+        // Bootstrap the tmux server before creating the resume window. After a
+        // reboot the server is dead (tmux servers don't survive a restart), so
+        // `createWindow` → `new-window` would throw "no server running on …" and
+        // on-demand Resume would silently fail. `ensureServer` (no-op if the
+        // session already exists) brings up `new-session -d -s main` first.
+        // It returns the bootstrap window ID ONLY when it created a new session;
+        // we must kill that placeholder after the real window exists (killing it
+        // earlier collapses the only-window session and exits the server). This
+        // deferred-kill bootstrap dance is what lets on-demand Resume be the sole
+        // post-reboot recovery path now that reconcile parks instead of recreating
+        // (#284).
+        let bootstrapWindowID: String?
+        do {
+            bootstrapWindowID = try await tmux.ensureServer(
+                server: server, session: "main", cwd: worktree.path
+            )
+        } catch {
+            // Server bootstrap failed — abort gracefully rather than crash.
+            // The terminal stays suspended; the next Resume attempt retries.
+            logger.warning("Failed to bootstrap tmux server for resume of terminal \(terminal.id): \(error)")
+            inFlight[terminal.id] = nil
+            return
+        }
+
         // Honor per-terminal model profile. We use loadByID (NOT resolve(repoID:))
         // to load the EXACT profile persisted on this terminal — a re-resolution
         // could pick a different override if the user changed defaults since
@@ -426,6 +450,13 @@ public actor SuspendResumeCoordinator {
                 env: resumeEnv,
                 sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
             )
+            // Now that the real window exists, kill the bootstrap placeholder
+            // (if we created one). The session keeps the freshly-created window,
+            // so it — and the server — stay alive. Best-effort: a leftover empty
+            // window is reaped by reconcile's orphan-window cleanup.
+            if let bootstrapWindowID {
+                try? await tmux.killWindow(server: server, windowID: bootstrapWindowID)
+            }
             try await db.terminals.updateTmuxIDs(
                 id: terminal.id, windowID: window.windowID, paneID: window.paneID
             )
@@ -474,6 +505,14 @@ public actor SuspendResumeCoordinator {
                 self.inFlight[termID] = nil
             }
         } catch {
+            // If we just bootstrapped the server and createWindow failed, the
+            // server is alive with only the placeholder window — a half-up state
+            // the next reconcile would misread (serverAlive + stale window gone)
+            // and route to the dead-window path. Kill the server so the next
+            // reconcile re-enters reboot recovery instead.
+            if bootstrapWindowID != nil {
+                try? await tmux.killServer(server: server)
+            }
             logger.warning("Failed to resume terminal \(terminal.id): \(error)")
             inFlight[terminal.id] = nil
         }

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -248,6 +249,83 @@ struct SuspendResumeCoordinatorTests {
 
         let after = try await db.terminals.get(id: terminal.id)
         #expect(after?.suspendedAt == nil, "Terminal should NOT be suspended when suspendEnabled is false")
+    }
+
+    /// Regression test for #285: on-demand Resume must bootstrap a dead tmux
+    /// server before creating the resume window. After a reboot the tmux server
+    /// is gone, so `createWindow` → `new-window` throws "no server running on …"
+    /// unless `resumeTerminal` calls `ensureServer` first.
+    ///
+    /// This uses a REAL `TmuxManager` against a unique, NOT-running socket —
+    /// the only way to actually exercise the dead-server bootstrap. The dryRun
+    /// path can't model this: `serverExists` always returns true and
+    /// `ensureServer` always returns nil in dryRun, so the bootstrap/kill code
+    /// added by this fix never engages. Modeled on
+    /// `testRecreateAfterRebootBootstrapKillOrdering` in WorktreeLifecycleTests.
+    @Test func manualResumeBootstrapsDeadServer() async throws {
+        let socketName = "tbd-test-\(UUID().uuidString.prefix(8))"
+        let realTmux = TmuxManager()
+        // Defensive: ensure no stray server is alive on this socket, and verify.
+        try? await realTmux.killServer(server: socketName)
+        let aliveBefore = await realTmux.serverExists(server: socketName)
+        #expect(!aliveBefore, "Test precondition: socket \(socketName) must not have a live server")
+
+        // Real repo dir on disk — tmux refuses to set cwd to a missing dir.
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "test", defaultBranch: "main"
+        )
+        // Worktree pointing at the dead socket — simulates post-reboot state.
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: repoDir.path, tmuxServer: socketName
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@stale-1", tmuxPaneID: "%stale-1",
+            label: "claude-1", claudeSessionID: "session-abc"
+        )
+        try await db.terminals.setSuspended(
+            id: terminal.id, sessionID: "session-abc", snapshot: "fake snapshot"
+        )
+
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: realTmux)
+
+        let result = await coordinator.manualResume(terminalID: terminal.id)
+        // Tear down inline on any failure (defer can't await).
+        func teardown() async { try? await realTmux.killServer(server: socketName) }
+
+        #expect(result == .ok)
+
+        // The server must now be up — proof the bootstrap ran. Without the fix,
+        // createWindow throws and the server stays dead.
+        let aliveAfter = await realTmux.serverExists(server: socketName)
+        if !aliveAfter {
+            await teardown()
+            Issue.record("tmux server must be running after resume bootstrapped a dead server")
+            return
+        }
+
+        // The terminal's stale IDs must have been replaced with the freshly
+        // created window/pane, and suspendedAt cleared.
+        let updated = try await db.terminals.get(id: terminal.id)
+        #expect(updated?.suspendedAt == nil, "resume must clear suspendedAt")
+        #expect(updated?.tmuxWindowID != "@stale-1",
+                "tmuxWindowID must be replaced with a freshly-allocated window ID")
+        #expect(updated?.tmuxPaneID != "%stale-1",
+                "tmuxPaneID must be replaced with a freshly-allocated pane ID")
+        #expect(updated?.tmuxWindowID.hasPrefix("@") == true)
+        #expect(updated?.tmuxPaneID.hasPrefix("%") == true)
+
+        // The bootstrap placeholder must have been killed — the session should
+        // hold exactly the one window we created for the resume.
+        let windows = try await realTmux.listWindows(server: socketName, session: "main")
+        #expect(windows.count == 1,
+                "session should contain exactly the freshly-created resume window; got \(windows)")
+
+        await teardown()
     }
 
     /// Polls `condition` every 50ms until it returns true, up to `timeout`.

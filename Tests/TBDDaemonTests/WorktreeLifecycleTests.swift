@@ -719,13 +719,11 @@ import Testing
 
     // In dryRun mode, serverExists → true → windowExists path is taken.
     // windowExists → true → terminals are kept with their original IDs.
-    // In the reboot path, windowIDs would be replaced with mock IDs.
-    // So if IDs are unchanged OR updated to mock IDs, we know reconcile ran.
     // The important invariant: terminal COUNT must not drop.
     let windowIDsAfter = Set(terminalsAfter.map { $0.tmuxWindowID })
     #expect(!windowIDsAfter.isEmpty, "Terminal window IDs must be present after reconcile")
     // Since serverExists → true and windowExists → true, the alive-window branch
-    // is taken and IDs are NOT replaced (no recreateAfterReboot call).
+    // is taken and IDs are NOT touched (the terminal is left running as-is).
     #expect(windowIDsAfter == windowIDsBefore, "Window IDs must be unchanged when server and windows are alive")
 }
 
@@ -812,99 +810,101 @@ import Testing
     #expect(terminalAfter?.tmuxWindowID == staleWindowID,
             "dryRun: stale window ID must not be replaced when server reports alive")
 
-    // NOTE: The actual reboot recovery path (serverExists → false → recreateAfterReboot)
-    // cannot be tested with dryRun=true. A non-dryRun integration test with a real
-    // tmux server would be needed to verify that stale IDs ARE replaced with fresh
-    // mock IDs when the server is gone.
+    // NOTE: The actual reboot path (serverExists → false) cannot be tested with
+    // dryRun=true. See testReconcileRebootParksClaudeAndDeletesShell below, which
+    // drives it with a real tmux server and verifies terminals are parked as
+    // suspended (not recreated) when the server is gone.
 }
 
-/// Regression test for the bug where `recreateAfterReboot` killed the bootstrap
-/// window before any real window existed in the session. tmux's rule: killing
-/// the only window destroys the session, and a server with no sessions exits.
-/// The buggy code would therefore lose the server between `ensureServer` and
-/// `createWindow`, causing the latter to fail with "no server running on …".
+/// Reboot path (whole tmux server gone) driven end-to-end through
+/// `reconcile(repoID:)`. Proves the #284 fix: terminals are PARKED as
+/// suspended (resumable Claude) or deleted (plain shell) — NOT eagerly
+/// recreated. Recovery is the on-demand Resume button (see #285), so reconcile
+/// must leave the dead server dead.
 ///
-/// Drives the path with a REAL `TmuxManager` (not dry-run) against a unique
-/// socket name so we can observe actual tmux behavior. The test:
-///   1. Verifies the socket does not exist before the call.
-///   2. Calls `recreateAfterReboot` and asserts it does not throw.
-///   3. Asserts the terminal's window/pane IDs were updated in the DB.
-///   4. Tears down by killing the test tmux server.
-@Test func testRecreateAfterRebootBootstrapKillOrdering() async throws {
-    let socketName = "tbd-test-\(UUID().uuidString.prefix(8))"
-    let realTmux = TmuxManager()
-    // Make sure no stray server is alive on this socket (it shouldn't be, but
-    // be defensive — and verify it isn't before we call into the recovery path).
-    try? await realTmux.killServer(server: socketName)
-    let aliveBefore = await realTmux.serverExists(server: socketName)
-    #expect(!aliveBefore, "Test precondition: socket \(socketName) must not have a live server")
-
-    // Use the same temp-repo machinery as other lifecycle tests so the worktree
-    // path actually exists on disk (tmux refuses to set cwd to a missing dir).
+/// This needs a REAL `TmuxManager`: `TmuxManager(dryRun: true)` always reports
+/// `serverExists → true`, so it cannot model the post-reboot `serverExists →
+/// false` state this test depends on. We start a real server, capture live
+/// window/pane IDs, then kill the server to simulate the reboot.
+@Test func testReconcileRebootParksClaudeAndDeletesShell() async throws {
     let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
+    let realTmux = TmuxManager()
     let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: GitManager(),
-        tmux: realTmux,
-        hooks: HookResolver()
+        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
     )
 
-    // Insert a worktree + terminal record pointing at the test socket. We do
-    // NOT go through `createWorktree` — that would spawn windows. Instead we
-    // simulate a freshly-rebooted state where DB rows exist but the tmux
-    // server is gone.
     let repo = try await db.repos.create(
         path: repoDir.path, displayName: "test", defaultBranch: "main"
     )
+    // reconcile derives the server name from the repo path, so the worktree row
+    // must use the same name for the serverExists probe to match.
+    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
+
+    // A worktree whose path == the repo path is reported by `git worktree
+    // list`, so reconcile will not archive it as missing.
     let wt = try await db.worktrees.create(
-        repoID: repo.id,
-        name: "wt",
-        branch: "main",
-        path: repoDir.path,
-        tmuxServer: socketName
-    )
-    let terminal = try await db.terminals.create(
-        worktreeID: wt.id,
-        tmuxWindowID: "@stale-1",
-        tmuxPaneID: "%stale-1"
+        repoID: repo.id, name: "wt", branch: "main",
+        path: repoDir.path, tmuxServer: serverName
     )
 
-    // Drive the recovery path. Must not throw — with the buggy ordering this
-    // throws `TmuxError.commandFailed` with output "no server running on …".
+    // Start a real server + two real windows, recording their actual IDs so the
+    // terminal rows look exactly like a pre-reboot live state.
+    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
+    let claudeWindow = try await realTmux.createWindow(
+        server: serverName, session: "main", cwd: repoDir.path, shellCommand: "sleep 60"
+    )
+    let shellWindow = try await realTmux.createWindow(
+        server: serverName, session: "main", cwd: repoDir.path, shellCommand: "sleep 60"
+    )
+
+    let sessionID = UUID().uuidString
+    let claudeTerminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: claudeWindow.windowID, tmuxPaneID: claudeWindow.paneID,
+        label: "claude", claudeSessionID: sessionID, kind: .claude
+    )
+    let shellTerminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: shellWindow.windowID, tmuxPaneID: shellWindow.paneID
+    )
+
+    // Simulate the reboot: the whole server is gone, so serverExists → false.
+    try await realTmux.killServer(server: serverName)
+    let aliveAfterKill = await realTmux.serverExists(server: serverName)
+    #expect(!aliveAfterKill, "precondition: server must be gone to model a reboot")
+
     do {
-        try await lifecycle.recreateAfterReboot(terminal: terminal, worktree: wt)
+        try await lifecycle.reconcile(repoID: repo.id)
     } catch {
-        // Make sure we tear down even when the assertion below fails.
-        try? await realTmux.killServer(server: socketName)
+        try? await realTmux.killServer(server: serverName)
         throw error
     }
 
-    // The terminal's IDs must have been updated to point at the freshly
-    // created tmux window/pane.
-    let updated = try await db.terminals.get(id: terminal.id)
-    #expect(updated != nil)
-    #expect(updated?.tmuxWindowID != "@stale-1",
-            "tmuxWindowID must be replaced with a freshly-allocated tmux window ID")
-    #expect(updated?.tmuxPaneID != "%stale-1",
-            "tmuxPaneID must be replaced with a freshly-allocated tmux pane ID")
-    // Real tmux window IDs look like "@<digits>" and pane IDs like "%<digits>".
-    #expect(updated?.tmuxWindowID.hasPrefix("@") == true)
-    #expect(updated?.tmuxPaneID.hasPrefix("%") == true)
+    let claudeAfter = try await db.terminals.get(id: claudeTerminal.id)
+    let shellAfter = try await db.terminals.get(id: shellTerminal.id)
+    // Was the dead server resurrected by an eager recreate? (The bug.)
+    let serverAliveAfter = await realTmux.serverExists(server: serverName)
+    try? await realTmux.killServer(server: serverName)
 
-    // Server should still be alive — and after the bootstrap kill, the session
-    // should contain exactly one window (the one we just created).
-    let aliveAfter = await realTmux.serverExists(server: socketName)
-    #expect(aliveAfter, "tmux server must still be running after recreateAfterReboot")
-    let windows = try await realTmux.listWindows(server: socketName, session: "main")
-    #expect(windows.count == 1,
-            "session should contain exactly the freshly-created window after bootstrap kill; got \(windows)")
+    // Resumable Claude session: parked, not recreated, not deleted.
+    #expect(claudeAfter != nil, "claude terminal must NOT be deleted on reboot")
+    #expect(claudeAfter?.suspendedAt != nil, "claude terminal must be parked as suspended")
+    #expect(claudeAfter?.claudeSessionID == sessionID, "session ID must be preserved for on-demand resume")
+    // The window/pane IDs must NOT have been replaced — reconcile does not spawn
+    // a new window on the reboot path anymore.
+    #expect(claudeAfter?.tmuxWindowID == claudeWindow.windowID,
+            "reboot must not recreate the claude window (no eager `claude --resume`)")
 
-    // Explicit cleanup: ensure the test server is gone before we leave.
-    // (defer can't `await`, so we tear down inline.)
-    try? await realTmux.killServer(server: socketName)
+    // Plain shell: nothing resumable, deleted.
+    #expect(shellAfter == nil, "shell terminal with no session must be deleted on reboot")
+
+    // CRUCIAL #284 invariant: reconcile must not have bootstrapped the dead
+    // server to recreate windows. No mass `claude --resume` storm on reboot.
+    #expect(!serverAliveAfter,
+            "reconcile must leave the dead server dead — no eager mass-recreate (#284)")
 }
 
 /// Dead-window cleanup, real tmux server alive: a terminal that holds a
