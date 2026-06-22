@@ -137,6 +137,14 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
         return paragraph(inner, style: style)
     }
 
+    mutating func visitCodeBlock(_ codeBlock: CodeBlock) -> NSAttributedString {
+        MarkdownCodeBlock.attributed(
+            code: codeBlock.code,
+            language: codeBlock.language,
+            theme: theme
+        )
+    }
+
     mutating func visitThematicBreak(_ b: ThematicBreak) -> NSAttributedString {
         let rule = NSMutableAttributedString(string: "————————")
         let style = NSMutableParagraphStyle()

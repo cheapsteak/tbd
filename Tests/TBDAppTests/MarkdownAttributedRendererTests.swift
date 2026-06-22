@@ -75,6 +75,14 @@ struct MarkdownAttributedRendererTests {
         #expect(seeColor == TranscriptTextTheme.chatBubble.blockquoteColor)
     }
 
+    @Test("fenced code uses a monospaced font and a background")
+    func codeBlock() {
+        let s = MarkdownAttributedRenderer.render("```swift\nlet x = 1\n```")
+        let f = s.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(f?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
+        #expect(s.string.contains("let x = 1"))
+    }
+
     // MARK: - Helpers
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {
