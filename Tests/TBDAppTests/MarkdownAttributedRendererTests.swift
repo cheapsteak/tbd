@@ -83,6 +83,18 @@ struct MarkdownAttributedRendererTests {
         #expect(s.string.contains("let x = 1"))
     }
 
+    @Test("GFM table produces text-table blocks for each cell")
+    func table() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |"
+        let s = MarkdownAttributedRenderer.render(md)
+        #expect(s.string.contains("A") && s.string.contains("2"))
+        var foundBlock = false
+        s.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: s.length)) { v, _, _ in
+            if let ps = v as? NSParagraphStyle, !ps.textBlocks.isEmpty { foundBlock = true }
+        }
+        #expect(foundBlock)
+    }
+
     // MARK: - Helpers
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {

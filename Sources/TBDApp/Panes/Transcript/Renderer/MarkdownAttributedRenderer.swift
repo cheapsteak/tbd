@@ -145,6 +145,10 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
         )
     }
 
+    mutating func visitTable(_ table: Markdown.Table) -> NSAttributedString {
+        MarkdownTable.attributed(table, theme: theme, render: { self.visit($0) })
+    }
+
     mutating func visitThematicBreak(_ b: ThematicBreak) -> NSAttributedString {
         let rule = NSMutableAttributedString(string: "————————")
         let style = NSMutableParagraphStyle()
