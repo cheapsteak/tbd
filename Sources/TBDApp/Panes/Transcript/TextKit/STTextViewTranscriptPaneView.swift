@@ -167,6 +167,17 @@ struct STTextViewTranscriptPaneView: View {
             scrollToBottomToken: scrollToBottomToken,
             nodesProvider: { transcriptRenderNodes(from: displayedMessages) }
         )
+        // Pin the representable's identity to the terminal. Without this, SwiftUI
+        // reuses the NSViewRepresentable (and its Coordinator) when this pane is
+        // re-targeted at a different terminal/worktree — so makeCoordinator/
+        // makeNSView never re-run and the Coordinator keeps the PREVIOUS
+        // terminal's TranscriptDocument (its bound text storage AND the
+        // terminalID baked into every card attachment's TranscriptCardContext).
+        // The result is the pane showing another worktree's conversation. A
+        // terminalID-keyed identity forces a fresh Coordinator + initial
+        // rebuild on switch, while the wrapper's poll loop (re-keyed via
+        // `.task(id:)`) keeps streaming correctly. (#129)
+        .id(terminalID)
         .overlay(alignment: .bottomLeading) {
             jumpToBottomButton
                 .animation(.easeInOut(duration: 0.2), value: atBottom)

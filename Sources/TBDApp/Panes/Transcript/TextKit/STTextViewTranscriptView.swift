@@ -23,7 +23,11 @@ struct STTextViewTranscriptView: NSViewRepresentable {
 
     func makeNSView(context ctx: Context) -> NSScrollView {
         let coordinator = ctx.coordinator
-        let scrollView = STTextView.scrollableTextView()
+        // `ReadOnlySTTextView.scrollableTextView()` builds a `ReadOnlySTTextView`
+        // (the factory uses `Self()`), giving us a view that is selectable and
+        // copyable but truly read-only — it refuses both drag-to-move-out and
+        // drop, which STTextView's `isEditable = false` alone does NOT do. (#129)
+        let scrollView = ReadOnlySTTextView.scrollableTextView()
         guard let textView = scrollView.documentView as? STTextView else { return scrollView }
 
         textView.isEditable = false
@@ -197,4 +201,51 @@ struct STTextViewTranscriptView: NSViewRepresentable {
             }
         }
     }
+}
+
+// MARK: - ReadOnlySTTextView
+
+/// A truly read-only `STTextView`: selectable and copyable, but it can neither
+/// be dragged-to-move-out nor be a drop target.
+///
+/// `STTextView.isEditable = false` is NOT sufficient. STTextView wires its
+/// drag-and-drop machinery to `isSelectable`, not `isEditable`:
+///
+/// - A `DragSelectedTextGestureRecognizer` is added in `init` with
+///   `isEnabled = isSelectable`, so a long-press over the selection begins a
+///   real `NSDraggingSession` (`STTextView+DragGestureRecognizer.swift`).
+/// - As an `NSDraggingSource`, `sourceOperationMaskFor` returns `.move` for
+///   in-application drags (`STTextView+NSDraggingSource.swift`).
+/// - As the drop destination, `performDragOperation` calls
+///   `performInternalDragOperation`, which DELETES the source range and
+///   re-inserts it at the drop point — mutating the document
+///   (`STTextView+NSDraggingDestination.swift`). None of this checks
+///   `isEditable`.
+///
+/// We neutralize both ends: disable the drag-out gesture recognizer (so a drag
+/// session never begins) and unregister dragged types at construction, and
+/// override the `open` drop-destination seams so any residual drop is a no-op.
+/// This keeps text selection + copy fully working. (#129)
+final class ReadOnlySTTextView: STTextView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // STTextView's `init` adds the press-to-drag recognizer and registers
+        // dragged types; `super.init` has now run, so undo both here.
+        for recognizer in gestureRecognizers where recognizer is NSPressGestureRecognizer {
+            recognizer.isEnabled = false
+        }
+        unregisterDraggedTypes()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    // Refuse every drop (defense in depth in case dragged types are
+    // re-registered by a later STTextView code path): no MOVE / COPY into the
+    // read-only document.
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation { [] }
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation { [] }
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool { false }
 }
