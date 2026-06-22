@@ -141,10 +141,10 @@ struct STTextViewTranscriptView: NSViewRepresentable {
             previousNodes = nodes
 
             // Repaint bubble chrome. TextKit 2 lays out the changed range
-            // asynchronously, so a synchronous redraw would read stale segment
-            // frames; redraw now AND on the next runloop turn (after layout
-            // settles) so the bubbles track the new text extent. (#129)
-            (textView as? ReadOnlySTTextView)?.setBubblesNeedDisplay()
+            // asynchronously — a synchronous setBubblesNeedDisplay() here would
+            // call enumerateTextSegments on not-yet-laid-out ranges and draw
+            // nothing useful (stale or empty rects). Defer so the overlay
+            // repaints only after layout has settled on the next runloop turn. (#129)
             DispatchQueue.main.async { [weak textView] in
                 (textView as? ReadOnlySTTextView)?.setBubblesNeedDisplay()
             }
@@ -304,6 +304,10 @@ final class BubbleBackgroundView: NSView {
             if rect.maxX > bounds.width - 1 {
                 rect.size.width = bounds.width - 1 - rect.origin.x
             }
+
+            // Skip bubbles that don't intersect the dirty region — avoids
+            // O(N)-per-draw cost for off-screen messages on long transcripts. (#129)
+            guard rect.intersects(dirtyRect) else { return }
 
             let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
             switch role {

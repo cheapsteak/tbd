@@ -87,16 +87,6 @@ final class TranscriptDocument {
     /// Node IDs in document order, parallel to the segments in `storage`.
     private var order: [String] = []
 
-    /// Maps `node.id → BubbleRole`, so the renderer can draw chat-bubble chrome
-    /// behind each message block's range without re-deriving the kind. Populated
-    /// alongside `ranges` on every append/replace. (#129)
-    private var roles: [String: BubbleRole] = [:]
-
-    /// Maps `node.id → role-header prefix length`, so `messageBlocks` can hand
-    /// the renderer the BODY-only sub-range (the bubble excludes the "You"/
-    /// "Claude" label, which sits above the bubble like in `ChatBubbleView`).
-    private var headerLengths: [String: Int] = [:]
-
     // MARK: - Init
 
     init(context: TranscriptCardContext) {
@@ -118,8 +108,6 @@ final class TranscriptDocument {
         storage = external
         ranges.removeAll(keepingCapacity: true)
         order.removeAll(keepingCapacity: true)
-        roles.removeAll(keepingCapacity: true)
-        headerLengths.removeAll(keepingCapacity: true)
         length = 0
     }
 
@@ -129,30 +117,6 @@ final class TranscriptDocument {
     /// Returns the `NSRange` of `id`'s fragment inside `storage`, or `nil` if absent.
     func range(forNodeID id: String) -> NSRange? { ranges[id] }
 
-    /// Ordered list of chat-bubble message blocks for background drawing.
-    /// Each entry pairs a node's CURRENT `NSRange` with its `BubbleRole`; the
-    /// renderer recomputes this on every draw pass so streaming + rebuild stay
-    /// correct. `.other` roles are omitted — only user/assistant blocks get
-    /// drawn bubble chrome. (#129)
-    var messageBlocks: [(range: NSRange, role: BubbleRole)] {
-        let nsString = storage.string as NSString
-        return order.compactMap { id in
-            guard let full = ranges[id], let role = roles[id], role != .other else { return nil }
-            // Body-only sub-range: drop the leading role-header prefix and the
-            // single trailing newline so the bubble hugs the body, not the
-            // "You"/"Claude" label above it nor the inter-block gap below.
-            let header = headerLengths[id] ?? 0
-            let location = full.location + header
-            var length = full.length - header
-            guard length > 0, location >= 0, location + length <= nsString.length else { return nil }
-            if nsString.substring(with: NSRange(location: location + length - 1, length: 1)) == "\n" {
-                length -= 1
-            }
-            guard length > 0 else { return nil }
-            return (NSRange(location: location, length: length), role)
-        }
-    }
-
     /// Replaces the entire document with fragments built from `nodes`.
     /// Mutates `storage` **in place** (preserving object identity) so any consumer
     /// holding a reference to `storage` does not go stale.
@@ -161,8 +125,6 @@ final class TranscriptDocument {
         length = 0
         ranges.removeAll(keepingCapacity: true)
         order.removeAll(keepingCapacity: true)
-        roles.removeAll(keepingCapacity: true)
-        headerLengths.removeAll(keepingCapacity: true)
         for node in nodes { appendNew(node) }
     }
 
@@ -210,8 +172,6 @@ final class TranscriptDocument {
         storage.append(fragment)
         length = storage.length
         ranges[node.id] = NSRange(location: start, length: length - start)
-        roles[node.id] = TranscriptDocumentBuilder.bubbleRole(for: node)
-        headerLengths[node.id] = TranscriptDocumentBuilder.headerLength(for: node)
         order.append(node.id)
     }
 
@@ -221,7 +181,5 @@ final class TranscriptDocument {
         storage.replaceCharacters(in: oldRange, with: fragment)
         length = storage.length
         ranges[node.id] = NSRange(location: oldRange.location, length: fragment.length)
-        roles[node.id] = TranscriptDocumentBuilder.bubbleRole(for: node)
-        headerLengths[node.id] = TranscriptDocumentBuilder.headerLength(for: node)
     }
 }
