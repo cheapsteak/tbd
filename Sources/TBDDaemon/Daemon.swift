@@ -213,6 +213,16 @@ public final class Daemon: Sendable {
         )
         let prManager = PRStatusManager()
 
+        // 7a. Wire auto-archive-on-merge: when a worktree's cached PR state
+        // transitions into `.merged`, the coordinator evaluates the effective
+        // setting and archives the worktree (no active children) in the
+        // background.
+        let autoArchiveCoordinator = AutoArchiveOnMergeCoordinator(
+            db: database, lifecycle: lifecycle, subscriptions: subs)
+        await prManager.setOnMergedTransition { worktreeID, prNumber in
+            await autoArchiveCoordinator.handleMergedTransition(worktreeID: worktreeID, prNumber: prNumber)
+        }
+
         // 8. Initialize RPC router
         let rpcRouter = RPCRouter(
             db: database,
