@@ -66,16 +66,49 @@ struct TabBarHitAreaTests {
 
     private func keyViewProxyMaxWidth<Content: View>(_ rootView: Content) -> CGFloat {
         let host = NSHostingView(rootView: rootView)
+
+        // SwiftUI only instantiates the private `KeyViewProxy` button hit-target
+        // view once the host is inside a window that has been ordered in and
+        // given a display pass; `layoutSubtreeIfNeeded()` alone is not enough on
+        // macOS 26, where the proxy is created lazily at first render (so a bare
+        // hosting view yields zero proxies and a misleading 0-width measurement).
+        // Attach to a borderless window positioned far off-screen and order it
+        // in *regardless* — no app activation, no visible flash — so the
+        // measurement is reliable in a headless `swift test` process without
+        // disturbing the developer's desktop.
+        let window = NSWindow(
+            contentRect: NSRect(x: -20000, y: -20000, width: 220, height: 30),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        // ARC owns the local `window` reference, so closing must not also
+        // release it (the AppKit default would over-release and crash).
+        window.isReleasedWhenClosed = false
+        window.contentView = host
         host.frame = NSRect(x: 0, y: 0, width: 220, height: 30)
+        window.orderFrontRegardless()
         host.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+            // `orderOut` alone leaves the window in `NSApp.windows`; close it so
+            // the two windows this helper creates per test don't accumulate
+            // across a parallel `swift test` run.
+            window.close()
+        }
+
         return keyViewProxyFrames(in: host).map(\.width).max() ?? 0
     }
 
     private func keyViewProxyFrames(in view: NSView) -> [CGRect] {
         // SwiftUI's AppKit button hit target is materialized as a private
-        // KeyViewProxy view. There's no public NSView API that exposes the
-        // same button hit-region frame directly, so this string match is a
-        // deliberate test seam rather than an accidental private dependency.
+        // KeyViewProxy view (see `keyViewProxyMaxWidth` for why the host must be
+        // in an ordered-in window for this view to exist). There's no public
+        // NSView API that exposes the same button hit-region frame directly, so
+        // this string match is a deliberate test seam rather than an accidental
+        // private dependency.
         let current = String(describing: type(of: view)) == "KeyViewProxy" ? [view.frame] : []
         return current + view.subviews.flatMap(keyViewProxyFrames(in:))
     }
