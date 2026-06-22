@@ -96,7 +96,7 @@ struct STTextViewTranscriptPaneView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: TaskKey(terminalID: terminalID, retryToken: retryToken)) {
+        .task(id: TaskKey(terminalID: terminalID, sessionID: currentSessionID, retryToken: retryToken)) {
             Self.perfLog.debug("textkit.task.start terminalID=\(Self.shortID(terminalID.uuidString), privacy: .public)")
             if let cfg = harnessConfig {
                 await runPerfHarness(cfg)
@@ -167,17 +167,23 @@ struct STTextViewTranscriptPaneView: View {
             scrollToBottomToken: scrollToBottomToken,
             nodesProvider: { transcriptRenderNodes(from: displayedMessages) }
         )
-        // Pin the representable's identity to the terminal. Without this, SwiftUI
-        // reuses the NSViewRepresentable (and its Coordinator) when this pane is
-        // re-targeted at a different terminal/worktree — so makeCoordinator/
-        // makeNSView never re-run and the Coordinator keeps the PREVIOUS
-        // terminal's TranscriptDocument (its bound text storage AND the
-        // terminalID baked into every card attachment's TranscriptCardContext).
-        // The result is the pane showing another worktree's conversation. A
-        // terminalID-keyed identity forces a fresh Coordinator + initial
-        // rebuild on switch, while the wrapper's poll loop (re-keyed via
-        // `.task(id:)`) keeps streaming correctly. (#129)
-        .id(terminalID)
+        // Pin the representable's identity to BOTH the terminal AND its current
+        // Claude session. Terminal alone is insufficient: a single terminal hosts
+        // MULTIPLE Claude sessions over its lifetime (/clear, /compact, resume all
+        // roll `claudeSessionID` — see AppState.applyTerminalSessionDelta). With a
+        // terminalID-only id, a session rollover does NOT change identity, so the
+        // stateful Coordinator (its bound TranscriptDocument + cached previousNodes)
+        // PERSISTS across the rollover. If the `@State lastSessionID` rollover guard
+        // misses the change (it resets to nil whenever the view is recreated, e.g.
+        // tab switch), `liveThreadPath[terminalID]` is never reset and the pane
+        // keeps rendering the PREVIOUS session's drilled-in subagent thread —
+        // foreign content. Composing the session id into the identity forces a
+        // fresh Coordinator + clean rebuild on every session switch within a
+        // terminal, so the pane always re-resolves to the new session's primary
+        // (Main) timeline. The poll loop is re-keyed in lockstep via `.task(id:)`.
+        // Without a session, fall back to terminalID so the empty/placeholder
+        // states still have a stable identity. (#129)
+        .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
         .overlay(alignment: .bottomLeading) {
             jumpToBottomButton
                 .animation(.easeInOut(duration: 0.2), value: atBottom)
@@ -358,5 +364,17 @@ struct STTextViewTranscriptPaneView: View {
 
 private struct TaskKey: Equatable {
     let terminalID: UUID
+    let sessionID: String?
     let retryToken: Int
+}
+
+/// SwiftUI identity for the TextKit transcript representable. Composes the
+/// terminal with its CURRENT Claude session so a session rollover within one
+/// terminal (multi-session) tears down and rebuilds the stateful Coordinator,
+/// re-resolving from a clean baseline rather than persisting the prior session's
+/// drilled-in subagent thread. `sessionID == nil` (no session yet) still yields a
+/// stable per-terminal identity for the empty/placeholder states. (#129)
+private struct PaneIdentity: Hashable {
+    let terminalID: UUID
+    let sessionID: String?
 }

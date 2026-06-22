@@ -133,7 +133,18 @@ struct STTextViewTranscriptView: NSViewRepresentable {
             previousNodes = nodes
 
             if wasAtBottom {
-                textView.scrollToEndOfDocument(nil)
+                // DEFER the bottom-pin scroll (mirrors makeNSView's deferred
+                // initial scroll). `applyEdit` mutated the adopted storage inside
+                // `performEditingTransaction`, but TextKit 2 lays out the newly
+                // appended text ASYNCHRONOUSLY. A synchronous
+                // `scrollToEndOfDocument` here resolves against the STALE
+                // (pre-append) document height, so it stops short of the real new
+                // bottom and the viewport never follows the streamed tail. Running
+                // it on the next runloop turn lets layout extend the document
+                // first, so the scroll reaches the true new end. (#129)
+                DispatchQueue.main.async { [weak self] in
+                    self?.textView?.scrollToEndOfDocument(nil)
+                }
             } else {
                 // User has scrolled up — restore position so reading is undisturbed.
                 clip.scroll(to: savedOrigin)
@@ -143,7 +154,10 @@ struct STTextViewTranscriptView: NSViewRepresentable {
             // Recompute atBottom AFTER the edit so the jump-to-bottom button
             // reflects truth — but DEFER it (I1): TextKit 2 layout is async, so
             // reading geometry synchronously right after the edit sees stale
-            // frames. Re-read fresh geometry on the next runloop turn. (#129)
+            // frames. Re-read fresh geometry on the next runloop turn. The
+            // deferred bottom-pin scroll above is enqueued first, so by the time
+            // this block runs the viewport already reflects the post-scroll
+            // position. (#129)
             DispatchQueue.main.async { [weak self] in
                 guard self != nil, let scrollView = self?.scrollView else { return }
                 let freshClip = scrollView.contentView
