@@ -19,4 +19,20 @@ extension TranscriptRenderNode {
             badgeUsage: nil
         )
     }
+
+    static func makeUserPrompt(id: String, text: String) -> TranscriptRenderNode {
+        TranscriptRenderNode(
+            id: id,
+            kind: .chatBubble(.userPrompt(id: id, text: text, timestamp: nil)),
+            badgeUsage: nil
+        )
+    }
+
+    static func makeSubagentSummary(id: String, count: Int, agentType: String?) -> TranscriptRenderNode {
+        TranscriptRenderNode(
+            id: id,
+            kind: .subagentSummary(parentItemID: id, count: count, agentType: agentType),
+            badgeUsage: nil
+        )
+    }
 }
