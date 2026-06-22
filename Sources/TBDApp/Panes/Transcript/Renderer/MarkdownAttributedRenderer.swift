@@ -26,15 +26,18 @@ enum MarkdownAttributedRenderer {
 
 /// Walks the swift-markdown AST and appends styled runs. Only ever instantiated
 /// and used on the main actor (inside `MarkdownAttributedRenderer.render`). (#129)
-private struct AttributedStringVisitor: MarkupVisitor {
+///
+/// `@MainActor` keeps theme access (non-Sendable `NSFont`/`NSColor`) compiler-checked.
+/// The `@preconcurrency` on the `MarkupVisitor` conformance reconciles the nonisolated
+/// protocol requirements with this struct's main-actor isolation.
+@MainActor
+private struct AttributedStringVisitor {
     typealias Result = NSAttributedString
 
-    // nonisolated(unsafe): The visitor is only created/used on the main actor
-    // inside MarkdownAttributedRenderer.render. NSFont/NSColor in TranscriptTextTheme
-    // are not Sendable; this annotation suppresses the cross-isolation warning
-    // while the actual usage is safe by construction.
-    nonisolated(unsafe) let theme: TranscriptTextTheme
+    let theme: TranscriptTextTheme
+}
 
+extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
     mutating func defaultVisit(_ markup: Markup) -> NSAttributedString {
         let out = NSMutableAttributedString()
         for child in markup.children {
@@ -75,10 +78,16 @@ private struct AttributedStringVisitor: MarkupVisitor {
     private mutating func traited(_ markup: any Markup, _ trait: NSFontDescriptor.SymbolicTraits) -> NSAttributedString {
         let inner = NSMutableAttributedString()
         for child in markup.children { inner.append(visit(child)) }
-        let base = theme.bodyFont
-        let desc = base.fontDescriptor.withSymbolicTraits(base.fontDescriptor.symbolicTraits.union(trait))
-        let font = NSFont(descriptor: desc, size: base.pointSize) ?? base
-        inner.addAttribute(.font, value: font, range: NSRange(location: 0, length: inner.length))
+        // Merge the trait into each run's EXISTING font rather than blanket-replacing,
+        // so nested inline-code (monospace) inside bold/italic keeps its monospace face
+        // AND gains the bold/italic trait. Runs with no font yet get the body font + trait.
+        let full = NSRange(location: 0, length: inner.length)
+        inner.enumerateAttribute(.font, in: full, options: []) { value, range, _ in
+            let base = (value as? NSFont) ?? theme.bodyFont
+            let desc = base.fontDescriptor.withSymbolicTraits(base.fontDescriptor.symbolicTraits.union(trait))
+            let font = NSFont(descriptor: desc, size: base.pointSize) ?? base
+            inner.addAttribute(.font, value: font, range: range)
+        }
         return inner
     }
 }

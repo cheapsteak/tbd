@@ -35,6 +35,16 @@ struct MarkdownAttributedRendererTests {
         #expect((link as? URL)?.absoluteString == "https://e.com" || (link as? String) == "https://e.com")
     }
 
+    @Test("inline code nested in bold keeps monospace AND gains the bold trait")
+    func nestedCodeInBold() {
+        let s = MarkdownAttributedRenderer.render("**a `c` b**")
+        let r = (s.string as NSString).range(of: "c")
+        let font = s.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont
+        let traits = font?.fontDescriptor.symbolicTraits
+        #expect(traits?.contains(.monoSpace) == true)
+        #expect(traits?.contains(.bold) == true)
+    }
+
     // MARK: - Helpers
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {
