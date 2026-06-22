@@ -516,15 +516,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             debugLog("PANEL: process terminated, exitCode=\(exitCode ?? -1)")
             DispatchQueue.main.async { [weak self] in
                 // This fires when the *attach client* (the on-screen tmux
-                // viewer) dies — e.g. the view was torn down or detached. The
-                // underlying tmux window keeps running (`remain-on-exit on`),
-                // so the user's shell/agent is almost always still alive. Avoid
-                // the old "[Process exited with code 0]" wording, which read as
-                // if the user's work had died. Surface a non-zero code only when
-                // the viewer genuinely exited abnormally.
+                // viewer) dies. A clean exit (code 0) means the view was torn
+                // down or detached while the underlying tmux window keeps
+                // running (`remain-on-exit on`), so the user's shell/agent is
+                // still alive — reopening reattaches. A non-zero exit (e.g. the
+                // whole tmux server died on sleep/wake or OOM, exit 256) means
+                // the session is NOT still running; don't claim it is. Reopening
+                // triggers prepareSession → onDeadWindow → park → Resume (or
+                // reattaches if the window is somehow still alive), so "recover"
+                // is honest in both cases.
                 let message: String
                 if let code = exitCode, code != 0 {
-                    message = "\r\n[View detached (exit \(code)) — session is still running in the background. Reopen this tab to reattach.]\r\n"
+                    message = "\r\n[View disconnected (exit \(code)). Reopen this tab to recover the session.]\r\n"
                 } else {
                     message = "\r\n[View detached — session is still running in the background. Reopen this tab to reattach.]\r\n"
                 }

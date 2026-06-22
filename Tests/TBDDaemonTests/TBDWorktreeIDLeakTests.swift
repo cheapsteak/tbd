@@ -205,6 +205,115 @@ func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
             "recreated codex tab must not use removed --full-auto flag; got bodies: \(bodies)")
 }
 
+// MARK: - Dead-window recovery: park resumable Claude terminals instead of wiping to shell
+
+/// When a Claude terminal's tmux window dies under a LIVE app+daemon (sleep/wake
+/// or OOM, no daemon restart), `handleTerminalRecreateWindow` must NOT recreate
+/// it as a plain shell — that nulls `claudeSessionID`/`transcriptPath` and flips
+/// `kind` to `.shell`, destroying the ability to Resume and breaking `/resume`.
+/// It must mirror reconcile(): park the terminal as suspended, preserving
+/// identity, so the app renders the moon state and offers Resume.
+@Test("handleTerminalRecreateWindow parks a resumable Claude terminal as suspended")
+func testHandleTerminalRecreateWindowParksClaudeAsSuspended() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let tmux = TmuxManager(dryRun: true)
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: tmux,
+            hooks: HookResolver()
+        ),
+        tmux: tmux
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-recreate-claude", displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-recreate-claude",
+        branch: "tbd/wt-recreate-claude",
+        path: "/tmp/fake-repo-recreate-claude/wt-recreate-claude",
+        tmuxServer: "tbd-c1a0de00"
+    )
+    let sessionID = "11111111-2222-3333-4444-555555555555"
+    let transcriptPath = "/tmp/fake-repo-recreate-claude/.claude/projects/foo/\(sessionID).jsonl"
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@old-claude",
+        tmuxPaneID: "%old-claude",
+        label: "claude",
+        claudeSessionID: sessionID,
+        kind: .claude
+    )
+    // create() doesn't accept transcriptPath; set it via the SessionStart bridge API.
+    try await db.terminals.updateSession(id: terminal.id, sessionID: sessionID, transcriptPath: transcriptPath)
+
+    let request = try RPCRequest(
+        method: RPCMethod.terminalRecreateWindow,
+        params: TerminalRecreateWindowParams(terminalID: terminal.id)
+    )
+    let response = await router.handle(request)
+    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+    let updated = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(updated.suspendedAt != nil, "claude terminal must be parked as suspended, not recreated as shell")
+    #expect(updated.kind == .claude, "kind must stay .claude, not flip to .shell")
+    #expect(updated.claudeSessionID == sessionID, "claudeSessionID must be preserved")
+    #expect(updated.transcriptPath == transcriptPath, "transcriptPath must be preserved")
+    #expect(updated.isClaudeResumable, "parked terminal must remain Claude-resumable")
+}
+
+/// Regression guard for the OTHER branch: a plain shell terminal whose window
+/// died must still be recreated as a plain shell (NOT parked as suspended).
+@Test("handleTerminalRecreateWindow rebuilds a shell terminal as a shell")
+func testHandleTerminalRecreateWindowRebuildsShellAsShell() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let tmux = TmuxManager(dryRun: true)
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: tmux,
+            hooks: HookResolver()
+        ),
+        tmux: tmux
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-recreate-shell", displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-recreate-shell",
+        branch: "tbd/wt-recreate-shell",
+        path: "/tmp/fake-repo-recreate-shell/wt-recreate-shell",
+        tmuxServer: "tbd-5be11000"
+    )
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@old-shell",
+        tmuxPaneID: "%old-shell",
+        label: "shell",
+        kind: .shell
+    )
+
+    let request = try RPCRequest(
+        method: RPCMethod.terminalRecreateWindow,
+        params: TerminalRecreateWindowParams(terminalID: terminal.id)
+    )
+    let response = await router.handle(request)
+    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+    let updated = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(updated.suspendedAt == nil, "shell terminal must not be parked as suspended")
+    #expect(updated.kind == .shell, "shell terminal must remain a shell")
+    #expect(updated.claudeSessionID == nil, "shell terminal has no session to preserve")
+}
+
 // MARK: - Fix 3: setupTerminals injects TBD_TERMINAL_ID + TBD_WORKTREE_ID on the setup tab
 
 /// Regression test for the bug where the auto-created "setup" tab that gets
