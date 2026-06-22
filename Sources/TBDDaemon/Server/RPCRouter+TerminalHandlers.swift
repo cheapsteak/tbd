@@ -349,6 +349,28 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
+        // A Claude-resumable terminal whose window died must NOT be recreated as a
+        // plain shell — that silently turns the tab into a shell and discards the
+        // session identity (claudeSessionID/transcriptPath), so TBD can no longer
+        // Resume and `/resume` finds nothing. Mirror reconcile(): park it as
+        // suspended, preserving identity, so the app renders the suspended (moon)
+        // state and offers Resume. Resume rebuilds a fresh window from the session
+        // ID on demand, so this is non-destructive even if the window were somehow
+        // still alive.
+        if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
+            // Clean up any lingering (almost always already-dead) window to avoid orphans.
+            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
+            try await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID)
+            // Drop any stale pending-question entry — the window the question
+            // belonged to is gone. Mirrors reconcile()/handleTerminalDelete.
+            await pendingQuestions.clear(terminalID: terminal.id)
+            guard let updated = try await db.terminals.get(id: params.terminalID) else {
+                return RPCResponse(error: "Terminal not found after suspend")
+            }
+            logger.info("recreateWindow: parked claude terminal \(terminal.id, privacy: .public) as suspended — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
+            return try RPCResponse(result: updated)
+        }
+
         // Kill the old window if it still exists (avoids orphans)
         try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
 
