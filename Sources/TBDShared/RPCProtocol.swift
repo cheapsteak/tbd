@@ -155,6 +155,9 @@ public enum RPCMethod {
     public static let configSetEnvOverrides       = "config.setEnvOverrides"
     public static let repoSetEnvOverrides         = "repo.setEnvOverrides"
     public static let modelProfileSetEnvOverrides = "modelProfile.setEnvOverrides"
+    public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
+    public static let configGet = "config.get"
+    public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
 }
 
 // MARK: - Branch Listing
@@ -424,16 +427,19 @@ public struct ModelProfileListResult: Codable, Sendable {
     /// The global free-form env overrides (config scope). Carried alongside the
     /// other config-derived fields so the app loads it in one round-trip.
     public let globalEnvOverrides: [String: String]
+    public let autoArchiveOnMergeDefault: Bool
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
         primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
-        globalEnvOverrides: [String: String] = [:]
+        globalEnvOverrides: [String: String] = [:],
+        autoArchiveOnMergeDefault: Bool = false
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
         self.primaryAgentPreference = primaryAgentPreference
         self.globalEnvOverrides = globalEnvOverrides
+        self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
     }
 
     public init(from decoder: Decoder) throws {
@@ -448,6 +454,8 @@ public struct ModelProfileListResult: Codable, Sendable {
             [String: String].self,
             forKey: .globalEnvOverrides
         ) ?? [:]
+        autoArchiveOnMergeDefault = try c.decodeIfPresent(
+            Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
     }
 }
 
@@ -826,6 +834,19 @@ public struct ClaudeSpawnPreferences: Codable, Sendable, Equatable {
 public struct SetGlobalEnvOverridesParams: Codable, Sendable, Equatable {
     public let overrides: [String: String]
     public init(overrides: [String: String]) { self.overrides = overrides }
+}
+
+public struct WorktreeSetAutoArchiveParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let enabled: Bool
+    public init(worktreeID: UUID, enabled: Bool) {
+        self.worktreeID = worktreeID; self.enabled = enabled
+    }
+}
+
+public struct ConfigSetAutoArchiveDefaultParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
 }
 
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.
