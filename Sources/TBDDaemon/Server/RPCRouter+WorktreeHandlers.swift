@@ -237,4 +237,10 @@ extension RPCRouter {
 
         return .ok()
     }
+
+    func handleWorktreeSetAutoArchive(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeSetAutoArchiveParams.self, from: paramsData)
+        try await db.worktrees.setAutoArchiveOnMerge(id: params.worktreeID, value: params.enabled)
+        return .ok()
+    }
 }

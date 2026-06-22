@@ -36,7 +36,8 @@ extension RPCRouter {
             profiles: result,
             defaultID: config.defaultProfileID,
             primaryAgentPreference: config.primaryAgentPreference,
-            globalEnvOverrides: config.envOverrides
+            globalEnvOverrides: config.envOverrides,
+            autoArchiveOnMergeDefault: config.autoArchiveOnMergeDefault
         ))
     }
 
