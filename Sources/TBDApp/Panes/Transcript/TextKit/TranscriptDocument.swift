@@ -17,11 +17,18 @@ final class TranscriptDocument {
 
     // MARK: - Public state
 
-    /// The accumulated attributed string. Consumers (NSTextContentStorage) hold a
-    /// reference to this object; mutation is safe because all callers are @MainActor.
-    /// The object identity is stable for the document's lifetime — `rebuild` mutates
-    /// in place rather than replacing the instance.
-    private(set) var storage = NSMutableAttributedString()
+    /// The accumulated attributed string — the SINGLE SOURCE OF TRUTH the
+    /// `STTextView` actually renders. After `bind(to:)` adopts STTextView's own
+    /// `NSTextContentStorage.textStorage`, every mutation here (`append`/
+    /// `updateLast`/`rebuild`) lands directly in the bytes the layout manager
+    /// lays out, so streaming edits are visible. (Before `bind`, it is a
+    /// standalone `NSTextStorage()` — e.g. in document-layer unit tests.)
+    ///
+    /// `NSTextStorage` is an `NSMutableAttributedString` subclass, so
+    /// `append`/`replaceCharacters`/`deleteCharacters`/`length`/`string`/
+    /// `enumerateAttribute` all behave identically. Consumers may hold a
+    /// reference; mutation is safe because all callers are @MainActor.
+    private(set) var storage = NSTextStorage()
 
     /// Mirrors `storage.length` without requiring a property read on every hot-path call.
     private(set) var length = 0
@@ -45,6 +52,22 @@ final class TranscriptDocument {
     }
 
     // MARK: - Public API
+
+    /// Adopt an externally-owned `NSTextStorage` (STTextView's own
+    /// `NSTextContentStorage.textStorage`) as this document's backing store, so
+    /// the document mutates the EXACT object STTextView renders. Without this,
+    /// `attributedText =` would copy bytes into a different internal storage and
+    /// our streaming `append`/`updateLast` would be invisible (#129, C1).
+    ///
+    /// Resets all bookkeeping; the caller must follow with `rebuild` to populate
+    /// the adopted storage from the current nodes. We do NOT replace STTextView's
+    /// `textStorage` object — we reuse the one already wired to its layout manager.
+    func bind(to external: NSTextStorage) {
+        storage = external
+        ranges.removeAll(keepingCapacity: true)
+        order.removeAll(keepingCapacity: true)
+        length = 0
+    }
 
     /// The node IDs present in the document, in document order.
     var nodeIDs: [String] { order }

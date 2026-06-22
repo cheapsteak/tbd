@@ -36,12 +36,32 @@ struct STTextViewTranscriptView: NSViewRepresentable {
         scrollView.autohidesScrollers = true
 
         let nodes = nodesProvider()
-        coordinator.document.rebuild(nodes)
+        // Adopt STTextView's OWN text storage as the document's backing store so
+        // streaming edits mutate the EXACT object STTextView renders (#129, C1).
+        // `attributedText =` would copy bytes into a different internal storage,
+        // making subsequent incremental edits invisible. Reuse the existing
+        // textStorage already wired to STTextView's layout manager; only create
+        // one if STTextView didn't (older fallback).
+        if let contentStorage = textView.textContentManager as? NSTextContentStorage {
+            let textStorage: NSTextStorage
+            if let existing = contentStorage.textStorage {
+                textStorage = existing
+            } else {
+                let created = NSTextStorage()
+                contentStorage.textStorage = created
+                textStorage = created
+            }
+            coordinator.document.bind(to: textStorage)
+            coordinator.document.rebuild(nodes)
+        } else {
+            // Fallback: no NSTextContentStorage available — install via
+            // attributedText (copies; streaming may not render, but keeps
+            // correctness on unexpected content-manager types).
+            Self.log.debug("textkit.pane.install.fallback no NSTextContentStorage; using attributedText copy")
+            coordinator.document.rebuild(nodes)
+            textView.attributedText = coordinator.document.storage
+        }
         coordinator.previousNodes = nodes
-        // Install the document's storage as the text view's content ONCE.
-        // After this, all mutations go through TranscriptDocument and are
-        // wrapped in performEditingTransaction so TextKit 2 sees incremental edits.
-        textView.attributedText = coordinator.document.storage
         coordinator.textView = textView
         coordinator.scrollView = scrollView
         coordinator.lastScrollToken = scrollToBottomToken
@@ -116,13 +136,20 @@ struct STTextViewTranscriptView: NSViewRepresentable {
                 scrollView.reflectScrolledClipView(clip)
             }
 
-            // Recompute atBottom after the edit so the jump-to-bottom button reflects truth.
-            let newVisibleMaxY = clip.bounds.origin.y + clip.bounds.height
-            let newDocMaxY = scrollView.documentView?.frame.maxY ?? newVisibleMaxY
-            atBottom.wrappedValue = TranscriptStreamPlan.isNearBottom(
-                documentMaxY: newDocMaxY,
-                visibleMaxY: newVisibleMaxY
-            )
+            // Recompute atBottom AFTER the edit so the jump-to-bottom button
+            // reflects truth — but DEFER it (I1): TextKit 2 layout is async, so
+            // reading geometry synchronously right after the edit sees stale
+            // frames. Re-read fresh geometry on the next runloop turn. (#129)
+            DispatchQueue.main.async { [weak self] in
+                guard self != nil, let scrollView = self?.scrollView else { return }
+                let freshClip = scrollView.contentView
+                let newVisibleMaxY = freshClip.bounds.origin.y + freshClip.bounds.height
+                let newDocMaxY = scrollView.documentView?.frame.maxY ?? newVisibleMaxY
+                atBottom.wrappedValue = TranscriptStreamPlan.isNearBottom(
+                    documentMaxY: newDocMaxY,
+                    visibleMaxY: newVisibleMaxY
+                )
+            }
         }
 
         /// Apply a `TranscriptStreamStep` to the document.
@@ -136,9 +163,10 @@ struct STTextViewTranscriptView: NSViewRepresentable {
         /// gets notified and re-lays out only the changed tail, with no
         /// selection-driven scroll side effect. (#129, spike `:312-340`)
         ///
-        /// For `.rebuild` (structural divergence), reinstall via
-        /// `textView.attributedText = document.storage` (full reset; acceptable on
-        /// the rare rebuild path — matches the SwiftUI `transcript.swap`).
+        /// For `.rebuild` (structural divergence), mutate the adopted storage in
+        /// place inside a `performEditingTransaction` — the document's storage IS
+        /// the rendered storage (after `bind`), so `document.rebuild` repopulates
+        /// the exact bytes STTextView lays out. No `attributedText =` reassignment.
         private func applyEdit(
             step: TranscriptStreamStep,
             nodes: [TranscriptRenderNode],
@@ -155,8 +183,9 @@ struct STTextViewTranscriptView: NSViewRepresentable {
             case .noop:
                 return
             case .rebuild:
-                document.rebuild(nodes)
-                textView.attributedText = document.storage
+                storage.performEditingTransaction {
+                    document.rebuild(nodes)
+                }
             case let .append(fromIndex):
                 storage.performEditingTransaction {
                     for node in nodes[fromIndex...] { document.append(node) }
