@@ -361,6 +361,9 @@ extension RPCRouter {
             // Clean up any lingering (almost always already-dead) window to avoid orphans.
             try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
             try await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID)
+            // Drop any stale pending-question entry — the window the question
+            // belonged to is gone. Mirrors reconcile()/handleTerminalDelete.
+            await pendingQuestions.clear(terminalID: terminal.id)
             guard let updated = try await db.terminals.get(id: params.terminalID) else {
                 return RPCResponse(error: "Terminal not found after suspend")
             }

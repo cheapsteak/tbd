@@ -522,12 +522,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // still alive — reopening reattaches. A non-zero exit (e.g. the
                 // whole tmux server died on sleep/wake or OOM, exit 256) means
                 // the session is NOT still running; don't claim it is. Reopening
-                // triggers prepareSession → onDeadWindow → park → Resume (or
-                // reattaches if the window is somehow still alive), so "recover"
-                // is honest in both cases.
+                // does the right thing for every tab kind — reattaches a live
+                // window, parks+resumes a dead Claude one, or respawns a
+                // shell/Codex — so use neutral "reconnect" wording that doesn't
+                // overpromise a session "recovery" for plain shell/Codex tabs.
                 let message: String
                 if let code = exitCode, code != 0 {
-                    message = "\r\n[View disconnected (exit \(code)). Reopen this tab to recover the session.]\r\n"
+                    message = "\r\n[View disconnected (exit \(code)). Reopen this tab to reconnect.]\r\n"
                 } else {
                     message = "\r\n[View detached — session is still running in the background. Reopen this tab to reattach.]\r\n"
                 }
