@@ -140,6 +140,21 @@ struct ContentView: View {
                             PRButtonLabel(prStatus: prStatus)
                         }
                         .help("Open PR in browser pane")
+
+                        if let worktree = appState.findWorktree(id: worktreeID) {
+                            let armed = appState.effectiveAutoArchive(for: worktree)
+                            let blocked = !appState.children(of: worktreeID).isEmpty
+                            Button {
+                                Task { await appState.setAutoArchive(worktreeID: worktreeID, enabled: !armed) }
+                            } label: {
+                                Image(systemName: armed ? "archivebox.fill" : "archivebox")
+                                    .foregroundStyle(armed ? Color.accentColor : Color.secondary)
+                            }
+                            .disabled(blocked)
+                            .help(blocked
+                                ? "Can't auto-archive: this worktree has active children"
+                                : "Auto-archive this worktree when PR #\(prStatus.number) merges")
+                        }
                     }
 
                     Button {
