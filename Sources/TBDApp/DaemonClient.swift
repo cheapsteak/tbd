@@ -658,6 +658,22 @@ actor DaemonClient {
         )
     }
 
+    /// Set the per-worktree auto-archive-on-PR-merge override.
+    func setWorktreeAutoArchive(id: UUID, enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeSetAutoArchive,
+            params: WorktreeSetAutoArchiveParams(worktreeID: id, enabled: enabled)
+        )
+    }
+
+    /// Set the global default for auto-archive-on-PR-merge.
+    func setAutoArchiveOnMergeDefault(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoArchiveOnMergeDefault,
+            params: ConfigSetAutoArchiveDefaultParams(enabled: enabled)
+        )
+    }
+
     /// Set or clear a repo's free-form env overrides.
     func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
         try await callVoidAsync(

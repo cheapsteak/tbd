@@ -360,6 +360,9 @@ final class AppState: ObservableObject {
     /// Global free-form env overrides (config scope). Loaded from the daemon
     /// alongside `defaultProfileID` via `loadModelProfiles()`.
     @Published var globalEnvOverrides: [String: String] = [:]
+    /// Global default for auto-archive-on-PR-merge. Loaded from the daemon
+    /// alongside `globalEnvOverrides` via `loadModelProfiles()`.
+    @Published var autoArchiveOnMergeDefault: Bool = false
     /// Terminals where the user has dismissed the proxy-unreachable banner.
     /// Cleared on app relaunch (in-memory only — banners are advisory).
     @Published var dismissedProxyWarnings: Set<UUID> = []
