@@ -16,6 +16,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var claude_env_settings: String?
     /// JSON-encoded `[String: String]` free-form env overrides (global scope).
     var env_overrides: String?
+    var auto_archive_on_merge_default: Bool?
 
     func toModel() -> Config {
         Config(
@@ -23,7 +24,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             primaryAgentPreference: primary_agent_preference
                 .flatMap(PrimaryAgentPreference.init(rawValue:)) ?? .defaultValue,
             envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings),
-            envOverrides: EnvOverridesCoding.decode(env_overrides)
+            envOverrides: EnvOverridesCoding.decode(env_overrides),
+            autoArchiveOnMergeDefault: auto_archive_on_merge_default ?? false
         )
     }
 }
@@ -96,6 +98,18 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET env_overrides = ? WHERE id = ?",
                 arguments: [json, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the global auto-archive-on-merge default. When true, every
+    /// worktree that hasn't overridden `autoArchiveOnMerge` will be archived
+    /// when its PR merges.
+    public func setAutoArchiveOnMergeDefault(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_archive_on_merge_default = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
             )
         }
     }

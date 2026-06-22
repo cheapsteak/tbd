@@ -542,6 +542,16 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "model_profiles", column: "env_overrides", type: .text)
         }
 
+        migrator.registerMigration("v32_worktree_auto_archive") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "autoArchiveOnMerge", type: .boolean)
+        }
+
+        migrator.registerMigration("v33_config_auto_archive_default") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_archive_on_merge_default",
+                type: .boolean, defaults: false)
+        }
+
         return migrator
     }
 }
