@@ -1057,11 +1057,25 @@ public struct TerminalSessionEventParams: Codable, Sendable {
     public let sessionID: String
     public let transcriptPath: String?
     public let source: String?
-    public init(terminalID: UUID, sessionID: String, transcriptPath: String?, source: String?) {
+    /// Claude's reported working directory (`cwd` in the SessionStart hook
+    /// payload). Transient — used only to validate that the reported session
+    /// belongs to the target terminal's worktree, guarding against a foreign
+    /// Claude session (e.g. a multi-agent teammate that inherited the
+    /// terminal's `TBD_TERMINAL_ID` env) hijacking the session pointer.
+    /// Optional for backward compatibility with older CLIs that don't send it.
+    public let cwd: String?
+    public init(
+        terminalID: UUID,
+        sessionID: String,
+        transcriptPath: String?,
+        source: String?,
+        cwd: String? = nil
+    ) {
         self.terminalID = terminalID
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
         self.source = source
+        self.cwd = cwd
     }
 }
 

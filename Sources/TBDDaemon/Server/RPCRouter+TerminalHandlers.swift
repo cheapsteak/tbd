@@ -969,31 +969,33 @@ extension RPCRouter {
 
     func handleResolvePath(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ResolvePathParams.self, from: paramsData)
-        let path = (params.path as NSString).standardizingPath
 
         // Walk up from the given path and try to match against known repos/worktrees
-        var currentPath = path
-
-        while currentPath != "/" && currentPath != "" {
-            // Check if this path matches a worktree
-            if let worktree = try await db.worktrees.findByPath(path: currentPath) {
-                let result = ResolvedPathResult(repoID: worktree.repoID, worktreeID: worktree.id)
-                return try RPCResponse(result: result)
-            }
-
-            // Check if this path matches a repo
-            if let repo = try await db.repos.findByPath(path: currentPath) {
-                let result = ResolvedPathResult(repoID: repo.id, worktreeID: nil)
-                return try RPCResponse(result: result)
-            }
-
-            // Move up one directory
-            currentPath = (currentPath as NSString).deletingLastPathComponent
+        if let resolved = try await resolvePathToRepoOrWorktree(params.path) {
+            return try RPCResponse(result: resolved)
         }
 
         // No match found
         let result = ResolvedPathResult(repoID: nil, worktreeID: nil)
         return try RPCResponse(result: result)
+    }
+
+    /// Walk up from `path`, matching each ancestor directory against known
+    /// worktrees (preferred) then repos. Returns the first match, or `nil` if
+    /// the path doesn't live inside any TBD-tracked repo/worktree. Shared by
+    /// `handleResolvePath` and the session-event worktree-ownership guard.
+    func resolvePathToRepoOrWorktree(_ path: String) async throws -> ResolvedPathResult? {
+        var currentPath = (path as NSString).standardizingPath
+        while currentPath != "/" && currentPath != "" {
+            if let worktree = try await db.worktrees.findByPath(path: currentPath) {
+                return ResolvedPathResult(repoID: worktree.repoID, worktreeID: worktree.id)
+            }
+            if let repo = try await db.repos.findByPath(path: currentPath) {
+                return ResolvedPathResult(repoID: repo.id, worktreeID: nil)
+            }
+            currentPath = (currentPath as NSString).deletingLastPathComponent
+        }
+        return nil
     }
 
     /// Bridge for the Claude SessionStart hook. The CLI relays the hook
@@ -1010,6 +1012,40 @@ extension RPCRouter {
             // error would just spam stderr inside Claude.
             logger.debug("sessionEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
+        }
+
+        // Worktree-ownership guard: `TBD_TERMINAL_ID` is injected at terminal
+        // creation and INHERITED by every descendant process — including
+        // multi-agent teammates and subprocesses that run their own Claude
+        // session and fire their own SessionStart hook. Routing solely by
+        // `TBD_TERMINAL_ID` lets such a foreign session hijack the terminal's
+        // `claudeSessionID`, so the transcript pane shows the wrong
+        // conversation. Defend by requiring the hook's reported `cwd` to
+        // resolve to the SAME worktree as the target terminal. A mismatch
+        // means the event came from a foreign session living in a different
+        // worktree — reject it (soft success; the hook is fire-and-forget).
+        //
+        // Self-heal: the guard ACCEPTS the legitimate session's events even
+        // when the stored pointer is currently foreign, so a hijacked terminal
+        // recovers to its real session on the next valid SessionStart (e.g.
+        // resume/clear). `cwd` is optional for backward compatibility — when
+        // absent we cannot validate, so we fall back to the old behavior.
+        if let cwd = params.cwd, !cwd.isEmpty {
+            let resolved = try await resolvePathToRepoOrWorktree(cwd)
+            if resolved?.worktreeID != terminal.worktreeID {
+                logger.info(
+                    """
+                    sessionEvent: REJECTED foreign session for terminal \
+                    \(terminal.id.uuidString, privacy: .public) — hook cwd \
+                    \(cwd, privacy: .public) resolves to worktree \
+                    \(resolved?.worktreeID?.uuidString ?? "none", privacy: .public) \
+                    but terminal belongs to worktree \
+                    \(terminal.worktreeID.uuidString, privacy: .public); \
+                    not updating claudeSessionID
+                    """
+                )
+                return .ok()
+            }
         }
 
         // Sanitize: an empty transcriptPath shouldn't overwrite an existing

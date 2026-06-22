@@ -47,6 +47,23 @@ struct TerminalSessionEventHandlerTests {
         return (terminal, wt)
     }
 
+    /// Creates a second, independent worktree (different path) so we can
+    /// simulate a foreign Claude session whose cwd lives elsewhere.
+    private func makeForeignWorktree() async throws -> Worktree {
+        let repo = try await db.repos.create(
+            path: "/tmp/se-foreign-repo-\(UUID().uuidString)",
+            displayName: "acme-prod",
+            defaultBranch: "main"
+        )
+        return try await db.worktrees.create(
+            repoID: repo.id,
+            name: "acme-prod-wt",
+            branch: "main",
+            path: "/tmp/se-foreign-wt-\(UUID().uuidString)",
+            tmuxServer: "tbd-se-foreign"
+        )
+    }
+
     @Test("updates sessionID + transcriptPath in DB on a fresh SessionStart")
     func updatesSessionAndBroadcasts() async throws {
         let (terminal, _) = try await makeTerminal(initialSession: "old-id")
@@ -147,6 +164,111 @@ struct TerminalSessionEventHandlerTests {
         let response = await router.handle(request)
         #expect(response.success)
         #expect(response.error == nil)
+    }
+
+    // MARK: - Worktree-ownership guard (foreign-session hijack defense)
+
+    @Test("guard ACCEPTS event whose cwd resolves to the terminal's worktree")
+    func guardAcceptsMatchingWorktreeCwd() async throws {
+        let (terminal, wt) = try await makeTerminal(initialSession: "old-id")
+        // A cwd nested inside the terminal's own worktree path.
+        let cwd = wt.path + "/Sources/Foo"
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "real-session",
+                transcriptPath: "/abs/real-session.jsonl",
+                source: "startup",
+                cwd: cwd
+            )
+        ))
+        #expect(response.success)
+        let updated = try await db.terminals.get(id: terminal.id)
+        #expect(updated?.claudeSessionID == "real-session")
+        #expect(updated?.transcriptPath == "/abs/real-session.jsonl")
+    }
+
+    @Test("guard REJECTS event whose cwd resolves to a DIFFERENT worktree")
+    func guardRejectsForeignWorktreeCwd() async throws {
+        let (terminal, _) = try await makeTerminal(initialSession: "old-id")
+        let foreign = try await makeForeignWorktree()
+        // Foreign teammate session inherited TBD_TERMINAL_ID but runs in a
+        // different worktree's directory.
+        let cwd = foreign.path + "/subdir"
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "foreign-session",
+                transcriptPath: "/abs/foreign-session.jsonl",
+                source: "startup",
+                cwd: cwd
+            )
+        ))
+        // Soft success (fire-and-forget hook) but the pointer is unchanged.
+        #expect(response.success)
+        let updated = try await db.terminals.get(id: terminal.id)
+        #expect(updated?.claudeSessionID == "old-id")
+        #expect(updated?.transcriptPath == nil)
+    }
+
+    @Test("guard REJECTS event whose cwd resolves to NO known worktree")
+    func guardRejectsUnknownCwd() async throws {
+        let (terminal, _) = try await makeTerminal(initialSession: "old-id")
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "stray-session",
+                transcriptPath: nil,
+                source: "startup",
+                cwd: "/tmp/se-unrelated-\(UUID().uuidString)/nope"
+            )
+        ))
+        #expect(response.success)
+        let updated = try await db.terminals.get(id: terminal.id)
+        #expect(updated?.claudeSessionID == "old-id")
+    }
+
+    @Test("guard is bypassed when cwd is absent (backward compatibility)")
+    func guardBypassedWhenCwdAbsent() async throws {
+        let (terminal, _) = try await makeTerminal(initialSession: "old-id")
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "no-cwd-session",
+                transcriptPath: nil,
+                source: "startup",
+                cwd: nil
+            )
+        ))
+        #expect(response.success)
+        let updated = try await db.terminals.get(id: terminal.id)
+        #expect(updated?.claudeSessionID == "no-cwd-session")
+    }
+
+    @Test("self-heal: a terminal stuck on a foreign pointer recovers on the next valid SessionStart")
+    func selfHealRecoversFromForeignPointer() async throws {
+        // Terminal is already hijacked: its stored session is foreign.
+        let (terminal, wt) = try await makeTerminal(initialSession: "foreign-2907c5ee")
+        // The terminal's REAL Claude fires its own SessionStart with a cwd
+        // inside the terminal's own worktree — this must be accepted and must
+        // overwrite the foreign pointer.
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "real-session-after-heal",
+                transcriptPath: "/abs/real.jsonl",
+                source: "resume",
+                cwd: wt.path
+            )
+        ))
+        #expect(response.success)
+        let updated = try await db.terminals.get(id: terminal.id)
+        #expect(updated?.claudeSessionID == "real-session-after-heal")
     }
 
     @Test("transcript handler prefers stored transcriptPath over cwd resolution")
