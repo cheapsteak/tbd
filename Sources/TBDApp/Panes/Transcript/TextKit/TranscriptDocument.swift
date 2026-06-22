@@ -6,7 +6,8 @@ import AppKit
 /// and a `node.id → NSRange` map so the layout engine can address individual nodes.
 /// Exposes three mutation points for the streaming lifecycle:
 ///
-/// - `rebuild(_:)` — full replace (initial load or /clear).
+/// - `rebuild(_:)` — full replace (initial load or /clear). Mutates `storage` in place so
+///   consumers (NSTextContentStorage) holding a reference to the same object stay valid.
 /// - `append(_:)` — O(1) append for each newly arrived node during streaming.
 /// - `updateLast(_:)` — O(tail) in-place replace of the streaming tail node when its
 ///   content grows (text delta, tool result, error flag). Earlier nodes are immutable
@@ -18,6 +19,8 @@ final class TranscriptDocument {
 
     /// The accumulated attributed string. Consumers (NSTextContentStorage) hold a
     /// reference to this object; mutation is safe because all callers are @MainActor.
+    /// The object identity is stable for the document's lifetime — `rebuild` mutates
+    /// in place rather than replacing the instance.
     private(set) var storage = NSMutableAttributedString()
 
     /// Mirrors `storage.length` without requiring a property read on every hot-path call.
@@ -50,41 +53,65 @@ final class TranscriptDocument {
     func range(forNodeID id: String) -> NSRange? { ranges[id] }
 
     /// Replaces the entire document with fragments built from `nodes`.
-    /// Resets `storage`, `ranges`, `order`, and `length`.
+    /// Mutates `storage` **in place** (preserving object identity) so any consumer
+    /// holding a reference to `storage` does not go stale.
     func rebuild(_ nodes: [TranscriptRenderNode]) {
-        storage = NSMutableAttributedString()
+        storage.deleteCharacters(in: NSRange(location: 0, length: storage.length))
         length = 0
         ranges.removeAll(keepingCapacity: true)
         order.removeAll(keepingCapacity: true)
-        for node in nodes { append(node) }
+        for node in nodes { appendNew(node) }
     }
 
     /// Appends a new node fragment to the end of the document.
     ///
-    /// If `node.id` is already tracked (e.g. called twice for the same id),
-    /// the range map is updated in place and no duplicate id is added to `order`.
+    /// - If `node.id` is not yet tracked → appends normally.
+    /// - If `node.id` is the current tail → in-place tail replace (same as `updateLast`).
+    /// - If `node.id` is tracked but is NOT the tail → no-op (prevents orphaned bytes).
     func append(_ node: TranscriptRenderNode) {
-        let fragment = TranscriptDocumentBuilder.fragment(for: node, context: context)
-        let start = length
-        storage.append(fragment)
-        length = storage.length
-        let nodeRange = NSRange(location: start, length: length - start)
-        if ranges[node.id] == nil {
-            order.append(node.id)
+        guard let oldRange = ranges[node.id] else {
+            appendNew(node)
+            return
         }
-        ranges[node.id] = nodeRange
+        // Already tracked.
+        if order.last == node.id {
+            replaceTail(node, oldRange: oldRange)
+        }
+        // else: tracked non-tail — no-op to avoid orphaning bytes.
     }
 
     /// Re-renders only the tail node in place. Used for streaming deltas where the
     /// last node's content grows (more text, tool result arriving, etc.).
     ///
-    /// Requires `node.id == order.last`. If the id is not the tail (or the document
-    /// is empty), falls back to `append(_:)` rather than crashing.
+    /// - If `node.id` equals the current tail → in-place replace (normal path).
+    /// - If `node.id` is not yet tracked → delegates to `appendNew` (brand-new node).
+    /// - If `node.id` is tracked but is NOT the tail → no-op (prevents orphaned bytes).
     func updateLast(_ node: TranscriptRenderNode) {
-        guard let lastID = order.last, lastID == node.id, let oldRange = ranges[node.id] else {
-            append(node)
+        guard let oldRange = ranges[node.id] else {
+            // Untracked id — fall back to append for brand-new nodes.
+            appendNew(node)
             return
         }
+        if order.last == node.id {
+            replaceTail(node, oldRange: oldRange)
+        }
+        // else: tracked non-tail — no-op.
+    }
+
+    // MARK: - Private helpers
+
+    /// Appends a new node that is not yet tracked. Caller must ensure `ranges[node.id] == nil`.
+    private func appendNew(_ node: TranscriptRenderNode) {
+        let fragment = TranscriptDocumentBuilder.fragment(for: node, context: context)
+        let start = length
+        storage.append(fragment)
+        length = storage.length
+        ranges[node.id] = NSRange(location: start, length: length - start)
+        order.append(node.id)
+    }
+
+    /// Replaces the tail node's bytes in place. Caller must ensure `node.id == order.last`.
+    private func replaceTail(_ node: TranscriptRenderNode, oldRange: NSRange) {
         let fragment = TranscriptDocumentBuilder.fragment(for: node, context: context)
         storage.replaceCharacters(in: oldRange, with: fragment)
         length = storage.length
