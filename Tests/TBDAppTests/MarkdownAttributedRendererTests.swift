@@ -95,6 +95,64 @@ struct MarkdownAttributedRendererTests {
         #expect(foundBlock)
     }
 
+    @Test("composite markdown renders heading, bold, link, list, code block, and table with expected attributes")
+    func compositeMixed() {
+        let md = """
+        # Getting Started
+
+        Use **swift** to install `Package`, see [docs](https://swift.org).
+
+        - alpha
+        - beta
+
+        ```swift
+        let result = compute()
+        ```
+
+        | Name  | Value |
+        |-------|-------|
+        | speed | 42    |
+        """
+        let out = MarkdownAttributedRenderer.render(md)
+        #expect(out.length > 0)
+
+        // Substring presence
+        #expect(out.string.contains("Getting Started"))
+        #expect(out.string.contains("swift"))
+        #expect(out.string.contains("docs"))
+        #expect(out.string.contains("alpha"))
+        #expect(out.string.contains("result"))
+        #expect(out.string.contains("speed"))
+
+        // Attribute presence
+        var foundMono = false
+        var foundBold = false
+        var foundLink = false
+        var foundBlock = false
+
+        let fullRange = NSRange(location: 0, length: out.length)
+
+        out.enumerateAttribute(.font, in: fullRange) { value, _, _ in
+            guard let font = value as? NSFont else { return }
+            let traits = font.fontDescriptor.symbolicTraits
+            if traits.contains(.monoSpace) { foundMono = true }
+            if traits.contains(.bold) { foundBold = true }
+        }
+
+        out.enumerateAttribute(.link, in: fullRange) { value, _, _ in
+            if value != nil { foundLink = true }
+        }
+
+        out.enumerateAttribute(.paragraphStyle, in: fullRange) { value, _, _ in
+            if let ps = value as? NSParagraphStyle, !ps.textBlocks.isEmpty { foundBlock = true }
+        }
+
+        #expect(foundMono)
+        #expect(foundBold)
+        #expect(foundLink)
+        #expect(foundBlock)
+    }
+
     // MARK: - Helpers
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {
