@@ -40,6 +40,7 @@ struct PanePlaceholder: View {
     @StateObject private var webviewState = WebviewState()
     @State private var didCopyURL = false
     @AppStorage(AppState.enableTranscriptKey) private var transcriptFeatureEnabled = false
+    @AppStorage(AppState.useTextKitTranscriptKey) private var useTextKitTranscript = false
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {
@@ -281,14 +282,20 @@ struct PanePlaceholder: View {
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):
             if transcriptFeatureEnabled {
-                LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
-                    .environment(\.openFilePreview, { path in
-                        let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                        layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
-                    })
-                    .environment(\.openTranscriptOverlay) { itemID in
-                        overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
+                Group {
+                    if useTextKitTranscript {
+                        STTextViewTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
+                    } else {
+                        LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
                     }
+                }
+                .environment(\.openFilePreview, { path in
+                    let newContent = PaneContent.codeViewer(id: UUID(), path: path)
+                    layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                })
+                .environment(\.openTranscriptOverlay) { itemID in
+                    overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
+                }
             } else {
                 transcriptDisabledPlaceholder
             }
