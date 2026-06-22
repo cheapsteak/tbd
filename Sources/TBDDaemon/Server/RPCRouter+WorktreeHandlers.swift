@@ -229,6 +229,11 @@ extension RPCRouter {
             newSortOrder: params.newSortOrder
         )
 
+        // A worktree with active children isn't auto-archivable; disarm the new parent.
+        if let newParentID = params.newParentID {
+            try? await db.worktrees.setAutoArchiveOnMerge(id: newParentID, value: false)
+        }
+
         subscriptions.broadcast(delta: .worktreeMoved(WorktreeMovedDelta(
             worktreeID: params.worktreeID,
             newParentID: params.newParentID,

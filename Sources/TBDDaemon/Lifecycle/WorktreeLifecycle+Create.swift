@@ -62,6 +62,11 @@ extension WorktreeLifecycle {
             suppressAutoParent: suppressAutoParent
         )
 
+        // A worktree with active children isn't auto-archivable; disarm the parent.
+        if let parentID = resolvedParent {
+            try? await db.worktrees.setAutoArchiveOnMerge(id: parentID, value: false)
+        }
+
         // 2. Generate name and construct path
         let resolvedName: String
         let resolvedBranch: String
