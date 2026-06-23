@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Testing
 @testable import TBDApp
+import TBDShared
 
 @MainActor
 @Suite("Transcript card attachment")
@@ -28,6 +29,44 @@ struct TranscriptCardAttachmentTests {
         #expect(provider.view is NSHostingView<AnyView>)
         let h = TranscriptCardSizing.fittingHeight(of: provider.view as! NSHostingView<AnyView>, width: 300)
         #expect(h > 0)
+    }
+
+    /// Regression for #129: a tall, complex card (a 2-question AskUserQuestion
+    /// with three long multi-line option descriptions each + answers) must
+    /// measure its TRUE height-for-width. The pre-fix `NSHostingView.fittingSize`
+    /// path under-reported this card by ~150 pt (≈530 measured vs ≈686 rendered),
+    /// so the next message overlapped it. `NSHostingController.sizeThatFits`
+    /// honours the proposed width and reports the real height. We assert a floor
+    /// comfortably above the old under-measured value.
+    @Test("tall AskUserQuestion card measures its true (large) height-for-width")
+    func tallAskMeasuresFullHeight() throws {
+        let suiteName = "card-attach-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+        let context = TranscriptCardContext(
+            terminalID: nil,
+            openTranscriptOverlay: { _ in },
+            navigateToThread: { _ in },
+            appState: appState
+        )
+
+        let items = TranscriptCompareFixtures.items(for: "tallAsk")
+        let askNode = try #require(
+            transcriptRenderNodes(from: items).first { node in
+                if case .toolCall(_, let name, _, _, _, _) = node.kind { return name == "AskUserQuestion" }
+                return false
+            }
+        )
+        let card = try #require(TranscriptCardFactory.card(for: askNode, context: context))
+
+        let width = TranscriptCardSizing.width(forLineFragmentWidth: 680)
+        let host = NSHostingView(rootView: card)
+        let height = TranscriptCardSizing.fittingHeight(of: host, width: width)
+
+        // The buggy fittingSize path returned ~530 for this card; the true
+        // height is ~686. Floor of 600 fails on the old measure, passes on the fix.
+        #expect(height > 600, "tall AskUserQuestion measured only \(height)pt — under-reported height regression")
     }
 }
 

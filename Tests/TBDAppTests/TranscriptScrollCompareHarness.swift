@@ -64,7 +64,11 @@ struct TranscriptScrollCompareHarness {
         // A tall synthetic scenario (many alternating bubbles) guarantees the
         // document far exceeds the viewport so every offset is a real scroll.
         var scenarios: [(name: String, items: [TranscriptItem])] = [
-            ("tall-synthetic", Self.tallSynthetic())
+            ("tall-synthetic", Self.tallSynthetic()),
+            // The tall AskUserQuestion card that exposed the height
+            // under-reservation bug — scrolled past so its full reserved extent
+            // is exercised through a real viewport. (#129)
+            ("tallAsk", TranscriptCompareFixtures.items(for: "tallAsk"))
         ]
         // Plus the real sessions that reportedly showed the overlap.
         for real in TranscriptCompareRealSessions.scenarios() {

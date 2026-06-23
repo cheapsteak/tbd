@@ -177,7 +177,10 @@ enum TranscriptCardFactory {
                     inputTruncatedTo: inputTruncatedTo,
                     result: result,
                     timestamp: timestamp,
-                    terminalID: terminalID
+                    terminalID: terminalID,
+                    // The TextKit2 transcript reserves card height from a single
+                    // measurement, so the card must not grow after first render.
+                    staticHeight: true
                 )
                 .environmentObject(appState)
                 .environment(\.openTranscriptOverlay, context.openTranscriptOverlay)

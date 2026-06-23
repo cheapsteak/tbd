@@ -92,19 +92,36 @@ final class TranscriptCardViewProvider: NSTextAttachmentViewProvider {
     }
 }
 
-/// Shared layout math for card attachments: full-width minus insets, and
-/// fitting-height with a 44 pt fallback when SwiftUI reports zero. (#129)
+/// Shared layout math for card attachments: full-width minus insets, and a
+/// reliable height-for-width measurement of the hosted SwiftUI card. (#129)
 @MainActor
 enum TranscriptCardSizing {
     static func width(forLineFragmentWidth lineWidth: CGFloat, insets: CGFloat = 8) -> CGFloat {
         max(lineWidth - insets * 2, 1)
     }
 
+    /// Returns the height the card needs at exactly `width`.
+    ///
+    /// The naive `NSHostingView` path —
+    /// `frame = width×10000; layoutSubtreeIfNeeded(); fittingSize.height` —
+    /// UNDER-REPORTS for complex/wrapping content. `NSHostingView.fittingSize`
+    /// does not reliably compute a height *for a constrained width*: a tall
+    /// multi-line card (the real `AskUserQuestion` with several long option
+    /// descriptions and answer bubbles) measures ~150 pt short of what it
+    /// actually renders, so the next message overlaps it and the card content
+    /// escapes its box. This was the same `NSHostingView` height
+    /// under-reporting that defeated the earlier NSTableView virtualizer. (#129)
+    ///
+    /// `NSHostingController.sizeThatFits(in:)` DOES honour the proposed width:
+    /// propose `(width, .greatestFiniteMagnitude)` and it returns the true
+    /// height-for-width. We build a throwaway controller from the hosting view's
+    /// `rootView` to measure, leaving the live hosting view untouched.
     static func fittingHeight(of view: NSHostingView<AnyView>, width: CGFloat) -> CGFloat {
-        view.frame = CGRect(x: 0, y: 0, width: width, height: 10_000)
-        view.layoutSubtreeIfNeeded()
-        let height = view.fittingSize.height
-        return height > 0 ? height : 44
+        let controller = NSHostingController(rootView: view.rootView)
+        controller.sizingOptions = [.preferredContentSize]
+        let proposed = NSSize(width: width, height: .greatestFiniteMagnitude)
+        let measured = controller.sizeThatFits(in: proposed).height
+        return measured > 0 ? measured : 44
     }
 }
 

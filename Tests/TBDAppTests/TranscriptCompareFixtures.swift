@@ -14,7 +14,7 @@ enum TranscriptCompareFixtures {
 
     /// All scenarios in the order they should be rendered/indexed.
     static let scenarioNames: [String] = [
-        "prose", "codeblock", "table", "lists", "toolcards", "mixed"
+        "prose", "codeblock", "table", "lists", "toolcards", "mixed", "tallAsk"
     ]
 
     /// Returns the fixture items for a named scenario.
@@ -26,6 +26,7 @@ enum TranscriptCompareFixtures {
         case "lists": return lists
         case "toolcards": return toolcards
         case "mixed": return mixed
+        case "tallAsk": return tallAsk
         default: return []
         }
     }
@@ -272,4 +273,63 @@ enum TranscriptCompareFixtures {
             usage: TokenUsage(inputTokens: 1200, cacheCreationTokens: 800, cacheReadTokens: 14_000)
         )
     ]
+
+    /// A genuinely TALL `AskUserQuestion` card followed by a trailing assistant
+    /// message. Mirrors the real-world shape that exposed the height
+    /// under-reservation bug (#129): MULTIPLE questions, 3+ options each with
+    /// LONG multi-line descriptions, plus an answer. Both input and result are
+    /// non-truncated so the card lays out its full height at first render with
+    /// no daemon/terminalID needed — isolating the static under-measurement the
+    /// self-sizing attachment now corrects. The trailing assistant message must
+    /// NOT overlap the card: clear vertical separation proves the card's full
+    /// height was reserved.
+    static let tallAsk: [TranscriptItem] = [
+        .userPrompt(
+            id: "tallask-u1",
+            text: "I'm not sure how to proceed — can you lay out the options for both the rollout and the data-migration strategy?",
+            timestamp: nil
+        ),
+        .toolCall(
+            id: "tallask-ask",
+            name: "AskUserQuestion",
+            inputJSON: tallAskInputJSON,
+            inputTruncatedTo: nil,
+            result: ToolResult(
+                text: #"User has answered your questions: "How should we roll out the new transcript renderer?"="Staged behind a feature flag, dogfood internally first". "What should we do about existing on-disk transcript caches?"="Lazily re-render on next open; never bulk-migrate". You can now continue."#,
+                truncatedTo: nil,
+                isError: false
+            ),
+            subagent: nil,
+            timestamp: nil,
+            usage: nil
+        ),
+        .assistantText(
+            id: "tallask-a1",
+            text: """
+            **TRAILING-MARKER:** this assistant message must sit fully BELOW the \
+            AskUserQuestion card with clear separation. If any of the card's option \
+            descriptions or the answer bubble overlap this text, the attachment \
+            under-reserved its height and the fix has regressed.
+            """,
+            timestamp: nil,
+            usage: nil
+        )
+    ]
+
+    /// Two-question AskUserQuestion input with three long, multi-line option
+    /// descriptions each — sized to make the rendered card tall.
+    private static let tallAskInputJSON: String = #"""
+    {"questions":[
+      {"question":"How should we roll out the new transcript renderer?","header":"Rollout strategy","options":[
+        {"label":"Staged behind a feature flag, dogfood internally first","description":"Ship the TextKit2 path dark behind a per-user flag. Enable it for the team for a week, watch for layout regressions and scroll-lag reports, then ramp to everyone. Safest, but slowest, and leaves two code paths live during the overlap window."},
+        {"label":"Hard cutover in the next release","description":"Delete the old SwiftUI LazyVStack path entirely and ship only TextKit2. Fastest to a single code path and removes the per-row layout cost for good, but any undiscovered card-sizing bug reaches every user at once with no flag to fall back to."},
+        {"label":"Side-by-side toggle the user controls","description":"Expose a visible setting so each user can switch renderers themselves. Maximises real-world coverage and gives an instant escape hatch, but doubles the surface area we must keep working and complicates bug reports because we never know which path produced a screenshot."}
+      ]},
+      {"question":"What should we do about existing on-disk transcript caches?","header":"Cache migration","options":[
+        {"label":"Lazily re-render on next open; never bulk-migrate","description":"Leave old cached layouts untouched and rebuild render nodes the first time a transcript is opened under the new path. No migration window, no big one-time cost, but the very first open of a long transcript pays the full layout price."},
+        {"label":"Eagerly re-render every cached transcript on upgrade","description":"Walk every stored transcript at upgrade time and rebuild its render nodes up front. Opens are then uniformly fast, but the upgrade itself can stall for users with large histories and burns CPU on transcripts they may never open again."},
+        {"label":"Drop the caches entirely and always render fresh","description":"Stop persisting laid-out transcripts; rebuild from the source JSONL on every open. Simplest invariant and removes a whole class of stale-cache bugs, but every open re-does the markdown and card layout work from scratch."}
+      ]}
+    ]}
+    """#
 }
