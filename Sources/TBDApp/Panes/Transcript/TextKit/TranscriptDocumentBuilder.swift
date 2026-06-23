@@ -111,24 +111,22 @@ enum TranscriptDocumentBuilder {
 
     // MARK: - Private helpers
 
-    /// Width fraction of the content column the user prompt's text may occupy.
-    /// The drawn bubble hugs the right edge, so the remaining gutter sits on the
-    /// LEFT — mirroring `ChatBubbleView`'s right-aligned narrower user bubble.
-    private static let userBubbleWidthFraction: CGFloat = 0.62
-
     /// Right-aligns the whole user message (header + body) and pushes its text
-    /// into the right portion of the column via a head indent, so the segment
-    /// union the renderer draws a bubble around lands on the right and is
-    /// narrower than full width. We rewrite each run's paragraph style rather
-    /// than blanket-replacing so list indents etc. from the markdown renderer
-    /// are preserved while gaining `.right` alignment + the left gutter.
+    /// into the right portion of the column via a fixed head indent, so the segment
+    /// union the renderer draws a bubble around lands on the right. We rewrite each
+    /// run's paragraph style rather than blanket-replacing so list indents etc. from
+    /// the markdown renderer are preserved while gaining `.right` alignment + the
+    /// left gutter.
+    ///
+    /// The left gutter is `BubbleRole.userLeadingGutter` (64 pt), a fixed value
+    /// mirroring `ChatBubbleView`'s `leading: isUser ? 64` padding. This means long
+    /// messages grow nearly full-width (just as OLD does) while short prompts stay
+    /// narrow because right-aligned text on a single line hugs the right edge. No
+    /// hardcoded column-width assumption needed — the gutter is container-independent.
+    /// (#129)
     private static func applyUserAlignment(to out: NSMutableAttributedString) {
         let full = NSRange(location: 0, length: out.length)
-        // Approximate the content column width; the head indent is resolved as a
-        // fraction of it. 680pt matches the transcript content column / harness
-        // width. Slightly conservative so wrapping doesn't overflow the bubble.
-        let columnWidth: CGFloat = 680
-        let leftGutter = columnWidth * (1 - userBubbleWidthFraction)
+        let leftGutter = BubbleRole.userLeadingGutter
         out.enumerateAttribute(.paragraphStyle, in: full, options: []) { value, range, _ in
             let style = (value as? NSParagraphStyle).map {
                 // swiftlint:disable:next force_cast

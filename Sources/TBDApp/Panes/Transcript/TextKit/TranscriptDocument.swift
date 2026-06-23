@@ -30,6 +30,13 @@ enum BubbleRole: Equatable {
     /// body top minus that inset — still lands below the header. (#129)
     static let headerBodyGap: CGFloat = 14
 
+    /// Fixed left gutter for user-prompt paragraphs — mirrors `ChatBubbleView`'s
+    /// `leading: isUser ? 64` padding. A fixed 64 pt gutter lets the bubble grow
+    /// to nearly full container width for long messages (same as OLD), while short
+    /// prompts remain narrow because right-aligned text hugs the right edge.
+    /// Container-width-independent: no need to know the actual pane width. (#129)
+    static let userLeadingGutter: CGFloat = 64
+
     /// Stable string carried in the `.transcriptBubbleRole` attribute. `.other`
     /// is never stamped (those nodes draw no bubble), so it has no value.
     var attributeValue: String {
