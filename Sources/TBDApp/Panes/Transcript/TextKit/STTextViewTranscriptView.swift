@@ -251,7 +251,9 @@ final class BubbleBackgroundView: NSView {
 
     /// Internal padding between a block's text and its drawn bubble edge,
     /// matching `ChatBubbleView`'s ~11pt horizontal / 8pt vertical chrome insets.
-    private let hInset: CGFloat = 11
+    /// Shared with the right-aligned user paragraph's `tailIndent` so the bubble's
+    /// right edge lands exactly one padding outside the (inset) text. (#129)
+    private let hInset: CGFloat = BubbleRole.horizontalPadding
     private let vInset: CGFloat = 8
     private let cornerRadius: CGFloat = 10
 

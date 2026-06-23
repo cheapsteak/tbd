@@ -130,6 +130,14 @@ enum TranscriptDocumentBuilder {
             style.alignment = .right
             style.headIndent = max(style.headIndent, leftGutter)
             style.firstLineHeadIndent = max(style.firstLineHeadIndent, leftGutter)
+            // Inset the text's RIGHT edge inward by the bubble's interior padding so
+            // right-aligned wrapped lines stop short of the container margin (a
+            // negative `tailIndent` is measured from the container's right edge).
+            // Without this, multi-line user text runs flush to / past the drawn
+            // bubble's right edge. The matching `hInset` in `BubbleBackgroundView`
+            // grows the bubble back out so the text sits inside with symmetric
+            // horizontal padding. (#129)
+            style.tailIndent = -BubbleRole.horizontalPadding
             out.addAttribute(.paragraphStyle, value: style, range: range)
         }
     }

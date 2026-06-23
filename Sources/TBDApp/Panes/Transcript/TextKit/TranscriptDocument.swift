@@ -12,6 +12,15 @@ enum BubbleRole: Equatable {
     case assistant
     case other
 
+    /// Interior horizontal padding between a chat bubble's text and its drawn
+    /// edge (matches `ChatBubbleView`'s ~11pt chrome inset). Shared so the
+    /// right-aligned user paragraph's `tailIndent` (in `TranscriptDocumentBuilder`)
+    /// and the bubble rect's `hInset` (in `BubbleBackgroundView`) stay in lock-step:
+    /// the tail indent pulls the wrapped text's right edge inward by this amount so
+    /// it never runs to the container margin, and the same value grows the drawn
+    /// bubble back out so the text sits inside with symmetric padding. (#129)
+    static let horizontalPadding: CGFloat = 11
+
     /// Stable string carried in the `.transcriptBubbleRole` attribute. `.other`
     /// is never stamped (those nodes draw no bubble), so it has no value.
     var attributeValue: String {
