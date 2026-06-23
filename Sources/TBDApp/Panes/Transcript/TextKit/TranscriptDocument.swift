@@ -21,6 +21,15 @@ enum BubbleRole: Equatable {
     /// bubble back out so the text sits inside with symmetric padding. (#129)
     static let horizontalPadding: CGFloat = 11
 
+    /// Vertical clearance reserved BETWEEN the role header ("You" / "Claude") and
+    /// the top of the drawn bubble/card, so the header sits above the card with a
+    /// gap (as in `ChatBubbleView`'s `VStack(spacing: 3)` + the card's own 8pt top
+    /// inset) instead of being painted over the top border. Applied as the body's
+    /// first-paragraph `paragraphSpacingBefore` in `TranscriptDocumentBuilder`; it
+    /// must exceed `BubbleBackgroundView.vInset` (8) so the card's top edge — the
+    /// body top minus that inset — still lands below the header. (#129)
+    static let headerBodyGap: CGFloat = 14
+
     /// Stable string carried in the `.transcriptBubbleRole` attribute. `.other`
     /// is never stamped (those nodes draw no bubble), so it has no value.
     var attributeValue: String {

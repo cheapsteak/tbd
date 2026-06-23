@@ -75,10 +75,14 @@ struct STTextViewTranscriptView: NSViewRepresentable {
         coordinator.scrollView = scrollView
         coordinator.lastScrollToken = scrollToBottomToken
 
-        // Defer first scroll-to-bottom so layout has a viewport size to resolve against.
-        DispatchQueue.main.async {
-            textView.scrollToEndOfDocument(nil)
-        }
+        // Pin the initial open to the TRUE bottom (newest message), like the old
+        // pane's `.defaultScrollAnchor(.bottom)`. A SINGLE deferred
+        // `scrollToEndOfDocument` is NOT enough on a long transcript: TextKit2
+        // lays the document out ASYNCHRONOUSLY, so the first scroll resolves
+        // against an incomplete (too-short) document height and stops partway. We
+        // nudge to the end across several layout passes until the clip view is
+        // actually parked at the document's max-Y (or we run out of attempts). (#129)
+        coordinator.scrollToTrueBottom(attempts: 8)
         Self.log.debug("textkit.pane.installed length=\(coordinator.document.length, privacy: .public)")
         // Diag: log NSView installation with initial node count for lifecycle tracing. (#129)
         let tidShort = String((context.terminalID?.uuidString ?? "").suffix(4))
@@ -114,6 +118,28 @@ struct STTextViewTranscriptView: NSViewRepresentable {
         private static let log = Logger(subsystem: "com.tbd.app", category: "perf-transcript")
 
         init(document: TranscriptDocument) { self.document = document }
+
+        /// Scrolls to the TRUE document bottom, retrying across runloop turns
+        /// until the clip view actually reaches the document's max-Y or we run out
+        /// of attempts. TextKit2 extends the document height asynchronously, so a
+        /// single `scrollToEndOfDocument` on a long transcript parks partway; each
+        /// retry re-reads the (now taller) document and scrolls again until the
+        /// position is stable. (#129)
+        func scrollToTrueBottom(attempts: Int) {
+            guard attempts > 0, let textView, scrollView != nil else { return }
+            textView.scrollToEndOfDocument(nil)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let scrollView = self.scrollView else { return }
+                let clip = scrollView.contentView
+                let visibleMaxY = clip.bounds.origin.y + clip.bounds.height
+                let docMaxY = scrollView.documentView?.frame.maxY ?? visibleMaxY
+                // Stop once parked at the true bottom (within 1pt); otherwise the
+                // document likely grew from async layout — try again.
+                if docMaxY - visibleMaxY > 1 {
+                    self.scrollToTrueBottom(attempts: attempts - 1)
+                }
+            }
+        }
 
         /// Apply a new poll result to the live document with a before-edit
         /// bottom-pin. Pure decision in `TranscriptStreamPlan`; here we only do
@@ -254,6 +280,11 @@ final class BubbleBackgroundView: NSView {
     /// Shared with the right-aligned user paragraph's `tailIndent` so the bubble's
     /// right edge lands exactly one padding outside the (inset) text. (#129)
     private let hInset: CGFloat = BubbleRole.horizontalPadding
+    /// Interior vertical padding between a bubble's body text and the drawn card
+    /// edge, matching `ChatBubbleView`'s 8pt top/bottom chrome inset. The header
+    /// label sits ABOVE the card (`BubbleRole.headerBodyGap` of clearance is
+    /// reserved by the body paragraph's `paragraphSpacingBefore`), so this inset
+    /// never rises into the header. (#129)
     private let vInset: CGFloat = 8
     private let cornerRadius: CGFloat = 10
 
@@ -291,11 +322,28 @@ final class BubbleBackgroundView: NSView {
         let assistantFill = NSColor.controlBackgroundColor
         let assistantStroke = NSColor.separatorColor
 
-        let full = NSRange(location: 0, length: storage.length)
-        storage.enumerateAttribute(.transcriptBubbleRole, in: full, options: []) { value, range, _ in
+        // Bound ALL work to the laid-out viewport. Enumerating
+        // `.transcriptBubbleRole` over the whole document AND computing a
+        // `boundingRect` (via `enumerateTextSegments`) for every message on every
+        // draw/scroll frame is O(N) and was the scroll LAG on long transcripts.
+        // It also produced OVERLAP: `enumerateTextSegments` for ranges outside the
+        // current viewport returns stale / transitional frames mid-scroll, so a
+        // bubble drawn for an off-screen message landed in the wrong place. We
+        // enumerate and compute rects ONLY for the character range backing the
+        // currently laid-out viewport (extended by a margin so a bubble straddling
+        // the viewport edge still draws). (#129)
+        guard let scanRange = visibleScanRange(textView: textView,
+                                               contentStorage: contentStorage,
+                                               storage: storage) else { return }
+
+        storage.enumerateAttribute(.transcriptBubbleRole, in: scanRange, options: []) { value, runRange, _ in
+            // The role run may extend past the scan window (a tall message that
+            // straddles the viewport top/bottom); compute the rect over the FULL
+            // role run so the card spans the whole message, but only because the
+            // run intersects the visible window.
             guard let raw = value as? String, let role = BubbleRole(attributeValue: raw),
-                  range.length > 0,
-                  let textRange = textRange(for: range, in: contentStorage),
+                  runRange.length > 0,
+                  let textRange = textRange(for: runRange, in: contentStorage),
                   var rect = boundingRect(of: textRange, layoutManager: layoutManager) else { return }
 
             // Grow the tight text union out to the bubble's chrome insets.
@@ -307,8 +355,8 @@ final class BubbleBackgroundView: NSView {
                 rect.size.width = bounds.width - 1 - rect.origin.x
             }
 
-            // Skip bubbles that don't intersect the dirty region — avoids
-            // O(N)-per-draw cost for off-screen messages on long transcripts. (#129)
+            // Skip bubbles outside the dirty region — cheap final cull now that
+            // enumeration itself is already bounded to the viewport. (#129)
             guard rect.intersects(dirtyRect) else { return }
 
             let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
@@ -326,6 +374,30 @@ final class BubbleBackgroundView: NSView {
                 break
             }
         }
+    }
+
+    /// Character `NSRange` backing the currently laid-out viewport, extended by a
+    /// margin on each side so a bubble straddling the viewport edge still draws.
+    /// `nil` if the viewport range is unavailable (nothing laid out yet). This is
+    /// what keeps the draw O(visible) rather than O(document). (#129)
+    private func visibleScanRange(
+        textView: STTextView,
+        contentStorage: NSTextContentStorage,
+        storage: NSTextStorage
+    ) -> NSRange? {
+        let controller = textView.textLayoutManager.textViewportLayoutController
+        guard let viewportRange = controller.viewportRange else { return nil }
+        let docStart = contentStorage.documentRange.location
+        let lower = contentStorage.offset(from: docStart, to: viewportRange.location)
+        let upper = contentStorage.offset(from: docStart, to: viewportRange.endLocation)
+        guard lower >= 0, upper >= lower else { return nil }
+        // Margin (in characters) so a message whose body starts just above the
+        // viewport top — or continues just below the bottom — is still picked up
+        // and its bubble drawn. Generous but still O(visible).
+        let margin = 4_000
+        let clampedLower = max(0, lower - margin)
+        let clampedUpper = min(storage.length, upper + margin)
+        return NSRange(location: clampedLower, length: clampedUpper - clampedLower)
     }
 
     /// Converts a character `NSRange` into a TextKit 2 `NSTextRange` via the

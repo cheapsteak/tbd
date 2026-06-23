@@ -31,6 +31,13 @@ enum TranscriptDocumentBuilder {
             out.append(MarkdownAttributedRenderer.render(bodyText(for: item)))
             appendBadge(node.badgeUsage, into: out)
             let bodyEnd = out.length
+            // Reserve a gap between the header and the drawn card so the header
+            // sits ABOVE the card with clearance (not painted over the top
+            // border). The bubble's top edge is the body top minus
+            // `BubbleBackgroundView.vInset`; making the body's first paragraph
+            // start `headerBodyGap` below the header keeps that edge below the
+            // header. (#129)
+            applyHeaderBodyGap(to: out, bodyRange: NSRange(location: bodyStart, length: bodyEnd - bodyStart))
             out.append(NSAttributedString(string: "\n"))
             // Lay the user prompt over to the right (narrower, right-aligned) so
             // its drawn bubble mirrors `ChatBubbleView`'s right-aligned blue
@@ -138,6 +145,37 @@ enum TranscriptDocumentBuilder {
             // grows the bubble back out so the text sits inside with symmetric
             // horizontal padding. (#129)
             style.tailIndent = -BubbleRole.horizontalPadding
+            out.addAttribute(.paragraphStyle, value: style, range: range)
+        }
+    }
+
+    /// Adds `BubbleRole.headerBodyGap` of leading space before the body's FIRST
+    /// paragraph so the drawn card starts below the header with clearance. Only
+    /// the first paragraph is touched (the `\n`-delimited prefix of `bodyRange`)
+    /// so internal paragraph spacing inside the message is unchanged. (#129)
+    private static func applyHeaderBodyGap(to out: NSMutableAttributedString, bodyRange: NSRange) {
+        guard bodyRange.length > 0 else { return }
+        // First paragraph = body start up to (and including) the first newline.
+        let text = out.string as NSString
+        let firstNewline = text.range(
+            of: "\n",
+            options: [],
+            range: bodyRange
+        )
+        let firstParagraphEnd = firstNewline.location == NSNotFound
+            ? bodyRange.location + bodyRange.length
+            : firstNewline.location
+        let firstParagraph = NSRange(
+            location: bodyRange.location,
+            length: firstParagraphEnd - bodyRange.location
+        )
+        guard firstParagraph.length > 0 else { return }
+        out.enumerateAttribute(.paragraphStyle, in: firstParagraph, options: []) { value, range, _ in
+            let style = (value as? NSParagraphStyle).map {
+                // swiftlint:disable:next force_cast
+                $0.mutableCopy() as! NSMutableParagraphStyle
+            } ?? NSMutableParagraphStyle()
+            style.paragraphSpacingBefore = max(style.paragraphSpacingBefore, BubbleRole.headerBodyGap)
             out.addAttribute(.paragraphStyle, value: style, range: range)
         }
     }
