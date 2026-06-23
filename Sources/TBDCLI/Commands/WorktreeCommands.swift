@@ -2,6 +2,13 @@ import ArgumentParser
 import Foundation
 import TBDShared
 
+// Shared by `worktree auto-archive` and `config` commands.
+enum OnOffArgument: String, ExpressibleByArgument {
+    case on
+    case off
+    var boolValue: Bool { self == .on }
+}
+
 struct WorktreeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "worktree",
@@ -11,6 +18,7 @@ struct WorktreeCommand: ParsableCommand {
             WorktreeList.self,
             WorktreeAdopt.self,
             WorktreeArchive.self,
+            WorktreeAutoArchive.self,
             WorktreeForget.self,
             WorktreeRevive.self,
             WorktreeRename.self,
@@ -381,6 +389,39 @@ struct WorktreeArchive: AsyncParsableCommand {
             printJSON(["status": "archived", "id": worktreeID.uuidString])
         } else {
             print("Worktree archived.")
+        }
+    }
+}
+
+// MARK: - worktree auto-archive
+
+struct WorktreeAutoArchive: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "auto-archive",
+        abstract: "Set whether a worktree auto-archives when its PR merges"
+    )
+
+    @Argument(help: "Worktree name or ID")
+    var nameOrID: String
+
+    @Argument(help: "on or off")
+    var state: OnOffArgument
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let client = SocketClient()
+        let worktreeID = try resolveWorktreeNameOrID(nameOrID, client: client)
+        try client.callVoid(
+            method: RPCMethod.worktreeSetAutoArchive,
+            params: WorktreeSetAutoArchiveParams(worktreeID: worktreeID, enabled: state.boolValue)
+        )
+        if json {
+            struct Result: Encodable { let status: String; let id: String; let enabled: Bool }
+            printJSON(Result(status: "auto-archive", id: worktreeID.uuidString, enabled: state.boolValue))
+        } else {
+            print("Auto-archive \(state.rawValue) for worktree.")
         }
     }
 }

@@ -106,7 +106,14 @@ struct ContentView: View {
                     .keyboardShortcut("]", modifiers: .command)
                 }
 
-                ToolbarItemGroup(placement: .primaryAction) {
+                // macOS 26 fuses ADJACENT bare toolbar items onto one Liquid Glass
+                // capsule, and `ToolbarItemGroup` fuses on purpose. The reliable
+                // capsule BOUNDARY is `ControlGroup` (→ NSToolbarItemGroup): the PR
+                // split button is its sole child, which separates it from both
+                // neighbors (confirmed earlier) with no internal gap, while keeping
+                // the split-button chevron + status-colored icon. Plain `Button`s
+                // for the filter / sidebar separate via placement-matched spacers.
+                ToolbarItem(placement: .primaryAction) {
                     Picker("Filter", selection: $appState.repoFilter) {
                         Text("All Repos").tag(UUID?.none)
                         Divider()
@@ -116,32 +123,64 @@ struct ContentView: View {
                     }
                     .pickerStyle(.menu)
                     .help("Filter sidebar by repository")
+                }
 
-                    if let worktreeID = appState.selectedWorktreeIDs.first,
-                       appState.selectedWorktreeIDs.count == 1,
-                       let prStatus = appState.prStatuses[worktreeID],
-                       let prURL = URL(string: prStatus.url) {
-                        Button {
-                            let existingTabs = appState.tabs[worktreeID] ?? []
-                            if let existingIndex = existingTabs.firstIndex(where: {
-                                if case .webview(_, let url) = $0.content { return url == prURL }
-                                return false
-                            }) {
-                                // Focus existing PR tab
-                                appState.activeTabIndices[worktreeID] = existingIndex
-                            } else {
-                                // Create and focus new PR tab
-                                let webviewID = UUID()
-                                let tab = Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
-                                appState.tabs[worktreeID, default: []].append(tab)
-                                appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
+                if #available(macOS 26.0, *) {
+                    ToolbarSpacer(.fixed, placement: .primaryAction)
+                }
+
+                if let worktreeID = appState.selectedWorktreeIDs.first,
+                   appState.selectedWorktreeIDs.count == 1,
+                   let prStatus = appState.prStatuses[worktreeID],
+                   let prURL = URL(string: prStatus.url) {
+                    ToolbarItem(placement: .primaryAction) {
+                        ControlGroup {
+                            // Split button: label = primary click (open PR); the
+                            // attached chevron opens the menu.
+                            Menu {
+                                if let worktree = appState.findWorktree(id: worktreeID) {
+                                    let armed = appState.effectiveAutoArchive(for: worktree)
+                                    let blocked = !appState.children(of: worktreeID).isEmpty
+                                    Toggle("Auto-archive worktree on PR merge", isOn: Binding(
+                                        get: { armed },
+                                        set: { newValue in
+                                            Task { await appState.setAutoArchive(worktreeID: worktreeID, enabled: newValue) }
+                                        }
+                                    ))
+                                    .disabled(blocked)
+                                }
+                            } label: {
+                                PRButtonLabel(prStatus: prStatus)
+                            } primaryAction: {
+                                let existingTabs = appState.tabs[worktreeID] ?? []
+                                if let existingIndex = existingTabs.firstIndex(where: {
+                                    if case .webview(_, let url) = $0.content { return url == prURL }
+                                    return false
+                                }) {
+                                    // Focus existing PR tab
+                                    appState.activeTabIndices[worktreeID] = existingIndex
+                                } else {
+                                    // Create and focus new PR tab
+                                    let webviewID = UUID()
+                                    let tab = Tab(id: UUID(), content: .webview(id: webviewID, url: prURL), label: "PR #\(prStatus.number)")
+                                    appState.tabs[worktreeID, default: []].append(tab)
+                                    appState.activeTabIndices[worktreeID] = (appState.tabs[worktreeID]?.count ?? 1) - 1
+                                }
                             }
-                        } label: {
-                            PRButtonLabel(prStatus: prStatus)
+                            // Keep "#123" neutral like the original plain Button (the
+                            // split button otherwise accent-tints it); the icon keeps
+                            // its baked status color via renderingMode(.original).
+                            .tint(.primary)
+                            .help("Open PR #\(prStatus.number) · more options")
                         }
-                        .help("Open PR in browser pane")
                     }
 
+                    if #available(macOS 26.0, *) {
+                        ToolbarSpacer(.fixed, placement: .primaryAction)
+                    }
+                }
+
+                ToolbarItem(placement: .primaryAction) {
                     Button {
                         // Defer the toggle one run-loop tick and skip the explicit
                         // withAnimation wrapper. Stacking an easeInOut animation
@@ -308,17 +347,19 @@ private func overlayFrameIsWindowRoot(
 
 private struct PRButtonLabel: View {
     let prStatus: PRStatus
+    // Re-bake the colored icon when the appearance flips (the baked image is
+    // non-template, so it can't auto-adapt the way a tinted template would).
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack(spacing: 3) {
             if let presentation = PRStatusPresentation.make(for: prStatus),
-               let nsImage = loadIcon(presentation.iconName) {
+               let nsImage = coloredIcon(presentation.iconName, nsColor: presentation.nsColor) {
                 Image(nsImage: nsImage)
-                    .renderingMode(.template)
+                    .renderingMode(.original)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 12, height: 12)
-                    .foregroundStyle(presentation.color)
             }
             Text(verbatim: "#\(prStatus.number)")
                 .font(.caption)
@@ -326,11 +367,23 @@ private struct PRButtonLabel: View {
         }
     }
 
-    private func loadIcon(_ name: String) -> NSImage? {
+    /// Bakes the status color into a NON-template image. Toolbar `Menu` /
+    /// split-button labels render template images monochrome (AppKit tints
+    /// them with the control color and ignores `.foregroundStyle`), so the
+    /// icon must carry its own color and be drawn with `.renderingMode(.original)`.
+    private func coloredIcon(_ name: String, nsColor: NSColor) -> NSImage? {
+        _ = colorScheme  // establish a dependency so we re-bake on light/dark change
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
-              let image = NSImage(contentsOf: url) else { return nil }
-        image.isTemplate = true
-        return image
+              let base = NSImage(contentsOf: url) else { return nil }
+        base.isTemplate = true
+        let img = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            nsColor.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        img.isTemplate = false
+        return img
     }
 }
 

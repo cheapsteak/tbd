@@ -127,6 +127,11 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// project dir could not be resolved).
     public var liveClaudeSessionCount: Int?
     public var parentWorktreeID: UUID?
+    /// Per-worktree auto-archive-on-PR-merge override. `nil` = follow the
+    /// global default (`Config.autoArchiveOnMergeDefault`); `true`/`false` =
+    /// explicit. Only set explicitly by user action (toolbar toggle / CLI);
+    /// there is no UI to return to `nil`.
+    public var autoArchiveOnMerge: Bool?
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
@@ -135,7 +140,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 archivedClaudeSessions: [String]? = nil, sortOrder: Int = 0,
                 archivedHeadSHA: String? = nil,
                 liveClaudeSessionCount: Int? = nil,
-                parentWorktreeID: UUID? = nil) {
+                parentWorktreeID: UUID? = nil,
+                autoArchiveOnMerge: Bool? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -152,13 +158,14 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.archivedHeadSHA = archivedHeadSHA
         self.liveClaudeSessionCount = liveClaudeSessionCount
         self.parentWorktreeID = parentWorktreeID
+        self.autoArchiveOnMerge = autoArchiveOnMerge
     }
 
     enum CodingKeys: String, CodingKey {
         case id, repoID, name, displayName, branch, path, status
         case hasConflicts, createdAt, archivedAt, tmuxServer
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
-        case liveClaudeSessionCount, parentWorktreeID
+        case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
     }
 
     public init(from decoder: Decoder) throws {
@@ -179,6 +186,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         archivedHeadSHA = try c.decodeIfPresent(String.self, forKey: .archivedHeadSHA)
         liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
         parentWorktreeID = try c.decodeIfPresent(UUID.self, forKey: .parentWorktreeID)
+        autoArchiveOnMerge = try c.decodeIfPresent(Bool.self, forKey: .autoArchiveOnMerge)
     }
 }
 
@@ -413,15 +421,20 @@ public struct Config: Codable, Sendable, Equatable {
     public var envSettingOverrides: [String: ClaudeEnvValue]
     /// Free-form env-var overrides applied to spawned sessions (global scope).
     public var envOverrides: [String: String]
+    /// Global default for auto-archive-on-PR-merge, applied to worktrees whose
+    /// per-worktree override is `nil`.
+    public var autoArchiveOnMergeDefault: Bool
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
                 envSettingOverrides: [String: ClaudeEnvValue] = [:],
-                envOverrides: [String: String] = [:]) {
+                envOverrides: [String: String] = [:],
+                autoArchiveOnMergeDefault: Bool = false) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
         self.envOverrides = envOverrides
+        self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
     }
 
     public init(from decoder: Decoder) throws {
@@ -435,6 +448,8 @@ public struct Config: Codable, Sendable, Equatable {
             [String: ClaudeEnvValue].self, forKey: .envSettingOverrides) ?? [:]
         envOverrides = try c.decodeIfPresent(
             [String: String].self, forKey: .envOverrides) ?? [:]
+        autoArchiveOnMergeDefault = try c.decodeIfPresent(
+            Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
     }
 }
 

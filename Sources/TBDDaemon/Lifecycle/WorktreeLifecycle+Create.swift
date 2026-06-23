@@ -62,6 +62,15 @@ extension WorktreeLifecycle {
             suppressAutoParent: suppressAutoParent
         )
 
+        // A worktree with active children isn't auto-archivable; disarm the parent.
+        if let parentID = resolvedParent {
+            do {
+                try await db.worktrees.setAutoArchiveOnMerge(id: parentID, value: false)
+            } catch {
+                logger.warning("failed to disarm auto-archive for \(parentID, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+
         // 2. Generate name and construct path
         let resolvedName: String
         let resolvedBranch: String

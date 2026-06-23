@@ -229,12 +229,27 @@ extension RPCRouter {
             newSortOrder: params.newSortOrder
         )
 
+        // A worktree with active children isn't auto-archivable; disarm the new parent.
+        if let newParentID = params.newParentID {
+            do {
+                try await db.worktrees.setAutoArchiveOnMerge(id: newParentID, value: false)
+            } catch {
+                logger.warning("failed to disarm auto-archive for \(newParentID, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+
         subscriptions.broadcast(delta: .worktreeMoved(WorktreeMovedDelta(
             worktreeID: params.worktreeID,
             newParentID: params.newParentID,
             newSortOrder: params.newSortOrder
         )))
 
+        return .ok()
+    }
+
+    func handleWorktreeSetAutoArchive(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeSetAutoArchiveParams.self, from: paramsData)
+        try await db.worktrees.setAutoArchiveOnMerge(id: params.worktreeID, value: params.enabled)
         return .ok()
     }
 }

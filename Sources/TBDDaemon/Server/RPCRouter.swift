@@ -236,6 +236,12 @@ public final class RPCRouter: Sendable {
                 return try await handleTabList(request.paramsData)
             case RPCMethod.worktreeSetActiveTab:
                 return try await handleWorktreeSetActiveTab(request.paramsData)
+            case RPCMethod.worktreeSetAutoArchive:
+                return try await handleWorktreeSetAutoArchive(request.paramsData)
+            case RPCMethod.configGet:
+                return try await handleConfigGet()
+            case RPCMethod.configSetAutoArchiveOnMergeDefault:
+                return try await handleConfigSetAutoArchiveDefault(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

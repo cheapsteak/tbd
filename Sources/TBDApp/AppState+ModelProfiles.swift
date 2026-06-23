@@ -28,6 +28,9 @@ extension AppState {
             if result.globalEnvOverrides != globalEnvOverrides {
                 globalEnvOverrides = result.globalEnvOverrides
             }
+            if result.autoArchiveOnMergeDefault != autoArchiveOnMergeDefault {
+                autoArchiveOnMergeDefault = result.autoArchiveOnMergeDefault
+            }
         } catch {
             logger.error("Failed to list model profiles: \(error, privacy: .public)")
             handleConnectionError(error)
@@ -150,6 +153,17 @@ extension AppState {
         } catch {
             logger.error("Failed to set primary agent preference: \(error, privacy: .public)")
             showAlert("Failed to set primary agent: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set the global default for auto-archive-on-PR-merge.
+    func setAutoArchiveOnMergeDefault(_ enabled: Bool) async {
+        do {
+            try await daemonClient.setAutoArchiveOnMergeDefault(enabled)
+            autoArchiveOnMergeDefault = enabled
+        } catch {
+            logger.error("Failed to set auto-archive default: \(error, privacy: .public)")
+            showAlert("Failed to set default: \(error.localizedDescription)", isError: true)
         }
     }
 

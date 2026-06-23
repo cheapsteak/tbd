@@ -10,6 +10,8 @@ public actor PRStatusManager {
 
     private var cache: [UUID: PRStatus] = [:]
 
+    private var onMergedTransition: (@Sendable (UUID, Int) async -> Void)?
+
     public init() {}
 
     // MARK: - Public interface
@@ -17,6 +19,30 @@ public actor PRStatusManager {
     public func allStatuses() -> [UUID: PRStatus] { cache }
 
     public func invalidate(worktreeID: UUID) { cache.removeValue(forKey: worktreeID) }
+
+    /// Register a callback fired when a worktree's cached PR state transitions
+    /// from non-merged (or absent) into `.merged`. Passes `(worktreeID, prNumber)`.
+    public func setOnMergedTransition(_ cb: @escaping @Sendable (UUID, Int) async -> Void) {
+        self.onMergedTransition = cb
+    }
+
+    /// Assigns `status` to the cache and fires `onMergedTransition` when the
+    /// state moves from non-merged (or absent) to `.merged`. All cache writes
+    /// route through here so the transition is detected uniformly.
+    ///
+    /// Note: the cache is in-memory only, so after a daemon restart the first
+    /// observation of an already-merged PR counts as a nil→merged transition and
+    /// fires `onMergedTransition`. This is intentional — a PR that merged while
+    /// the daemon was down should still auto-archive its (armed) worktree on the
+    /// next poll. Re-archive loops are prevented because archived worktrees leave
+    /// the active poll set and revive disarms the override.
+    private func apply(_ status: PRStatus, for worktreeID: UUID) async {
+        let wasMerged = (cache[worktreeID]?.state == .merged)
+        cache[worktreeID] = status
+        if !wasMerged && status.state == .merged {
+            await onMergedTransition?(worktreeID, status.number)
+        }
+    }
 
     /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
     /// worktrees: list of (id, branch, upstreamBranch, worktreePath) for active non-main worktrees.
@@ -60,7 +86,7 @@ public actor PRStatusManager {
                 upstreamBranch: wt.upstreamBranch
             )
             if let node = candidates.compactMap({ byBranch[$0] }).first {
-                cache[wt.id] = PRStatus(
+                await apply(PRStatus(
                     number: node.number,
                     url: node.url,
                     state: Self.mapState(
@@ -77,7 +103,7 @@ public actor PRStatusManager {
                         isDraft: node.isDraft,
                         statusCheckRollupState: node.statusCheckRollupState
                     )
-                )
+                ), for: wt.id)
             }
         }
     }
@@ -113,7 +139,7 @@ public actor PRStatusManager {
                 state: state,
                 reason: reason
             )
-            cache[worktreeID] = status
+            await apply(status, for: worktreeID)
             return status
         }
 
@@ -121,9 +147,10 @@ public actor PRStatusManager {
         return cache[worktreeID]
     }
 
-    /// For tests only: seed a cache entry directly.
-    public func seedForTesting(worktreeID: UUID, status: PRStatus) {
-        cache[worktreeID] = status
+    /// For tests only: seed a cache entry. Routes through `apply` so the
+    /// merge-transition logic is exercised exactly as in production.
+    public func seedForTesting(worktreeID: UUID, status: PRStatus) async {
+        await apply(status, for: worktreeID)
     }
 
     // MARK: - State mapping (internal but static for testability)

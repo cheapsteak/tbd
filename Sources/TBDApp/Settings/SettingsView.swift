@@ -125,6 +125,14 @@ struct GeneralSettingsTab: View {
                 .help("Used when TBD needs to choose the primary agent for a worktree and there is no prior agent state to restore.")
             }
 
+            Section("Worktrees") {
+                Toggle("Auto-archive worktrees when their PR merges", isOn: Binding(
+                    get: { appState.autoArchiveOnMergeDefault },
+                    set: { newValue in Task { await appState.setAutoArchiveOnMergeDefault(newValue) } }
+                ))
+                .help("Default for new worktrees. Each worktree can override this from its toolbar toggle.")
+            }
+
             Section("Claude") {
                 Toggle("Launch claude with --dangerously-skip-permissions", isOn: $skipPermissions)
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
