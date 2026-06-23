@@ -83,16 +83,46 @@ struct MarkdownAttributedRendererTests {
         #expect(s.string.contains("let x = 1"))
     }
 
-    @Test("GFM table produces text-table blocks for each cell")
+    @Test("GFM table becomes a single grid-view attachment carrying its cell text")
     func table() {
+        // `NSTextTable` does not lay out under STTextView's TextKit 2; the table
+        // is now rendered as ONE `TranscriptCardAttachment` hosting a SwiftUI
+        // grid. The cell strings live inside the view, not the attributed string,
+        // so we assert the attachment + its parsed table data instead. (#129)
         let md = "| A | B |\n|---|---|\n| 1 | 2 |"
         let s = MarkdownAttributedRenderer.render(md)
-        #expect(s.string.contains("A") && s.string.contains("2"))
+
+        var attachment: TranscriptCardAttachment?
+        s.enumerateAttribute(.attachment, in: NSRange(location: 0, length: s.length)) { v, _, _ in
+            if let a = v as? TranscriptCardAttachment { attachment = a }
+        }
+        #expect(attachment != nil)
+
+        // No `NSTextTable` blocks remain in the attributed string.
         var foundBlock = false
         s.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: s.length)) { v, _, _ in
             if let ps = v as? NSParagraphStyle, !ps.textBlocks.isEmpty { foundBlock = true }
         }
-        #expect(foundBlock)
+        #expect(!foundBlock)
+
+        // The parsed cell data round-trips header + body text through the shared
+        // inline renderer.
+        let data = parsedTableData(from: md)
+        #expect(data.columnCount == 2)
+        #expect(data.header.map(\.string) == ["A", "B"])
+        #expect(data.rows.map { $0.map(\.string) } == [["1", "2"]])
+    }
+
+    @Test("table cells render inline markdown (bold survives)")
+    func tableCellInlineMarkdown() {
+        let md = "| **Bold** | code |\n|---|---|\n| `mono` | x |"
+        let data = parsedTableData(from: md)
+        // Header cell "**Bold**" keeps a bold-trait font.
+        let headerFont = data.header[0].attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(headerFont?.fontDescriptor.symbolicTraits.contains(.bold) == true)
+        // Body cell "`mono`" keeps a monospaced inline-code font.
+        let bodyFont = data.rows[0][0].attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(bodyFont?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
     }
 
     @Test("composite markdown renders heading, bold, link, list, code block, and table with expected attributes")
@@ -122,13 +152,15 @@ struct MarkdownAttributedRendererTests {
         #expect(out.string.contains("docs"))
         #expect(out.string.contains("alpha"))
         #expect(out.string.contains("result"))
-        #expect(out.string.contains("speed"))
+        // Table cell text ("speed") now lives inside the grid-view attachment,
+        // not the attributed string — assert it on the parsed table data instead.
+        #expect(parsedTableData(from: md).rows.contains { $0.map(\.string).contains("speed") })
 
         // Attribute presence
         var foundMono = false
         var foundBold = false
         var foundLink = false
-        var foundBlock = false
+        var foundTableAttachment = false
 
         let fullRange = NSRange(location: 0, length: out.length)
 
@@ -143,19 +175,27 @@ struct MarkdownAttributedRendererTests {
             if value != nil { foundLink = true }
         }
 
-        out.enumerateAttribute(.paragraphStyle, in: fullRange) { value, _, _ in
-            if let ps = value as? NSParagraphStyle, !ps.textBlocks.isEmpty { foundBlock = true }
+        out.enumerateAttribute(.attachment, in: fullRange) { value, _, _ in
+            if value is TranscriptCardAttachment { foundTableAttachment = true }
         }
 
         #expect(foundMono)
         #expect(foundBold)
         #expect(foundLink)
-        #expect(foundBlock)
+        #expect(foundTableAttachment)
     }
 
     // MARK: - Helpers
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {
         (s.string as NSString).range(of: substring)
+    }
+
+    func parsedTableData(from markdown: String) -> TranscriptTableData {
+        guard let data = MarkdownAttributedRenderer.tableData(forMarkdown: markdown) else {
+            Issue.record("expected a table in markdown: \(markdown)")
+            return TranscriptTableData(header: [], rows: [])
+        }
+        return data
     }
 }

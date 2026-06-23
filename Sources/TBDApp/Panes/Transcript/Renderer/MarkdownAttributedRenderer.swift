@@ -1,5 +1,6 @@
 import AppKit
 import Markdown
+import SwiftUI
 
 /// Converts a message's Markdown into an `NSAttributedString` for the TextKit 2
 /// transcript. Pure: same input → same output, no view/layout state. (#129)
@@ -21,6 +22,21 @@ enum MarkdownAttributedRenderer {
             if value == nil { out.addAttribute(.foregroundColor, value: theme.bodyColor, range: range) }
         }
         return out
+    }
+
+    /// Parses `markdown` and returns the `TranscriptTableData` for its first GFM
+    /// table (cells rendered through the same inline visitor as `render`), or
+    /// `nil` if there is no table. Test seam for asserting the attachment-based
+    /// table path without reaching into the private visitor. (#129)
+    static func tableData(forMarkdown markdown: String, theme: TranscriptTextTheme = .chatBubble) -> TranscriptTableData? {
+        let document = Document(parsing: markdown, options: [])
+        var visitor = AttributedStringVisitor(theme: theme)
+        for child in document.children {
+            if let table = child as? Markdown.Table {
+                return MarkdownTable.data(table, theme: theme, render: { visitor.visit($0) })
+            }
+        }
+        return nil
     }
 }
 
@@ -146,7 +162,22 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
     }
 
     mutating func visitTable(_ table: Markdown.Table) -> NSAttributedString {
-        MarkdownTable.attributed(table, theme: theme, render: { self.visit($0) })
+        // `NSTextTable` is a TextKit 1 construct that STTextView's TextKit 2
+        // layout flattens into a vertical cell list. Instead emit the whole
+        // table as ONE view attachment hosting a real SwiftUI grid. (#129)
+        let data = MarkdownTable.data(table, theme: theme, render: { self.visit($0) })
+        guard data.columnCount > 0 else { return NSAttributedString() }
+        let tableView = TranscriptTableView(
+            data: data,
+            borderColor: Color(theme.tableBorderColor)
+        )
+        // A stable-ish ID from the table's source range keeps the attachment
+        // correlatable across streaming rebuilds without needing a render node.
+        let nodeID = "table-\(table.range?.lowerBound.line ?? 0)-\(table.range?.lowerBound.column ?? 0)"
+        let attachment = TranscriptCardAttachment(nodeID: nodeID, card: AnyView(tableView))
+        let out = NSMutableAttributedString(attributedString: NSAttributedString(attachment: attachment))
+        out.append(NSAttributedString(string: "\n"))
+        return out
     }
 
     mutating func visitThematicBreak(_ b: ThematicBreak) -> NSAttributedString {

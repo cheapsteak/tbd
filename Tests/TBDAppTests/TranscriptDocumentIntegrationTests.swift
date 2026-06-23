@@ -56,7 +56,10 @@ struct TranscriptDocumentIntegrationTests {
         #expect(text.contains("Plan"))
         #expect(text.contains("swift"))
 
-        // (c) exactly 2 TranscriptCardAttachments (Bash + Read) with correct nodeIDs
+        // (c) attachments: the Bash + Read tool cards, plus ONE grid-view
+        // attachment for the GFM table in the assistant markdown body. The table
+        // attachment's nodeID is derived from its source position, so we only
+        // assert the tool-card IDs explicitly and the table by prefix. (#129)
         var cards: [TranscriptCardAttachment] = []
         doc.storage.enumerateAttribute(
             .attachment,
@@ -67,8 +70,10 @@ struct TranscriptDocumentIntegrationTests {
                 cards.append(attachment)
             }
         }
-        #expect(cards.count == 2)
-        #expect(Set(cards.map(\.nodeID)) == ["b1", "r1"])
+        let toolCardIDs = cards.map(\.nodeID).filter { !$0.hasPrefix("table-") }
+        let tableIDs = cards.map(\.nodeID).filter { $0.hasPrefix("table-") }
+        #expect(Set(toolCardIDs) == ["b1", "r1"])
+        #expect(tableIDs.count == 1)
 
         // (d) nodeIDs match input order
         #expect(doc.nodeIDs == ["u1", "a1", "b1", "r1", "s1"])
