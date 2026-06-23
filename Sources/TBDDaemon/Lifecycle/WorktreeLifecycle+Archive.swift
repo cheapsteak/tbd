@@ -335,7 +335,11 @@ extension WorktreeLifecycle {
 
         // Deliberate revive: disarm auto-archive so a still-merged PR doesn't
         // immediately re-archive the worktree the user just revived.
-        try? await db.worktrees.setAutoArchiveOnMerge(id: worktreeID, value: false)
+        do {
+            try await db.worktrees.setAutoArchiveOnMerge(id: worktreeID, value: false)
+        } catch {
+            archiveLogger.warning("failed to disarm auto-archive for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+        }
 
         // Return updated worktree
         guard let revived = try await db.worktrees.get(id: worktreeID) else {

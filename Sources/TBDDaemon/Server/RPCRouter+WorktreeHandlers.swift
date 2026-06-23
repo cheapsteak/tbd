@@ -231,7 +231,11 @@ extension RPCRouter {
 
         // A worktree with active children isn't auto-archivable; disarm the new parent.
         if let newParentID = params.newParentID {
-            try? await db.worktrees.setAutoArchiveOnMerge(id: newParentID, value: false)
+            do {
+                try await db.worktrees.setAutoArchiveOnMerge(id: newParentID, value: false)
+            } catch {
+                logger.warning("failed to disarm auto-archive for \(newParentID, privacy: .public): \(error, privacy: .public)")
+            }
         }
 
         subscriptions.broadcast(delta: .worktreeMoved(WorktreeMovedDelta(

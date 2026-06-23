@@ -320,7 +320,11 @@ extension WorktreeLifecycle {
                 try await db.worktrees.revive(id: worktree.id, clearSessions: clearSessions)
                 // Deliberate revive: disarm auto-archive so a still-merged PR
                 // doesn't immediately re-archive the worktree the user just revived.
-                try? await db.worktrees.setAutoArchiveOnMerge(id: worktree.id, value: false)
+                do {
+                    try await db.worktrees.setAutoArchiveOnMerge(id: worktree.id, value: false)
+                } catch {
+                    logger.warning("failed to disarm auto-archive for \(worktree.id, privacy: .public): \(error, privacy: .public)")
+                }
             }
         } catch {
             logger.error("phase-3 status update failed for worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")

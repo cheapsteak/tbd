@@ -418,7 +418,8 @@ struct WorktreeAutoArchive: AsyncParsableCommand {
             params: WorktreeSetAutoArchiveParams(worktreeID: worktreeID, enabled: state.boolValue)
         )
         if json {
-            printJSON(["status": "auto-archive", "id": worktreeID.uuidString, "enabled": String(state.boolValue)])
+            struct Result: Encodable { let status: String; let id: String; let enabled: Bool }
+            printJSON(Result(status: "auto-archive", id: worktreeID.uuidString, enabled: state.boolValue))
         } else {
             print("Auto-archive \(state.rawValue) for worktree.")
         }
