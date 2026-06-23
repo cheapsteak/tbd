@@ -51,7 +51,11 @@ actor DaemonClient {
     /// preSession hooks) still complete — it exists only to convert a
     /// half-dead-daemon hang into a bounded failure instead of a permanently
     /// parked background thread. Per-recv granularity is SO_RCVTIMEO (1s).
-    private static let rpcRecvDeadlineSeconds: TimeInterval = 120
+    /// 300s is deliberately generous: worktree create/revive can run a blocking
+    /// preSession hook (e.g. `npm install`) that legitimately exceeds 2 minutes,
+    /// so a shorter bound risks failing real work. The frequent poll path
+    /// returns in milliseconds and never approaches this ceiling.
+    private static let rpcRecvDeadlineSeconds: TimeInterval = 300
 
     init(socketPath: String? = nil) {
         // See HookResolver — resolve here, not at the caller's site.
