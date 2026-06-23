@@ -72,7 +72,7 @@ struct TranscriptScrollCompareHarness {
         ]
         // Plus the real sessions that reportedly showed the overlap.
         for real in TranscriptCompareRealSessions.scenarios() {
-            let items = TranscriptCompareRealSessions.parseWindow(filePath: real.jsonlPath, window: real.window)
+            let items = TranscriptCompareRealSessions.parseWindow(for: real)
             if !items.isEmpty {
                 scenarios.append((real.name, items))
             }
@@ -84,6 +84,21 @@ struct TranscriptScrollCompareHarness {
             // Coordinator's initial bottom-pin so we can confirm an open lands at
             // the TRUE bottom (newest content), not the middle/top. (#129)
             paths.append(try renderOpen(scenario: scenario, items: items, appState: appState))
+
+            // For the "this session" diagnosis scenario the orchestrator expects a
+            // single, stably-named scrolled NEW artifact with the reported region
+            // (the `<task-notification>` user bubble) in view. The window is short,
+            // so the bottom-pinned "open" snapshot already lands that region on
+            // screen; alias it to the requested path so the report can reference it
+            // without depending on which fractional offset happened to catch it.
+            if scenario == "thisSession-phrase" {
+                let alias = "\(Self.outputDir)/thisSession-phrase-scroll__new.png"
+                let openPath = "\(Self.outputDir)/scroll-\(scenario)-open__new.png"
+                try? fm.removeItem(atPath: alias)
+                try fm.copyItem(atPath: openPath, toPath: alias)
+                paths.append(alias)
+            }
+
             indexLines.append("scenario: \(scenario) (\(items.count) items)")
             for path in paths {
                 let size = (try? fm.attributesOfItem(atPath: path)[.size] as? Int) ?? 0

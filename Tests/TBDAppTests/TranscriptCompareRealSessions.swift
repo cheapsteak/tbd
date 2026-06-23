@@ -25,8 +25,18 @@ enum TranscriptCompareRealSessions {
         let name: String
         let jsonlPath: String
         /// Inclusive item-index window into the parsed `[TranscriptItem]`. Full
-        /// real sessions can be many MB; we render a representative slice.
+        /// real sessions can be many MB; we render a representative slice. When
+        /// `anchorPhrase` is set, the window is recomputed at parse time as
+        /// `[matchIndex - before, matchIndex + after]` (clamped) instead.
         let window: Range<Int>
+        /// Optional: a phrase to locate in the parsed items' rendered text. When
+        /// present, `parseWindow` ignores `window` and renders a slice centred on
+        /// the first item whose text contains it. Keeps the committed window
+        /// robust to upstream session edits (no hardcoded indices for that case).
+        var anchorPhrase: String?
+        /// Items to include before/after the anchor match (inclusive of the match).
+        var anchorBefore: Int = 5
+        var anchorAfter: Int = 4
     }
 
     /// Resolves the real-session scenarios available on this machine. Returns an
@@ -60,7 +70,41 @@ enum TranscriptCompareRealSessions {
             result.append(Scenario(name: "real-tbd", jsonlPath: path, window: 0..<30))
         }
 
+        // "This session" — the live session the user is looking at, copied to a
+        // scratch path. The reported defect is the region AROUND the heading
+        // "Confirmation from regenerated real PNGs": that phrase first appears
+        // inside a long `<task-notification>` envelope which the parser renders
+        // as a right-aligned blue USER bubble. We anchor on the phrase (rather
+        // than a hardcoded index) so the committed scenario survives session
+        // edits, and so no real session-id is baked into the source. The path is
+        // env-overridable and defaults to the scratch copy; the JSONL itself is
+        // never committed.
+        if let path = resolveThisSession() {
+            result.append(Scenario(
+                name: "thisSession-phrase",
+                jsonlPath: path,
+                window: 0..<10,
+                anchorPhrase: "Confirmation from regenerated real PNGs",
+                anchorBefore: 5,
+                anchorAfter: 4
+            ))
+        }
+
         return result
+    }
+
+    /// Resolve the "this session" JSONL: `TBD_COMPARE_THIS_SESSION` env override
+    /// first, else the conventional scratchpad copy path. Returns nil (scenario
+    /// skipped) when neither exists, so the gated run still succeeds elsewhere.
+    private static func resolveThisSession() -> String? {
+        let fm = FileManager.default
+        if let override = ProcessInfo.processInfo.environment["TBD_COMPARE_THIS_SESSION"],
+           fm.fileExists(atPath: override) {
+            return override
+        }
+        let fallback = "/private/tmp/claude-501/-Users-chang-tbd-worktrees-tbd-transcript-row-flatten"
+            + "/6F6A46F5-0E30-4CF8-A06C-A5C628760FF5/scratchpad/this-session-6F6A46F5.jsonl"
+        return fm.fileExists(atPath: fallback) ? fallback : nil
     }
 
     /// Resolve a JSONL path: env-var override first, else a recursive glob under
@@ -208,11 +252,47 @@ enum TranscriptCompareRealSessions {
     /// clamped to the available count.
     static func parseWindow(filePath: String, window: Range<Int>) -> [TranscriptItem] {
         let all = parse(filePath: filePath)
+        return slice(all, window: window)
+    }
+
+    /// Resolve a scenario's window: if it carries an `anchorPhrase`, locate the
+    /// first parsed item whose rendered text contains it and return the slice
+    /// `[match - anchorBefore, match + anchorAfter]` (inclusive, clamped).
+    /// Falls back to the fixed `window` when the phrase isn't found.
+    static func parseWindow(for scenario: Scenario) -> [TranscriptItem] {
+        let all = parse(filePath: scenario.jsonlPath)
+        guard !all.isEmpty else { return [] }
+        guard let phrase = scenario.anchorPhrase,
+              let match = all.firstIndex(where: { itemText($0).contains(phrase) }) else {
+            return slice(all, window: scenario.window)
+        }
+        let lower = match - scenario.anchorBefore
+        let upper = match + scenario.anchorAfter + 1  // +1: inclusive upper bound
+        return slice(all, window: lower..<upper)
+    }
+
+    private static func slice(_ all: [TranscriptItem], window: Range<Int>) -> [TranscriptItem] {
         guard !all.isEmpty else { return [] }
         let lower = max(0, window.lowerBound)
         let upper = min(all.count, window.upperBound)
         guard lower < upper else { return all }
         return Array(all[lower..<upper])
+    }
+
+    /// The text a `TranscriptItem` renders (for anchor-phrase matching). Mirrors
+    /// the fields the two render paths display.
+    static func itemText(_ item: TranscriptItem) -> String {
+        switch item {
+        case .userPrompt(_, let text, _),
+             .assistantText(_, let text, _, _),
+             .thinking(_, let text, _),
+             .systemReminder(_, _, let text, _):
+            return text
+        case .toolCall(_, let name, let inputJSON, _, let result, _, _, _):
+            return "\(name)\n\(inputJSON)\n\(result?.text ?? "")"
+        case .slashCommand(_, let name, let args, _):
+            return "\(name) \(args ?? "")"
+        }
     }
 
     // MARK: - helpers (mirror TranscriptParser)

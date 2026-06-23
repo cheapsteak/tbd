@@ -62,7 +62,7 @@ struct TranscriptVisualCompareHarness {
             ($0, TranscriptCompareFixtures.items(for: $0))
         }
         for real in TranscriptCompareRealSessions.scenarios() {
-            let items = TranscriptCompareRealSessions.parseWindow(filePath: real.jsonlPath, window: real.window)
+            let items = TranscriptCompareRealSessions.parseWindow(for: real)
             if items.isEmpty {
                 indexLines.append("scenario: \(real.name) — SKIPPED (parsed 0 items from \(real.jsonlPath))")
                 indexLines.append("")
