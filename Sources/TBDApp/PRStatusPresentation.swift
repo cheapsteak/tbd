@@ -36,6 +36,29 @@ struct PRStatusPresentation: Equatable {
         }
     }
 
+    /// AppKit equivalent of `color`, for baking a pre-tinted (non-template)
+    /// NSImage — toolbar `Menu`/split-button labels strip color from template
+    /// images, so the icon must carry its own color via `.renderingMode(.original)`.
+    var nsColor: NSColor {
+        switch colorSemantic {
+        case .pending:
+            return NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? NSColor(srgbRed: 210 / 255, green: 153 / 255, blue: 34 / 255, alpha: 1)
+                    : NSColor(srgbRed: 147 / 255, green: 105 / 255, blue: 33 / 255, alpha: 1)
+            }
+        case .nonMergeable:     return .systemRed
+        case .draft:            return .secondaryLabelColor
+        case .mergeable:
+            return NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? NSColor(srgbRed: 63 / 255, green: 185 / 255, blue: 80 / 255, alpha: 1)
+                    : NSColor(srgbRed: 61 / 255, green: 125 / 255, blue: 64 / 255, alpha: 1)
+            }
+        case .merged:           return .systemPurple
+        }
+    }
+
     static func make(for prStatus: PRStatus?) -> PRStatusPresentation? {
         guard let prStatus else { return nil }
         switch prStatus.state {
