@@ -963,7 +963,7 @@ extension RPCRouter {
         let status = DaemonStatusResult(
             version: TBDConstants.version,
             uptime: uptime,
-            connectedClients: 0,  // Will be updated when socket server is implemented
+            connectedClients: connectedClientsProvider?() ?? 0,
             executablePath: Self.resolvedExecutablePath
         )
         return try RPCResponse(result: status)
