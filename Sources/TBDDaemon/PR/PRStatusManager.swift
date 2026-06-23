@@ -29,6 +29,13 @@ public actor PRStatusManager {
     /// Assigns `status` to the cache and fires `onMergedTransition` when the
     /// state moves from non-merged (or absent) to `.merged`. All cache writes
     /// route through here so the transition is detected uniformly.
+    ///
+    /// Note: the cache is in-memory only, so after a daemon restart the first
+    /// observation of an already-merged PR counts as a nil→merged transition and
+    /// fires `onMergedTransition`. This is intentional — a PR that merged while
+    /// the daemon was down should still auto-archive its (armed) worktree on the
+    /// next poll. Re-archive loops are prevented because archived worktrees leave
+    /// the active poll set and revive disarms the override.
     private func apply(_ status: PRStatus, for worktreeID: UUID) async {
         let wasMerged = (cache[worktreeID]?.state == .merged)
         cache[worktreeID] = status
