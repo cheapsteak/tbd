@@ -53,9 +53,25 @@ struct TranscriptVisualCompareHarness {
         indexLines.append("generated: \(ISO8601DateFormatter().string(from: Date()))")
         indexLines.append("")
 
-        for scenario in TranscriptCompareFixtures.scenarioNames {
-            let items = TranscriptCompareFixtures.items(for: scenario)
+        // Synthetic fixture scenarios + any REAL on-disk session windows. Real
+        // scenarios feed actual Claude JSONL content through the same two render
+        // paths to hunt the reported "overlapping bubbles" defect that synthetic
+        // fixtures did not reproduce. They are skipped silently when the files
+        // aren't present on this machine.
+        var scenarios: [(name: String, items: [TranscriptItem])] = TranscriptCompareFixtures.scenarioNames.map {
+            ($0, TranscriptCompareFixtures.items(for: $0))
+        }
+        for real in TranscriptCompareRealSessions.scenarios() {
+            let items = TranscriptCompareRealSessions.parseWindow(filePath: real.jsonlPath, window: real.window)
+            if items.isEmpty {
+                indexLines.append("scenario: \(real.name) — SKIPPED (parsed 0 items from \(real.jsonlPath))")
+                indexLines.append("")
+                continue
+            }
+            scenarios.append((real.name, items))
+        }
 
+        for (scenario, items) in scenarios {
             let oldPath = "\(Self.outputDir)/\(scenario)__old.png"
             let newPath = "\(Self.outputDir)/\(scenario)__new.png"
 
@@ -72,7 +88,7 @@ struct TranscriptVisualCompareHarness {
             #expect(oldSize > 1000, "OLD \(scenario) PNG only \(oldSize) bytes")
             #expect(newSize > 1000, "NEW \(scenario) PNG only \(newSize) bytes")
 
-            indexLines.append("scenario: \(scenario)")
+            indexLines.append("scenario: \(scenario) (\(items.count) items)")
             indexLines.append("  old: \(oldPath)  (\(Int(Self.width))x\(Int(oldHeight)), \(oldSize) bytes)")
             indexLines.append("  new: \(newPath)  (\(Int(Self.width))x\(Int(newHeight)), \(newSize) bytes)")
             indexLines.append("")
