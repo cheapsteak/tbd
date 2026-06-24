@@ -132,6 +132,10 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// explicit. Only set explicitly by user action (toolbar toggle / CLI);
     /// there is no UI to return to `nil`.
     public var autoArchiveOnMerge: Bool?
+    /// Last-known GitHub PR status, persisted in the DB so the PR icon survives
+    /// app/daemon restarts. nil = never observed. Refreshed live by the daemon's
+    /// PR poll; the app seeds from this only when it has no fresher live value.
+    public var prStatus: PRStatus?
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
@@ -141,7 +145,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 archivedHeadSHA: String? = nil,
                 liveClaudeSessionCount: Int? = nil,
                 parentWorktreeID: UUID? = nil,
-                autoArchiveOnMerge: Bool? = nil) {
+                autoArchiveOnMerge: Bool? = nil,
+                prStatus: PRStatus? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -159,13 +164,14 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.liveClaudeSessionCount = liveClaudeSessionCount
         self.parentWorktreeID = parentWorktreeID
         self.autoArchiveOnMerge = autoArchiveOnMerge
+        self.prStatus = prStatus
     }
 
     enum CodingKeys: String, CodingKey {
         case id, repoID, name, displayName, branch, path, status
         case hasConflicts, createdAt, archivedAt, tmuxServer
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
-        case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
+        case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge, prStatus
     }
 
     public init(from decoder: Decoder) throws {
@@ -187,6 +193,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
         parentWorktreeID = try c.decodeIfPresent(UUID.self, forKey: .parentWorktreeID)
         autoArchiveOnMerge = try c.decodeIfPresent(Bool.self, forKey: .autoArchiveOnMerge)
+        prStatus = try c.decodeIfPresent(PRStatus.self, forKey: .prStatus)
     }
 }
 

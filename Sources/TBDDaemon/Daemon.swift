@@ -213,6 +213,14 @@ public final class Daemon: Sendable {
         )
         let prManager = PRStatusManager()
 
+        // Hydrate PR status cache from the DB so PR icons survive restart, then
+        // persist future updates back to the DB.
+        let persistedPRStatuses = (try? await database.worktrees.allPRStatuses()) ?? [:]
+        await prManager.hydrate(persistedPRStatuses)
+        await prManager.setOnStatusPersist { worktreeID, status in
+            try? await database.worktrees.setPRStatus(id: worktreeID, status: status)
+        }
+
         // 7a. Wire auto-archive-on-merge: when a worktree's cached PR state
         // transitions into `.merged`, the coordinator evaluates the effective
         // setting and archives the worktree (no active children) in the

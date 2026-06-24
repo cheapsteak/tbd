@@ -12,6 +12,8 @@ public actor PRStatusManager {
 
     private var onMergedTransition: (@Sendable (UUID, Int) async -> Void)?
 
+    private var onStatusPersist: (@Sendable (UUID, PRStatus) async -> Void)?
+
     public init() {}
 
     // MARK: - Public interface
@@ -26,19 +28,52 @@ public actor PRStatusManager {
         self.onMergedTransition = cb
     }
 
+    /// Register a callback fired whenever a worktree's cached PR status actually
+    /// changes, so the daemon can persist it to the DB.
+    public func setOnStatusPersist(_ cb: @escaping @Sendable (UUID, PRStatus) async -> Void) {
+        self.onStatusPersist = cb
+    }
+
+    /// Seed the cache from persisted DB state at startup. Writes directly (not via
+    /// `apply`) so it never fires `onMergedTransition` or `onStatusPersist`.
+    /// `.merged` is never persisted (see `apply`), so in practice nothing here is
+    /// ever `.merged`; the direct write is still required so that a real merge
+    /// observed after startup is detected against the correct hydrated baseline.
+    public func hydrate(_ statuses: [UUID: PRStatus]) {
+        for (id, status) in statuses { cache[id] = status }
+    }
+
     /// Assigns `status` to the cache and fires `onMergedTransition` when the
-    /// state moves from non-merged (or absent) to `.merged`. All cache writes
-    /// route through here so the transition is detected uniformly.
+    /// state moves from non-merged (or absent) to `.merged`. Also fires
+    /// `onStatusPersist` whenever a NON-merged status actually changes, so the
+    /// new value is written to the DB. All cache writes route through here
+    /// (except the startup `hydrate`, which writes the cache directly) so the
+    /// transition and persistence are detected uniformly.
     ///
-    /// Note: the cache is in-memory only, so after a daemon restart the first
-    /// observation of an already-merged PR counts as a nil→merged transition and
-    /// fires `onMergedTransition`. This is intentional — a PR that merged while
-    /// the daemon was down should still auto-archive its (armed) worktree on the
-    /// next poll. Re-archive loops are prevented because archived worktrees leave
-    /// the active poll set and revive disarms the override.
+    /// The cache is hydrated from the DB at startup via `hydrate`, so PR icons
+    /// survive a restart. Crucially, `.merged` is NEVER persisted (see the gate
+    /// below): merged is the terminal state that triggers auto-archive. If it
+    /// were persisted and the archive failed/early-returned (momentarily-active
+    /// child, effective=false, error) before a daemon crash, `hydrate` would
+    /// restore `.merged` and the next poll would see `wasMerged == true` and
+    /// never re-fire `onMergedTransition` — permanently losing the auto-archive
+    /// (a regression vs #295's in-memory-only cache). By not persisting
+    /// `.merged`, a still-active merged worktree is hydrated with its last
+    /// non-merged status (or nothing), so the next post-restart poll re-observes
+    /// the merge as a non-merged→merged transition and re-fires — preserving the
+    /// merge-while-daemon-down recovery guarantee. Re-archive loops are still
+    /// prevented because archived worktrees leave the active poll set and revive
+    /// disarms the override.
     private func apply(_ status: PRStatus, for worktreeID: UUID) async {
-        let wasMerged = (cache[worktreeID]?.state == .merged)
+        let previous = cache[worktreeID]
+        let wasMerged = (previous?.state == .merged)
         cache[worktreeID] = status
+        // Persist every non-terminal change so the PR icon survives restart, but
+        // deliberately skip `.merged` (the auto-archive trigger) — see the doc
+        // comment above for why persisting it would break #295's recovery.
+        if previous != status && status.state != .merged {
+            await onStatusPersist?(worktreeID, status)
+        }
         if !wasMerged && status.state == .merged {
             await onMergedTransition?(worktreeID, status.number)
         }
