@@ -586,4 +586,93 @@ struct PRStatusManagerTests {
         #expect(state == .blocked)
         #expect(reason == "Behind base branch")
     }
+
+    // MARK: - Hydration & persistence
+
+    /// Thread-safe fire counter for `@Sendable` callbacks.
+    private actor FireCounter {
+        private(set) var count = 0
+        func bump() { count += 1 }
+    }
+
+    @Test("hydrate populates allStatuses without firing callbacks")
+    func hydratePopulatesAllStatuses() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let status = PRStatus(number: 7, url: "https://example.com/pr/7", state: .mergeable, reason: "Ready to merge")
+        await manager.hydrate([id: status])
+        let all = await manager.allStatuses()
+        #expect(all[id] == status)
+    }
+
+    @Test("hydrating merged then applying same merged does NOT fire onMergedTransition")
+    func hydratedMergedDoesNotRefireTransition() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let counter = FireCounter()
+        await manager.setOnMergedTransition { _, _ in await counter.bump() }
+
+        let merged = PRStatus(number: 11, url: "https://example.com/pr/11", state: .merged, reason: "Merged")
+        await manager.hydrate([id: merged])
+        await manager.seedForTesting(worktreeID: id, status: merged)
+
+        #expect(await counter.count == 0)
+    }
+
+    @Test("hydrating non-merged then applying merged DOES fire onMergedTransition once")
+    func hydratedNonMergedFiresTransitionOnMerge() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let counter = FireCounter()
+        await manager.setOnMergedTransition { _, _ in await counter.bump() }
+
+        let open = PRStatus(number: 12, url: "https://example.com/pr/12", state: .mergeable, reason: "Ready to merge")
+        let merged = PRStatus(number: 12, url: "https://example.com/pr/12", state: .merged, reason: "Merged")
+        await manager.hydrate([id: open])
+        await manager.seedForTesting(worktreeID: id, status: merged)
+
+        #expect(await counter.count == 1)
+    }
+
+    @Test("apply fires onStatusPersist on change, not on identical status")
+    func persistFiresOnChangeOnly() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let counter = FireCounter()
+        await manager.setOnStatusPersist { _, _ in await counter.bump() }
+
+        let statusA = PRStatus(number: 20, url: "https://example.com/pr/20", state: .mergeable, reason: "Ready to merge")
+        let statusB = PRStatus(number: 20, url: "https://example.com/pr/20", state: .blocked, reason: "Blocked")
+
+        await manager.seedForTesting(worktreeID: id, status: statusA)
+        #expect(await counter.count == 1)
+
+        // Identical status — no persist.
+        await manager.seedForTesting(worktreeID: id, status: statusA)
+        #expect(await counter.count == 1)
+
+        // Different status — persist again.
+        await manager.seedForTesting(worktreeID: id, status: statusB)
+        #expect(await counter.count == 2)
+    }
+
+    @Test("apply does NOT fire onStatusPersist for a .merged status even though it changed")
+    func persistSkipsMergedState() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let counter = FireCounter()
+        await manager.setOnStatusPersist { _, _ in await counter.bump() }
+
+        // Applying a .merged status is a genuine change (cache was empty), but
+        // merged is the auto-archive trigger and must NOT be persisted —
+        // persisting + hydrating it would defeat #295's archive-while-down
+        // recovery (see PRStatusManager.apply doc comment).
+        let merged = PRStatus(number: 30, url: "https://example.com/pr/30", state: .merged, reason: "Merged")
+        await manager.seedForTesting(worktreeID: id, status: merged)
+        #expect(await counter.count == 0)
+
+        // The cache still updated, even though nothing was persisted.
+        let all = await manager.allStatuses()
+        #expect(all[id] == merged)
+    }
 }

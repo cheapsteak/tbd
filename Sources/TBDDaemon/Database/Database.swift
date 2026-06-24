@@ -552,6 +552,13 @@ public final class TBDDatabase: Sendable {
                 type: .boolean, defaults: false)
         }
 
+        // Last-known GitHub PR status per worktree, stored as a JSON-encoded
+        // `PRStatus`. Nullable so existing rows decode as "no status yet". Lets the
+        // PR icon survive app/daemon restarts (mirrors archivedClaudeSessions).
+        migrator.registerMigration("v34_worktree_pr_status") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "prStatus", type: .text)
+        }
+
         return migrator
     }
 }

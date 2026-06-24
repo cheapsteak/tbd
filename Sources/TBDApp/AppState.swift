@@ -1170,6 +1170,15 @@ final class AppState: ObservableObject {
                 tombstones: Set(recentlyArchivedWorktreeIDs.keys)
             )
 
+            // Seed PR status from the persisted value so the PR icon shows immediately
+            // on cold start. Only fill gaps — never overwrite a fresher live entry
+            // populated by refreshPRStatuses().
+            for wt in fetched where prStatuses[wt.id] == nil {
+                if let pr = wt.prStatus {
+                    prStatuses[wt.id] = pr
+                }
+            }
+
             // A revive that was gated by a blocking preSession hook lingers
             // `.inFlight` until the daemon reports the row `.active` — this
             // periodic refresh is where that flip is observed.
