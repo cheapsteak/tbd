@@ -110,6 +110,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeReorder(request.paramsData)
             case RPCMethod.worktreeMove:
                 return try await handleWorktreeMove(request.paramsData)
+            case RPCMethod.worktreeForget:
+                return try await handleWorktreeForget(request.paramsData)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData)
             case RPCMethod.terminalList:
@@ -198,6 +200,12 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileSetPrimaryAgentPreference(request.paramsData)
             case RPCMethod.modelProfileSetRepoOverride:
                 return try await handleModelProfileSetRepoOverride(request.paramsData)
+            case RPCMethod.configSetEnvOverrides:
+                return try await handleConfigSetEnvOverrides(request.paramsData)
+            case RPCMethod.repoSetEnvOverrides:
+                return try await handleRepoSetEnvOverrides(request.paramsData)
+            case RPCMethod.modelProfileSetEnvOverrides:
+                return try await handleModelProfileSetEnvOverrides(request.paramsData)
             case RPCMethod.modelProfileFetchUsage:
                 return try await handleModelProfileFetchUsage(request.paramsData)
             case RPCMethod.modelProfileHealthCheck:
@@ -228,6 +236,12 @@ public final class RPCRouter: Sendable {
                 return try await handleTabList(request.paramsData)
             case RPCMethod.worktreeSetActiveTab:
                 return try await handleWorktreeSetActiveTab(request.paramsData)
+            case RPCMethod.worktreeSetAutoArchive:
+                return try await handleWorktreeSetAutoArchive(request.paramsData)
+            case RPCMethod.configGet:
+                return try await handleConfigGet()
+            case RPCMethod.configSetAutoArchiveOnMergeDefault:
+                return try await handleConfigSetAutoArchiveDefault(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

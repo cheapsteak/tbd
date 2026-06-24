@@ -357,6 +357,12 @@ final class AppState: ObservableObject {
     @Published var modelProfiles: [ModelProfileWithUsage] = []
     @Published var defaultProfileID: UUID? = nil
     @Published var primaryAgentPreference: PrimaryAgentPreference = .defaultValue
+    /// Global free-form env overrides (config scope). Loaded from the daemon
+    /// alongside `defaultProfileID` via `loadModelProfiles()`.
+    @Published var globalEnvOverrides: [String: String] = [:]
+    /// Global default for auto-archive-on-PR-merge. Loaded from the daemon
+    /// alongside `globalEnvOverrides` via `loadModelProfiles()`.
+    @Published var autoArchiveOnMergeDefault: Bool = false
     /// Terminals where the user has dismissed the proxy-unreachable banner.
     /// Cleared on app relaunch (in-memory only — banners are advisory).
     @Published var dismissedProxyWarnings: Set<UUID> = []
@@ -364,6 +370,8 @@ final class AppState: ObservableObject {
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
     @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
+    @Published var historyThreadPath: [UUID: [String]] = [:]   // worktreeID → subagent drill path
+    @Published var liveThreadPath: [UUID: [String]] = [:]      // terminalID → subagent drill path
     @Published var sessionTranscriptLoading: Set<String> = []
 
     /// Raw most-recent-first log of recently-visited worktrees, the recency
@@ -782,6 +790,8 @@ final class AppState: ObservableObject {
             Task { [weak self] in await self?.loadModelProfiles() }
         case .terminalSessionUpdated(let d):
             applyTerminalSessionDelta(d)
+        case .terminalCreated(let d):
+            applyTerminalCreatedDelta(d)
         case .terminalActivityUpdated(let d):
             applyTerminalActivityDelta(d)
         case .worktreeMoved(let d):
@@ -1160,6 +1170,20 @@ final class AppState: ObservableObject {
                 tombstones: Set(recentlyArchivedWorktreeIDs.keys)
             )
 
+            // Seed PR status from the persisted value so the PR icon shows immediately
+            // on cold start. Only fill gaps — never overwrite a fresher live entry
+            // populated by refreshPRStatuses().
+            for wt in fetched where prStatuses[wt.id] == nil {
+                if let pr = wt.prStatus {
+                    prStatuses[wt.id] = pr
+                }
+            }
+
+            // A revive that was gated by a blocking preSession hook lingers
+            // `.inFlight` until the daemon reports the row `.active` — this
+            // periodic refresh is where that flip is observed.
+            promoteRevivedWorktrees(observing: allWts)
+
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet
                 let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }
@@ -1403,6 +1427,55 @@ final class AppState: ObservableObject {
     /// never mutate the developer's live app preferences.
     static func autoSuspendClaudeEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? false
+    }
+
+    /// Pure target-selection for the pre-sleep suspend hook. Returns the
+    /// worktree IDs to best-effort suspend before the machine sleeps:
+    /// `[]` when auto-suspend is disabled, otherwise every worktree ID
+    /// (flattened across repos). No I/O — trivially unit-testable for both
+    /// gate branches without a live daemon.
+    static func worktreeIDsToSuspendForSleep(
+        worktrees: [UUID: [Worktree]],
+        autoSuspendEnabled: Bool
+    ) -> [UUID] {
+        guard autoSuspendEnabled else { return [] }
+        return worktrees.values.flatMap { $0 }.map(\.id)
+    }
+
+    /// Best-effort suspend of idle Claude terminals across all worktrees when
+    /// the machine is about to sleep, so if the tmux server dies during a long
+    /// sleep, wake has less to recover.
+    ///
+    /// This is an OPT-IN optimization gated on the existing `autoSuspendClaude`
+    /// toggle (default OFF) — NOT the safety net. Short sleeps (lid close)
+    /// usually leave the tmux server alive, so unconditionally exiting every
+    /// idle Claude session on every sleep would force needless manual resumes.
+    /// The unconditional safety is #284 (park-on-reboot), which already
+    /// guarantees no OOM by parking terminals as suspended on reboot/server
+    /// death. Gating keeps all proactive-suspend behavior under the one toggle
+    /// the user already controls.
+    ///
+    /// When the gate is off this makes ZERO daemon calls. Otherwise it fires a
+    /// fire-and-forget `worktreeSuspend` per worktree; the daemon filters to
+    /// `isClaudeResumable && suspendedAt == nil`, waits briefly per terminal
+    /// for idle, and skips busy ones — so firing for every worktree is safe and
+    /// no-ops worktrees with nothing to suspend.
+    func suspendIdleClaudeForSleep(defaults: UserDefaults = .standard) {
+        let enabled = Self.autoSuspendClaudeEnabled(defaults: defaults)
+        let ids = Self.worktreeIDsToSuspendForSleep(
+            worktrees: worktrees,
+            autoSuspendEnabled: enabled
+        )
+        guard !ids.isEmpty else {
+            logger.debug("suspendIdleClaudeForSleep: nothing to do (enabled=\(enabled, privacy: .public))")
+            return
+        }
+        logger.info("suspendIdleClaudeForSleep: best-effort suspending \(ids.count, privacy: .public) worktree(s) before sleep")
+        for id in ids {
+            Task { [daemonClient] in
+                try? await daemonClient.worktreeSuspend(worktreeID: id)
+            }
+        }
     }
 
     /// UserDefaults key for the `@AppStorage` toggle in the

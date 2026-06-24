@@ -256,15 +256,6 @@ struct TranscriptOverlayView: View {
                         result: toolResult,
                         terminalID: f?.terminalID
                     )
-                case .toolCall(let toolID, let name, let inputJSON, let inputTruncatedTo, let toolResult, let subagent, _, _) where name == "Task" || name == "Agent":
-                    AgentCardBody(
-                        id: toolID,
-                        inputJSON: inputJSON,
-                        inputTruncatedTo: inputTruncatedTo,
-                        result: toolResult,
-                        subagent: subagent,
-                        terminalID: f?.terminalID
-                    )
                 case .toolCall(let toolID, _, let inputJSON, let inputTruncatedTo, let toolResult, _, _, _):
                     GenericToolCardBody(
                         id: toolID,

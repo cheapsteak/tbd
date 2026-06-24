@@ -23,6 +23,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var tabOrder: String  // JSON array of UUID strings, e.g. "[]" or "[\"...\",\"...\"]"
     var activeTabID: String?
     var parentWorktreeID: String?
+    var autoArchiveOnMerge: Bool?
+    var prStatus: String?  // JSON-encoded PRStatus, nil when never observed
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -45,6 +47,8 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.tabOrder = "[]"  // overwritten by GRDB when fetched; only "new worktree" path uses this initializer
         self.activeTabID = nil  // new worktrees start with no stored selection
         self.parentWorktreeID = wt.parentWorktreeID?.uuidString
+        self.autoArchiveOnMerge = wt.autoArchiveOnMerge
+        self.prStatus = wt.prStatus.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
     }
 
     func toModel() -> Worktree {
@@ -52,6 +56,10 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         if let json = archivedClaudeSessions,
            let data = json.data(using: .utf8) {
             sessions = try? JSONDecoder().decode([String].self, from: data)
+        }
+        var pr: PRStatus?
+        if let json = prStatus, let data = json.data(using: .utf8) {
+            pr = try? JSONDecoder().decode(PRStatus.self, from: data)
         }
         return Worktree(
             id: UUID(uuidString: id)!,
@@ -68,7 +76,9 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             archivedClaudeSessions: sessions,
             sortOrder: sortOrder,
             archivedHeadSHA: archivedHeadSHA,
-            parentWorktreeID: parentWorktreeID.flatMap { UUID(uuidString: $0) }
+            parentWorktreeID: parentWorktreeID.flatMap { UUID(uuidString: $0) },
+            autoArchiveOnMerge: autoArchiveOnMerge,
+            prStatus: pr
         )
     }
 }
@@ -641,5 +651,44 @@ public struct WorktreeStore: Sendable {
         guard let data = try? JSONEncoder().encode(strings),
               let s = String(data: data, encoding: .utf8) else { return "[]" }
         return s
+    }
+
+    /// Set or clear the per-worktree auto-archive-on-merge override.
+    /// `nil` means follow the global default; `true`/`false` override it.
+    public func setAutoArchiveOnMerge(id: UUID, value: Bool?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE worktree SET autoArchiveOnMerge = ? WHERE id = ?",
+                arguments: [value, id.uuidString]
+            )
+        }
+    }
+
+    /// Persist (or clear with nil) the last-known GitHub PR status for a worktree.
+    public func setPRStatus(id: UUID, status: PRStatus?) async throws {
+        let json: String?
+        if let status {
+            json = String(data: try JSONEncoder().encode(status), encoding: .utf8)
+        } else {
+            json = nil
+        }
+        try await writer.write { db in
+            try db.execute(sql: "UPDATE worktree SET prStatus = ? WHERE id = ?",
+                           arguments: [json, id.uuidString])
+        }
+    }
+
+    /// All persisted PR statuses, keyed by worktree id. Used to hydrate the
+    /// in-memory PR cache at daemon startup so icons survive restart.
+    public func allPRStatuses() async throws -> [UUID: PRStatus] {
+        try await writer.read { db in
+            var result: [UUID: PRStatus] = [:]
+            for record in try WorktreeRecord.fetchAll(db) {
+                guard let wtID = UUID(uuidString: record.id),
+                      let model = record.toModel().prStatus else { continue }
+                result[wtID] = model
+            }
+            return result
+        }
     }
 }

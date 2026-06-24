@@ -10,6 +10,8 @@ struct WorktreeRowView: View {
     @EnvironmentObject var appState: AppState
     @State private var isEditing = false
     @State private var isRowHovered: Bool = false
+    @State private var isPRIconHovered: Bool = false
+    @State private var isNameTruncated = false
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -83,13 +85,26 @@ struct WorktreeRowView: View {
                 .foregroundStyle(.secondary)
         case .prStatus:
             if let presentation = prPresentation,
-               let nsImage = loadIcon(presentation.iconName) {
-                Image(nsImage: nsImage)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 12, height: 12)
-                    .foregroundStyle(presentation.color)
+               let nsImage = loadIcon(presentation.iconName),
+               let status = prStatus {
+                let reasonText = status.reason ?? status.state.displayReason
+                Button(action: openPR) {
+                    Image(nsImage: nsImage)
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 12, height: 12)
+                        .foregroundStyle(presentation.color)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .onHover { isPRIconHovered = $0 }
+                .accessibilityLabel("PR #\(status.number): \(reasonText)")
+                .anchorPreference(key: RowTooltipPreferenceKey.self, value: .bounds) { anchor in
+                    isPRIconHovered
+                        ? RowTooltipPreference(text: "PR #\(status.number) · \(reasonText)", anchor: anchor)
+                        : nil
+                }
             }
         case nil:
             EmptyView()
@@ -122,8 +137,23 @@ struct WorktreeRowView: View {
                         .fontWeight(hasBoldNotification ? .bold : .regular)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .onAppear { updateNameTruncation(availableWidth: proxy.size.width) }
+                                    .onChange(of: proxy.size.width) { _, w in updateNameTruncation(availableWidth: w) }
+                                    .onChange(of: worktree.displayName) { _, _ in updateNameTruncation(availableWidth: proxy.size.width) }
+                            }
+                        )
+                        .anchorPreference(key: RowTooltipPreferenceKey.self, value: .bounds) { anchor in
+                            (isRowHovered && !isPRIconHovered && isNameTruncated && !isEditing)
+                                ? RowTooltipPreference(text: worktree.displayName, anchor: anchor)
+                                : nil
+                        }
                     if isPending {
-                        Text("Creating worktree…")
+                        Text(Self.creatingSubtitle(
+                            hasPreSessionTerminal: appState.hasPreSessionTerminal(worktreeID: worktree.id)
+                        ))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -142,7 +172,6 @@ struct WorktreeRowView: View {
         .padding(.leading, CGFloat(indentLevel) * 16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: 28)
-        .help(isEditing ? "" : worktree.displayName)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
@@ -192,6 +221,13 @@ struct WorktreeRowView: View {
         }
     }
 
+    /// Subtitle under the name while the worktree is `.creating`. A visible
+    /// pre-session hook terminal means the git checkout is done and the
+    /// blocking setup hook is what the user is waiting on.
+    static func creatingSubtitle(hasPreSessionTerminal: Bool) -> String {
+        hasPreSessionTerminal ? "Running setup…" : "Creating worktree…"
+    }
+
     func startRename() {
         guard !isMain else { return }
         isEditing = true
@@ -202,5 +238,17 @@ struct WorktreeRowView: View {
               let image = NSImage(contentsOf: url) else { return nil }
         image.isTemplate = true
         return image
+    }
+
+    private func openPR() {
+        guard let prStatus = prStatus, let url = URL(string: prStatus.url) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func updateNameTruncation(availableWidth: CGFloat) {
+        let font = NSFont.systemFont(ofSize: 13, weight: hasBoldNotification ? .bold : .regular)
+        let ideal = (worktree.displayName as NSString).size(withAttributes: [.font: font]).width
+        let truncated = ideal > availableWidth + 0.5
+        if truncated != isNameTruncated { isNameTruncated = truncated }
     }
 }

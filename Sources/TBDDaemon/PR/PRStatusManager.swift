@@ -23,6 +23,10 @@ public actor PRStatusManager {
     /// Set by `refresh()`/`invalidate()`; `fetchAll` won't overwrite newer data.
     private var lastDirectUpdate: [UUID: Date] = [:]
 
+    private var onMergedTransition: (@Sendable (UUID, Int) async -> Void)?
+
+    private var onStatusPersist: (@Sendable (UUID, PRStatus) async -> Void)?
+
     public init() {}
 
     // MARK: - Public interface
@@ -32,6 +36,63 @@ public actor PRStatusManager {
     public func invalidate(worktreeID: UUID) {
         cache.removeValue(forKey: worktreeID)
         lastDirectUpdate[worktreeID] = Date()   // an in-flight fetchAll must not resurrect the entry
+    }
+
+    /// Register a callback fired when a worktree's cached PR state transitions
+    /// from non-merged (or absent) into `.merged`. Passes `(worktreeID, prNumber)`.
+    public func setOnMergedTransition(_ cb: @escaping @Sendable (UUID, Int) async -> Void) {
+        self.onMergedTransition = cb
+    }
+
+    /// Register a callback fired whenever a worktree's cached PR status actually
+    /// changes, so the daemon can persist it to the DB.
+    public func setOnStatusPersist(_ cb: @escaping @Sendable (UUID, PRStatus) async -> Void) {
+        self.onStatusPersist = cb
+    }
+
+    /// Seed the cache from persisted DB state at startup. Writes directly (not via
+    /// `apply`) so it never fires `onMergedTransition` or `onStatusPersist`.
+    /// `.merged` is never persisted (see `apply`), so in practice nothing here is
+    /// ever `.merged`; the direct write is still required so that a real merge
+    /// observed after startup is detected against the correct hydrated baseline.
+    public func hydrate(_ statuses: [UUID: PRStatus]) {
+        for (id, status) in statuses { cache[id] = status }
+    }
+
+    /// Assigns `status` to the cache and fires `onMergedTransition` when the
+    /// state moves from non-merged (or absent) to `.merged`. Also fires
+    /// `onStatusPersist` whenever a NON-merged status actually changes, so the
+    /// new value is written to the DB. All cache writes route through here
+    /// (except the startup `hydrate`, which writes the cache directly) so the
+    /// transition and persistence are detected uniformly.
+    ///
+    /// The cache is hydrated from the DB at startup via `hydrate`, so PR icons
+    /// survive a restart. Crucially, `.merged` is NEVER persisted (see the gate
+    /// below): merged is the terminal state that triggers auto-archive. If it
+    /// were persisted and the archive failed/early-returned (momentarily-active
+    /// child, effective=false, error) before a daemon crash, `hydrate` would
+    /// restore `.merged` and the next poll would see `wasMerged == true` and
+    /// never re-fire `onMergedTransition` — permanently losing the auto-archive
+    /// (a regression vs #295's in-memory-only cache). By not persisting
+    /// `.merged`, a still-active merged worktree is hydrated with its last
+    /// non-merged status (or nothing), so the next post-restart poll re-observes
+    /// the merge as a non-merged→merged transition and re-fires — preserving the
+    /// merge-while-daemon-down recovery guarantee. Re-archive loops are still
+    /// prevented because archived worktrees leave the active poll set and revive
+    /// disarms the override.
+    private func apply(_ status: PRStatus, for worktreeID: UUID) async {
+        let previous = cache[worktreeID]
+        let wasMerged = (previous?.state == .merged)
+        cache[worktreeID] = status
+        // Persist every non-terminal change so the PR icon survives restart, but
+        // deliberately skip `.merged` (the auto-archive trigger) — see the doc
+        // comment above for why persisting it would break #295's recovery.
+        if previous != status && status.state != .merged {
+            await onStatusPersist?(worktreeID, status)
+        }
+        if !wasMerged && status.state == .merged {
+            await onMergedTransition?(worktreeID, status.number)
+        }
     }
 
     /// Fetch all viewer PRs in one GraphQL call and update cache for all known worktrees.
@@ -113,17 +174,17 @@ public actor PRStatusManager {
             } else {
                 signals = Self.aggregateFallbackSignals(match.node.statusCheckRollupState)
             }
-            cache[match.worktreeID] = PRStatus(
-                number: match.node.number,
-                url: match.node.url,
-                state: Self.mapState(
-                    ghState: match.node.state,
-                    mergeStateStatus: match.node.mergeStateStatus,
-                    reviewDecision: match.node.reviewDecision,
-                    isDraft: match.node.isDraft,
-                    requiredChecksFailing: signals.failing,
-                    requiredChecksPending: signals.pending
-                )
+            let (state, reason) = Self.mapStateAndReason(
+                ghState: match.node.state,
+                mergeStateStatus: match.node.mergeStateStatus,
+                reviewDecision: match.node.reviewDecision,
+                isDraft: match.node.isDraft,
+                requiredChecksFailing: signals.failing,
+                requiredChecksPending: signals.pending
+            )
+            await apply(
+                PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason),
+                for: match.worktreeID
             )
         }
     }
@@ -159,17 +220,16 @@ public actor PRStatusManager {
                 signals = (false, false)   // bootstrap with no data; the next poll corrects it
             }
 
-            let status = PRStatus(
-                number: obj.number,
-                url: obj.url,
-                state: Self.mapState(ghState: obj.state,
-                                     mergeStateStatus: obj.mergeStateStatus,
-                                     reviewDecision: obj.reviewDecision ?? "",
-                                     isDraft: obj.isDraft,
-                                     requiredChecksFailing: signals.failing,
-                                     requiredChecksPending: signals.pending)
+            let (state, reason) = Self.mapStateAndReason(
+                ghState: obj.state,
+                mergeStateStatus: obj.mergeStateStatus,
+                reviewDecision: obj.reviewDecision ?? "",
+                isDraft: obj.isDraft,
+                requiredChecksFailing: signals.failing,
+                requiredChecksPending: signals.pending
             )
-            cache[worktreeID] = status
+            let status = PRStatus(number: obj.number, url: obj.url, state: state, reason: reason)
+            await apply(status, for: worktreeID)
             lastDirectUpdate[worktreeID] = Date()
             return status
         }
@@ -178,12 +238,56 @@ public actor PRStatusManager {
         return cache[worktreeID]
     }
 
-    /// For tests only: seed a cache entry directly.
-    public func seedForTesting(worktreeID: UUID, status: PRStatus) {
-        cache[worktreeID] = status
+    /// For tests only: seed a cache entry. Routes through `apply` so the
+    /// merge-transition logic is exercised exactly as in production.
+    public func seedForTesting(worktreeID: UUID, status: PRStatus) async {
+        await apply(status, for: worktreeID)
     }
 
     // MARK: - State mapping (internal but static for testability)
+
+    /// Unified function that produces both state and reason in one pass — the single
+    /// source of truth that `mapState()` and `computeReason()` delegate to, so they can't drift.
+    /// Required-check awareness: a failing *required* check is red and a pending *required*
+    /// check is yellow regardless of merge state; non-required checks never color the icon.
+    public static func mapStateAndReason(
+        ghState: String,
+        mergeStateStatus: String,
+        reviewDecision: String = "",
+        isDraft: Bool = false,
+        requiredChecksFailing: Bool = false,
+        requiredChecksPending: Bool = false
+    ) -> (state: PRMergeableState, reason: String) {
+        switch ghState {
+        case "MERGED": return (.merged, "Merged")
+        case "CLOSED": return (.closed, "Closed")
+        default:
+            if isDraft || mergeStateStatus == "DRAFT" { return (.draft, "Draft") }
+            if reviewDecision == "CHANGES_REQUESTED" { return (.changesRequested, "Changes requested") }
+            // Uniform precedence: failing required check → red, pending required check → yellow,
+            // regardless of merge state. With no required checks both are false and the
+            // mergeStateStatus switch below decides (see checkSignals).
+            if requiredChecksFailing { return (.checksFailed, "Checks failing") }
+            if requiredChecksPending { return (.pending, "Checks pending") }
+
+            switch mergeStateStatus {
+            case "CLEAN", "HAS_HOOKS", "UNSTABLE":
+                // UNSTABLE = mergeable with only non-required checks failing → not red.
+                return (.mergeable, "Ready to merge")
+            case "BLOCKED":
+                // Checks are settled and passing; the only blocker is a not-yet-given review.
+                return reviewDecision == "REVIEW_REQUIRED" ? (.mergeable, "Ready to merge") : (.blocked, "Blocked")
+            case "DIRTY":
+                return (.blocked, "Merge conflicts")
+            case "BEHIND":
+                return (.blocked, "Behind base branch")
+            case "UNKNOWN":
+                return (.pending, "Checks pending")
+            default:
+                return (.blocked, "Blocked")
+            }
+        }
+    }
 
     public static func mapState(
         ghState: String,
@@ -193,33 +297,14 @@ public actor PRStatusManager {
         requiredChecksFailing: Bool = false,
         requiredChecksPending: Bool = false
     ) -> PRMergeableState {
-        switch ghState {
-        case "MERGED": return .merged
-        case "CLOSED": return .closed
-        default:
-            if isDraft || mergeStateStatus == "DRAFT" { return .draft }
-            if reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
-            // Uniform precedence: a failing required check is red and a pending required check
-            // is yellow regardless of merge state. (When the PR has no required checks at all,
-            // both signals are false and mergeStateStatus below decides — see checkSignals.)
-            if requiredChecksFailing { return .checksFailed }
-            if requiredChecksPending { return .pending }
-
-            switch mergeStateStatus {
-            case "CLEAN", "HAS_HOOKS", "UNSTABLE":
-                // UNSTABLE = mergeable with non-required checks failing → not red.
-                return .mergeable
-            case "BLOCKED":
-                // Checks are settled and passing; the only blocker is a not-yet-given review.
-                return reviewDecision == "REVIEW_REQUIRED" ? .mergeable : .blocked
-            case "DIRTY", "BEHIND":
-                return .blocked
-            case "UNKNOWN":
-                return .pending
-            default:
-                return .blocked
-            }
-        }
+        Self.mapStateAndReason(
+            ghState: ghState,
+            mergeStateStatus: mergeStateStatus,
+            reviewDecision: reviewDecision,
+            isDraft: isDraft,
+            requiredChecksFailing: requiredChecksFailing,
+            requiredChecksPending: requiredChecksPending
+        ).state
     }
 
     /// Conclusions (CheckRun) that count as a failing check.
@@ -387,6 +472,26 @@ public actor PRStatusManager {
             }
           } } } } } } } }
         """
+    }
+
+    /// Compute human-readable reason string for the PR merge state.
+    /// Delegates to mapStateAndReason() for the single source of truth.
+    public static func computeReason(
+        ghState: String,
+        mergeStateStatus: String,
+        reviewDecision: String = "",
+        isDraft: Bool = false,
+        requiredChecksFailing: Bool = false,
+        requiredChecksPending: Bool = false
+    ) -> String {
+        Self.mapStateAndReason(
+            ghState: ghState,
+            mergeStateStatus: mergeStateStatus,
+            reviewDecision: reviewDecision,
+            isDraft: isDraft,
+            requiredChecksFailing: requiredChecksFailing,
+            requiredChecksPending: requiredChecksPending
+        ).reason
     }
 
     /// Priority for choosing between multiple PRs on the same branch.

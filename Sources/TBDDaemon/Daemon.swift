@@ -59,6 +59,7 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var sshRefreshTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
+    public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public let pidFile: PIDFile
     public let startTime: Date
@@ -95,6 +96,11 @@ public final class Daemon: Sendable {
     /// daemon. A tmux server hosting dozens of pty panes can exhaust 256
     /// descriptors and `exit(1)`, taking every session with it.
     ///
+    /// Modern macOS shells default to 524,288. Large monorepos (e.g. Elastic
+    /// Path's commerce-manager with ~18k directories) cause Claude CLI to walk
+    /// past 10k file descriptors during startup, so a ceiling around the macOS
+    /// shell default keeps spawned `claude` processes from hitting that wall.
+    ///
     /// Best-effort: a `getrlimit`/`setrlimit` failure is logged and ignored —
     /// the daemon must still start. Returns the resulting limit (for tests).
     @discardableResult
@@ -104,7 +110,7 @@ public final class Daemon: Sendable {
             daemonLogger.warning("getrlimit(RLIMIT_NOFILE) failed: \(String(cString: strerror(errno)), privacy: .public)")
             return limit
         }
-        let target = min(limit.rlim_max, rlim_t(8192))
+        let target = min(limit.rlim_max, rlim_t(524_288))
         if limit.rlim_cur < target {
             let previous = limit.rlim_cur
             limit.rlim_cur = target
@@ -207,6 +213,24 @@ public final class Daemon: Sendable {
         )
         let prManager = PRStatusManager()
 
+        // Hydrate PR status cache from the DB so PR icons survive restart, then
+        // persist future updates back to the DB.
+        let persistedPRStatuses = (try? await database.worktrees.allPRStatuses()) ?? [:]
+        await prManager.hydrate(persistedPRStatuses)
+        await prManager.setOnStatusPersist { worktreeID, status in
+            try? await database.worktrees.setPRStatus(id: worktreeID, status: status)
+        }
+
+        // 7a. Wire auto-archive-on-merge: when a worktree's cached PR state
+        // transitions into `.merged`, the coordinator evaluates the effective
+        // setting and archives the worktree (no active children) in the
+        // background.
+        let autoArchiveCoordinator = AutoArchiveOnMergeCoordinator(
+            db: database, lifecycle: lifecycle, subscriptions: subs)
+        await prManager.setOnMergedTransition { worktreeID, prNumber in
+            await autoArchiveCoordinator.handleMergedTransition(worktreeID: worktreeID, prNumber: prNumber)
+        }
+
         // 8. Initialize RPC router
         let rpcRouter = RPCRouter(
             db: database,
@@ -241,6 +265,13 @@ public final class Daemon: Sendable {
         } catch {
             daemonLogger.warning("breakCyclicParents failed at startup: \(error.localizedDescription, privacy: .public)")
         }
+        // Resolve worktree rows stranded in `.creating` by a daemon restart
+        // mid-pre-session-wait. Must run BEFORE the per-repo reconcile loop so
+        // orphaned rows are deleted/flipped first — reconcile only sees
+        // `.active` rows and would otherwise trip the UNIQUE path constraint
+        // re-adopting a stranded checkout. Resumed waits run detached and
+        // never block startup.
+        await lifecycle.recoverCreatingWorktrees()
         do {
             let repos = try await database.repos.list()
             for repo in repos {
@@ -252,6 +283,22 @@ public final class Daemon: Sendable {
             }
         } catch {
             reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
+        }
+
+        // 11a-reaper. Reap orphaned/wedged agent processes: sweep now, then periodically.
+        let reaper = AgentReaper(tmux: tmux, signaller: ProductionProcessSignaller())
+        let ownedServers: () async -> [String] = { [database] in
+            guard let repos = try? await database.repos.list() else { return [] }
+            return Array(Set(repos.map { TmuxManager.serverName(forRepoPath: $0.path) }))
+        }
+        self.reaperTask = Task {
+            // Sweep once immediately (cold recovery), then every 60s.
+            await reaper.sweep(servers: await ownedServers())
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else { break }
+                await reaper.sweep(servers: await ownedServers())
+            }
         }
 
         // 11a-pre. Prune per-session Claude `fallbackModel` overlay files
@@ -338,6 +385,7 @@ public final class Daemon: Sendable {
         sshRefreshTask?.cancel()
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
+        reaperTask?.cancel()
 
         // Stop servers
         if let sock = socketServer {

@@ -33,6 +33,16 @@ struct SidebarView: View {
                     appState.pendingScrollToWorktreeID = nil
                 }
             }
+            .overlayPreferenceValue(RowTooltipPreferenceKey.self) { pref in
+                GeometryReader { geo in
+                    if let pref {
+                        let rect = geo[pref.anchor]
+                        RowTooltipBubble(text: pref.text)
+                            .offset(x: rect.minX, y: rect.maxY + 4)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)

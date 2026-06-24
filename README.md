@@ -79,4 +79,4 @@ Adopt your existing Claude Code Desktop worktrees into TBD in place. Pass any pa
 
 ## License
 
-Private / All rights reserved.
+[MIT](LICENSE) © 2026 Chang Wang

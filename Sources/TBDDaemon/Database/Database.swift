@@ -533,6 +533,32 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "model_profiles", column: "fallback_models", type: .text)
         }
 
+        // Free-form env-var overrides applied to spawned Claude/Codex sessions.
+        // One JSON-encoded `[String: String]` per scope. Nullable so existing
+        // rows decode as "no overrides". See docs/env-overrides.md.
+        migrator.registerMigration("v31_env_overrides") { db in
+            try db.addColumnIfMissing(table: "config",         column: "env_overrides", type: .text)
+            try db.addColumnIfMissing(table: "repo",           column: "env_overrides", type: .text)
+            try db.addColumnIfMissing(table: "model_profiles", column: "env_overrides", type: .text)
+        }
+
+        migrator.registerMigration("v32_worktree_auto_archive") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "autoArchiveOnMerge", type: .boolean)
+        }
+
+        migrator.registerMigration("v33_config_auto_archive_default") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_archive_on_merge_default",
+                type: .boolean, defaults: false)
+        }
+
+        // Last-known GitHub PR status per worktree, stored as a JSON-encoded
+        // `PRStatus`. Nullable so existing rows decode as "no status yet". Lets the
+        // PR icon survive app/daemon restarts (mirrors archivedClaudeSessions).
+        migrator.registerMigration("v34_worktree_pr_status") { db in
+            try db.addColumnIfMissing(table: "worktree", column: "prStatus", type: .text)
+        }
+
         return migrator
     }
 }

@@ -7,4 +7,8 @@ Plans produced by planning skills (`writing-implementation-plans`, `writing-desi
 - `docs/superpowers/plans/`
 - `docs/implementation-plans/`
 
-When committing, do not stage plan files. If a plan's content is worth keeping, summarize it in the PR description or promote it to a proper doc (an ADR, or a section in the relevant `docs/*.md`).
+When committing, do not stage plan files. If a plan's content is worth keeping, summarize it in the PR description or promote it to a proper doc (an ADR, a `docs/specs/<date>-<topic>-spec.md`, or a section in the relevant `docs/*.md`).
+
+**A `.gitignore` "paths are ignored" error on `git add` is intent, not an obstacle.** It means "this is scratch — don't commit it." Do NOT relocate the file to a non-ignored directory (e.g. `docs/specs/`) to force the commit. If you think a plan genuinely belongs in the tree, stop and ask.
+
+This is enforced mechanically by the `pre-commit` git hook (`scripts/git-hooks/pre-commit`, installed via `scripts/install-hooks.sh`): it refuses to commit any newly-added file carrying the writing-plans header marker, no matter where it's placed. Rare intentional override: `ALLOW_PLAN_COMMIT=1 git commit ...`.

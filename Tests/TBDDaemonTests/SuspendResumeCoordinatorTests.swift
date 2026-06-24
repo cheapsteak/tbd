@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -248,6 +249,145 @@ struct SuspendResumeCoordinatorTests {
 
         let after = try await db.terminals.get(id: terminal.id)
         #expect(after?.suspendedAt == nil, "Terminal should NOT be suspended when suspendEnabled is false")
+    }
+
+    /// Regression test for #285: on-demand Resume must bootstrap a dead tmux
+    /// server before creating the resume window. After a reboot the tmux server
+    /// is gone, so `createWindow` → `new-window` throws "no server running on …"
+    /// unless `resumeTerminal` calls `ensureServer` first.
+    ///
+    /// This uses a REAL `TmuxManager` against a unique, NOT-running socket —
+    /// the only way to actually exercise the dead-server bootstrap. The dryRun
+    /// path can't model this: `serverExists` always returns true and
+    /// `ensureServer` always returns nil in dryRun, so the bootstrap/kill code
+    /// added by this fix never engages. Modeled on
+    /// `testRecreateAfterRebootBootstrapKillOrdering` in WorktreeLifecycleTests.
+    ///
+    /// The resume window tmux creates runs `$SHELL -ic 'claude --resume <id> …'`.
+    /// Its pane — and therefore the freshly-bootstrapped session and the whole
+    /// server — stays alive only while that `claude` process keeps running. CI
+    /// installs tmux but NOT the `claude` binary (see .github/workflows/test.yml),
+    /// so on CI the resume shell hits "command not found", exits immediately, and
+    /// the just-bootstrapped session collapses to zero windows — tearing down the
+    /// server *before* `serverExists` is queried below. That made this test fail
+    /// (flakily, racing tmux's async pane reaping) on CI while passing locally only
+    /// because the developer happens to have a long-running `claude` installed.
+    /// Remove that environmental dependency by shadowing `claude` with a stub that
+    /// blocks (`exec /bin/sleep`), so the resume window is deterministically
+    /// long-lived on any runner — the same trick the sibling real-tmux test uses
+    /// when it spawns `sleep 60`. The stub is put on the tmux server's inherited
+    /// PATH and the resume shell's rc is neutralized via ZDOTDIR; see the setup
+    /// block below for why those are the only reliable levers.
+    @Test func manualResumeBootstrapsDeadServer() async throws {
+        let socketName = "tbd-test-\(UUID().uuidString.prefix(8))"
+        let realTmux = TmuxManager()
+        // Defensive: ensure no stray server is alive on this socket, and verify.
+        try? await realTmux.killServer(server: socketName)
+        let aliveBefore = await realTmux.serverExists(server: socketName)
+        #expect(!aliveBefore, "Test precondition: socket \(socketName) must not have a live server")
+
+        // Real repo dir on disk — tmux refuses to set cwd to a missing dir.
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: repoDir.path, displayName: "test", defaultBranch: "main"
+        )
+        // Worktree pointing at the dead socket — simulates post-reboot state.
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: repoDir.path, tmuxServer: socketName
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@stale-1", tmuxPaneID: "%stale-1",
+            label: "claude-1", claudeSessionID: "session-abc"
+        )
+        try await db.terminals.setSuspended(
+            id: terminal.id, sessionID: "session-abc", snapshot: "fake snapshot"
+        )
+
+        // Shadow `claude` with a blocking stub so the resume window's pane — and
+        // thus the bootstrapped session and server — stays alive on any runner,
+        // not just one that happens to have a long-running `claude` installed.
+        // See the test's doc comment for the full rationale.
+        //
+        // Mechanism (the only one that proved reliable; tmux's `new-window -e
+        // PATH=…` does NOT override the PATH a pane's shell ends up with):
+        //  1. Prepend the stub dir to the *test process* PATH. `ensureServer`
+        //     spawns the tmux server from this process, so the server — and every
+        //     pane it later forks, including the resume window — inherits it.
+        //  2. Point ZDOTDIR at an empty dir so the resume window's `$SHELL -ic`
+        //     sources no user `.zshrc`. Without this, a developer rc that rebuilds
+        //     PATH would drop the stub before `claude` is resolved (CI runners have
+        //     no such rc, which is why the stub is reached there unaided). `-ic` is
+        //     non-login, so /etc/zprofile's path_helper never runs.
+        // Both are process-global, so restore them in `defer`. Unlike the
+        // `setenv("TBD_HOME")` hazard CLAUDE.md calls out — where the flake was a
+        // *logic* race (another suite read TBD_HOME and derived a wrong path) — no
+        // test reads PATH or ZDOTDIR to make assertions, so that failure mode can't
+        // occur here. The only concurrent consumers are subprocess spawns, for which
+        // these values are additive/inert: prepending a `claude`-only dir changes no
+        // other binary's resolution, and the sibling real-tmux suites spawn `sleep`,
+        // which needs no rc. (Verified: these suites pass repeatedly under
+        // `swift test --parallel` alongside this mutation.) Caveat for future work:
+        // a new test that spawns an *interactive* shell expecting the user rc to
+        // have run could observe the empty ZDOTDIR during this window — serialize
+        // against this test if that ever becomes a concern.
+        let stubBinDir = tempDir.appendingPathComponent("stub-bin")
+        let emptyZDotDir = tempDir.appendingPathComponent("empty-zdotdir")
+        try FileManager.default.createDirectory(at: stubBinDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: emptyZDotDir, withIntermediateDirectories: true)
+        let claudeStub = stubBinDir.appendingPathComponent("claude")
+        // Absolute `/bin/sleep` so the stub does not itself depend on PATH.
+        try "#!/bin/sh\nexec /bin/sleep 120\n".write(to: claudeStub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: claudeStub.path
+        )
+        let originalPath = ProcessInfo.processInfo.environment["PATH"]
+        let originalZDotDir = ProcessInfo.processInfo.environment["ZDOTDIR"]
+        setenv("PATH", "\(stubBinDir.path):\(originalPath ?? "/usr/bin:/bin")", 1)
+        setenv("ZDOTDIR", emptyZDotDir.path, 1)
+        defer {
+            if let originalPath { setenv("PATH", originalPath, 1) } else { unsetenv("PATH") }
+            if let originalZDotDir { setenv("ZDOTDIR", originalZDotDir, 1) } else { unsetenv("ZDOTDIR") }
+        }
+
+        let coordinator = SuspendResumeCoordinator(db: db, tmux: realTmux)
+
+        let result = await coordinator.manualResume(terminalID: terminal.id)
+        // Tear down inline on any failure (defer can't await).
+        func teardown() async { try? await realTmux.killServer(server: socketName) }
+
+        #expect(result == .ok)
+
+        // The server must now be up — proof the bootstrap ran. Without the fix,
+        // createWindow throws and the server stays dead.
+        let aliveAfter = await realTmux.serverExists(server: socketName)
+        if !aliveAfter {
+            await teardown()
+            Issue.record("tmux server must be running after resume bootstrapped a dead server")
+            return
+        }
+
+        // The terminal's stale IDs must have been replaced with the freshly
+        // created window/pane, and suspendedAt cleared.
+        let updated = try await db.terminals.get(id: terminal.id)
+        #expect(updated?.suspendedAt == nil, "resume must clear suspendedAt")
+        #expect(updated?.tmuxWindowID != "@stale-1",
+                "tmuxWindowID must be replaced with a freshly-allocated window ID")
+        #expect(updated?.tmuxPaneID != "%stale-1",
+                "tmuxPaneID must be replaced with a freshly-allocated pane ID")
+        #expect(updated?.tmuxWindowID.hasPrefix("@") == true)
+        #expect(updated?.tmuxPaneID.hasPrefix("%") == true)
+
+        // The bootstrap placeholder must have been killed — the session should
+        // hold exactly the one window we created for the resume.
+        let windows = try await realTmux.listWindows(server: socketName, session: "main")
+        #expect(windows.count == 1,
+                "session should contain exactly the freshly-created resume window; got \(windows)")
+
+        await teardown()
     }
 
     /// Polls `condition` every 50ms until it returns true, up to `timeout`.

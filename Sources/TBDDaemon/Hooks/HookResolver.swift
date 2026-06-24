@@ -6,6 +6,7 @@ private let hooksLogger = Logger(subsystem: "com.tbd.daemon", category: "hooks")
 
 public enum HookEvent: String, Sendable {
     case setup
+    case preSession
     case archive
     case preMerge
     case postMerge
@@ -13,6 +14,7 @@ public enum HookEvent: String, Sendable {
     public var conductorKey: String {
         switch self {
         case .setup: return "setup"
+        case .preSession: return "preSession"
         case .archive: return "archive"
         case .preMerge: return "preMerge"
         case .postMerge: return "postMerge"
@@ -22,6 +24,7 @@ public enum HookEvent: String, Sendable {
     public var dmuxHookName: String {
         switch self {
         case .setup: return "worktree_created"
+        case .preSession: return "pre_session"
         case .archive: return "before_worktree_remove"
         case .preMerge: return "pre_merge"
         case .postMerge: return "post_merge"

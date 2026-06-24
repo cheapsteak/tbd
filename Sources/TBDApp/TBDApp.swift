@@ -440,6 +440,18 @@ struct TBDAppMain: App {
                 .onOpenURL { url in
                     DeepLinkHandler.handle(url, appState: appState)
                 }
+                .onReceive(
+                    NSWorkspace.shared.notificationCenter
+                        .publisher(for: NSWorkspace.willSleepNotification)
+                ) { _ in
+                    // Best-effort: suspend idle Claude across all worktrees
+                    // before the machine sleeps, so a tmux server that dies
+                    // during a long sleep has less to recover. Gated on the
+                    // existing auto-suspend opt-in; #284 is the unconditional
+                    // safety net. AppState is @MainActor and onReceive runs on
+                    // the main actor, so this call is isolation-correct.
+                    appState.suspendIdleClaudeForSleep()
+                }
         }
         .defaultSize(width: 1200, height: 800)
         .windowResizability(.contentMinSize)

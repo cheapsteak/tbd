@@ -1,5 +1,8 @@
 import Foundation
 import TBDShared
+import os
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "reaper")
 
 /// Errors that can occur during worktree lifecycle operations.
 public enum WorktreeLifecycleError: Error, CustomStringConvertible, LocalizedError {
@@ -53,6 +56,19 @@ public struct WorktreeLifecycle: Sendable {
     public let subscriptions: StateSubscriptionManager?
     public let modelProfileResolver: ModelProfileResolver?
     public let pendingQuestions: PendingQuestionStore
+    /// How long to wait for a blocking `preSession` hook before giving up and
+    /// spawning the primary terminals anyway. Injectable for tests.
+    public let preSessionTimeout: TimeInterval
+    /// Poll interval for the preSession completion marker file.
+    public let preSessionPollInterval: TimeInterval
+    /// Process-signal seam for the agent reaper. Injectable for tests.
+    public let processSignaller: ProcessSignaller
+    /// Reaper grace knobs (kept small in tests to avoid real sleeps).
+    public let reaperGraceAttempts: Int
+    public let reaperPollInterval: Duration
+
+    /// Default `preSession` hook timeout (production value).
+    public static let defaultPreSessionTimeout: TimeInterval = 600
 
     /// The user's default shell (from $SHELL, falls back to /bin/zsh)
     var defaultShell: String {
@@ -66,7 +82,12 @@ public struct WorktreeLifecycle: Sendable {
         hooks: HookResolver,
         subscriptions: StateSubscriptionManager? = nil,
         modelProfileResolver: ModelProfileResolver? = nil,
-        pendingQuestions: PendingQuestionStore = PendingQuestionStore()
+        pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        preSessionTimeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
+        preSessionPollInterval: TimeInterval = 0.5,
+        processSignaller: ProcessSignaller = ProductionProcessSignaller(),
+        reaperGraceAttempts: Int = 30,
+        reaperPollInterval: Duration = .milliseconds(100)
     ) {
         self.db = db
         self.git = git
@@ -75,5 +96,29 @@ public struct WorktreeLifecycle: Sendable {
         self.subscriptions = subscriptions
         self.modelProfileResolver = modelProfileResolver
         self.pendingQuestions = pendingQuestions
+        self.preSessionTimeout = preSessionTimeout
+        self.preSessionPollInterval = preSessionPollInterval
+        self.processSignaller = processSignaller
+        self.reaperGraceAttempts = reaperGraceAttempts
+        self.reaperPollInterval = reaperPollInterval
+    }
+
+    /// The agent reaper composed from the injected tmux + signaller seams.
+    var reaper: AgentReaper {
+        AgentReaper(tmux: tmux, signaller: processSignaller,
+                    graceAttempts: reaperGraceAttempts, pollInterval: reaperPollInterval)
+    }
+
+    /// Kill a tmux window, then confirm the pane process actually died and
+    /// escalate (SIGTERM→SIGKILL) if it survived the SIGHUP (wedged agent).
+    func killWindowAndReap(server: String, windowID: String, paneID: String) async {
+        let panePID = Int32((try? await tmux.panePID(server: server, paneID: paneID)) ?? "")
+        do {
+            try await tmux.killWindow(server: server, windowID: windowID)
+        } catch {
+            logger.warning("killWindow failed on \(server, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+        // Escalate even if killWindow threw — the pane process may still be alive.
+        if let panePID { await reaper.escalateAfterHangup(panePID) }
     }
 }

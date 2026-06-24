@@ -88,6 +88,8 @@ TBD instruments every `claude` (and `codex`) session it spawns so the app can ob
 
 The overlay and plugin are regenerated on every daemon startup; both writes are idempotent and non-fatal on failure (the session just loses instrumentation, it still runs).
 
+Spawned Claude/Codex sessions also receive free-form `KEY=VALUE` env overrides merged across three scopes (`global < repo < profile`), with the Claude builder's auth/routing env layered last so it can't be clobbered. See `docs/env-overrides.md`.
+
 ## Common Tasks
 
 ### Restart for testing

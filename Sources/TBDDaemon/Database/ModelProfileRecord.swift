@@ -17,6 +17,8 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
     /// nil when no fallback is configured. Stored as text so the array survives
     /// a single column.
     var fallback_models: String?
+    /// JSON-encoded `[String: String]` free-form env overrides (profile scope).
+    var env_overrides: String?
     var created_at: Date
     var last_used_at: Date?
 
@@ -30,6 +32,7 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
         self.aws_region = profile.awsRegion
         self.aws_profile = profile.awsProfile
         self.fallback_models = Self.encodeFallbackModels(profile.fallbackModels)
+        self.env_overrides = EnvOverridesCoding.encode(profile.envOverrides)
         self.created_at = profile.createdAt
         self.last_used_at = profile.lastUsedAt
     }
@@ -44,6 +47,7 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
             awsRegion: aws_region,
             awsProfile: aws_profile,
             fallbackModels: Self.decodeFallbackModels(fallback_models),
+            envOverrides: EnvOverridesCoding.decode(env_overrides),
             createdAt: created_at,
             lastUsedAt: last_used_at
         )
@@ -140,6 +144,17 @@ public struct ModelProfileStore: Sendable {
             try db.execute(
                 sql: "UPDATE model_profiles SET aws_region = ?, aws_profile = ?, model = ?, fallback_models = ? WHERE id = ?",
                 arguments: [awsRegion, awsProfile, model, fallbackJSON, id.uuidString]
+            )
+        }
+    }
+
+    /// Set or clear the per-profile free-form env overrides.
+    public func setEnvOverrides(id: UUID, overrides: [String: String]) async throws {
+        let json = EnvOverridesCoding.encode(overrides)
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE model_profiles SET env_overrides = ? WHERE id = ?",
+                arguments: [json, id.uuidString]
             )
         }
     }

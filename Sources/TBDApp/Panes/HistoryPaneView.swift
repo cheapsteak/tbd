@@ -33,8 +33,17 @@ struct HistoryPaneView: View {
         return loadState.currentSessions.first { $0.sessionId == sid }
     }
 
+    /// Subagent threads for the selected session's transcript (empty when none).
+    private var threadsForSelection: [SessionThread] {
+        guard let sid = selectedSessionID,
+              let items = appState.sessionTranscripts[sid] else { return [] }
+        return sessionThreads(from: items)
+    }
+
     @State private var listWidth: CGFloat = 290
     @State private var dragStartWidth: CGFloat? = nil
+    @State private var threadColumnWidth: CGFloat = 260
+    @State private var threadDragStartWidth: CGFloat? = nil
 
     var body: some View {
         HStack(spacing: 0) {
@@ -61,6 +70,30 @@ struct HistoryPaneView: View {
                         }
                         .onEnded { _ in dragStartWidth = nil }
                 )
+
+            // Middle panel: subagent threads (only when the session has any)
+            if !threadsForSelection.isEmpty {
+                ThreadsColumnView(
+                    worktreeID: worktreeID,
+                    threads: threadsForSelection
+                )
+                .frame(width: threadColumnWidth)
+
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(width: 1)
+                    .contentShape(Rectangle().inset(by: -3))
+                    .cursor(.resizeLeftRight)
+                    .gesture(
+                        DragGesture()
+                            .onChanged { value in
+                                if threadDragStartWidth == nil { threadDragStartWidth = threadColumnWidth }
+                                let newWidth = (threadDragStartWidth ?? threadColumnWidth) + value.translation.width
+                                threadColumnWidth = max(180, min(500, newWidth))
+                            }
+                            .onEnded { _ in threadDragStartWidth = nil }
+                    )
+            }
 
             // Right panel: transcript or empty state
             if let summary = selectedSummary {
@@ -293,6 +326,14 @@ struct SessionTranscriptView: View {
         appState.sessionTranscripts[sessionId] ?? []
     }
 
+    private var path: [String] {
+        appState.historyThreadPath[worktreeID] ?? []
+    }
+
+    private var resolvedMessages: [TranscriptItem] {
+        resolveThread(root: messages, path: path)
+    }
+
     private var isLoading: Bool {
         appState.sessionTranscriptLoading.contains(sessionId)
     }
@@ -308,6 +349,20 @@ struct SessionTranscriptView: View {
         VStack(spacing: 0) {
             // Transcript header with Resume button
             HStack {
+                if !path.isEmpty {
+                    Button {
+                        appState.historyThreadPath[worktreeID]?.removeLast()
+                    } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: "chevron.left")
+                            Text(threadLabel(root: messages, path: path) ?? "Subagent")
+                                .lineLimit(1)
+                        }
+                        .font(.subheadline)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
                 if let first = summary.firstUserMessage {
                     Text(first)
                         .font(.subheadline)
@@ -346,7 +401,7 @@ struct SessionTranscriptView: View {
             if isLoading {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if messages.isEmpty {
+            } else if resolvedMessages.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .font(.system(size: 32))
@@ -359,7 +414,7 @@ struct SessionTranscriptView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        TranscriptItemsView(items: messages, terminalID: nil, atBottom: $atBottom)
+                        TranscriptItemsView(items: resolvedMessages, terminalID: nil, atBottom: $atBottom)
                             .environment(\.openTranscriptOverlay) { itemID in
                                 overlayCoordinator.open(
                                     terminalID: nil,
@@ -367,13 +422,16 @@ struct SessionTranscriptView: View {
                                     historySessionID: sessionId
                                 )
                             }
+                            .environment(\.navigateToThread) { id in
+                                appState.historyThreadPath[worktreeID, default: []].append(id)
+                            }
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .overlay(alignment: .bottomTrailing) {
                         Group {
                             if !atBottom {
                                 Button {
-                                    guard let lastID = lastRenderedNodeID(for: messages) else { return }
+                                    guard let lastID = lastRenderedNodeID(for: resolvedMessages) else { return }
                                     withAnimation(.easeOut(duration: 0.2)) {
                                         proxy.scrollTo(lastID, anchor: .bottom)
                                     }

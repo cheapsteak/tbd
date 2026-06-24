@@ -10,6 +10,7 @@ struct TBDCommand: AsyncParsableCommand {
         subcommands: [
             RepoCommand.self,
             WorktreeCommand.self,
+            ConfigCommand.self,
             TerminalCommand.self,
             NotifyCommand.self,
             SessionEventCommand.self,

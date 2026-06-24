@@ -224,7 +224,8 @@ struct ClaudeProfileConfigDirManagerTests {
             secret: nil,
             awsRegion: "us-west-2",
             awsProfile: nil,
-            fallbackModels: nil
+            fallbackModels: nil,
+            envOverrides: [:]
         )
         #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
     }
@@ -240,7 +241,8 @@ struct ClaudeProfileConfigDirManagerTests {
             secret: nil,
             awsRegion: nil,
             awsProfile: nil,
-            fallbackModels: nil
+            fallbackModels: nil,
+            envOverrides: [:]
         )
         #expect(ClaudeProfileConfigDirManager.resolveConfigDir(for: profile) == nil)
     }

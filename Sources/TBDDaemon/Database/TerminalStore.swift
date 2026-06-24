@@ -216,7 +216,7 @@ public struct TerminalStore: Sendable {
             record.transcriptPath = nil
             record.suspendedAt = nil
             record.suspendedSnapshot = nil
-            record.label = "shell"
+            record.label = TerminalLabel.shell
             record.kind = TerminalKind.shell.rawValue
             record.activityState = TerminalActivityState.unknown.rawValue
             try record.update(db)

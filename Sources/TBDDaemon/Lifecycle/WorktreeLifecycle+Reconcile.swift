@@ -106,20 +106,25 @@ extension WorktreeLifecycle {
         dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
 
         let gitPaths = Set(gitWorktrees.map(\.path))
-        let dbPaths = Set(dbWorktrees.map(\.path))
+        // Include `.creating` rows so a worktree whose pre-session phase-3
+        // wait is still in flight (status flips to .active only when the hook
+        // finishes) isn't "unknown" to the re-adopt pass below — re-adopting
+        // its path would violate the UNIQUE path constraint and abort this
+        // repo's reconcile.
+        let creatingPaths = Set(
+            (try await db.worktrees.list(repoID: repoID, status: .creating)).map(\.path)
+        )
+        let dbPaths = Set(dbWorktrees.map(\.path)).union(creatingPaths)
 
         // Mark missing worktrees as archived — also kill their tmux windows
         for wt in dbWorktrees where !gitPaths.contains(wt.path) {
             let terminals = try await db.terminals.list(worktreeID: wt.id)
             for terminal in terminals {
-                do {
-                    try await tmux.killWindow(
-                        server: wt.tmuxServer,
-                        windowID: terminal.tmuxWindowID
-                    )
-                } catch {
-                    logger.warning("reconcile: failed to kill window \(terminal.tmuxWindowID, privacy: .public): \(error, privacy: .public)")
-                }
+                await killWindowAndReap(
+                    server: wt.tmuxServer,
+                    windowID: terminal.tmuxWindowID,
+                    paneID: terminal.tmuxPaneID
+                )
             }
             try await db.terminals.deleteForWorktree(worktreeID: wt.id)
             try await db.tabs.deleteForWorktree(worktreeID: wt.id)
@@ -157,57 +162,75 @@ extension WorktreeLifecycle {
             )
         }
 
-        // Clean up terminal records pointing to dead tmux windows (especially main worktrees).
-        // If the entire tmux server is gone (e.g. machine reboot), recreate windows from
-        // persisted records instead of deleting them.
+        // Reconcile terminals whose tmux window is gone. A window can vanish two
+        // ways: its specific window died while the server is still up, or the
+        // whole server is gone after a reboot/long sleep. BOTH are handled the
+        // same way — park resumable Claude sessions as suspended and let the
+        // user bring them back on demand via the Resume button (which bootstraps
+        // a dead server, see SuspendResumeCoordinator.resumeTerminal / #285).
+        //
+        // We deliberately do NOT eagerly recreate terminals on reboot: on a
+        // machine with many worktrees that spawned N simultaneous `claude
+        // --resume` processes (~0.5-1.5 GB each) and OOM'd the machine (#284).
+        // Lazy recreate-on-demand keeps idle worktrees as cheap suspended rows.
         let allLiveWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
             + (try await db.worktrees.list(repoID: repoID, status: .main))
         let serverAlive = await tmux.serverExists(server: correctTmuxServer)
         for wt in allLiveWorktrees {
             let terminals = try await db.terminals.list(worktreeID: wt.id)
             for terminal in terminals where terminal.suspendedAt == nil {
+                // After a reboot the server is gone, so every window is dead;
+                // otherwise probe the specific window. (Split across statements
+                // because `&&` builds an autoclosure that can't contain `await`.)
+                var windowAlive = false
                 if serverAlive {
-                    let alive = await tmux.windowExists(server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
-                    if !alive {
-                        if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
-                            // Window is gone but a resumable session exists.
-                            // Suspend the terminal instead of deleting it — the
-                            // suspend/resume machinery rebuilds a window from the
-                            // session ID on demand. Deleting here would orphan the
-                            // transcript and the session would vanish from TBD.
-                            try? await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID)
-                            logger.info("reconcile: suspended terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
-                        } else {
-                            try? await db.terminals.delete(id: terminal.id)
-                            logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, no session to preserve")
-                        }
-                        await pendingQuestions.clear(terminalID: terminal.id)
-                    }
-                } else {
-                    do {
-                        try await recreateAfterReboot(terminal: terminal, worktree: wt)
-                        logger.info("Reboot recovery: recreated terminal \(terminal.id, privacy: .public) in worktree \(wt.id, privacy: .public)")
-                    } catch {
-                        logger.error("Reboot recovery: failed to recreate terminal \(terminal.id, privacy: .public): \(error, privacy: .public)")
-                    }
+                    windowAlive = await tmux.windowExists(server: wt.tmuxServer, windowID: terminal.tmuxWindowID)
                 }
+                guard !windowAlive else { continue }
+
+                if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
+                    // Resumable Claude session: park it. The suspend/resume
+                    // machinery rebuilds a window from the session ID on demand.
+                    // Deleting here would orphan the transcript and the session
+                    // would vanish from TBD.
+                    try? await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID)
+                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) as suspended — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
+                } else {
+                    // Plain shell / Codex: nothing resumable to preserve, delete.
+                    try? await db.terminals.delete(id: terminal.id)
+                    logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, no session to preserve")
+                }
+                await pendingQuestions.clear(terminalID: terminal.id)
             }
         }
 
-        // Clean up orphaned tmux windows — windows not tracked by any terminal (active or main)
+        // Clean up orphaned tmux windows — windows not tracked by any terminal
+        // (active, main, or creating). `.creating` worktrees count as live: a
+        // pre-session hook wait that's still in flight (or just resumed by the
+        // startup recovery sweep) owns a real tmux window, and phase 3 spawns
+        // primary/setup windows before the row flips `.active`. Treating those
+        // rows as dead would kill the hook mid-run (interrupting e.g. a running
+        // npm install), fire a spurious `.paneKilled` notification, and spawn
+        // the agent prematurely.
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         let activeWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
         let mainWorktreesForCleanup = try await db.worktrees.list(repoID: repoID, status: .main)
-        let allLiveWorktreesForCleanup = activeWorktrees + mainWorktreesForCleanup
+        let creatingWorktreesForCleanup = try await db.worktrees.list(repoID: repoID, status: .creating)
+        let allLiveWorktreesForCleanup = activeWorktrees + mainWorktreesForCleanup + creatingWorktreesForCleanup
         if allLiveWorktreesForCleanup.isEmpty {
-            // No live worktrees — kill the entire tmux server
+            // No live worktrees (including `.creating` ones) — reap the
+            // server's agent processes first so a wedged one doesn't reparent
+            // to launchd, then kill the entire tmux server. A repo whose only
+            // live row is mid-pre-session must NOT land here, or the hook's
+            // window dies with the server.
+            await reaper.reapServerChildren(server: tmuxServer)
             do {
                 try await tmux.killServer(server: tmuxServer)
             } catch {
                 logger.warning("reconcile: failed to kill tmux server \(tmuxServer, privacy: .public): \(error, privacy: .public)")
             }
         } else {
-            // Collect all tracked window IDs (active + main worktrees)
+            // Collect all tracked window IDs (active + main + creating worktrees)
             var trackedWindowIDs: Set<String> = []
             for wt in allLiveWorktreesForCleanup {
                 let terminals = try await db.terminals.list(worktreeID: wt.id)
@@ -220,11 +243,11 @@ extension WorktreeLifecycle {
             do {
                 let tmuxWindows = try await tmux.listWindows(server: tmuxServer, session: "main")
                 for window in tmuxWindows where !trackedWindowIDs.contains(window.windowID) {
-                    do {
-                        try await tmux.killWindow(server: tmuxServer, windowID: window.windowID)
-                    } catch {
-                        logger.warning("reconcile: failed to kill orphaned window \(window.windowID, privacy: .public): \(error, privacy: .public)")
-                    }
+                    await killWindowAndReap(
+                        server: tmuxServer,
+                        windowID: window.windowID,
+                        paneID: window.paneID
+                    )
                 }
             } catch {
                 logger.warning("reconcile: failed to list tmux windows for server \(tmuxServer, privacy: .public): \(error, privacy: .public)")
@@ -246,129 +269,5 @@ extension WorktreeLifecycle {
                 repoID: repo.id, path: repo.path, displayName: repo.displayName
             )))
         }
-    }
-
-    // MARK: - Reboot Recovery
-
-    /// Recreates a tmux window for a terminal record after the tmux server has been lost
-    /// (e.g. machine reboot). Updates the terminal's stored window/pane IDs in the DB.
-    ///
-    /// Visibility: `internal` (not `private`) so tests in the same module can drive
-    /// this path directly. The reconcile dispatcher only enters this branch when
-    /// `serverExists → false`, which `TmuxManager(dryRun: true)` cannot simulate.
-    internal func recreateAfterReboot(terminal: Terminal, worktree: Worktree) async throws {
-        // tmux invariant: killing the ONLY window in a session destroys the
-        // session, and a server with no sessions exits. `ensureServer` here
-        // bootstraps a brand-new server via `new-session -d -s main`, leaving
-        // exactly one window. If we kill that bootstrap window now, the
-        // session collapses, the server exits, and the `createWindow` call
-        // below fails with `no server running on …`. Defer the kill until
-        // after the real window exists so the session always has at least
-        // one window during the transition.
-        let bootstrapWindowID = try await tmux.ensureServer(
-            server: worktree.tmuxServer, session: "main", cwd: worktree.path
-        )
-
-        let claudeEnvOverrides = (try? await db.config.get())?.envSettingOverrides ?? [:]
-        let spawn: ClaudeSpawnCommandBuilder.Result
-        var env: [String: String] = [:]
-        // Always announce the worktree to recreated panes. Without this, the
-        // pane inherits whatever TBD_WORKTREE_ID the tmux server was spawned
-        // with — which would misattribute notifications to a different
-        // worktree. Applies to all branches below (claude, codex, shell/cmd).
-        env["TBD_WORKTREE_ID"] = worktree.id.uuidString
-        // Persist the terminal ID into the spawned env so the SessionStart
-        // hook bridge can route session events for `/clear`/`/compact`
-        // rollovers without depending on cwd-based heuristics.
-        env["TBD_TERMINAL_ID"] = terminal.id.uuidString
-
-        if terminal.isCodexTerminal {
-            // Codex's SessionStart hook records session metadata into the
-            // shared Claude fields, so terminal kind must win over the
-            // presence of a captured session ID during reboot recovery.
-            let codexHome = try CodexHomeManager().ensureProfilePlugin()
-            env["CODEX_HOME"] = codexHome.path
-            spawn = ClaudeSpawnCommandBuilder.build(
-                resumeID: nil,
-                freshSessionID: nil,
-                appendSystemPrompt: nil,
-                initialPrompt: nil,
-                profileSecret: nil,
-                cmd: CodexSpawnCommandBuilder.command,
-                shellFallback: defaultShell
-            )
-        } else if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
-            // Claude terminal — resume existing session with persisted profile
-            var resolvedProfile: ResolvedModelProfile? = nil
-            if let profileID = terminal.profileID, let resolver = modelProfileResolver {
-                resolvedProfile = try? await resolver.loadByID(profileID)
-            }
-            spawn = ClaudeSpawnCommandBuilder.build(
-                resumeID: sessionID,
-                freshSessionID: nil,
-                appendSystemPrompt: nil,
-                initialPrompt: nil,
-                profileSecret: resolvedProfile?.secret,
-                profileKind: resolvedProfile?.kind,
-                profileBaseURL: resolvedProfile?.baseURL,
-                profileModel: resolvedProfile?.model,
-                profileAwsRegion: resolvedProfile?.awsRegion,
-                profileAwsProfile: resolvedProfile?.awsProfile,
-                profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
-                cmd: nil,
-                shellFallback: defaultShell,
-                settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
-                    fallbackModels: resolvedProfile?.fallbackModels,
-                    sessionKey: terminal.id.uuidString
-                ),
-                pluginDirPath: PluginDirWriter.pluginDirPath,
-                envSettingOverrides: claudeEnvOverrides
-            )
-        } else {
-            // Shell or custom-cmd terminal. Plain shell terminals have label nil or "shell";
-            // custom-cmd terminals store the command string directly in label.
-            let cmd = (terminal.label == "shell" || terminal.label == nil) ? nil : terminal.label
-            spawn = ClaudeSpawnCommandBuilder.build(
-                resumeID: nil,
-                freshSessionID: nil,
-                appendSystemPrompt: nil,
-                initialPrompt: nil,
-                profileSecret: nil,
-                cmd: cmd,
-                shellFallback: defaultShell
-            )
-        }
-
-        let window: (windowID: String, paneID: String)
-        do {
-            window = try await tmux.createWindow(
-                server: worktree.tmuxServer,
-                session: "main",
-                cwd: worktree.path,
-                shellCommand: spawn.command,
-                env: env,
-                sensitiveEnv: spawn.sensitiveEnv
-            )
-        } catch {
-            // If we just bootstrapped the server and createWindow failed, the
-            // server is alive with only the placeholder window. On the next
-            // reconcile, `serverAlive=true` + `windowExists("@stale")=false`
-            // would route this terminal to the dead-window-delete path and
-            // lose the record. Kill the server so the next reconcile takes
-            // the serverExists=false branch and retries recovery here.
-            if bootstrapWindowID != nil {
-                try? await tmux.killServer(server: worktree.tmuxServer)
-            }
-            throw error
-        }
-        // Now that a real window exists, it's safe to kill the bootstrap.
-        // The session retains the freshly-created window, so it stays alive
-        // and the server keeps running. Best-effort: a failure here just
-        // leaves an empty placeholder window behind, which the orphan-window
-        // cleanup pass in reconcile() will remove next time.
-        if let bootstrapWindowID {
-            try? await tmux.killWindow(server: worktree.tmuxServer, windowID: bootstrapWindowID)
-        }
-        try await db.terminals.updateTmuxIDs(id: terminal.id, windowID: window.windowID, paneID: window.paneID)
     }
 }

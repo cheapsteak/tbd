@@ -666,4 +666,281 @@ struct PRStatusManagerTests {
         #expect(all[id] == nil)
     }
 
+    // MARK: - Reason computation
+
+    @Test("computeReason returns 'Merged' for merged state")
+    func reasonForMerged() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "MERGED",
+            mergeStateStatus: "UNKNOWN",
+            reviewDecision: "",
+            isDraft: false
+        )
+        #expect(reason == "Merged")
+    }
+
+    @Test("computeReason returns 'Closed' for closed state")
+    func reasonForClosed() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "CLOSED",
+            mergeStateStatus: "UNKNOWN",
+            reviewDecision: "",
+            isDraft: false
+        )
+        #expect(reason == "Closed")
+    }
+
+    @Test("computeReason returns 'Draft' for draft PRs")
+    func reasonForDraft() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            reviewDecision: "",
+            isDraft: true
+        )
+        #expect(reason == "Draft")
+    }
+
+    @Test("computeReason returns 'Ready to merge' for mergeable state")
+    func reasonForMergeable() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            reviewDecision: "",
+            isDraft: false
+        )
+        #expect(reason == "Ready to merge")
+    }
+
+    @Test("computeReason returns 'Merge conflicts' for DIRTY merge state")
+    func reasonForConflicts() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "DIRTY",
+            reviewDecision: "",
+            isDraft: false
+        )
+        #expect(reason == "Merge conflicts")
+    }
+
+    @Test("computeReason returns 'Behind base branch' for BEHIND merge state")
+    func reasonForBehind() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BEHIND",
+            reviewDecision: "",
+            isDraft: false
+        )
+        #expect(reason == "Behind base branch")
+    }
+
+    @Test("computeReason returns 'Checks failing' for failed status checks")
+    func reasonForFailingChecks() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            reviewDecision: "",
+            isDraft: false,
+            requiredChecksFailing: true
+        )
+        #expect(reason == "Checks failing")
+    }
+
+    @Test("computeReason returns 'Checks pending' for pending status checks")
+    func reasonForPendingChecks() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN",
+            reviewDecision: "",
+            isDraft: false,
+            requiredChecksPending: true
+        )
+        #expect(reason == "Checks pending")
+    }
+
+    @Test("computeReason returns 'Checks failing' for a failing required check under UNSTABLE")
+    func reasonForRequiredFailingUnderUnstable() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE",
+            requiredChecksFailing: true
+        )
+        #expect(reason == "Checks failing")
+    }
+
+    @Test("computeReason returns 'Checks pending' for a pending required check under BLOCKED")
+    func reasonForRequiredPendingUnderBlocked() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "REVIEW_REQUIRED",
+            requiredChecksPending: true
+        )
+        #expect(reason == "Checks pending")
+    }
+
+    @Test("computeReason returns 'Changes requested' for CHANGES_REQUESTED review decision")
+    func reasonForChangesRequested() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "CHANGES_REQUESTED",
+            isDraft: false
+        )
+        #expect(reason == "Changes requested")
+    }
+
+    @Test("computeReason returns 'Ready to merge' for REVIEW_REQUIRED with no other blocker (green state)")
+    func reasonForReviewRequired() {
+        let reason = PRStatusManager.computeReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "REVIEW_REQUIRED",
+            isDraft: false
+        )
+        // REVIEW_REQUIRED with passing checks is actually mergeable (green), never shows a red/yellow warning
+        #expect(reason == "Ready to merge")
+    }
+
+    // MARK: - Unified state+reason pairs (critical consistency tests)
+
+    @Test("BLOCKED + REVIEW_REQUIRED + passing checks → (.mergeable, 'Ready to merge')")
+    func stateAndReasonBlockedReviewRequiredMergeable() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BLOCKED",
+            reviewDecision: "REVIEW_REQUIRED"
+        )
+        #expect(state == .mergeable)
+        #expect(reason == "Ready to merge")
+    }
+
+    @Test("UNSTABLE + no required signals → (.mergeable, 'Ready to merge')")
+    func stateAndReasonUnstableNilChecksMergeable() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "UNSTABLE"
+        )
+        #expect(state == .mergeable)
+        #expect(reason == "Ready to merge")
+    }
+
+    @Test("CLEAN + no pending checks → (.mergeable, 'Ready to merge')")
+    func stateAndReasonCleanMergeable() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "CLEAN"
+        )
+        #expect(state == .mergeable)
+        #expect(reason == "Ready to merge")
+    }
+
+    @Test("DIRTY → (.blocked, 'Merge conflicts')")
+    func stateAndReasonDirtyConflicts() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "DIRTY"
+        )
+        #expect(state == .blocked)
+        #expect(reason == "Merge conflicts")
+    }
+
+    @Test("BEHIND → (.blocked, 'Behind base branch')")
+    func stateAndReasonBehind() {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: "OPEN",
+            mergeStateStatus: "BEHIND"
+        )
+        #expect(state == .blocked)
+        #expect(reason == "Behind base branch")
+    }
+
+    // MARK: - Hydration & persistence
+
+    /// Thread-safe fire counter for `@Sendable` callbacks.
+    private actor FireCounter {
+        private(set) var count = 0
+        func bump() { count += 1 }
+    }
+
+    @Test("hydrate populates allStatuses without firing callbacks")
+    func hydratePopulatesAllStatuses() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let status = PRStatus(number: 7, url: "https://example.com/pr/7", state: .mergeable, reason: "Ready to merge")
+        await manager.hydrate([id: status])
+        let all = await manager.allStatuses()
+        #expect(all[id] == status)
+    }
+
+    @Test("hydrating merged then applying same merged does NOT fire onMergedTransition")
+    func hydratedMergedDoesNotRefireTransition() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let counter = FireCounter()
+        await manager.setOnMergedTransition { _, _ in await counter.bump() }
+
+        let merged = PRStatus(number: 11, url: "https://example.com/pr/11", state: .merged, reason: "Merged")
+        await manager.hydrate([id: merged])
+        await manager.seedForTesting(worktreeID: id, status: merged)
+
+        #expect(await counter.count == 0)
+    }
+
+    @Test("hydrating non-merged then applying merged DOES fire onMergedTransition once")
+    func hydratedNonMergedFiresTransitionOnMerge() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let counter = FireCounter()
+        await manager.setOnMergedTransition { _, _ in await counter.bump() }
+
+        let open = PRStatus(number: 12, url: "https://example.com/pr/12", state: .mergeable, reason: "Ready to merge")
+        let merged = PRStatus(number: 12, url: "https://example.com/pr/12", state: .merged, reason: "Merged")
+        await manager.hydrate([id: open])
+        await manager.seedForTesting(worktreeID: id, status: merged)
+
+        #expect(await counter.count == 1)
+    }
+
+    @Test("apply fires onStatusPersist on change, not on identical status")
+    func persistFiresOnChangeOnly() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let counter = FireCounter()
+        await manager.setOnStatusPersist { _, _ in await counter.bump() }
+
+        let statusA = PRStatus(number: 20, url: "https://example.com/pr/20", state: .mergeable, reason: "Ready to merge")
+        let statusB = PRStatus(number: 20, url: "https://example.com/pr/20", state: .blocked, reason: "Blocked")
+
+        await manager.seedForTesting(worktreeID: id, status: statusA)
+        #expect(await counter.count == 1)
+
+        // Identical status — no persist.
+        await manager.seedForTesting(worktreeID: id, status: statusA)
+        #expect(await counter.count == 1)
+
+        // Different status — persist again.
+        await manager.seedForTesting(worktreeID: id, status: statusB)
+        #expect(await counter.count == 2)
+    }
+
+    @Test("apply does NOT fire onStatusPersist for a .merged status even though it changed")
+    func persistSkipsMergedState() async {
+        let manager = PRStatusManager()
+        let id = UUID()
+        let counter = FireCounter()
+        await manager.setOnStatusPersist { _, _ in await counter.bump() }
+
+        // Applying a .merged status is a genuine change (cache was empty), but
+        // merged is the auto-archive trigger and must NOT be persisted —
+        // persisting + hydrating it would defeat #295's archive-while-down
+        // recovery (see PRStatusManager.apply doc comment).
+        let merged = PRStatus(number: 30, url: "https://example.com/pr/30", state: .merged, reason: "Merged")
+        await manager.seedForTesting(worktreeID: id, status: merged)
+        #expect(await counter.count == 0)
+
+        // The cache still updated, even though nothing was persisted.
+        let all = await manager.allStatuses()
+        #expect(all[id] == merged)
+    }
 }

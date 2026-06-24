@@ -111,6 +111,8 @@ extension AppState {
     /// Select a session and load its transcript (stale-while-revalidate: skip if already loaded).
     func selectSession(_ summary: SessionSummary, worktreeID: UUID) async {
         selectedSessionIDs[worktreeID] = summary.sessionId
+        // Reset drill-in: a freshly selected session always starts on Main.
+        historyThreadPath[worktreeID] = []
         guard sessionTranscripts[summary.sessionId] == nil else { return }
         sessionTranscriptLoading.insert(summary.sessionId)
         defer { sessionTranscriptLoading.remove(summary.sessionId) }
@@ -145,7 +147,9 @@ extension AppState {
 
     /// Revive an archived worktree and resume the selected Claude session.
     /// Marks the row as `inFlight` immediately so the archived view can show
-    /// a status pill, then flips to `.done` on success or clears on failure.
+    /// a status pill, then flips to `.done` once the worktree is usable —
+    /// immediately when no blocking preSession hook gates it, otherwise via
+    /// `promoteRevivedWorktrees` when the row turns `.active`. Clears on failure.
     func reviveWithSession(worktreeID: UUID, sessionId: String) async {
         // Idempotency: ignore re-entrant calls (e.g. rapid double-click)
         // so a concurrent invocation can't overwrite the .done state with
@@ -168,13 +172,13 @@ extension AppState {
 
         do {
             let size = mainAreaTerminalSize()
-            try await daemonClient.reviveWorktree(
+            let revived = try await daemonClient.reviveWorktree(
                 id: worktreeID,
                 cols: size.cols,
                 rows: size.rows,
                 preferredSessionID: sessionId
             )
-            revivingArchived[worktreeID] = .done(snapshot: snapshot)
+            settleReviveState(id: worktreeID, snapshot: snapshot, revived: revived)
             await refreshWorktrees()
             await refreshArchivedWorktrees(repoID: snapshot.repoID)
         } catch {

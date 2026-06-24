@@ -789,6 +789,11 @@ struct EditEndpointSheet: View {
                 }
                 FallbackModelsEditor(models: $fallbackModels)
             }
+            Divider()
+            EnvOverridesEditor(
+                initial: profile.envOverrides,
+                caption: "Highest precedence. Cannot override the profile's own auth/routing (token, AWS region, model)."
+            ) { await appState.setProfileEnvOverrides(profileID: profile.id, overrides: $0) }
             probeLabel
             if let errorMessage {
                 Text(errorMessage)
@@ -966,6 +971,12 @@ struct EditBedrockSheet: View {
 
             FallbackModelsEditor(models: $fallbackModels)
 
+            Divider()
+            EnvOverridesEditor(
+                initial: profile.envOverrides,
+                caption: "Highest precedence. Cannot override the profile's own auth/routing (token, AWS region, model)."
+            ) { await appState.setProfileEnvOverrides(profileID: profile.id, overrides: $0) }
+
             if let errorMessage {
                 Text(errorMessage).font(.caption).foregroundStyle(.red)
             }
@@ -1098,6 +1109,11 @@ struct EditClaudeDirectSheet: View {
                 }
                 FallbackModelsEditor(models: $fallbackModels)
             }
+            Divider()
+            EnvOverridesEditor(
+                initial: profile.envOverrides,
+                caption: "Highest precedence. Cannot override the profile's own auth/routing (token, AWS region, model)."
+            ) { await appState.setProfileEnvOverrides(profileID: profile.id, overrides: $0) }
             if let errorMessage {
                 Text(errorMessage)
                     .font(.caption)

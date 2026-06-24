@@ -117,16 +117,42 @@ extension AppState {
 
         do {
             let size = mainAreaTerminalSize()
-            try await daemonClient.reviveWorktree(id: id, cols: size.cols, rows: size.rows)
-            revivingArchived[id] = .done(snapshot: snapshot)
+            let revived = try await daemonClient.reviveWorktree(id: id, cols: size.cols, rows: size.rows)
+            settleReviveState(id: id, snapshot: snapshot, revived: revived)
             recentlyArchivedWorktreeIDs.removeValue(forKey: id)
-            await refreshWorktrees()
+            // No refreshWorktrees() here: the sidebar refresh arrives via the
+            // `.worktreeRevived` delta handler (AppState.swift handleDelta),
+            // same as createWorktree relies on its delta.
             await refreshArchivedWorktrees(repoID: snapshot.repoID)
         } catch {
             revivingArchived.removeValue(forKey: id)
             logger.error("Failed to revive worktree: \(error)")
             showAlert("Couldn't revive worktree: \(error.localizedDescription)", isError: true)
             handleConnectionError(error)
+        }
+    }
+
+    /// Apply the revive RPC's returned worktree to `revivingArchived`.
+    /// With a blocking `preSession` hook, `beginReviveWorktree` returns
+    /// promptly with the row still `.creating` — marking `.done` then would
+    /// show "Revived" in the archived view while the sidebar still says
+    /// "Running setup…". Keep those entries `.inFlight`; the periodic
+    /// `refreshWorktrees` poll promotes them via `promoteRevivedWorktrees`
+    /// once the daemon reports the row `.active`.
+    func settleReviveState(id: UUID, snapshot: Worktree, revived: Worktree) {
+        guard revived.status != .creating else { return }
+        revivingArchived[id] = .done(snapshot: snapshot)
+    }
+
+    /// Promote lingering `.inFlight` revive entries to `.done` once the
+    /// daemon reports their worktree `.active` (i.e. the blocking
+    /// `preSession` hook finished). A `.creating` observation never
+    /// promotes — the hook is still running.
+    func promoteRevivedWorktrees(observing fetched: [Worktree]) {
+        for (id, state) in revivingArchived {
+            guard case .inFlight(let snapshot) = state else { continue }
+            guard fetched.contains(where: { $0.id == id && $0.status == .active }) else { continue }
+            revivingArchived[id] = .done(snapshot: snapshot)
         }
     }
 
@@ -424,6 +450,30 @@ extension AppState {
             if let wt = rows.first(where: { $0.id == id }) { return wt }
         }
         return nil
+    }
+
+    /// Resolve the effective auto-archive-on-merge setting for a worktree.
+    /// Returns the per-worktree override when explicitly set; otherwise falls
+    /// back to the global default (`autoArchiveOnMergeDefault`).
+    func effectiveAutoArchive(for worktree: Worktree) -> Bool {
+        worktree.autoArchiveOnMerge ?? autoArchiveOnMergeDefault
+    }
+
+    /// Set the per-worktree auto-archive override and update local state optimistically.
+    func setAutoArchive(worktreeID: UUID, enabled: Bool) async {
+        do {
+            try await daemonClient.setWorktreeAutoArchive(id: worktreeID, enabled: enabled)
+            // Optimistic local update so the toolbar reflects it immediately.
+            for (key, list) in worktrees {
+                if let idx = list.firstIndex(where: { $0.id == worktreeID }) {
+                    worktrees[key]?[idx].autoArchiveOnMerge = enabled
+                    break
+                }
+            }
+        } catch {
+            logger.error("Failed to set auto-archive: \(error, privacy: .public)")
+            showAlert("Couldn't update auto-archive: \(error.localizedDescription)", isError: true)
+        }
     }
 
     /// Repo ID of the repo containing the given worktree, if any.

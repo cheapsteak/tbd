@@ -458,11 +458,14 @@ actor DaemonClient {
         )
     }
 
-    /// Revive an archived worktree.
-    func reviveWorktree(id: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws {
-        try await callVoidAsync(
+    /// Revive an archived worktree. Returns the revived worktree as the daemon
+    /// sees it when the RPC completes — still `.creating` while a blocking
+    /// `preSession` hook runs, `.active` otherwise.
+    func reviveWorktree(id: UUID, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> Worktree {
+        try await callAsync(
             method: RPCMethod.worktreeRevive,
-            params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows, preferredSessionID: preferredSessionID)
+            params: WorktreeReviveParams(worktreeID: id, cols: cols, rows: rows, preferredSessionID: preferredSessionID),
+            resultType: Worktree.self
         )
     }
 
@@ -644,6 +647,46 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.claudeSetSpawnPreferences,
             params: preferences
+        )
+    }
+
+    /// Push the global free-form env overrides to the daemon.
+    func setGlobalEnvOverrides(_ overrides: [String: String]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetEnvOverrides,
+            params: SetGlobalEnvOverridesParams(overrides: overrides)
+        )
+    }
+
+    /// Set the per-worktree auto-archive-on-PR-merge override.
+    func setWorktreeAutoArchive(id: UUID, enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeSetAutoArchive,
+            params: WorktreeSetAutoArchiveParams(worktreeID: id, enabled: enabled)
+        )
+    }
+
+    /// Set the global default for auto-archive-on-PR-merge.
+    func setAutoArchiveOnMergeDefault(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoArchiveOnMergeDefault,
+            params: ConfigSetAutoArchiveDefaultParams(enabled: enabled)
+        )
+    }
+
+    /// Set or clear a repo's free-form env overrides.
+    func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.repoSetEnvOverrides,
+            params: SetRepoEnvOverridesParams(repoID: repoID, overrides: overrides)
+        )
+    }
+
+    /// Set or clear a model profile's free-form env overrides.
+    func setProfileEnvOverrides(profileID: UUID, overrides: [String: String]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.modelProfileSetEnvOverrides,
+            params: SetProfileEnvOverridesParams(profileID: profileID, overrides: overrides)
         )
     }
 

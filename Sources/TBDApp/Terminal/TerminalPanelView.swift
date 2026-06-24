@@ -128,6 +128,25 @@ struct TerminalPanelView: View {
             logger.debug("proxy unreachable for terminal \(terminalID, privacy: .public) base=\(baseURL, privacy: .public) detail=\(result.detail ?? "nil", privacy: .public)")
         }
     }
+
+    /// Builds the environment for the SwiftTerm PTY that runs the tmux attach client.
+    ///
+    /// The viewer environment must have `TMUX` and `TMUX_PANE` removed to prevent
+    /// nested-attach errors. When TBD.app itself is launched from inside a tmux session
+    /// (e.g., running `scripts/restart.sh` from a TBD pane), the parent environment
+    /// contains these variables. tmux's `attach` client refuses with:
+    /// "sessions should be nested with care, unset $TMUX to force" (exit 1) if run
+    /// in a nested context. The attach client must always be a fresh top-level tmux client.
+    ///
+    /// - Parameter base: Base environment dict (typically ProcessInfo.processInfo.environment)
+    /// - Returns: Cleaned environment with TMUX/TMUX_PANE removed and TERM set to xterm-256color
+    nonisolated static func makeViewerEnvironment(base: [String: String]) -> [String: String] {
+        var env = base
+        env.removeValue(forKey: "TMUX")
+        env.removeValue(forKey: "TMUX_PANE")
+        env["TERM"] = "xterm-256color"
+        return env
+    }
 }
 
 // MARK: - TerminalPanelRepresentable
@@ -306,9 +325,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
 
             debugLog("PANEL: Starting: \(tmuxPath) \(processArgs.joined(separator: " "))")
 
-            // Inherit environment with proper TERM
-            var env = ProcessInfo.processInfo.environment
-            env["TERM"] = "xterm-256color"
+            // Build viewer environment with TMUX/TMUX_PANE scrubbed and TERM set correctly
+            let env = TerminalPanelView.makeViewerEnvironment(base: ProcessInfo.processInfo.environment)
             let envPairs = env.map { "\($0.key)=\($0.value)" }
 
             let process = LocalProcess(delegate: self)
@@ -498,15 +516,19 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             debugLog("PANEL: process terminated, exitCode=\(exitCode ?? -1)")
             DispatchQueue.main.async { [weak self] in
                 // This fires when the *attach client* (the on-screen tmux
-                // viewer) dies — e.g. the view was torn down or detached. The
-                // underlying tmux window keeps running (`remain-on-exit on`),
-                // so the user's shell/agent is almost always still alive. Avoid
-                // the old "[Process exited with code 0]" wording, which read as
-                // if the user's work had died. Surface a non-zero code only when
-                // the viewer genuinely exited abnormally.
+                // viewer) dies. A clean exit (code 0) means the view was torn
+                // down or detached while the underlying tmux window keeps
+                // running (`remain-on-exit on`), so the user's shell/agent is
+                // still alive — reopening reattaches. A non-zero exit (e.g. the
+                // whole tmux server died on sleep/wake or OOM, exit 256) means
+                // the session is NOT still running; don't claim it is. Reopening
+                // does the right thing for every tab kind — reattaches a live
+                // window, parks+resumes a dead Claude one, or respawns a
+                // shell/Codex — so use neutral "reconnect" wording that doesn't
+                // overpromise a session "recovery" for plain shell/Codex tabs.
                 let message: String
                 if let code = exitCode, code != 0 {
-                    message = "\r\n[View detached (exit \(code)) — session is still running in the background. Reopen this tab to reattach.]\r\n"
+                    message = "\r\n[View disconnected (exit \(code)). Reopen this tab to reconnect.]\r\n"
                 } else {
                     message = "\r\n[View detached — session is still running in the background. Reopen this tab to reattach.]\r\n"
                 }

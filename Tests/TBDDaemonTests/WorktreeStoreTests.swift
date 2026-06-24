@@ -384,4 +384,34 @@ import TBDShared
         #expect(ids == [wt1.id, wt2.id])
         #expect(result.map(\.sortOrder) == [1, 2])
     }
+
+    @Test func prStatusRoundTripsThroughDB() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "pr-wt", branch: "pr-branch",
+            path: "/tmp/pr-wt-\(UUID())", tmuxServer: "srv"
+        )
+
+        // Newly created worktree has no PR status.
+        #expect(try await db.worktrees.get(id: wt.id)?.prStatus == nil)
+
+        let status = PRStatus(
+            number: 42,
+            url: "https://example.com/pr/42",
+            state: .mergeable,
+            reason: "Ready to merge"
+        )
+        try await db.worktrees.setPRStatus(id: wt.id, status: status)
+
+        let reloaded = try await db.worktrees.get(id: wt.id)
+        #expect(reloaded?.prStatus == status)
+        #expect(try await db.worktrees.allPRStatuses()[wt.id] == status)
+
+        // Clearing with nil removes the persisted status.
+        try await db.worktrees.setPRStatus(id: wt.id, status: nil)
+        #expect(try await db.worktrees.get(id: wt.id)?.prStatus == nil)
+        #expect(try await db.worktrees.allPRStatuses()[wt.id] == nil)
+    }
 }

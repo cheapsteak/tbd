@@ -4,19 +4,36 @@ import TBDShared
 struct RepoHooksSettingsView: View {
     let repoID: UUID
 
+    @State private var preSessionDraft: String = ""
     @State private var setupDraft: String = ""
     @State private var archiveDraft: String = ""
+    @State private var preSessionSaved = false
     @State private var setupSaved = false
     @State private var archiveSaved = false
 
+    private var preSessionPath: String { TBDConstants.hookPath(repoID: repoID, eventName: "preSession") }
     private var setupPath: String { TBDConstants.hookPath(repoID: repoID, eventName: "setup") }
     private var archivePath: String { TBDConstants.hookPath(repoID: repoID, eventName: "archive") }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             hookSection(
+                title: "Pre-session hook",
+                description: "Runs in a visible terminal when a new worktree is created, and blocks "
+                    + "the agent (Claude/Codex) from starting until it finishes. Use for setup the agent "
+                    + "must not run without — copying env files, installing dependencies. Times out after "
+                    + "10 minutes; on failure the agent starts anyway.",
+                draft: $preSessionDraft,
+                filePath: preSessionPath,
+                showSaved: $preSessionSaved
+            )
+
+            Divider()
+
+            hookSection(
                 title: "Setup hook",
-                description: "Runs in Terminal 2 when a new worktree is created.",
+                description: "Runs in parallel alongside the agent when a new worktree is created. "
+                    + "Does not block the agent from starting.",
                 draft: $setupDraft,
                 filePath: setupPath,
                 showSaved: $setupSaved
@@ -33,6 +50,7 @@ struct RepoHooksSettingsView: View {
             )
         }
         .onAppear {
+            preSessionDraft = readHook(at: preSessionPath)
             setupDraft = readHook(at: setupPath)
             archiveDraft = readHook(at: archivePath)
         }

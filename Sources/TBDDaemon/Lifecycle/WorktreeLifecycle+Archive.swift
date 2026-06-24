@@ -4,6 +4,28 @@ import TBDShared
 
 private let archiveLogger = Logger(subsystem: "com.tbd.daemon", category: "archive")
 
+/// Result of `beginReviveWorktree`. Mirrors `WorktreeCreateCompletion`: the
+/// pre-session path defers the primary terminal spawn to a detached task so
+/// the revive RPC isn't blocked for the duration of the hook.
+public enum WorktreeReviveCompletion: Sendable {
+    /// All terminals were spawned inline; the worktree is `.active`.
+    case ready(Worktree)
+    /// A blocking `preSession` hook terminal was spawned and the row flipped
+    /// to `.creating` (the app gates its pre-session UI on that status).
+    /// `phase3` awaits the hook, spawns the primary terminals, and finishes
+    /// the revive (status `.active`, `archivedAt`/session clearing).
+    case preSessionPending(worktree: Worktree, phase3: Task<Void, Never>)
+
+    /// The worktree row as of the moment the call returned (`.active` when
+    /// ready, `.creating` while the pre-session hook runs).
+    public var worktree: Worktree {
+        switch self {
+        case .ready(let worktree): return worktree
+        case .preSessionPending(let worktree, _): return worktree
+        }
+    }
+}
+
 /// Reorders `stored` so `preferred` is first, preserving the relative order of
 /// the rest. Returns `stored` unchanged when `preferred` is nil, when `stored`
 /// is nil, or when `stored` does not contain `preferred`.
@@ -91,11 +113,13 @@ extension WorktreeLifecycle {
             archivedHeadSHA: capturedSHA
         )
 
-        // Kill all tmux windows for this worktree
+        // Kill all tmux windows for this worktree, reaping any wedged agent
+        // that survives kill-window's SIGHUP.
         for terminal in terminals {
-            try? await tmux.killWindow(
+            await killWindowAndReap(
                 server: worktree.tmuxServer,
-                windowID: terminal.tmuxWindowID
+                windowID: terminal.tmuxWindowID,
+                paneID: terminal.tmuxPaneID
             )
         }
 
@@ -152,11 +176,47 @@ extension WorktreeLifecycle {
 
     /// Revives an archived worktree, re-creating the git worktree and tmux windows.
     ///
+    /// Legacy synchronous contract (CLI + tests): the returned worktree is
+    /// fully set up and `.active`. When a `preSession` hook gates the primary
+    /// terminals, this awaits the detached phase-3 task INLINE — mirroring
+    /// `createWorktree`'s relationship to `completeCreateWorktree`.
+    ///
     /// - Parameters:
     ///   - worktreeID: The archived worktree to revive.
     ///   - skipClaude: If true, skip launching the primary agent in the first terminal window.
     /// - Returns: The revived worktree.
     public func reviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> Worktree {
+        let completion = try await beginReviveWorktree(
+            worktreeID: worktreeID, skipClaude: skipClaude,
+            cols: cols, rows: rows, preferredSessionID: preferredSessionID
+        )
+        if case .preSessionPending(_, let phase3) = completion {
+            await phase3.value
+        }
+        guard let revived = try await db.worktrees.get(id: worktreeID) else {
+            throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
+        }
+        return revived
+    }
+
+    /// Non-blocking revive. Validates, re-adds the git worktree, then:
+    ///
+    /// - No `preSession` hook → spawns all terminals inline, flips the row to
+    ///   `.active`, and returns `.ready` (today's behavior, unchanged).
+    /// - `preSession` hook resolves → spawns ONLY the hook terminal, flips the
+    ///   row to `.creating` (the app gates its pre-session UI on that status),
+    ///   and returns `.preSessionPending` promptly. The detached phase-3 task
+    ///   awaits the hook's completion marker, spawns the primary terminals,
+    ///   and finishes with `db.worktrees.revive(id:clearSessions:)` so the
+    ///   archivedClaudeSessions-clearing semantics match the inline path.
+    ///
+    /// If the daemon restarts mid-wait, the row sits in `.creating` with a
+    /// pre-session terminal record; `recoverCreatingWorktrees()` resumes the
+    /// wait at next startup. The recovery sweep detects the interrupted
+    /// revive (the row still carries `archivedClaudeSessions`) and resumes
+    /// with revive semantics: the archived sessions are restored into
+    /// terminals and the row finishes via `.revive(clearSessions: true)`.
+    public func beginReviveWorktree(worktreeID: UUID, skipClaude: Bool = false, cols: Int? = nil, rows: Int? = nil, preferredSessionID: String? = nil) async throws -> WorktreeReviveCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -221,12 +281,51 @@ extension WorktreeLifecycle {
             try await db.worktrees.setArchivedClaudeSessions(id: worktreeID, sessions: sessions)
         }
 
-        try await setupTerminals(
+        // Gated path: a preSession hook must finish before the primary
+        // terminals spawn. Mirrors completeCreateWorktree's 5a branch.
+        if let preSession = try await spawnPreSessionTerminal(
             worktree: worktree, repo: repo,
+            worktreePath: worktree.path,
+            cols: cols, rows: rows
+        ) {
+            subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
+                terminalID: preSession.terminalID,
+                worktreeID: worktree.id,
+                label: TerminalLabel.preSession
+            )))
+            // Flip to .creating AFTER the pre-session terminal exists so a
+            // daemon crash in between leaves the row .archived (re-revivable)
+            // rather than a terminal-less .creating row the recovery sweep
+            // would discard.
+            try await db.worktrees.updateStatus(id: worktreeID, status: .creating)
+            let phase3 = Task.detached { [self] in
+                await runPreSessionPhase3(
+                    preSession: preSession,
+                    worktree: worktree, repo: repo,
+                    worktreePath: worktree.path,
+                    skipClaude: skipClaude,
+                    archivedClaudeSessions: sessions,
+                    cols: cols, rows: rows,
+                    // Only clear archivedClaudeSessions if Claude was actually
+                    // restored — otherwise preserve them so a subsequent
+                    // revive (without skipClaude) can use them.
+                    completionAction: .revive(clearSessions: !skipClaude)
+                )
+            }
+            guard let pending = try await db.worktrees.get(id: worktreeID) else {
+                throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
+            }
+            return .preSessionPending(worktree: pending, phase3: phase3)
+        }
+
+        // No preSession hook → spawn all terminals inline (today's behavior).
+        _ = try await spawnPrimaryTerminals(
+            worktree: worktree, repo: repo,
+            worktreePath: worktree.path,
             skipClaude: skipClaude,
             archivedClaudeSessions: sessions,
-            cols: cols,
-            rows: rows
+            cols: cols, rows: rows,
+            preSessionTerminalID: nil
         )
 
         // Update status to active.
@@ -234,10 +333,18 @@ extension WorktreeLifecycle {
         // otherwise preserve them so a subsequent revive (without skipClaude) can use them.
         try await db.worktrees.revive(id: worktreeID, clearSessions: !skipClaude)
 
+        // Deliberate revive: disarm auto-archive so a still-merged PR doesn't
+        // immediately re-archive the worktree the user just revived.
+        do {
+            try await db.worktrees.setAutoArchiveOnMerge(id: worktreeID, value: false)
+        } catch {
+            archiveLogger.warning("failed to disarm auto-archive for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+        }
+
         // Return updated worktree
         guard let revived = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
-        return revived
+        return .ready(revived)
     }
 }

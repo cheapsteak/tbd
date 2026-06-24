@@ -20,6 +20,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var status: String
     var hidden: Bool
     var expanded: Bool
+    var env_overrides: String?
 
     init(from repo: Repo) {
         self.id = repo.id.uuidString
@@ -36,6 +37,7 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.status = repo.status.rawValue
         self.hidden = repo.hidden
         self.expanded = repo.expanded
+        self.env_overrides = EnvOverridesCoding.encode(repo.envOverrides)
     }
 
     func toModel() -> Repo {
@@ -53,7 +55,8 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             worktreeRoot: worktree_root,
             status: RepoStatus(rawValue: status) ?? .ok,
             hidden: hidden,
-            expanded: expanded
+            expanded: expanded,
+            envOverrides: EnvOverridesCoding.decode(env_overrides)
         )
     }
 }
@@ -189,6 +192,17 @@ public struct RepoStore: Sendable {
             try db.execute(
                 sql: "UPDATE repo SET expanded = ? WHERE id = ?",
                 arguments: [expanded, id.uuidString]
+            )
+        }
+    }
+
+    /// Set or clear the per-repo free-form env overrides.
+    public func setEnvOverrides(id: UUID, overrides: [String: String]) async throws {
+        let json = EnvOverridesCoding.encode(overrides)
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE repo SET env_overrides = ? WHERE id = ?",
+                arguments: [json, id.uuidString]
             )
         }
     }

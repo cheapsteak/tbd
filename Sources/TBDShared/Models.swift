@@ -23,6 +23,8 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
     /// expanded (true). Collapsing hides the main worktree row and all child
     /// worktree rows beneath the repo header.
     public var expanded: Bool
+    /// Free-form env-var overrides applied to spawned sessions (repo scope).
+    public var envOverrides: [String: String]
 
     public init(id: UUID = UUID(), path: String, remoteURL: String? = nil,
                 displayName: String, defaultBranch: String = "main", createdAt: Date = Date(),
@@ -30,7 +32,8 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
                 profileOverrideID: UUID? = nil,
                 worktreeSlot: String? = nil, worktreeRoot: String? = nil,
                 status: RepoStatus = .ok, hidden: Bool = false,
-                expanded: Bool = true) {
+                expanded: Bool = true,
+                envOverrides: [String: String] = [:]) {
         self.id = id
         self.path = path
         self.remoteURL = remoteURL
@@ -45,12 +48,14 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         self.status = status
         self.hidden = hidden
         self.expanded = expanded
+        self.envOverrides = envOverrides
     }
 
     enum CodingKeys: String, CodingKey {
         case id, path, remoteURL, displayName, defaultBranch, createdAt
         case renamePrompt, customInstructions, profileOverrideID
         case worktreeSlot, worktreeRoot, status, hidden, expanded
+        case envOverrides
     }
 
     public init(from decoder: Decoder) throws {
@@ -69,6 +74,8 @@ public struct Repo: Codable, Sendable, Identifiable, Equatable {
         status = try c.decodeIfPresent(RepoStatus.self, forKey: .status) ?? .ok
         hidden = try c.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
         expanded = try c.decodeIfPresent(Bool.self, forKey: .expanded) ?? true
+        envOverrides = try c.decodeIfPresent(
+            [String: String].self, forKey: .envOverrides) ?? [:]
     }
 }
 
@@ -120,6 +127,15 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// project dir could not be resolved).
     public var liveClaudeSessionCount: Int?
     public var parentWorktreeID: UUID?
+    /// Per-worktree auto-archive-on-PR-merge override. `nil` = follow the
+    /// global default (`Config.autoArchiveOnMergeDefault`); `true`/`false` =
+    /// explicit. Only set explicitly by user action (toolbar toggle / CLI);
+    /// there is no UI to return to `nil`.
+    public var autoArchiveOnMerge: Bool?
+    /// Last-known GitHub PR status, persisted in the DB so the PR icon survives
+    /// app/daemon restarts. nil = never observed. Refreshed live by the daemon's
+    /// PR poll; the app seeds from this only when it has no fresher live value.
+    public var prStatus: PRStatus?
 
     public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
@@ -128,7 +144,9 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 archivedClaudeSessions: [String]? = nil, sortOrder: Int = 0,
                 archivedHeadSHA: String? = nil,
                 liveClaudeSessionCount: Int? = nil,
-                parentWorktreeID: UUID? = nil) {
+                parentWorktreeID: UUID? = nil,
+                autoArchiveOnMerge: Bool? = nil,
+                prStatus: PRStatus? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -145,13 +163,15 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.archivedHeadSHA = archivedHeadSHA
         self.liveClaudeSessionCount = liveClaudeSessionCount
         self.parentWorktreeID = parentWorktreeID
+        self.autoArchiveOnMerge = autoArchiveOnMerge
+        self.prStatus = prStatus
     }
 
     enum CodingKeys: String, CodingKey {
         case id, repoID, name, displayName, branch, path, status
         case hasConflicts, createdAt, archivedAt, tmuxServer
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
-        case liveClaudeSessionCount, parentWorktreeID
+        case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge, prStatus
     }
 
     public init(from decoder: Decoder) throws {
@@ -172,6 +192,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         archivedHeadSHA = try c.decodeIfPresent(String.self, forKey: .archivedHeadSHA)
         liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
         parentWorktreeID = try c.decodeIfPresent(UUID.self, forKey: .parentWorktreeID)
+        autoArchiveOnMerge = try c.decodeIfPresent(Bool.self, forKey: .autoArchiveOnMerge)
+        prStatus = try c.decodeIfPresent(PRStatus.self, forKey: .prStatus)
     }
 }
 
@@ -253,7 +275,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
 
 public extension Terminal {
     var isCodexTerminal: Bool {
-        kind == .codex || label == "Codex"
+        kind == .codex || label == TerminalLabel.codex
     }
 
     /// True only for Claude terminals whose session can be resumed through
@@ -290,6 +312,8 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
     /// id namespace is profile-specific (bedrock/proxy/oauth differ), so this
     /// lives on the profile, not globally. nil/empty = no fallback configured.
     public var fallbackModels: [String]?
+    /// Free-form env-var overrides applied to spawned sessions (profile scope).
+    public var envOverrides: [String: String]
     public var createdAt: Date
     public var lastUsedAt: Date?
 
@@ -297,6 +321,7 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
                 baseURL: String? = nil, model: String? = nil,
                 awsRegion: String? = nil, awsProfile: String? = nil,
                 fallbackModels: [String]? = nil,
+                envOverrides: [String: String] = [:],
                 createdAt: Date = Date(), lastUsedAt: Date? = nil) {
         self.id = id
         self.name = name
@@ -306,12 +331,14 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         self.awsRegion = awsRegion
         self.awsProfile = awsProfile
         self.fallbackModels = fallbackModels
+        self.envOverrides = envOverrides
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, kind, baseURL, model, awsRegion, awsProfile, fallbackModels, createdAt, lastUsedAt
+        case id, name, kind, baseURL, model, awsRegion, awsProfile, fallbackModels
+        case envOverrides, createdAt, lastUsedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -324,6 +351,8 @@ public struct ModelProfile: Codable, Sendable, Identifiable, Equatable {
         awsRegion = try c.decodeIfPresent(String.self, forKey: .awsRegion)
         awsProfile = try c.decodeIfPresent(String.self, forKey: .awsProfile)
         fallbackModels = try c.decodeIfPresent([String].self, forKey: .fallbackModels)
+        envOverrides = try c.decodeIfPresent(
+            [String: String].self, forKey: .envOverrides) ?? [:]
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
     }
@@ -397,13 +426,22 @@ public struct Config: Codable, Sendable, Equatable {
     public var primaryAgentPreference: PrimaryAgentPreference
     /// Claude spawn-env setting overrides, keyed by `ClaudeEnvSetting.id`.
     public var envSettingOverrides: [String: ClaudeEnvValue]
+    /// Free-form env-var overrides applied to spawned sessions (global scope).
+    public var envOverrides: [String: String]
+    /// Global default for auto-archive-on-PR-merge, applied to worktrees whose
+    /// per-worktree override is `nil`.
+    public var autoArchiveOnMergeDefault: Bool
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
-                envSettingOverrides: [String: ClaudeEnvValue] = [:]) {
+                envSettingOverrides: [String: ClaudeEnvValue] = [:],
+                envOverrides: [String: String] = [:],
+                autoArchiveOnMergeDefault: Bool = false) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
+        self.envOverrides = envOverrides
+        self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
     }
 
     public init(from decoder: Decoder) throws {
@@ -415,6 +453,10 @@ public struct Config: Codable, Sendable, Equatable {
         ) ?? .defaultValue
         envSettingOverrides = try c.decodeIfPresent(
             [String: ClaudeEnvValue].self, forKey: .envSettingOverrides) ?? [:]
+        envOverrides = try c.decodeIfPresent(
+            [String: String].self, forKey: .envOverrides) ?? [:]
+        autoArchiveOnMergeDefault = try c.decodeIfPresent(
+            Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
     }
 }
 
@@ -521,17 +563,33 @@ public enum PRMergeableState: String, Codable, Sendable {
     case mergeable          // GitHub considers it clean (checks + reviews satisfied)
     case merged             // PR was merged
     case closed             // PR was closed without merging
+
+    /// Human-readable reason for this state (fallback when PRStatus.reason is nil).
+    public var displayReason: String {
+        switch self {
+        case .pending:          return "Checks pending"
+        case .blocked:          return "Blocked"
+        case .changesRequested: return "Changes requested"
+        case .draft:            return "Draft"
+        case .checksFailed:     return "Checks failing"
+        case .mergeable:        return "Ready to merge"
+        case .merged:           return "Merged"
+        case .closed:           return "Closed"
+        }
+    }
 }
 
 public struct PRStatus: Codable, Sendable, Equatable {
     public let number: Int
     public let url: String
     public let state: PRMergeableState
+    public let reason: String?
 
-    public init(number: Int, url: String, state: PRMergeableState) {
+    public init(number: Int, url: String, state: PRMergeableState, reason: String? = nil) {
         self.number = number
         self.url = url
         self.state = state
+        self.reason = reason
     }
 }
 
