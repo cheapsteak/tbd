@@ -71,24 +71,29 @@ jobs:
             spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
 
       # Workaround for swiftlang/swift-package-manager#7715: a cache-restored
-      # `.build/` can hold a stale `TBDShared` object archive next to a fresh
-      # `.swiftmodule`. Downstream files compile happily against the new module
-      # interface but the linker fails to resolve the new symbol, producing
-      # "Undefined symbols ... TBDShared.<NewType>" link-time flakes that
-      # disappear on retry. The bug fires specifically when a PR adds a new
-      # public symbol to TBDShared. Wiping just the TBDShared build artifacts
-      # forces SPM to re-emit them while keeping the rest of `.build/` warm.
-      # Costs ~1-2min per run (TBDShared rebuild + downstream cascade relink)
-      # in exchange for never seeing the link-time flake again.
-      - name: Force-rebuild TBDShared (workaround SPM #7715)
+      # `.build/` can hold a stale object archive for a first-party library
+      # target next to a fresh `.swiftmodule`. Downstream files (incl. test
+      # targets) compile happily against the new module interface but the
+      # linker fails to resolve the new symbol, producing
+      # "Undefined symbols ... <Module>.<NewType>" link-time flakes that
+      # disappear on retry. The bug fires whenever a PR adds a new symbol to
+      # one of these library targets — it has bitten TBDShared, and the
+      # required-checks work bit TBDDaemonLib (new PRStatusManager.CheckContext
+      # / checkSignals / mapStateAndReason signatures). Wiping just these
+      # library build artifacts forces SPM to re-emit them while keeping the
+      # rest of `.build/` warm. Costs a couple min per run (library rebuild +
+      # downstream cascade relink) in exchange for never seeing the flake.
+      - name: Force-rebuild first-party libraries (workaround SPM #7715)
         run: |
-          echo "=== TBDShared artifacts before wipe ==="
-          ls -la .build/*/debug/TBDShared.build 2>/dev/null || echo "(absent)"
-          ls -la .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || echo "(absent)"
-          rm -rf .build/*/debug/TBDShared.build .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || true
-          echo "=== TBDShared artifacts after wipe ==="
-          ls -la .build/*/debug/TBDShared.build 2>/dev/null || echo "(absent)"
-          ls -la .build/*/debug/Modules/TBDShared.swiftmodule 2>/dev/null || echo "(absent)"
+          for module in TBDShared TBDDaemonLib; do
+            echo "=== $module artifacts before wipe ==="
+            ls -la .build/*/debug/"$module".build 2>/dev/null || echo "(absent)"
+            ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
+            rm -rf .build/*/debug/"$module".build .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || true
+            echo "=== $module artifacts after wipe ==="
+            ls -la .build/*/debug/"$module".build 2>/dev/null || echo "(absent)"
+            ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
+          done
 
       # `-j 2` caps parallel swift-frontend processes. The macos-15 runner
       # has limited RAM (~7-14 GB) and Swift 6.2.4 frontends each consume

@@ -5,10 +5,23 @@ import os
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "PRStatusManager")
 
 /// In-memory cache of GitHub PR status per worktree.
-/// Fetches via `gh api graphql` — one call per `fetchAll`, one `gh pr view` per `refresh`.
+///
+/// `fetchAll` runs one batch GraphQL call for all viewer PRs, plus one combined per-PR
+/// GraphQL call (run concurrently) for each OPEN PR whose aggregate rollup isn't SUCCESS —
+/// that call returns the aggregate state, every check context with its `isRequired`
+/// flag, and a pagination flag in a single round trip. `refresh` runs
+/// `gh pr view` plus the same combined call for OPEN PRs. On transient fetch failure,
+/// callers keep the previous cached status instead of guessing.
 public actor PRStatusManager {
 
     private var cache: [UUID: PRStatus] = [:]
+
+    /// Reentrancy guard: a previous poll still running means a new `fetchAll` is skipped
+    /// so two generations of batch data can't interleave their cache writes.
+    private var fetchAllInProgress = false
+
+    /// Set by `refresh()`/`invalidate()`; `fetchAll` won't overwrite newer data.
+    private var lastDirectUpdate: [UUID: Date] = [:]
 
     private var onMergedTransition: (@Sendable (UUID, Int) async -> Void)?
 
@@ -20,7 +33,10 @@ public actor PRStatusManager {
 
     public func allStatuses() -> [UUID: PRStatus] { cache }
 
-    public func invalidate(worktreeID: UUID) { cache.removeValue(forKey: worktreeID) }
+    public func invalidate(worktreeID: UUID) {
+        cache.removeValue(forKey: worktreeID)
+        lastDirectUpdate[worktreeID] = Date()   // an in-flight fetchAll must not resurrect the entry
+    }
 
     /// Register a callback fired when a worktree's cached PR state transitions
     /// from non-merged (or absent) into `.merged`. Passes `(worktreeID, prNumber)`.
@@ -83,6 +99,10 @@ public actor PRStatusManager {
     /// worktrees: list of (id, branch, upstreamBranch, worktreePath) for active non-main worktrees.
     public func fetchAll(worktrees: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String)]) async {
         guard !worktrees.isEmpty else { return }
+        guard !fetchAllInProgress else { return }   // a previous poll is still running; skip to avoid interleaved generations
+        fetchAllInProgress = true
+        defer { fetchAllInProgress = false }
+        let batchStartedAt = Date()
         // All worktrees share one repo; any path works as gh's working directory for auth.
         let repoPath = worktrees[0].worktreePath
 
@@ -111,70 +131,106 @@ public actor PRStatusManager {
             }
         }
 
-        // Update cache for worktrees found in the batch.
+        // Collect matches first.
         // Do NOT clear entries for missing worktrees — the batch query is
         // limited to 100 PRs across all repos, so older PRs may not appear.
         // Those entries may have been populated by a targeted `refresh` call.
+        var matches: [(worktreeID: UUID, node: PRNode)] = []
         for wt in worktrees {
-            let candidates = Self.branchCandidates(
-                localBranch: wt.branch,
-                upstreamBranch: wt.upstreamBranch
-            )
+            let candidates = Self.branchCandidates(localBranch: wt.branch, upstreamBranch: wt.upstreamBranch)
             if let node = candidates.compactMap({ byBranch[$0] }).first {
-                await apply(PRStatus(
-                    number: node.number,
-                    url: node.url,
-                    state: Self.mapState(
-                        ghState: node.state,
-                        mergeStateStatus: node.mergeStateStatus,
-                        reviewDecision: node.reviewDecision,
-                        isDraft: node.isDraft,
-                        statusCheckRollupState: node.statusCheckRollupState
-                    ),
-                    reason: Self.computeReason(
-                        ghState: node.state,
-                        mergeStateStatus: node.mergeStateStatus,
-                        reviewDecision: node.reviewDecision,
-                        isDraft: node.isDraft,
-                        statusCheckRollupState: node.statusCheckRollupState
-                    )
-                ), for: wt.id)
+                matches.append((wt.id, node))
             }
         }
+
+        // Fetch per-PR signals concurrently; only non-green OPEN PRs need the query.
+        let signalsByID = await withTaskGroup(of: (UUID, (failing: Bool, pending: Bool)?).self,
+                                              returning: [UUID: (failing: Bool, pending: Bool)?].self) { group in
+            for match in matches {
+                let node = match.node
+                let id = match.worktreeID
+                if node.state != "OPEN" || !Self.aggregateRollupIsNonSuccess(node.statusCheckRollupState) {
+                    group.addTask { (id, (failing: false, pending: false)) }
+                } else {
+                    group.addTask {
+                        (id, await self.fetchCheckSignals(url: node.url, number: node.number, repoPath: repoPath))
+                    }
+                }
+            }
+            var out: [UUID: (failing: Bool, pending: Bool)?] = [:]
+            for await (id, signals) in group { out[id] = signals }
+            return out
+        }
+
+        for match in matches {
+            // A user-initiated refresh (or invalidate) landed after this batch's snapshot —
+            // its data is fresher than ours; don't clobber it.
+            if let direct = lastDirectUpdate[match.worktreeID], direct > batchStartedAt { continue }
+            let signals: (failing: Bool, pending: Bool)
+            if let fetched = signalsByID[match.worktreeID] ?? nil {
+                signals = fetched
+            } else if cache[match.worktreeID] != nil {
+                continue   // transient failure: keep the previous status rather than guessing
+            } else {
+                signals = Self.aggregateFallbackSignals(match.node.statusCheckRollupState)
+            }
+            let (state, reason) = Self.mapStateAndReason(
+                ghState: match.node.state,
+                mergeStateStatus: match.node.mergeStateStatus,
+                reviewDecision: match.node.reviewDecision,
+                isDraft: match.node.isDraft,
+                requiredChecksFailing: signals.failing,
+                requiredChecksPending: signals.pending
+            )
+            await apply(
+                PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason),
+                for: match.worktreeID
+            )
+        }
+    }
+
+    /// The aggregate rollup classifies a per-check query as worthwhile when it is NOT a settled
+    /// success — i.e. it is failing or pending (or any other non-success/non-nil value). SUCCESS
+    /// or nil means no required check can be failing or pending → skip the query.
+    private static func aggregateRollupIsNonSuccess(_ state: String?) -> Bool {
+        guard let state else { return false }
+        return state != "SUCCESS"
     }
 
     /// Refresh a single worktree using `gh pr view`. Used for on-select refresh.
     public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, repoPath: String) async -> PRStatus? {
-        let candidates = Self.branchCandidates(
-            localBranch: branch,
-            upstreamBranch: upstreamBranch
-        )
+        let candidates = Self.branchCandidates(localBranch: branch, upstreamBranch: upstreamBranch)
         for candidate in candidates {
             let args = ["pr", "view", candidate,
-                        "--json", "number,url,state,mergeStateStatus,reviewDecision,isDraft,statusCheckRollup"]
+                        "--json", "number,url,state,mergeStateStatus,reviewDecision,isDraft"]
             guard let output = await runGH(args: args, repoPath: repoPath),
                   let data = output.data(using: .utf8),
                   let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
                 continue
             }
 
-            let state = Self.mapState(ghState: obj.state,
-                                        mergeStateStatus: obj.mergeStateStatus,
-                                        reviewDecision: obj.reviewDecision ?? "",
-                                        isDraft: obj.isDraft,
-                                        statusCheckRollupState: obj.statusCheckRollup?.state)
-            let reason = Self.computeReason(ghState: obj.state,
-                                             mergeStateStatus: obj.mergeStateStatus,
-                                             reviewDecision: obj.reviewDecision ?? "",
-                                             isDraft: obj.isDraft,
-                                             statusCheckRollupState: obj.statusCheckRollup?.state)
-            let status = PRStatus(
-                number: obj.number,
-                url: obj.url,
-                state: state,
-                reason: reason
+            let signals: (failing: Bool, pending: Bool)
+            if obj.state != "OPEN" {
+                signals = (false, false)   // mapState ignores signals for MERGED/CLOSED
+            } else if let fetched = await fetchCheckSignals(url: obj.url, number: obj.number, repoPath: repoPath) {
+                signals = fetched
+            } else if let cached = cache[worktreeID] {
+                return cached   // transient failure: keep the previous status rather than guessing
+            } else {
+                signals = (false, false)   // bootstrap with no data; the next poll corrects it
+            }
+
+            let (state, reason) = Self.mapStateAndReason(
+                ghState: obj.state,
+                mergeStateStatus: obj.mergeStateStatus,
+                reviewDecision: obj.reviewDecision ?? "",
+                isDraft: obj.isDraft,
+                requiredChecksFailing: signals.failing,
+                requiredChecksPending: signals.pending
             )
+            let status = PRStatus(number: obj.number, url: obj.url, state: state, reason: reason)
             await apply(status, for: worktreeID)
+            lastDirectUpdate[worktreeID] = Date()
             return status
         }
 
@@ -190,64 +246,45 @@ public actor PRStatusManager {
 
     // MARK: - State mapping (internal but static for testability)
 
-    /// Unified function that produces both state and reason in one pass.
-    /// This is the single source of truth — both mapState() and computeReason()
-    /// delegate to this to prevent drift.
+    /// Unified function that produces both state and reason in one pass — the single
+    /// source of truth that `mapState()` and `computeReason()` delegate to, so they can't drift.
+    /// Required-check awareness: a failing *required* check is red and a pending *required*
+    /// check is yellow regardless of merge state; non-required checks never color the icon.
     public static func mapStateAndReason(
         ghState: String,
         mergeStateStatus: String,
         reviewDecision: String = "",
         isDraft: Bool = false,
-        statusCheckRollupState: String? = nil
+        requiredChecksFailing: Bool = false,
+        requiredChecksPending: Bool = false
     ) -> (state: PRMergeableState, reason: String) {
         switch ghState {
-        case "MERGED":
-            return (.merged, "Merged")
-        case "CLOSED":
-            return (.closed, "Closed")
+        case "MERGED": return (.merged, "Merged")
+        case "CLOSED": return (.closed, "Closed")
         default:
             if isDraft || mergeStateStatus == "DRAFT" { return (.draft, "Draft") }
             if reviewDecision == "CHANGES_REQUESTED" { return (.changesRequested, "Changes requested") }
-            // UNSTABLE = mergeable despite failing/pending NON-required checks (a failing *required*
-            // check surfaces as BLOCKED instead). Defer to the UNSTABLE arm so it isn't flagged red here.
-            if mergeStateStatus != "UNSTABLE", Self.isFailingStatusCheckRollup(statusCheckRollupState) {
-                return (.checksFailed, "Checks failing")
-            }
+            // Uniform precedence: failing required check → red, pending required check → yellow,
+            // regardless of merge state. With no required checks both are false and the
+            // mergeStateStatus switch below decides (see checkSignals).
+            if requiredChecksFailing { return (.checksFailed, "Checks failing") }
+            if requiredChecksPending { return (.pending, "Checks pending") }
 
             switch mergeStateStatus {
-            case "CLEAN", "HAS_HOOKS":
-                if Self.isPendingStatusCheckRollup(statusCheckRollupState) {
-                    return (.pending, "Checks pending")
-                } else {
-                    return (.mergeable, "Ready to merge")
-                }
+            case "CLEAN", "HAS_HOOKS", "UNSTABLE":
+                // UNSTABLE = mergeable with only non-required checks failing → not red.
+                return (.mergeable, "Ready to merge")
             case "BLOCKED":
-                if Self.isPendingStatusCheckRollup(statusCheckRollupState) {
-                    return (.pending, "Checks pending")
-                }
-                // Only blocker is a required (but not-yet-given) review while checks pass → ready to merge, show green.
-                if reviewDecision == "REVIEW_REQUIRED" {
-                    return (.mergeable, "Ready to merge")
-                }
-                return (.blocked, "Blocked")
+                // Checks are settled and passing; the only blocker is a not-yet-given review.
+                return reviewDecision == "REVIEW_REQUIRED" ? (.mergeable, "Ready to merge") : (.blocked, "Blocked")
             case "DIRTY":
                 return (.blocked, "Merge conflicts")
             case "BEHIND":
                 return (.blocked, "Behind base branch")
-            case "UNSTABLE":
-                if Self.isPendingStatusCheckRollup(statusCheckRollupState) {
-                    return (.pending, "Checks pending")
-                } else {
-                    return (.mergeable, "Ready to merge")
-                }
             case "UNKNOWN":
                 return (.pending, "Checks pending")
             default:
-                if Self.isPendingStatusCheckRollup(statusCheckRollupState) {
-                    return (.pending, "Checks pending")
-                } else {
-                    return (.blocked, "Blocked")
-                }
+                return (.blocked, "Blocked")
             }
         }
     }
@@ -257,25 +294,184 @@ public actor PRStatusManager {
         mergeStateStatus: String,
         reviewDecision: String = "",
         isDraft: Bool = false,
-        statusCheckRollupState: String? = nil
+        requiredChecksFailing: Bool = false,
+        requiredChecksPending: Bool = false
     ) -> PRMergeableState {
-        return Self.mapStateAndReason(
+        Self.mapStateAndReason(
             ghState: ghState,
             mergeStateStatus: mergeStateStatus,
             reviewDecision: reviewDecision,
             isDraft: isDraft,
-            statusCheckRollupState: statusCheckRollupState
+            requiredChecksFailing: requiredChecksFailing,
+            requiredChecksPending: requiredChecksPending
         ).state
     }
 
-    private static func isFailingStatusCheckRollup(_ state: String?) -> Bool {
-        guard let state else { return false }
-        return ["ERROR", "FAILURE"].contains(state)
+    /// Conclusions (CheckRun) that count as a failing check.
+    private static let failingCheckRunConclusions: Set<String> = [
+        "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"
+    ]
+    /// States (StatusContext) that count as a failing check.
+    private static let failingStatusContextStates: Set<String> = ["FAILURE", "ERROR"]
+    /// CheckRun `status` values that mean the check is still running / not yet concluded.
+    private static let pendingCheckRunStatuses: Set<String> = [
+        "QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"
+    ]
+    /// StatusContext `state` values that count as a pending check.
+    private static let pendingStatusContextStates: Set<String> = ["PENDING", "EXPECTED"]
+
+    /// A single status-check context for one PR's last commit. Unifies the GraphQL `CheckRun`
+    /// and `StatusContext` shapes.
+    struct CheckContext {
+        let name: String          // CheckRun.name, or StatusContext.context
+        let status: String?       // CheckRun.status (nil for StatusContext)
+        let conclusion: String?   // CheckRun.conclusion (nil for StatusContext)
+        let state: String?        // StatusContext.state (nil for CheckRun)
+        let isRequired: Bool?     // absent in the JSON → nil
     }
 
-    private static func isPendingStatusCheckRollup(_ state: String?) -> Bool {
-        guard let state else { return false }
-        return ["EXPECTED", "PENDING"].contains(state)
+    /// Whether a context counts as failing (regardless of required-ness).
+    static func contextIsFailing(_ ctx: CheckContext) -> Bool {
+        if let conclusion = ctx.conclusion, Self.failingCheckRunConclusions.contains(conclusion) {
+            return true
+        }
+        if let state = ctx.state, Self.failingStatusContextStates.contains(state) {
+            return true
+        }
+        return false
+    }
+
+    /// Whether a context counts as pending (regardless of required-ness).
+    static func contextIsPending(_ ctx: CheckContext) -> Bool {
+        if let status = ctx.status, Self.pendingCheckRunStatuses.contains(status), ctx.conclusion == nil {
+            return true
+        }
+        if let state = ctx.state, Self.pendingStatusContextStates.contains(state) {
+            return true
+        }
+        return false
+    }
+
+    /// Compute the (failing, pending) signals for one PR's check contexts.
+    /// Only checks GitHub marks `isRequired` for this PR ever color the icon. A PR with no
+    /// required checks (stacked PR targeting an unprotected feature branch, or a repo without
+    /// branch protection) gets no CI coloring from checks — the mergeStateStatus refinement in
+    /// mapState decides instead, matching GitHub's own merge verdict.
+    /// `aggregateRollupState` EXPECTED covers the post-push window: a required check that
+    /// hasn't reported a context yet can't be seen in `contexts`.
+    static func checkSignals(contexts: [CheckContext], aggregateRollupState: String?) -> (failing: Bool, pending: Bool) {
+        let required = contexts.filter { $0.isRequired == true }
+        return (
+            required.contains(where: contextIsFailing),
+            required.contains(where: contextIsPending) || aggregateRollupState == "EXPECTED"
+        )
+    }
+
+    /// Signals derived from the aggregate rollup alone — used when per-check data is
+    /// unavailable (query failure) or incomplete (contexts truncated past first page).
+    /// The aggregate counts non-required checks too, so this can over-report; it is a
+    /// bootstrap/degraded mode, not the normal path.
+    static func aggregateFallbackSignals(_ rollupState: String?) -> (failing: Bool, pending: Bool) {
+        (["FAILURE", "ERROR"].contains(rollupState ?? ""),
+         ["PENDING", "EXPECTED"].contains(rollupState ?? ""))
+    }
+
+    /// Result of the combined per-PR check query.
+    struct PRCheckDetail {
+        let contexts: [CheckContext]
+        let rollupState: String?
+        let truncated: Bool   // contexts has more than one page; per-check view is incomplete
+    }
+
+    /// Pure parse of a single PR's last-commit status-check detail.
+    ///
+    /// Walks `data.repository.pullRequest.commits.nodes[].commit.statusCheckRollup`: reads
+    /// `state`, `contexts.pageInfo.hasNextPage`, and the context nodes (CheckRun via
+    /// name/status/conclusion/isRequired; StatusContext via context/state/isRequired; nameless
+    /// nodes are skipped). Throws `PRStatusError.invalidJSON` if the outer shape can't be parsed.
+    /// A null `statusCheckRollup` (no checks at all) yields empty contexts, nil state, not truncated.
+    static func parsePRCheckDetail(fromJSON data: Data) throws -> PRCheckDetail {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataObj = root["data"] as? [String: Any],
+              let repository = dataObj["repository"] as? [String: Any],
+              let pullRequest = repository["pullRequest"] as? [String: Any],
+              let commits = pullRequest["commits"] as? [String: Any],
+              let commitNodes = commits["nodes"] as? [Any] else {
+            throw PRStatusError.invalidJSON
+        }
+
+        var result: [CheckContext] = []
+        var rollupState: String?
+        var truncated = false
+
+        for commitNode in commitNodes.compactMap({ $0 as? [String: Any] }) {
+            guard let commit = commitNode["commit"] as? [String: Any],
+                  let rollup = commit["statusCheckRollup"] as? [String: Any] else {
+                continue
+            }
+            if let state = rollup["state"] as? String {
+                rollupState = state
+            }
+            guard let contexts = rollup["contexts"] as? [String: Any] else { continue }
+            if let pageInfo = contexts["pageInfo"] as? [String: Any],
+               pageInfo["hasNextPage"] as? Bool == true {
+                truncated = true
+            }
+            guard let contextNodes = contexts["nodes"] as? [Any] else { continue }
+
+            for context in contextNodes.compactMap({ $0 as? [String: Any] }) {
+                let isRequired = context["isRequired"] as? Bool
+                if let name = context["name"] as? String {
+                    // CheckRun
+                    result.append(CheckContext(
+                        name: name,
+                        status: context["status"] as? String,
+                        conclusion: context["conclusion"] as? String,
+                        state: nil,
+                        isRequired: isRequired
+                    ))
+                } else if let name = context["context"] as? String {
+                    // StatusContext
+                    result.append(CheckContext(
+                        name: name,
+                        status: nil,
+                        conclusion: nil,
+                        state: context["state"] as? String,
+                        isRequired: isRequired
+                    ))
+                }
+                // else: no name/context — skip.
+            }
+        }
+
+        return PRCheckDetail(contexts: result, rollupState: rollupState, truncated: truncated)
+    }
+
+    /// Parse `owner` and `name` from a PR URL like
+    /// `https://github.com/<owner>/<name>/pull/<n>`.
+    static func parseOwnerRepo(fromURL url: String) -> (owner: String, name: String)? {
+        guard let components = URLComponents(string: url) else { return nil }
+        let parts = components.path.split(separator: "/", omittingEmptySubsequences: true)
+        // Expect: [owner, name, "pull", <n>]
+        guard parts.count >= 4, parts[2] == "pull" else { return nil }
+        return (owner: String(parts[0]), name: String(parts[1]))
+    }
+
+    /// Combined per-PR query: aggregate rollup state + every check context with its
+    /// isRequired flag + pagination flag, in one round trip.
+    /// The literal number must appear in both pullRequest(number:) and isRequired(pullRequestNumber:).
+    static func prCheckQuery(owner: String, name: String, number: Int) -> String {
+        """
+        { repository(owner: "\(owner)", name: "\(name)") { pullRequest(number: \(number)) {
+          commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) {
+            pageInfo { hasNextPage }
+            nodes {
+              __typename
+              ... on CheckRun { name status conclusion isRequired(pullRequestNumber: \(number)) }
+              ... on StatusContext { context state isRequired(pullRequestNumber: \(number)) }
+            }
+          } } } } } } } }
+        """
     }
 
     /// Compute human-readable reason string for the PR merge state.
@@ -285,14 +481,16 @@ public actor PRStatusManager {
         mergeStateStatus: String,
         reviewDecision: String = "",
         isDraft: Bool = false,
-        statusCheckRollupState: String? = nil
+        requiredChecksFailing: Bool = false,
+        requiredChecksPending: Bool = false
     ) -> String {
-        return Self.mapStateAndReason(
+        Self.mapStateAndReason(
             ghState: ghState,
             mergeStateStatus: mergeStateStatus,
             reviewDecision: reviewDecision,
             isDraft: isDraft,
-            statusCheckRollupState: statusCheckRollupState
+            requiredChecksFailing: requiredChecksFailing,
+            requiredChecksPending: requiredChecksPending
         ).reason
     }
 
@@ -360,7 +558,7 @@ public actor PRStatusManager {
 
     // MARK: - Shell helpers
 
-    private func runGHGraphQL(repoPath: String) async -> Data? {
+    private nonisolated func runGHGraphQL(repoPath: String) async -> Data? {
         let query = """
         {
           viewer {
@@ -392,7 +590,32 @@ public actor PRStatusManager {
         return data
     }
 
-    private func runGH(args: [String], repoPath: String) async -> String? {
+    /// One combined GraphQL round trip for a PR's check signals.
+    /// Returns nil on any failure (gh missing, non-zero exit, parse error) — callers keep
+    /// the previous cached status rather than guessing.
+    private nonisolated func fetchCheckSignals(url: String, number: Int, repoPath: String) async -> (failing: Bool, pending: Bool)? {
+        guard let ownerRepo = Self.parseOwnerRepo(fromURL: url) else {
+            logger.debug("Cannot parse owner/repo from PR URL \(url, privacy: .public)")
+            return nil
+        }
+        let query = Self.prCheckQuery(owner: ownerRepo.owner, name: ownerRepo.name, number: number)
+        let args = ["api", "graphql", "-f", "query=\(query)"]
+        guard let result = await runGHResult(args: args, repoPath: repoPath),
+              result.exitStatus == 0,
+              let data = Self.graphQLOutputData(stdout: result.stdout),
+              let detail = try? Self.parsePRCheckDetail(fromJSON: data) else {
+            logger.debug("Check signal query failed for PR #\(number, privacy: .public)")
+            return nil
+        }
+        if detail.truncated {
+            // Can't see every check — trust the aggregate instead of a partial view.
+            logger.debug("PR #\(number, privacy: .public) has >100 check contexts; using aggregate fallback")
+            return Self.aggregateFallbackSignals(detail.rollupState)
+        }
+        return Self.checkSignals(contexts: detail.contexts, aggregateRollupState: detail.rollupState)
+    }
+
+    private nonisolated func runGH(args: [String], repoPath: String) async -> String? {
         guard let result = await runGHResult(args: args, repoPath: repoPath) else {
             return nil
         }
@@ -412,8 +635,8 @@ public actor PRStatusManager {
         return stdout.data(using: .utf8)
     }
 
-    private func runGHResult(args: [String], repoPath: String) async -> GHCommandResult? {
-        guard let ghPath = findGH() else {
+    private nonisolated func runGHResult(args: [String], repoPath: String) async -> GHCommandResult? {
+        guard let ghPath = Self.resolvedGHPath else {
             logger.debug("gh CLI not found in PATH")
             return nil
         }
@@ -448,7 +671,8 @@ public actor PRStatusManager {
         }
     }
 
-    private func findGH() -> String? {
+    /// Resolved once per process — gh's location doesn't change mid-process.
+    private static let resolvedGHPath: String? = {
         let candidates = ["/usr/local/bin/gh", "/opt/homebrew/bin/gh", "/usr/bin/gh"]
         for path in candidates {
             if FileManager.default.isExecutableFile(atPath: path) { return path }
@@ -461,7 +685,7 @@ public actor PRStatusManager {
             }
         }
         return nil
-    }
+    }()
 }
 
 private struct GHCommandResult {
@@ -479,11 +703,6 @@ private struct GHPRViewResult: Codable {
     let mergeStateStatus: String
     let reviewDecision: String?
     let isDraft: Bool
-    let statusCheckRollup: GHStatusCheckRollup?
-}
-
-private struct GHStatusCheckRollup: Codable {
-    let state: String?
 }
 
 public enum PRStatusError: Error {
