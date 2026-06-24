@@ -64,6 +64,15 @@ extension RPCRouterTests {
         #expect(status.connectedClients == 0)
     }
 
+    @Test("daemon.status reports the live connected-client count when wired")
+    func daemonStatusReportsConnectedClients() async throws {
+        router.connectedClientsProvider = { 3 }
+        let response = await router.handle(RPCRequest(method: RPCMethod.daemonStatus))
+        #expect(response.success)
+        let status = try response.decodeResult(DaemonStatusResult.self)
+        #expect(status.connectedClients == 3)
+    }
+
     // MARK: - Resolve Path
 
     @Test("resolve.path finds repo by path")

@@ -248,6 +248,9 @@ public final class Daemon: Sendable {
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock
+        // Wire the live connected-client count into daemon.status (the router
+        // is built above, before the server exists, so it can't be an init dep).
+        rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
 
         // 10. Start HTTP server

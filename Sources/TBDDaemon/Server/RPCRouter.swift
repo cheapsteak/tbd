@@ -18,6 +18,12 @@ public final class RPCRouter: Sendable {
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
+    /// Live connected-client count, supplied by the SocketServer after it is
+    /// constructed (the router is built first in Daemon.swift, so it cannot
+    /// take the server as an init dependency). Mirrors `claudeUsagePoller`
+    /// post-construction wiring. `nil` for unit tests / HTTP-only paths, which
+    /// report 0.
+    public nonisolated(unsafe) var connectedClientsProvider: (@Sendable () -> Int)?
     public let pendingQuestions: PendingQuestionStore
     public let repoSerializer: RepoSerializer
     public let configDirManager: ClaudeProfileConfigDirManager

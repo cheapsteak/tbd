@@ -45,6 +45,18 @@ actor DaemonClient {
     private let socketPath: String
     private(set) var connected: Bool = false
 
+    /// Upper bound a single one-shot RPC waits for the daemon's response
+    /// before failing. Generous so legitimately slow handlers (model-profile
+    /// add → Anthropic round-trip; worktree create/revive with blocking
+    /// preSession hooks) still complete — it exists only to convert a
+    /// half-dead-daemon hang into a bounded failure instead of a permanently
+    /// parked background thread. Per-recv granularity is SO_RCVTIMEO (1s).
+    /// 300s is deliberately generous: worktree create/revive can run a blocking
+    /// preSession hook (e.g. `npm install`) that legitimately exceeds 2 minutes,
+    /// so a shorter bound risks failing real work. The frequent poll path
+    /// returns in milliseconds and never approaches this ceiling.
+    private static let rpcRecvDeadlineSeconds: TimeInterval = 300
+
     init(socketPath: String? = nil) {
         // See HookResolver — resolve here, not at the caller's site.
         self.socketPath = socketPath ?? TBDConstants.socketPath
@@ -196,6 +208,15 @@ actor DaemonClient {
             throw DaemonClientError.daemonNotRunning
         }
 
+        // Bound every blocking recv() on this socket. Without this, a
+        // half-dead daemon (connection stays ESTABLISHED with no FIN — e.g.
+        // live tmux-server death) parks the reading thread in recv() forever,
+        // saturating the cooperative pool and freezing the app↔daemon loop.
+        // SO_RCVTIMEO makes recv() return -1/EAGAIN ~every second so callers
+        // can re-check Task cancellation and overall deadlines.
+        var recvTimeout = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, socklen_t(MemoryLayout<timeval>.size))
+
         return fd
     }
 
@@ -231,16 +252,22 @@ actor DaemonClient {
             let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
             defer { buffer.deallocate() }
 
+            let deadline = Date().addingTimeInterval(Self.rpcRecvDeadlineSeconds)
             while true {
                 let bytesRead = recv(fd, buffer, bufferSize, 0)
                 if bytesRead < 0 {
                     let savedErrno = errno
-                    // Retry transient interruptions. Blocking recv on a Unix
-                    // socket can be kicked out with EINTR when the app process
-                    // services signals (GCD timers, Combine, etc.) during a
-                    // long handler like modelProfile.add where the daemon is
-                    // itself waiting on a network round-trip to Anthropic.
-                    if savedErrno == EINTR || savedErrno == EAGAIN {
+                    // EINTR: signal interruption (GCD timers, Combine) while a
+                    // long daemon handler runs. EAGAIN/EWOULDBLOCK: SO_RCVTIMEO
+                    // idle tick. Both mean "no data yet, not an error" — keep
+                    // waiting until the overall deadline so a wedged daemon
+                    // can't park this background thread indefinitely.
+                    if savedErrno == EINTR || savedErrno == EAGAIN || savedErrno == EWOULDBLOCK {
+                        if Date() >= deadline {
+                            throw DaemonClientError.receiveFailed(
+                                "recv timed out after \(Int(Self.rpcRecvDeadlineSeconds))s (daemon unresponsive)"
+                            )
+                        }
                         continue
                     }
                     throw DaemonClientError.receiveFailed(
@@ -772,7 +799,17 @@ actor DaemonClient {
 
         while !Task.isCancelled {
             let bytesRead = recv(fd, buffer, bufferSize, 0)
-            if bytesRead <= 0 { break }
+            if bytesRead < 0 {
+                let e = errno
+                // SO_RCVTIMEO idle tick (EAGAIN/EWOULDBLOCK) or signal (EINTR):
+                // not a disconnect. Looping re-checks Task.isCancelled so a
+                // cancelled/reconnecting subscription unwinds and closes its fd
+                // (via the defer) instead of parking this thread in recv()
+                // forever on a half-dead daemon socket.
+                if e == EAGAIN || e == EWOULDBLOCK || e == EINTR { continue }
+                break   // genuine socket error → disconnect; AppState reconnects
+            }
+            if bytesRead == 0 { break }   // EOF → daemon closed the stream
 
             accumulated.append(buffer, count: bytesRead)
 
