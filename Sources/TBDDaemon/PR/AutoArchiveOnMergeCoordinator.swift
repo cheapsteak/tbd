@@ -24,10 +24,12 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
             let effective = wt.autoArchiveOnMerge ?? config.autoArchiveOnMergeDefault
             guard effective else { return }
 
-            // Worktrees with active children are not auto-archivable.
+            // Worktrees with active children are not auto-archivable. Narrow the
+            // catch to the children guard so DB errors fall through to the outer
+            // catch and are logged at .error rather than silently swallowed.
             do {
                 try await db.worktrees.assertArchivable(id: worktreeID)
-            } catch {
+            } catch WorktreeArchiveError.hasActiveChildren {
                 logger.info("auto-archive skipped (active children): \(worktreeID, privacy: .public)")
                 return
             }
