@@ -77,3 +77,27 @@ import TBDShared
 
     #expect(state.terminals[worktreeID]?[0].activityState == .working)
 }
+
+@MainActor
+@Test func appState_escInterruptClearsClaudeActivityImmediately() {
+    let state = AppState()
+    let worktreeID = UUID()
+    let terminalID = UUID()
+    state.terminals = [
+        worktreeID: [
+            Terminal(
+                id: terminalID,
+                worktreeID: worktreeID,
+                tmuxWindowID: "@1",
+                tmuxPaneID: "%1",
+                label: "Claude",
+                kind: .claude,
+                activityState: .working
+            )
+        ]
+    ]
+
+    state.handleTerminalInterrupt(terminalID: terminalID, viaEscape: true)
+
+    #expect(state.terminals[worktreeID]?[0].activityState == .idle)
+}

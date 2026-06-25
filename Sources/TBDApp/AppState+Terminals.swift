@@ -196,17 +196,26 @@ extension AppState {
 
     // MARK: - Terminal Actions
 
-    /// Treat an explicit user interrupt as "not working" for Codex terminals.
-    /// This clears the sidebar spinner immediately and mirrors the state to
-    /// the daemon best-effort.
-    func handleTerminalInterrupt(terminalID: UUID) {
+    /// Treat an explicit user interrupt (Ctrl+C, or Esc for Claude) as "not
+    /// working" for Claude and Codex terminals. This clears the sidebar spinner
+    /// immediately and mirrors the state to the daemon best-effort. Shell
+    /// terminals are never affected.
+    func handleTerminalInterrupt(terminalID: UUID, viaEscape: Bool = false) {
         guard let terminal = terminals.values.flatMap({ $0 })
-            .first(where: { $0.id == terminalID }),
-              terminal.kind == .codex || terminal.label == TerminalLabel.codex
+            .first(where: { $0.id == terminalID })
         else {
             return
         }
 
+        // Shells have no agent spinner to clear.
+        guard terminal.kind != .shell else { return }
+
+        let isCodex = terminal.kind == .codex || terminal.label == TerminalLabel.codex
+        // Esc is Claude's interrupt key, not Codex's. Ignoring Esc for Codex avoids
+        // falsely idling a still-working Codex session.
+        if viaEscape && isCodex { return }
+
+        // Remaining terminals: Codex (Ctrl+C), Claude, or legacy nil-kind sessions.
         if let idx = terminals[terminal.worktreeID]?.firstIndex(where: { $0.id == terminalID }) {
             terminals[terminal.worktreeID]?[idx].activityState = .idle
         }
