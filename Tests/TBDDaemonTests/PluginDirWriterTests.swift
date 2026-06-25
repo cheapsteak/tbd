@@ -61,6 +61,38 @@ struct PluginDirWriterTests {
         #expect(written == TBDSkillContent.body)
     }
 
+    @Test("bundles the nightwatch skill — SKILL.md, executable tick.py, configs")
+    func writesNightwatchSkill() throws {
+        let tempRoot = NSTemporaryDirectory() + "tbd-plugin-test-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: tempRoot) }
+
+        try PluginDirWriter(applicationSupportRoot: tempRoot).writePlugin()
+
+        let nw = tempRoot + "/TBD/plugin/skills/nightwatch"
+        let tick = nw + "/scripts/tick.py"
+        #expect(FileManager.default.fileExists(atPath: nw + "/SKILL.md"))
+        #expect(FileManager.default.fileExists(atPath: tick))
+        #expect(FileManager.default.fileExists(atPath: nw + "/scripts/judge.py"))
+        #expect(FileManager.default.fileExists(atPath: nw + "/scripts/scheduler.sh"))
+        #expect(FileManager.default.fileExists(atPath: nw + "/scripts/tick-cron.sh"))
+        #expect(FileManager.default.fileExists(atPath: nw + "/config/priorities.txt"))
+        #expect(FileManager.default.fileExists(atPath: nw + "/config/safe_wedges.txt"))
+        #expect(FileManager.default.fileExists(atPath: nw + "/config/dont_touch.txt"))
+
+        // content matches the single source of truth
+        let writtenTick = try String(contentsOfFile: tick, encoding: .utf8)
+        #expect(writtenTick == NightwatchSkillContent.tickPy)
+
+        // tick.py is executable (cron/launchd run it directly)
+        let perms = try FileManager.default.attributesOfItem(atPath: tick)[.posixPermissions] as? NSNumber
+        #expect(perms?.int16Value ?? 0 & 0o111 != 0)
+    }
+
+    @Test("nightwatch SKILL.md has a valid skill name in frontmatter")
+    func nightwatchSkillNamed() {
+        #expect(NightwatchSkillContent.skillMd.contains("name: nightwatch"))
+    }
+
     @Test("pluginDirPath has expected shape")
     func pluginDirPathShape() {
         let writer = PluginDirWriter(applicationSupportRoot: "/var/test")
