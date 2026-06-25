@@ -1494,6 +1494,22 @@ final class AppState: ObservableObject {
         defaults.object(forKey: useTextKitTranscriptKey) as? Bool ?? false
     }
 
+    /// UserDefaults key for the NSTableView-based transcript renderer. When the
+    /// experimental transcript is enabled, this gate takes precedence over the
+    /// TextKit 2 / STTextView renderer: the table pane reuses the existing
+    /// SwiftUI row views (`SelectableTranscriptRow`) hosted per-cell with an
+    /// explicit height cache, replacing the fragile single-document TextKit
+    /// approach. Defaults false. (#129)
+    static let useTableViewTranscriptKey = "useTableViewTranscript"
+
+    /// Fail-closed read of the NSTableView transcript toggle for non-View callers
+    /// (the View layer uses `@AppStorage` directly). Only meaningful when
+    /// `transcriptFeatureEnabled` is also true. Takes precedence over
+    /// `useTextKitTranscript` when both are set.
+    static func useTableViewTranscript(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: useTableViewTranscriptKey) as? Bool ?? false
+    }
+
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
     nonisolated static func claudeEnvKey(_ settingID: String) -> String {
         "claudeEnvSetting.\(settingID)"

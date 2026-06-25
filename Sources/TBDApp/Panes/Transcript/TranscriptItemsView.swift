@@ -125,7 +125,7 @@ struct TranscriptItemsView: View {
 /// acceptable since each row is its own `NSTextField` and selection cannot span
 /// rows anyway. This guarantee assumes the drag-select begins inside the row; a
 /// drag that starts outside never armed this row's selection in the first place.
-private struct SelectableTranscriptRow: View {
+struct SelectableTranscriptRow: View {
     let node: TranscriptRenderNode
     let terminalID: UUID?
 

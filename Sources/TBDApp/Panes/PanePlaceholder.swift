@@ -41,6 +41,7 @@ struct PanePlaceholder: View {
     @State private var didCopyURL = false
     @AppStorage(AppState.enableTranscriptKey) private var transcriptFeatureEnabled = false
     @AppStorage(AppState.useTextKitTranscriptKey) private var useTextKitTranscript = false
+    @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript = false
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {
@@ -283,7 +284,9 @@ struct PanePlaceholder: View {
         case .liveTranscript(_, let terminalID):
             if transcriptFeatureEnabled {
                 Group {
-                    if useTextKitTranscript {
+                    if useTableViewTranscript {
+                        TableTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
+                    } else if useTextKitTranscript {
                         STTextViewTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
                     } else {
                         LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
