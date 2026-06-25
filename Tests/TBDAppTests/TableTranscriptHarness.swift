@@ -66,6 +66,21 @@ struct TableTranscriptHarness {
         let scene = makeScene(items: items, appState: appState, fixedSize: true)
         defer { withExtendedLifetime(scene.coordinator) {} }
 
+        // --- FIX 1(b): eager precompute populates EVERY row's height ---
+        // Production `makeNSView` calls this before `reloadData`; the harness
+        // builds the coordinator directly, so call it here and assert the cache is
+        // fully populated — i.e. every `heightOfRow` will be a pure cache hit (no
+        // estimate, no shrink-on-realize). Selection/jank are LIVE-only; this is
+        // the headless backstop for the precompute invariant.
+        let precomputeStart = Date()
+        scene.coordinator.precomputeAllHeights()
+        let precomputeMillis = Date().timeIntervalSince(precomputeStart) * 1000
+        let cachedRows = scene.coordinator.cachedHeightRowCount
+        let nodeCount = transcriptRenderNodes(from: items).count
+        #expect(cachedRows == nodeCount,
+                Comment(rawValue: "precomputeAllHeights left \(nodeCount - cachedRows) rows "
+                    + "unmeasured — heightOfRow would miss the cache for those"))
+
         // --- (c) lazy load + per-op timing during initial reload + first layout ---
         // Initial paint, as the live app does it: reloadData + run loop. We do NOT
         // force a full `layoutSubtreeIfNeeded` here — NSTableView lays out only the
@@ -132,6 +147,8 @@ struct TableTranscriptHarness {
         findings.append("    lastRow=\(lastRow) rect=\(lastRowRect) visible=\(visibleRect)")
         findings.append("(b) oracle violations (must be 0): \(violations.count)")
         for v in violations { findings.append("    \(v)") }
+        findings.append("FIX 1b eager precompute: \(cachedRows)/\(nodeCount) rows cached in "
+            + "\(String(format: "%.1f", precomputeMillis)) ms (heightOfRow is then all cache hits)")
         findings.append("(c) lazy load: realized \(realizedAfterLoad)/\(nodes.count) cells (ok=\(lazyOK))")
         findings.append("    heightOfRow fired \(heightCallsAfterLoad)/\(nodes.count) times by full layout")
         findings.append("    INITIAL PAINT (reloadData + run loop, no forced full layout): "
@@ -158,6 +175,7 @@ struct TableTranscriptHarness {
         #expect(scrollMillis < firstOpenBudgetMillis,
                 "scroll-to-end took \(scrollMillis) ms — regressing toward the #129 hang")
     }
+
 
     // MARK: - All-kinds fixture: oracle ground truth, before/after proof
 
@@ -364,6 +382,21 @@ struct TableTranscriptHarness {
     /// computation from scratch through the known-correct layout — it just uses
     /// the correct measurement primitive, not the broken one.
     private func oracleHeight(for node: TranscriptRenderNode) -> CGFloat {
+        // Chat bubbles render as a vertical stack of typed blocks (prose on
+        // TextKit-1, tables as native grid views) inside one bubble — NOT the
+        // SwiftUI SelectableTranscriptRow. The ground truth for those rows is the
+        // per-block measurement: an INDEPENDENT `MessageBlockMeasurer` over the
+        // composed blocks at the SAME body width, plus inter-block spacing and the
+        // fixed chrome. (Render==measure for the realized bubble cell is verified
+        // separately in `bubbleCells`.) Every other kind keeps the width-honouring
+        // SwiftUI hosting oracle.
+        if case .chatBubble(let item) = node.kind {
+            let role = TranscriptBubbleGeometry.role(for: item)
+            let blocks = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: node.badgeUsage)
+            let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: Self.width, role: role)
+            let blocksHeight = MessageBlockMeasurer().blocksHeight(blocks, bodyWidth: bodyWidth)
+            return TranscriptBubbleGeometry.rowHeight(blocksHeight: blocksHeight)
+        }
         let controller = NSHostingController(rootView: AnyView(
             SelectableTranscriptRow(node: node, terminalID: nil)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -659,6 +692,386 @@ struct TableTranscriptHarness {
         ))
 
         return items
+    }
+
+    // MARK: - Attributed chat-bubble cells (render == measure)
+
+    /// A short session exercising the attributed bubble cell path: a very long
+    /// (>5000pt) assistant message, a message carrying a token badge, a bubble
+    /// containing a GFM table, a code-block bubble, and a short user message.
+    private static func bubbleFixture() -> [TranscriptItem] {
+        var items: [TranscriptItem] = []
+
+        items.append(.userPrompt(
+            id: "b-user",
+            text: "Short user message that fits on a line or two.",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000)
+        ))
+
+        // >5000pt long assistant message: many wrapped paragraphs.
+        var longParagraphs: [String] = []
+        for i in 0..<85 {
+            longParagraphs.append(
+                "Paragraph \(i): this is a deliberately long paragraph that wraps across "
+                + "several lines in the column so the bubble grows tall enough to exceed "
+                + "five thousand points of rendered height, exercising the exact-measure path "
+                + "on a very large attributed string with `inline code` and **bold** runs.")
+        }
+        items.append(.assistantText(
+            id: "b-long",
+            text: longParagraphs.joined(separator: "\n\n"),
+            timestamp: nil,
+            usage: nil
+        ))
+
+        items.append(.assistantText(
+            id: "b-badge",
+            text: "This assistant message carries a token-usage badge that must render "
+                + "fully inside the bubble, beneath the body text.",
+            timestamp: nil,
+            usage: TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0)
+        ))
+
+        items.append(.assistantText(
+            id: "b-table",
+            text: """
+            Comparison table embedded in a bubble:
+
+            | Path | Cost | Clip risk |
+            | --- | --- | --- |
+            | Authoritative | measure visible rows | none |
+            | Estimate+correct | cheap | high |
+
+            Text continues after the table to confirm the attachment contributes height.
+            """,
+            timestamp: nil,
+            usage: nil
+        ))
+
+        items.append(.assistantText(
+            id: "b-code",
+            text: """
+            Here is a code block bubble:
+
+            ```swift
+            func greet(_ name: String) -> String {
+                return "Hello, \\(name)"
+            }
+            ```
+
+            And a trailing line after the code.
+            """,
+            timestamp: nil,
+            usage: nil
+        ))
+
+        return items
+    }
+
+    /// Drives the REAL table with attributed bubble cells. Snapshots the TOP and
+    /// BOTTOM of the long message plus the table bubble and the user bubble, and
+    /// asserts that for each chatBubble row the value `heightOfRow` returned equals
+    /// the realized `TranscriptBubbleCellView`'s actual drawn text height (its
+    /// NSTextView `usedRect` + chrome) within ~1pt — render == measure.
+    ///
+    ///     TBD_TABLE_HARNESS=1 swift test --filter TableTranscriptHarness
+    @Test("attributed bubble cells: render == measure; snapshots written (gated)")
+    func bubbleCells() throws {
+        guard ProcessInfo.processInfo.environment["TBD_TABLE_HARNESS"] == "1" else {
+            #expect(true)
+            return
+        }
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
+
+        let suiteName = "table-harness-bubble-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = Self.bubbleFixture()
+        let nodes = transcriptRenderNodes(from: items)
+        #expect(!nodes.isEmpty)
+
+        let scene = makeScene(items: items, appState: appState, fixedSize: true)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        scene.tableView.reloadData()
+        settle(scene.tableView)
+
+        // --- render == measure: heightOfRow vs realized cell drawn height ---
+        var deltas: [String] = []
+        var maxDelta: CGFloat = 0
+        for (row, node) in nodes.enumerated() {
+            guard case .chatBubble = node.kind else { continue }
+            let measured = scene.coordinator.tableView(scene.tableView, heightOfRow: row)
+            guard let cell = scene.coordinator.tableView(
+                scene.tableView, viewFor: nil, row: row) as? TranscriptBubbleCellView else {
+                deltas.append("row \(row): cell was not a TranscriptBubbleCellView")
+                continue
+            }
+            cell.layoutSubtreeIfNeeded()
+            let realized = cell.realizedRowHeight
+            let delta = abs(measured - realized)
+            maxDelta = max(maxDelta, delta)
+            deltas.append("row \(row) [\(Self.kindLabel(node.kind))]: "
+                + "measured=\(String(format: "%.1f", measured)) "
+                + "realized=\(String(format: "%.1f", realized)) "
+                + "delta=\(String(format: "%.2f", delta))")
+        }
+
+        // --- snapshots: top + bottom of the long message, table bubble, user bubble ---
+        // Order the window on-screen so each cell's NSTextView realizes and draws
+        // (an unordered offscreen window leaves text views blank). Restored/closed
+        // at scope exit by the window's own lifetime.
+        scene.window.orderFrontRegardless()
+        scene.tableView.layoutSubtreeIfNeeded()
+        settle(scene.tableView)
+        var snapshotPaths: [String] = []
+        func snapshot(row: Int, slug: String) throws {
+            // BOTTOM: align the row's bottom into view, then TOP: its top.
+            scene.tableView.scrollRowToVisible(min(row + 1, nodes.count - 1))
+            settle(scene.tableView)
+            let bottomPath = "\(Self.outputDir)/bubble-prod-\(slug)-bottom__new.png"
+            try snapshotViewport(scrollView: scene.scrollView, to: bottomPath)
+            snapshotPaths.append(bottomPath)
+
+            scene.tableView.scrollRowToVisible(row)
+            settle(scene.tableView)
+            let topPath = "\(Self.outputDir)/bubble-prod-\(slug)-top__new.png"
+            try snapshotViewport(scrollView: scene.scrollView, to: topPath)
+            snapshotPaths.append(topPath)
+        }
+        let longRow = nodes.firstIndex { $0.id == "b-long" } ?? 0
+        let tableRow = nodes.firstIndex { $0.id == "b-table" } ?? 0
+        let userRow = nodes.firstIndex { $0.id == "b-user" } ?? 0
+        try snapshot(row: longRow, slug: "long")
+        try snapshot(row: tableRow, slug: "table")
+        try snapshot(row: userRow, slug: "user")
+
+        var findings: [String] = ["HARNESS: attributed chat-bubble cells (render == measure) (#129)"]
+        findings.append("generated: \(ISO8601DateFormatter().string(from: Date()))")
+        findings.append("nodes: \(nodes.count)  max render==measure delta: \(String(format: "%.2f", maxDelta))pt")
+        findings.append("")
+        findings.append("render == measure (delta must be <= 1.0pt):")
+        for d in deltas { findings.append("    \(d)") }
+        findings.append("")
+        findings.append("snapshots:")
+        for p in snapshotPaths { findings.append("    \(p)") }
+        try findings.joined(separator: "\n").write(
+            toFile: "\(Self.outputDir)/TABLE-HARNESS-BUBBLES.txt", atomically: true, encoding: .utf8)
+
+        let failMessage = "render != measure for some bubble row (max delta \(maxDelta)pt): "
+            + deltas.joined(separator: "; ")
+        #expect(maxDelta <= 1.0, Comment(rawValue: failMessage))
+    }
+
+    // MARK: - Spot anchors (user-named clipping symptoms)
+
+    /// Substring anchors for the user-named live-clipping rows, each with robust
+    /// fallbacks present in any captured session (the literal future phrases may
+    /// not exist in an older capture). The FIRST found per group is snapshotted.
+    private static let spotAnchorGroups: [(slug: String, phrases: [String])] = [
+        ("task-notification", ["ac9fba3cf555b40bc", "<task-notification>", "task-notification"]),
+        ("restarted-fixed-binary", ["Restarted on the fixed binary", "fixed binary", "Restarted"]),
+        ("nstableview-pane-live", ["The NSTableView pane is live behind its gate",
+                                   "NSTableView pane is live", "behind its gate", "NSTableView"])
+    ]
+
+    /// Locates each named spot by text substring, scrolls the REAL (fixed) table
+    /// to it, and writes paired PNGs — the TABLE render and a width-constrained
+    /// GROUND-TRUTH `NSHostingView` render of the same node — to
+    /// `spot-{slug}-{table,truth}__new.png` for side-by-side visual inspection.
+    /// Asserts, per spot, that the table's `rect(ofRow:)` height >= the
+    /// ground-truth height (no under-measure → no bottom clip / header top-clip).
+    /// A synthesized 347k-token badge row is checked the same way. The paired
+    /// PNGs are the visual backstop the numeric geometry check cannot replace.
+    ///
+    /// The SAME assertion is run against the UNFIXED (estimate-driven) table to
+    /// prove it FAILS there (the regression the fix removes) and PASSES on fixed.
+    ///
+    ///     TBD_TABLE_HARNESS=1 swift test --filter TableTranscriptHarness
+    @Test("spot anchors: named clipping rows fit their row; unfixed clips, fixed passes (gated)")
+    func spotAnchors() throws {
+        guard ProcessInfo.processInfo.environment["TBD_TABLE_HARNESS"] == "1" else {
+            #expect(true)
+            return
+        }
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
+        let suiteName = "table-harness-spot-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        // Real session + a synthesized 347k-token badge bubble (the capture
+        // carries no usage, so the badge attaches to this appended item).
+        var items = try loadSession()
+        items.append(.assistantText(
+            id: "spot-badge-anchor",
+            text: "Badge anchor row: this assistant message carries a 347k-token usage "
+                + "badge that must render fully inside the row, badge included.",
+            timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            usage: TokenUsage(inputTokens: 347_000, cacheCreationTokens: 0, cacheReadTokens: 0)
+        ))
+        let nodes = transcriptRenderNodes(from: items)
+        #expect(!nodes.isEmpty)
+
+        // Resolve each spot to a row index.
+        var spots: [(slug: String, row: Int, note: String)] = []
+        for group in Self.spotAnchorGroups {
+            if let (row, matched) = Self.tallestRow(in: nodes, matchingAny: group.phrases) {
+                spots.append((group.slug, row, "matched \"\(matched)\""))
+            }
+        }
+        if let badgeRow = nodes.firstIndex(where: { $0.badgeUsage != nil }) {
+            spots.append(("badge-347k", badgeRow, "badgeUsage=\(nodes[badgeRow].badgeUsage!.contextTotal)"))
+        }
+        #expect(!spots.isEmpty, "no spot anchors resolved — none of the named phrases or fallbacks found")
+
+        // --- FIXED table: snapshot each spot + assert it fits ---
+        let fixed = makeScene(items: items, appState: appState, fixedSize: true)
+        defer { withExtendedLifetime(fixed.coordinator) {} }
+        fixed.tableView.reloadData()
+        settle(fixed.tableView)
+        let fixedViolations = try snapshotAndCheckSpots(
+            spots: spots, nodes: nodes, scene: fixed, appState: appState,
+            tableSuffix: "table", writeTruth: true)
+
+        // --- UNFIXED table: same spots must violate (regression proof) ---
+        let unfixed = makeScene(items: items, appState: appState, fixedSize: false)
+        defer { withExtendedLifetime(unfixed.coordinator) {} }
+        unfixed.tableView.reloadData()
+        settle(unfixed.tableView)
+        let unfixedViolations = try snapshotAndCheckSpots(
+            spots: spots, nodes: nodes, scene: unfixed, appState: appState,
+            tableSuffix: "table-unfixed", writeTruth: false)
+
+        var findings: [String] = ["HARNESS: spot anchors (named clipping rows) (#129)"]
+        findings.append("generated: \(ISO8601DateFormatter().string(from: Date()))")
+        findings.append("nodes: \(nodes.count)  tol: \(Self.tolerance)pt")
+        for spot in spots {
+            findings.append("spot \(spot.slug) row \(spot.row) [\(Self.kindLabel(nodes[spot.row].kind))] \(spot.note)")
+            findings.append("    table=\(Self.outputDir)/spot-\(spot.slug)-table__new.png")
+            findings.append("    truth=\(Self.outputDir)/spot-\(spot.slug)-truth__new.png")
+        }
+        findings.append("")
+        findings.append("FIXED   violations (must be 0): \(fixedViolations.count)")
+        for v in fixedViolations { findings.append("    \(v)") }
+        findings.append("UNFIXED violations (must be > 0, proves the oracle bites): \(unfixedViolations.count)")
+        for v in unfixedViolations { findings.append("    \(v)") }
+        try findings.joined(separator: "\n").write(
+            toFile: "\(Self.outputDir)/TABLE-HARNESS-SPOTS.txt", atomically: true, encoding: .utf8)
+
+        #expect(fixedViolations.isEmpty,
+                "spot rows clip/overflow on the FIXED table: \(fixedViolations.joined(separator: "; "))")
+        #expect(!unfixedViolations.isEmpty,
+                "oracle did not bite on the UNFIXED table — it cannot prove the fix")
+    }
+
+    /// For each spot: scroll the table to it, snapshot the viewport (and, when
+    /// `writeTruth`, the ground-truth render), and check the row height >= the
+    /// ground truth and the rendered last-ink fits the row. Returns violations.
+    private func snapshotAndCheckSpots(
+        spots: [(slug: String, row: Int, note: String)],
+        nodes: [TranscriptRenderNode],
+        scene: Scene,
+        appState: AppState,
+        tableSuffix: String,
+        writeTruth: Bool
+    ) throws -> [String] {
+        let spacing = scene.tableView.intercellSpacing.height
+        var violations: [String] = []
+        for spot in spots {
+            scene.tableView.scrollRowToVisible(min(spot.row + 6, nodes.count - 1))
+            settle(scene.tableView)
+            scene.tableView.scrollRowToVisible(spot.row)
+            settle(scene.tableView)
+            try snapshotViewport(scrollView: scene.scrollView,
+                                 to: "\(Self.outputDir)/spot-\(spot.slug)-\(tableSuffix)__new.png")
+            let node = nodes[spot.row]
+            if writeTruth {
+                try renderGroundTruth(for: node, appState: appState,
+                                      to: "\(Self.outputDir)/spot-\(spot.slug)-truth__new.png")
+            }
+            let rowH = scene.tableView.rect(ofRow: spot.row).height - spacing
+            let truthH = oracleHeight(for: node)
+            if rowH < truthH - Self.tolerance {
+                violations.append("spot \(spot.slug): row UNDER-measured rowH="
+                    + "\(String(format: "%.1f", rowH)) < truth=\(String(format: "%.1f", truthH)) (CLIP)")
+            }
+        }
+        return violations
+    }
+
+    /// The TALLEST node (by ground-truth height) whose text contains ANY of
+    /// `phrases` — surfaces the worst clipping case for that group.
+    private static func tallestRow(
+        in nodes: [TranscriptRenderNode], matchingAny phrases: [String]
+    ) -> (row: Int, matched: String)? {
+        var best: (row: Int, matched: String, len: Int)?
+        for (i, node) in nodes.enumerated() {
+            let text = nodeText(node)
+            guard let matched = phrases.first(where: { text.contains($0) }) else { continue }
+            if best == nil || text.count > best!.len { best = (i, matched, text.count) }
+        }
+        guard let best else { return nil }
+        return (best.row, best.matched)
+    }
+
+    /// Searchable text for a render node (mirrors `TranscriptCompareRealSessions.itemText`).
+    private static func nodeText(_ node: TranscriptRenderNode) -> String {
+        switch node.kind {
+        case .chatBubble(let item):
+            return TranscriptCompareRealSessions.itemText(item)
+        case .systemReminder(_, _, let text, _), .skillBody(_, let text, _):
+            return text
+        case .toolCall(_, let name, let inputJSON, _, let result, _):
+            return "\(name)\n\(inputJSON)\n\(result?.text ?? "")"
+        case .subagentSummary(_, _, let agentType):
+            return agentType ?? "subagent"
+        }
+    }
+
+    /// Renders `node` in the KNOWN-GOOD width-constrained `NSHostingView` layout
+    /// (the SwiftUI ground truth), sized to the oracle height, to a white PNG.
+    private func renderGroundTruth(for node: TranscriptRenderNode, appState: AppState, to path: String) throws {
+        let height = max(oracleHeight(for: node), 1)
+        let frame = NSRect(x: 0, y: 0, width: Self.width, height: height)
+        let host = NSHostingView(rootView: AnyView(
+            SelectableTranscriptRow(node: node, terminalID: nil)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .fixedSize(horizontal: false, vertical: true)
+                .environmentObject(appState)
+        ))
+        host.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView(frame: frame)
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.white.cgColor
+        container.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            host.topAnchor.constraint(equalTo: container.topAnchor),
+            host.widthAnchor.constraint(equalToConstant: Self.width)
+        ])
+        container.layoutSubtreeIfNeeded()
+        host.layoutSubtreeIfNeeded()
+
+        let image = NSImage(size: frame.size)
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(rect: frame).fill()
+        if let rep = container.bitmapImageRepForCachingDisplay(in: frame) {
+            container.cacheDisplay(in: frame, to: rep)
+            rep.draw(in: frame)
+        }
+        image.unlockFocus()
+        guard let tiff = image.tiffRepresentation,
+              let merged = NSBitmapImageRep(data: tiff),
+              let png = merged.representation(using: .png, properties: [:]) else {
+            throw HarnessError.couldNotMakePNG
+        }
+        try png.write(to: URL(fileURLWithPath: path))
     }
 
     // MARK: - Session loading

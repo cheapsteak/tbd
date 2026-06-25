@@ -34,6 +34,17 @@ struct TranscriptTableView: View {
                 GridRow {
                     ForEach(Array(row.enumerated()), id: \.offset) { colIndex, cell in
                         cellText(cell)
+                            // FIX: stretch each cell to the FULL height of its
+                            // grid row (SwiftUI `Grid` sizes a row to its tallest
+                            // cell, but a cell's content only occupies its own
+                            // intrinsic height). Without `maxHeight: .infinity`,
+                            // the top/leading border overlays — anchored to the
+                            // cell's content box, not the row box — stopped at the
+                            // content and didn't reach the row's bottom, so a
+                            // shorter cell beside a taller one showed a border that
+                            // ended mid-row. Filling the cell makes every border in
+                            // a row span the full row height. (#129)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                             .overlay(alignment: .top) {
                                 if rowIndex > 0 { Rectangle().fill(borderColor).frame(height: lineWidth) }
                             }

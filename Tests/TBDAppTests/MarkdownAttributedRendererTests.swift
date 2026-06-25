@@ -185,6 +185,109 @@ struct MarkdownAttributedRendererTests {
         #expect(foundTableAttachment)
     }
 
+    // MARK: - Block splitting (renderBlocks)
+
+    @Test("renderBlocks: prose-only markdown is one prose block, no table block")
+    func blocksProseOnly() {
+        let blocks = MarkdownAttributedRenderer.renderBlocks("# Title\n\nSome **prose** text.")
+        #expect(blocks.count == 1)
+        guard case .prose(let s) = blocks[0] else {
+            Issue.record("expected a single prose block")
+            return
+        }
+        #expect(s.string.contains("Title"))
+        #expect(s.string.contains("prose"))
+    }
+
+    @Test("renderBlocks: a single-paragraph prose block has no trailing newline (no dead bottom space)")
+    func blocksProseTrimsTrailingNewline() {
+        let blocks = MarkdownAttributedRenderer.renderBlocks("Some prose text.")
+        #expect(blocks.count == 1)
+        guard case .prose(let s) = blocks[0] else {
+            Issue.record("expected a single prose block")
+            return
+        }
+        // Block visitors append a paragraph-terminating "\n"; the prose finalizer
+        // must trim it so `usedRect` doesn't count a phantom empty line. (#129)
+        #expect(!s.string.hasSuffix("\n"))
+        #expect(s.string.hasSuffix("."))
+
+        // And the measured height is ~one line, not two: lay it out wide enough
+        // that the text never wraps and compare against a plain single-line
+        // reference rendered with the same body font. Without the trim the prose
+        // would measure ~2x this (a phantom trailing empty line). (#129)
+        let measurer = TranscriptBubbleMeasurer()
+        let reference = NSAttributedString(
+            string: "Some prose text.",
+            attributes: [.font: TranscriptTextTheme.chatBubble.bodyFont]
+        )
+        let oneLine = measurer.textHeight(of: reference, width: 4000)
+        let measured = measurer.textHeight(of: s, width: 4000)
+        #expect(measured < oneLine * 1.6)
+    }
+
+    @Test("renderBlocks: a table becomes its own table block, splitting surrounding prose")
+    func blocksProseTableProse() {
+        let md = """
+        Intro paragraph.
+
+        | A | B |
+        |---|---|
+        | 1 | 2 |
+
+        Trailing paragraph.
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md)
+        #expect(blocks.count == 3)
+        guard case .prose(let lead) = blocks[0] else { Issue.record("block 0 not prose"); return }
+        guard case .table(let data) = blocks[1] else { Issue.record("block 1 not table"); return }
+        guard case .prose(let trail) = blocks[2] else { Issue.record("block 2 not prose"); return }
+        #expect(lead.string.contains("Intro"))
+        #expect(data.columnCount == 2)
+        #expect(data.header.map(\.string) == ["A", "B"])
+        #expect(trail.string.contains("Trailing"))
+    }
+
+    @Test("renderBlocks: code blocks and lists stay inside prose (not split out)")
+    func blocksCodeAndListStayInProse() {
+        let md = """
+        ```swift
+        let x = 1
+        ```
+
+        - one
+        - two
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md)
+        // No table → all prose, grouped into one block.
+        #expect(blocks.count == 1)
+        guard case .prose(let s) = blocks[0] else { Issue.record("expected prose"); return }
+        #expect(s.string.contains("let x = 1"))
+        #expect(s.string.contains("one") && s.string.contains("two"))
+        // Prose carries NO table attachment (tables are broken out as blocks).
+        var hasAttachment = false
+        s.enumerateAttribute(.attachment, in: NSRange(location: 0, length: s.length)) { v, _, _ in
+            if v != nil { hasAttachment = true }
+        }
+        #expect(!hasAttachment)
+    }
+
+    @Test("renderBlocks: two adjacent tables yield two table blocks")
+    func blocksTwoTables() {
+        let md = """
+        | A | B |
+        |---|---|
+        | 1 | 2 |
+
+        | C | D |
+        |---|---|
+        | 3 | 4 |
+        """
+        let blocks = MarkdownAttributedRenderer.renderBlocks(md)
+        let tableCount = blocks.reduce(0) { if case .table = $1 { return $0 + 1 } else { return $0 } }
+        #expect(tableCount == 2)
+    }
+
     // MARK: - Helpers
 
     func boldRange(in s: NSAttributedString, substring: String) -> NSRange {

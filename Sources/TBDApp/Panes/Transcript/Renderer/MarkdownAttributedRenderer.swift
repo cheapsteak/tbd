@@ -38,6 +38,81 @@ enum MarkdownAttributedRenderer {
         }
         return nil
     }
+
+    /// Splits `markdown` into an ordered list of typed `MessageBlock`s: runs of
+    /// consecutive non-table top-level blocks are rendered into one `.prose`
+    /// `NSAttributedString` each (via the SAME visitor logic as `render`), and a
+    /// `Table` node becomes a `.table` block carrying its `TranscriptTableData`.
+    ///
+    /// Unlike `render`, prose is rendered WITHOUT touching TextKit-2 attachments —
+    /// tables are broken out as native blocks instead — so the bubble cell can lay
+    /// prose out on TextKit 1 (fast, exact `usedRect`) and host the table as its
+    /// own view. Code blocks, lists, blockquotes, paragraphs, and headings all
+    /// stay inside prose with unchanged inline rendering. (#129)
+    static func renderBlocks(_ markdown: String, theme: TranscriptTextTheme = .chatBubble) -> [MessageBlock] {
+        let document = Document(parsing: markdown, options: [])
+        var visitor = AttributedStringVisitor(theme: theme)
+        var blocks: [MessageBlock] = []
+        var proseRun = NSMutableAttributedString()
+
+        func flushProse() {
+            guard proseRun.length > 0 else { return }
+            blocks.append(.prose(finalizedProse(proseRun, theme: theme)))
+            proseRun = NSMutableAttributedString()
+        }
+
+        for child in document.children {
+            if let table = child as? Markdown.Table {
+                flushProse()
+                let data = MarkdownTable.data(table, theme: theme, render: { visitor.visit($0) })
+                if data.columnCount > 0 { blocks.append(.table(data)) }
+            } else {
+                proseRun.append(visitor.visit(child))
+            }
+        }
+        flushProse()
+        return blocks
+    }
+
+    /// Back-fills body font/color onto runs that didn't set their own — the same
+    /// finalization `render` applies, factored out so `renderBlocks` produces
+    /// identically-styled prose. Returns an immutable copy.
+    private static func finalizedProse(_ run: NSMutableAttributedString, theme: TranscriptTextTheme) -> NSAttributedString {
+        let full = NSRange(location: 0, length: run.length)
+        run.enumerateAttribute(.font, in: full, options: []) { value, range, _ in
+            if value == nil { run.addAttribute(.font, value: theme.bodyFont, range: range) }
+        }
+        run.enumerateAttribute(.foregroundColor, in: full, options: []) { value, range, _ in
+            if value == nil { run.addAttribute(.foregroundColor, value: theme.bodyColor, range: range) }
+        }
+        // Block visitors append a trailing "\n" (paragraph terminator), so the
+        // prose ends with a hard line break that `usedRect` counts as an extra
+        // empty line fragment — ~one line of dead space at the bottom of every
+        // block. Trim the trailing run of newlines/whitespace so the prose ends
+        // at its last visible glyph. Guard the all-whitespace/empty case so we
+        // never delete an empty range. (#129)
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        let ns = run.string as NSString
+        var end = ns.length
+        while end > 0,
+              let scalar = Unicode.Scalar(ns.character(at: end - 1)),
+              whitespace.contains(scalar) {
+            end -= 1
+        }
+        if end < ns.length {
+            run.deleteCharacters(in: NSRange(location: end, length: ns.length - end))
+        }
+        return NSAttributedString(attributedString: run)
+    }
+}
+
+/// One typed segment of a chat message: either a run of prose (rendered markdown
+/// as an `NSAttributedString`, laid out on TextKit 1) or a GFM table (its parsed
+/// cell data, rendered as a native grid view). A message is an ordered list of
+/// these, stacked vertically inside one bubble. (#129)
+enum MessageBlock {
+    case prose(NSAttributedString)
+    case table(TranscriptTableData)
 }
 
 /// Walks the swift-markdown AST and appends styled runs. Only ever instantiated

@@ -35,7 +35,21 @@ struct TableTranscriptView: NSViewRepresentable {
     func makeNSView(context ctx: Context) -> NSScrollView {
         let coordinator = ctx.coordinator
 
-        let tableView = NSTableView()
+        // FIX 1(a): disable AppKit's off-screen row-height ESTIMATION. On Ventura+
+        // NSTableView estimates the height of not-yet-realized rows from the rows
+        // it has already measured; for a transcript whose row heights vary wildly
+        // that guess is far too large, so a row reserves too much space and then
+        // visibly shrinks (the collapsing blank gap) when it scrolls into view and
+        // `heightOfRow` returns the real height. Turning estimation off forces the
+        // table to ask `heightOfRow` for the REAL height of every row up front —
+        // which is a pure cache hit because we precompute all heights eagerly
+        // (FIX 1(b)). The authoritative register now happens at app launch
+        // (`applicationWillFinishLaunching`) so it precedes ANY NSTableView; this
+        // redundant register is harmless. `register` (not `set`) means it never
+        // persists into the real plist, per repo UserDefaults rules.
+        UserDefaults.standard.register(defaults: ["NSTableViewCanEstimateRowHeights": false])
+
+        let tableView = TranscriptBubbleTableView()
         tableView.headerView = nil
         tableView.gridStyleMask = []
         tableView.backgroundColor = .clear
@@ -71,6 +85,10 @@ struct TableTranscriptView: NSViewRepresentable {
         let nodes = nodesProvider()
         coordinator.nodes = nodes
         coordinator.previousNodes = nodes
+        // FIX 1(b): eagerly measure + cache EVERY row's exact height before the
+        // table asks `heightOfRow`, so the first layout is all cache hits and no
+        // row ever reserves a provisional/estimated height.
+        coordinator.precomputeAllHeights()
         tableView.reloadData()
 
         // Pin the initial open to the newest message (last row), deferred so the
@@ -79,8 +97,28 @@ struct TableTranscriptView: NSViewRepresentable {
             coordinator.scrollToEnd(animated: false)
         }
 
+        Self.warmHighlightrOnce()
+
+        // One-time runtime verification of FIX 1(a): with the app-launch register
+        // in place, `canEstimate` must read false by the time any table is set up.
+        Self.log.info(
+            "table.estimation canEstimate=\(UserDefaults.standard.bool(forKey: "NSTableViewCanEstimateRowHeights"), privacy: .public) usesAutomaticRowHeights=\(tableView.usesAutomaticRowHeights, privacy: .public)")
+
         Self.log.debug("table.installed rows=\(nodes.count, privacy: .public)")
         return scrollView
+    }
+
+    /// Highlightr's first init costs ~300ms (it loads the full highlight.js
+    /// runtime). It's `@MainActor`, so we can't move it off the main thread —
+    /// but we can pay it asynchronously at pane install, before the first real
+    /// code bubble needs it. Runs exactly once per process.
+    private static var didWarmHighlightr = false
+    private static func warmHighlightrOnce() {
+        guard !didWarmHighlightr else { return }
+        didWarmHighlightr = true
+        DispatchQueue.main.async {
+            _ = MarkdownCodeBlock.attributed(code: "x", language: "swift", theme: .chatBubble)
+        }
     }
 
     func updateNSView(_ nsView: NSScrollView, context ctx: Context) {
@@ -98,6 +136,7 @@ struct TableTranscriptView: NSViewRepresentable {
     class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         static let columnID = NSUserInterfaceItemIdentifier("transcript")
         private static let cellID = NSUserInterfaceItemIdentifier("transcriptCell")
+        private static let bubbleCellID = NSUserInterfaceItemIdentifier("bubbleCell")
         private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
         let context: TranscriptCardContext
@@ -129,22 +168,96 @@ struct TableTranscriptView: NSViewRepresentable {
         /// freeze path on a long session. (#129)
         private let measuringController = NSHostingController(rootView: AnyView(EmptyView()))
 
+        /// Composed `[MessageBlock]` for chat-bubble rows, keyed by
+        /// `(node.id, contentVersion)`. The blocks `heightOfRow` measures are the
+        /// SAME values `viewFor` installs into the cell, so render == measure by
+        /// construction. Invalidated for a node on `updateLast` (growing stream)
+        /// and cleared wholesale on a width-change reload.
+        private var composedCache: [ComposedKey: [MessageBlock]] = [:]
+
+        struct ComposedKey: Hashable {
+            let id: String
+            let version: UInt64
+        }
+
+        /// Reusable per-block measurer (TextKit-1 `usedRect` for prose, one-shot
+        /// `sizeThatFits` for tables). Owned by the Coordinator so the
+        /// storage/layout-manager allocation is paid once.
+        private let blockMeasurer = MessageBlockMeasurer()
+
         init(context: TranscriptCardContext) {
             self.context = context
             super.init()
             measuringController.sizingOptions = [.preferredContentSize]
         }
 
+        /// Returns (and caches) the composed blocks for a chat-bubble node:
+        /// rendered markdown split at GFM tables, plus the token-usage badge when
+        /// present.
+        func composedBubbleBlocks(for node: TranscriptRenderNode, item: TranscriptItem) -> [MessageBlock] {
+            let key = ComposedKey(id: node.id, version: node.contentVersion)
+            if let cached = composedCache[key] { return cached }
+            let composed = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: node.badgeUsage)
+            composedCache[key] = composed
+            return composed
+        }
+
+        /// FIX 1(b): eagerly measure and cache EVERY present row's exact height at
+        /// the current column width, so the table's first `heightOfRow` walk (and
+        /// every subsequent one until content changes) is a pure cache hit and no
+        /// row is ever sized from an estimate. Cheap: bubble rows measure via the
+        /// TextKit `usedRect` path (~0.04ms/row); hosted (SwiftUI) rows go through
+        /// the reused measuring controller. Idempotent — already-cached rows are
+        /// skipped — so calling it before each streaming insert only measures the
+        /// newly-present rows.
+        func precomputeAllHeights() {
+            let width = columnWidth
+            guard width > 1 else { return }
+            for node in nodes {
+                _ = measuredHeight(for: node, width: width)
+            }
+        }
+
+        /// Test backstop: number of present rows whose exact height is already
+        /// cached at the current column width. When this equals `nodes.count`
+        /// after `precomputeAllHeights()`, every `tableView(_:heightOfRow:)` is a
+        /// pure cache hit (no estimate, no on-realize re-measure) — the property
+        /// FIX 1 depends on. (#129)
+        var cachedHeightRowCount: Int {
+            let width = columnWidth
+            return nodes.reduce(into: 0) { count, node in
+                let key = HeightKey(id: node.id, version: node.contentVersion, width: width)
+                if heightCache[key] != nil { count += 1 }
+            }
+        }
+
         /// Authoritative natural content height of `node` at `width`, measured via
         /// the proven width-honouring `sizeThatFits` path over the `.fixedSize`
-        /// row root, cached by `(id, contentVersion, width)`.
-        private func measuredHeight(for node: TranscriptRenderNode, width: CGFloat) -> CGFloat {
+        /// row root, cached by `(id, contentVersion, width)`. A nil node (a row
+        /// index AppKit asked for out of range) yields a small safe default.
+        private func measuredHeight(for node: TranscriptRenderNode?, width: CGFloat) -> CGFloat {
+            guard let node else { return 44 }
             let key = HeightKey(id: node.id, version: node.contentVersion, width: width)
             if let cached = heightCache[key] { return cached }
-            measuringController.rootView = AnyView(rowRootView(for: node))
-            let proposed = NSSize(width: width, height: .greatestFiniteMagnitude)
-            let measured = measuringController.sizeThatFits(in: proposed).height
-            let height = measured > 0 ? measured : 44
+
+            let height: CGFloat
+            if case .chatBubble(let item) = node.kind {
+                // Chat bubbles: exact per-block height (TextKit-1 `usedRect` for
+                // prose, one-shot `sizeThatFits` for tables) summed with
+                // inter-block spacing, plus fixed chrome. This makes the row height
+                // equal the cell's drawn block-stack height by construction.
+                let role = TranscriptBubbleGeometry.role(for: item)
+                let blocks = composedBubbleBlocks(for: node, item: item)
+                let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role)
+                let blocksHeight = blockMeasurer.blocksHeight(blocks, bodyWidth: bodyWidth)
+                height = TranscriptBubbleGeometry.rowHeight(blocksHeight: blocksHeight)
+            } else {
+                measuringController.rootView = AnyView(rowRootView(for: node))
+                let proposed = NSSize(width: width, height: .greatestFiniteMagnitude)
+                let measured = measuringController.sizeThatFits(in: proposed).height
+                height = measured > 0 ? measured : 44
+            }
+
             heightCache[key] = height
             return height
         }
@@ -169,25 +282,25 @@ struct TableTranscriptView: NSViewRepresentable {
         // MARK: NSTableViewDelegate
 
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-            guard row >= 0, row < nodes.count else { return Self.estimate(for: nil, width: columnWidth) }
-            // AUTHORITATIVE: return the row's true natural content height (cached).
+            guard row >= 0, row < nodes.count else { return measuredHeight(for: nil, width: columnWidth) }
+            // AUTHORITATIVE + PRECOMPUTED: this returns the row's exact natural
+            // content height, which `precomputeAllHeights()` already measured and
+            // cached for every present row at the current `(id, contentVersion,
+            // width)`. So this is a pure cache-hit lookup — never an estimate and
+            // never a provisional/placeholder value.
             //
             // This is deliberately NOT the estimate-then-`noteHeightOfRows`-correct
-            // approach. That path returns a low estimate here and patches the real
-            // height in after the row is realized — but the correction does not
-            // reliably re-lay the row (verified: in the headless harness the row
-            // stays at the estimate height), which is exactly what shipped the live
-            // CLIP (too-short rows cutting off a header/card) and GAP (too-tall rows
-            // leaving empty space) symptoms. Returning the measured height directly
-            // here makes the geometry authoritative and verifiably exact (the
-            // harness oracle passes with 0 violations).
+            // approach. That path returned a low estimate here and patched the real
+            // height in after the row was realized — but the correction did not
+            // reliably re-lay the row, and on Ventura+ AppKit ALSO estimated
+            // off-screen rows from already-measured ones, so a row reserved too
+            // much space and then visibly shrank as it scrolled in (the collapsing
+            // blank gap). Disabling estimation (FIX 1a) + precomputing every height
+            // (FIX 1b) makes this an exact cache hit and removes the jank.
             //
-            // Cost: NSTableView walks `heightOfRow` for a large prefix when it needs
-            // the document height (scroller sizing / scroll-to-bottom), so the first
-            // open of a very long session measures each such row once (~1.1s for an
-            // 1100-message session, far below #129's 35s hang). A reusable measuring
-            // controller plus the `(id, contentVersion, width)` cache make every
-            // subsequent poll and scroll free.
+            // `measuredHeight` is retained as a defensive fallback only: if AppKit
+            // ever asks for a row we somehow did not precompute, it measures it
+            // once and caches it rather than returning a guess.
             return measuredHeight(for: nodes[row], width: columnWidth)
         }
 
@@ -199,13 +312,56 @@ struct TableTranscriptView: NSViewRepresentable {
             guard row >= 0, row < nodes.count else { return nil }
             let node = nodes[row]
 
+            // Dual dispatch: chat bubbles render as exactly-measured attributed
+            // text in a selectable NSTextView (render height == measure height by
+            // construction); every other kind keeps the SwiftUI hosting path.
+            if case .chatBubble(let item) = node.kind {
+                return bubbleView(tableView, node: node, item: item)
+            }
+
             let cell = dequeueOrMakeCell(tableView)
-            // The row root carries `.fixedSize(horizontal:false, vertical:true)`
-            // (see `rowRootView`) so the hosted view lays out at its NATURAL
-            // content height — identical to the height `heightOfRow` measured for
-            // this same root — so the cell content fills the row exactly, never
-            // stretching into a gap nor overflowing into a clip.
+            // Lock the hosting view to the SAME box `heightOfRow` measured —
+            // `columnWidth × measuredHeight` — so the SwiftUI content renders into
+            // exactly the row's box. This is what makes render-height == row-height
+            // by construction and removes the live clip/gap that an unconstrained
+            // hosting-view width (wrapping at a different width than measurement)
+            // produced.
+            let width = columnWidth
+            let reservedHeight = measuredHeight(for: node, width: width)
+            cell.setContentBox(width: width, height: reservedHeight)
             cell.hostingView.rootView = AnyView(rowRootView(for: node))
+            return cell
+        }
+
+        /// Dequeues (or makes) the dedicated attributed bubble cell and configures
+        /// it from the SAME composed string `heightOfRow` measured, locked to the
+        /// SAME `columnWidth × cachedHeight` box.
+        private func bubbleView(
+            _ tableView: NSTableView,
+            node: TranscriptRenderNode,
+            item: TranscriptItem
+        ) -> NSView {
+            let cell: TranscriptBubbleCellView
+            if let reused = tableView.makeView(withIdentifier: Self.bubbleCellID, owner: self)
+                as? TranscriptBubbleCellView {
+                cell = reused
+            } else {
+                cell = TranscriptBubbleCellView()
+                cell.identifier = Self.bubbleCellID
+            }
+            let width = columnWidth
+            let role: TranscriptBubbleGeometry.Role = TranscriptBubbleGeometry.role(for: item)
+            let blocks = composedBubbleBlocks(for: node, item: item)
+            let height = measuredHeight(for: node, width: width)
+            cell.configure(
+                blocks: blocks,
+                sourceText: TranscriptBubbleGeometry.text(for: item),
+                role: role,
+                header: TranscriptBubbleGeometry.header(for: item),
+                bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role),
+                columnWidth: width,
+                cachedHeight: height
+            )
             return cell
         }
 
@@ -285,16 +441,22 @@ struct TableTranscriptView: NSViewRepresentable {
         /// `TranscriptStreamPlan`. Captures at-bottom BEFORE the edit so a grown
         /// document doesn't misjudge whether to follow the tail.
         func update(nodes newNodes: [TranscriptRenderNode], atBottom: Binding<Bool>) {
-            guard let tableView, let scrollView else { return }
+            // `scrollView` must exist (downstream `scrollToEnd` / `isAtBottom`
+            // read it via the stored property); bind it only to gate on presence.
+            guard let tableView, scrollView != nil else { return }
             let step = TranscriptStreamPlan.step(previous: previousNodes, next: newNodes)
 
-            // Width change: heights re-flow, so drop the cache and reload.
+            // Width change: heights re-flow, so drop the cache, recompute every
+            // height at the new width, then reload (a true rebuild, paired with a
+            // full cache clear + recompute per FIX 1d).
             let width = columnWidth
             if abs(width - cachedColumnWidth) > 0.5 {
                 cachedColumnWidth = width
                 heightCache.removeAll(keepingCapacity: true)
+                composedCache.removeAll(keepingCapacity: true)
                 nodes = newNodes
                 previousNodes = newNodes
+                precomputeAllHeights()
                 tableView.reloadData()
                 recomputeAtBottom(atBottom)
                 return
@@ -315,28 +477,50 @@ struct TableTranscriptView: NSViewRepresentable {
             case .noop:
                 break
             case .rebuild:
+                // True rebuild: clear the cache, recompute every height, reload.
                 heightCache.removeAll(keepingCapacity: true)
+                composedCache.removeAll(keepingCapacity: true)
+                precomputeAllHeights()
                 tableView.reloadData()
             case let .append(fromIndex):
                 let newCount = newNodes.count
                 guard newCount > fromIndex, fromIndex <= oldCount else {
+                    heightCache.removeAll(keepingCapacity: true)
+                    composedCache.removeAll(keepingCapacity: true)
+                    precomputeAllHeights()
                     tableView.reloadData()
                     break
                 }
+                // FIX 1(d): precompute the inserted rows' EXACT heights BEFORE the
+                // insert, so the table never asks `heightOfRow` for an unmeasured
+                // row (no estimate, no shrink-on-realize). `precomputeAllHeights`
+                // is idempotent, so this only measures the new rows.
+                precomputeAllHeights()
                 let inserted = IndexSet(integersIn: fromIndex..<newCount)
                 tableView.insertRows(at: inserted, withAnimation: [])
             case .updateLast:
                 let last = newNodes.count - 1
                 guard last >= 0 else { break }
-                // Invalidate the last node's cached height across widths and ask
-                // the table to re-fetch its cell (which re-measures) and height.
+                // Invalidate the last node's cached height across widths AND its
+                // composed string (a growing streaming bubble must re-render and
+                // re-measure), recompute its exact height, then ask the table to
+                // re-fetch its cell and height.
                 invalidateHeight(for: newNodes[last])
+                invalidateComposed(for: newNodes[last])
+                _ = measuredHeight(for: newNodes[last], width: columnWidth)
                 if tableView.numberOfRows > last {
                     tableView.reloadData(
                         forRowIndexes: IndexSet(integer: last),
                         columnIndexes: IndexSet(integer: 0)
                     )
-                    tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: last))
+                    // FIX 1(c): this is a genuine post-hoc height change (the
+                    // streamed last row grew), so `noteHeightOfRows` is legitimate
+                    // here — but wrap it in a zero-duration NSAnimationContext so
+                    // the row doesn't animate its height change.
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0
+                        tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: last))
+                    }
                 }
             }
 
@@ -353,6 +537,12 @@ struct TableTranscriptView: NSViewRepresentable {
         private func invalidateHeight(for node: TranscriptRenderNode) {
             for key in heightCache.keys where key.id == node.id {
                 heightCache.removeValue(forKey: key)
+            }
+        }
+
+        private func invalidateComposed(for node: TranscriptRenderNode) {
+            for key in composedCache.keys where key.id == node.id {
+                composedCache.removeValue(forKey: key)
             }
         }
 
@@ -394,26 +584,77 @@ struct TableTranscriptView: NSViewRepresentable {
     }
 }
 
+// MARK: - Table view subclass
+
+/// NSTableView subclass for the transcript pane.
+///
+/// FIX 2: NSTableView normally intercepts a cell subview's `mouseDown` and DELAYS
+/// first responder by one click, so the first click on a chat bubble selects the
+/// ROW instead of starting a text drag — selection (and Cmd-C copy) appears
+/// broken. Overriding `validateProposedFirstResponder(_:for:)` to immediately
+/// accept our `TranscriptBubbleTextView` lets the text view take the mouse on the
+/// first click, so click-drag selection and copy work. `selectionHighlightStyle =
+/// .none` does NOT bypass this gate, which is why selection failed before.
+@MainActor
+final class TranscriptBubbleTableView: NSTableView {
+    override func validateProposedFirstResponder(
+        _ responder: NSResponder,
+        for event: NSEvent?
+    ) -> Bool {
+        // Let the selectable bubble text view become first responder immediately
+        // (the click starts a text selection rather than a row selection).
+        if responder is TranscriptBubbleTextView { return true }
+        return super.validateProposedFirstResponder(responder, for: event)
+    }
+}
+
 // MARK: - Hosting cell
 
-/// An `NSTableCellView` that hosts a SwiftUI row in an `NSHostingView<AnyView>`
-/// pinned to its edges. Reused by row identifier across the table's lifetime so
-/// scrolling virtualizes the hosted views. (#129)
+/// An `NSTableCellView` that hosts a SwiftUI row in an `NSHostingView<AnyView>`.
+/// Reused by row identifier across the table's lifetime so scrolling virtualizes
+/// the hosted views. (#129)
+///
+/// ## Why explicit width AND height constraints (not a top+bottom stretch)
+/// The row's height is measured separately by `heightOfRow`
+/// (`NSHostingController.sizeThatFits(width: columnWidth, height: ∞)`). For the
+/// live pane to render WITHOUT clip or gap, the hosting view must lay the
+/// SwiftUI content out into the EXACT same box that measurement assumed:
+/// `columnWidth × measuredHeight`. The previous edge-pinned approach left the
+/// hosting view's width unconstrained, so its SwiftUI layout could wrap at a
+/// different effective width than the 680pt `sizeThatFits` used — producing a
+/// render whose true height diverged from the row height (the live bottom-clip
+/// of tall messages / token badges and the top-clip of the next header). Pinning
+/// BOTH the width (= the measured width) and the height (= the measured height)
+/// forces render-box == measure-box == row-box by construction. (#129)
 @MainActor
 final class TranscriptHostingCellView: NSTableCellView {
     let hostingView: NSHostingView<AnyView>
+    private let widthConstraint: NSLayoutConstraint
+    private let heightConstraint: NSLayoutConstraint
 
     override init(frame frameRect: NSRect) {
         hostingView = NSHostingView(rootView: AnyView(EmptyView()))
+        widthConstraint = hostingView.widthAnchor.constraint(equalToConstant: 1)
+        heightConstraint = hostingView.heightAnchor.constraint(equalToConstant: 1)
         super.init(frame: frameRect)
         hostingView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(hostingView)
         NSLayoutConstraint.activate([
             hostingView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            hostingView.trailingAnchor.constraint(equalTo: trailingAnchor),
             hostingView.topAnchor.constraint(equalTo: topAnchor),
-            hostingView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            widthConstraint,
+            heightConstraint
         ])
+    }
+
+    /// Locks the hosted SwiftUI row to the box the row height was measured for —
+    /// `width × height` (the column width and the `sizeThatFits` height) — so the
+    /// render and the row height cannot diverge.
+    func setContentBox(width: CGFloat, height: CGFloat) {
+        let w = max(width, 1)
+        let h = max(height, 1)
+        if abs(widthConstraint.constant - w) > 0.5 { widthConstraint.constant = w }
+        if abs(heightConstraint.constant - h) > 0.5 { heightConstraint.constant = h }
     }
 
     @available(*, unavailable)
