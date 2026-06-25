@@ -80,9 +80,12 @@ struct STTextViewTranscriptView: NSViewRepresentable {
         // `scrollToEndOfDocument` is NOT enough on a long transcript: TextKit2
         // lays the document out ASYNCHRONOUSLY, so the first scroll resolves
         // against an incomplete (too-short) document height and stops partway. We
-        // nudge to the end across several layout passes until the clip view is
-        // actually parked at the document's max-Y (or we run out of attempts). (#129)
-        coordinator.scrollToTrueBottom(attempts: 8)
+        // converge on the realized TAIL fragment's position via the
+        // viewport-relative bottom-stick (O(visible) per iteration) — it lands on
+        // the newest content instead of chasing the jittery absolute document-
+        // height estimate the old absolute-maxY retry did (which parked ~500pt
+        // short on this long session and cost ~2s). (#129)
+        coordinator.scrollViewportToEnd()
         Self.log.debug("textkit.pane.installed length=\(coordinator.document.length, privacy: .public)")
         // Diag: log NSView installation with initial node count for lifecycle tracing. (#129)
         let tidShort = String((context.terminalID?.uuidString ?? "").suffix(4))
@@ -100,7 +103,10 @@ struct STTextViewTranscriptView: NSViewRepresentable {
         let coordinator = ctx.coordinator
         if scrollToBottomToken != coordinator.lastScrollToken {
             coordinator.lastScrollToken = scrollToBottomToken
-            coordinator.textView?.scrollToEndOfDocument(nil)
+            // Jump-to-bottom button: converge on the realized tail so the newest
+            // content actually lands on screen (a single scrollToEndOfDocument
+            // parks short on a long doc, same as the initial-open bug). (#129)
+            coordinator.scrollViewportToEnd()
         }
         coordinator.flush(nodes: nodesProvider(), atBottom: $atBottom)
     }
@@ -139,6 +145,144 @@ struct STTextViewTranscriptView: NSViewRepresentable {
                     self.scrollToTrueBottom(attempts: attempts - 1)
                 }
             }
+        }
+
+        /// Bottom-stick that does NOT chase the unstable ABSOLUTE document height,
+        /// and converges ACROSS runloop turns so TextKit 2's async layout can
+        /// actually advance between attempts.
+        ///
+        /// TextKit 2 only ever lays out the realized viewport, so the document's
+        /// total height is an ESTIMATE that converges (jitters smaller→larger) as
+        /// more fragments get incidentally laid out. The old `scrollToTrueBottom`
+        /// retried while `documentView.frame.maxY - visibleMaxY > 1`, chasing that
+        /// estimate to zero — on a long transcript it never closes and the retries
+        /// exhaust mid-document (the #129 open bug).
+        ///
+        /// A SYNCHRONOUS convergence loop (all iterations in ONE runloop turn) is
+        /// ALSO wrong: `scrollToEndOfDocument` schedules viewport layout on the
+        /// runloop, so back-to-back iterations in the same turn all read the SAME
+        /// not-yet-advanced layout — the loop "converges" on an incomplete estimate
+        /// and parks mid-document. So we run each convergence attempt on a SEPARATE
+        /// runloop turn (`DispatchQueue.main.async`), the way the old
+        /// `scrollToTrueBottom(attempts:)` did, letting AppKit/TextKit2 perform a
+        /// layout pass between attempts.
+        ///
+        /// Each turn drives STTextView's own Apple-blessed cheap path
+        /// (`scrollToEndOfDocument` = `relocateViewport(to:endLocation)` →
+        /// `layoutViewport` → `updateContentSizeIfNeeded` → scroll, all O(visible))
+        /// then asks the viewport-relative question that actually matters: is the
+        /// realized LAST text layout fragment's bottom now WITHIN the visible clip
+        /// rect? On a long transcript a single `scrollToEndOfDocument` parks ~200pt
+        /// short — it resolves against a content size that only grows on the NEXT
+        /// async layout pass, so the tail sits just below the visible bottom. While
+        /// that gap remains (and turns remain) we schedule another turn so the
+        /// freshly-grown content size lets the next cheap scroll reach further. We
+        /// also stop if the tail's position stops moving AND we can't close the gap
+        /// (genuinely no more layout to do). NEVER `sizeToFit()` /
+        /// `ensureLayout(documentRange)` — those are O(document) (~2.35s freeze). (#129)
+        func scrollViewportToEnd(
+            maxTurns: Int = 10,
+            gapThreshold: CGFloat = 2.0,
+            stabilityThreshold: CGFloat = 1.0
+        ) {
+            guard let textView, let scrollView else { return }
+
+            // Cheap viewport realization + scroll to the realized tail THIS turn.
+            textView.scrollToEndOfDocument(nil)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+
+            // Measure the realized LAST fragment's bottom (viewport-relative,
+            // O(visible)) by reverse-enumerating from the document end and taking
+            // the first (newest) fragment.
+            let tailMaxY = realizedTailMaxY(textView: textView)
+
+            // Schedule the convergence check on the NEXT runloop turn so async
+            // layout can advance (and grow the content size) before we re-measure.
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let self, let textView, let scrollView = self.scrollView else { return }
+
+                // Re-scroll against the (possibly grown) content size, then measure.
+                textView.scrollToEndOfDocument(nil)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+
+                let newTailMaxY = self.realizedTailMaxY(textView: textView)
+                let clip = scrollView.contentView
+                let visibleMaxY = clip.bounds.origin.y + clip.bounds.height
+
+                // Done when the realized tail is at/above the visible bottom (the
+                // newest content is on screen). `gap > 0` means the tail still sits
+                // below the viewport — `scrollToEndOfDocument` parked short.
+                let gap = (newTailMaxY ?? visibleMaxY) - visibleMaxY
+                let tailVisible = gap <= gapThreshold
+
+                // Whether layout is still advancing the tail position between turns.
+                let stillMoving: Bool
+                if let tailMaxY, let newTailMaxY {
+                    stillMoving = abs(newTailMaxY - tailMaxY) >= stabilityThreshold
+                } else {
+                    stillMoving = true
+                }
+
+                // Keep converging while the tail is below the viewport AND there's
+                // either remaining movement or turns left to let layout catch up.
+                if !tailVisible, stillMoving, maxTurns > 1 {
+                    self.scrollViewportToEnd(
+                        maxTurns: maxTurns - 1,
+                        gapThreshold: gapThreshold,
+                        stabilityThreshold: stabilityThreshold
+                    )
+                    return
+                }
+
+                // Settled (tail visible, no more movement, or capped). One more
+                // cheap scroll, then close any residual gap directly: STTextView's
+                // `scrollToEndOfDocument` can park ~200pt short of the bottom even
+                // once the documentView has grown to its full height (its target is
+                // computed from a content size that lags the realized layout). Since
+                // the documentView frame is now correct, pin the clip to the true
+                // bottom in O(1) — clamp the origin to `documentView.maxY -
+                // viewportHeight` — rather than chasing it with more layout passes.
+                textView.scrollToEndOfDocument(nil)
+                self.pinClipToDocumentBottom(scrollView: scrollView)
+            }
+        }
+
+        /// The realized LAST text layout fragment's `layoutFragmentFrame.maxY`
+        /// (viewport-relative, O(visible)). Reverse-enumerates from the document
+        /// end and returns the first (newest) fragment's bottom, or `nil` if none
+        /// is laid out yet.
+        private func realizedTailMaxY(textView: STTextView) -> CGFloat? {
+            let layoutManager = textView.textLayoutManager
+            var tailMaxY: CGFloat?
+            layoutManager.enumerateTextLayoutFragments(
+                from: layoutManager.documentRange.endLocation,
+                options: [.reverse, .ensuresLayout]
+            ) { fragment in
+                tailMaxY = fragment.layoutFragmentFrame.maxY
+                return false  // first (last-in-document) fragment only
+            }
+            return tailMaxY
+        }
+
+        /// Pins the clip view to the document's true bottom in O(1): clamps the
+        /// scroll origin to `documentView.frame.maxY - viewportHeight`. Used as the
+        /// final step of the convergence so the newest content lands at the viewport
+        /// bottom even when `scrollToEndOfDocument` parked short of it. Only ever
+        /// scrolls DOWN (never above the cheap scroll's resting place), so it can't
+        /// yank the viewport up if the document is shorter than the viewport. (#129)
+        private func pinClipToDocumentBottom(scrollView: NSScrollView) {
+            guard let documentView = scrollView.documentView else { return }
+            let clip = scrollView.contentView
+            let viewportHeight = clip.bounds.height
+            let targetY = max(0, documentView.frame.maxY - viewportHeight)
+            // Only move down toward the bottom — never above where the cheap scroll
+            // already left us.
+            guard targetY > clip.bounds.origin.y else {
+                scrollView.reflectScrolledClipView(clip)
+                return
+            }
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: targetY))
+            scrollView.reflectScrolledClipView(clip)
         }
 
         /// Apply a new poll result to the live document with a before-edit
@@ -184,9 +328,11 @@ struct STTextViewTranscriptView: NSViewRepresentable {
                 // (pre-append) document height, so it stops short of the real new
                 // bottom and the viewport never follows the streamed tail. Running
                 // it on the next runloop turn lets layout extend the document
-                // first, so the scroll reaches the true new end. (#129)
+                // first, so the convergence loop reaches the true new end. Use the
+                // viewport-relative bottom-stick (not a single scrollToEndOfDocument)
+                // so streaming stays pinned to the realized tail. (#129)
                 DispatchQueue.main.async { [weak self] in
-                    self?.textView?.scrollToEndOfDocument(nil)
+                    self?.scrollViewportToEnd()
                 }
             } else {
                 // User has scrolled up — restore position so reading is undisturbed.

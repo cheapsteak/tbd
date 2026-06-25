@@ -112,6 +112,399 @@ struct TranscriptScrollCompareHarness {
         #expect(true)
     }
 
+    // MARK: - Bottom-stick spike (full session)
+
+    /// De-risking spike for the TextKit2 transcript bottom-stick (#129).
+    ///
+    /// Loads the FULL real "this session" transcript (not a small window) into a
+    /// production `Coordinator`-wired `STTextView` at the fixed 680x600 viewport,
+    /// then:
+    ///   - times and snapshots the NEW `scrollViewportToEnd()` convergence loop,
+    ///     asserting the LAST text layout fragment lands in the visible clip rect,
+    ///   - snapshots the OLD `scrollToTrueBottom(attempts:8)` for comparison,
+    /// and writes a findings file. Inert unless `TBD_TRANSCRIPT_COMPARE=1`.
+    ///
+    ///     TBD_TRANSCRIPT_COMPARE=1 swift test --filter renderBottomStickSpike
+    @Test("bottom-stick spike on FULL session (gated by TBD_TRANSCRIPT_COMPARE=1)")
+    func renderBottomStickSpike() throws {
+        guard ProcessInfo.processInfo.environment["TBD_TRANSCRIPT_COMPARE"] == "1" else {
+            #expect(true)
+            return
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
+
+        // Resolve the FULL "this session" file (env override or scratch default).
+        let thisSessionPath = ProcessInfo.processInfo.environment["TBD_COMPARE_THIS_SESSION"]
+            ?? "/private/tmp/claude-501/-Users-chang-tbd-worktrees-tbd-transcript-row-flatten"
+                + "/6F6A46F5-0E30-4CF8-A06C-A5C628760FF5/scratchpad/this-session-6F6A46F5.jsonl"
+        guard fm.fileExists(atPath: thisSessionPath) else {
+            var lines = ["SPIKE: bottom-stick (#129)", ""]
+            lines.append("SKIPPED: full-session JSONL not found at \(thisSessionPath)")
+            try lines.joined(separator: "\n").write(
+                toFile: "\(Self.outputDir)/SPIKE-BOTTOMSTICK.txt", atomically: true, encoding: .utf8)
+            Issue.record("full session not found at \(thisSessionPath)")
+            return
+        }
+
+        let items = TranscriptCompareRealSessions.parse(filePath: thisSessionPath)
+        let totalChars = items.reduce(0) { $0 + TranscriptCompareRealSessions.itemText($1).count }
+
+        let suiteName = "spike-bottomstick-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        var findings: [String] = []
+        findings.append("SPIKE: TextKit2 transcript bottom-stick (#129)")
+        findings.append("generated: \(ISO8601DateFormatter().string(from: Date()))")
+        findings.append("session: \(thisSessionPath)")
+        findings.append("items: \(items.count)  approx chars (capped bodies): \(totalChars)")
+        findings.append("viewport: \(Int(Self.width))x\(Int(Self.viewportHeight)) pt")
+        findings.append("")
+
+        // --- NEW path: scrollViewportToEnd() convergence loop ---
+        let newResult = try runBottomStick(
+            items: items, appState: appState, useNewPrimitive: true,
+            snapshotPath: "\(Self.outputDir)/spike-open-end__new.png")
+        findings.append("NEW scrollViewportToEnd():")
+        findings.append("  wall-clock: \(String(format: "%.1f", newResult.millis)) ms")
+        findings.append("  last fragment in visible clip rect: \(newResult.lastFragmentVisible)")
+        findings.append("  last fragment frame: \(newResult.lastFragmentFrameDesc)")
+        findings.append("  visible clip rect: \(newResult.visibleRectDesc)")
+        findings.append("  snapshot: \(Self.outputDir)/spike-open-end__new.png")
+        findings.append("")
+
+        // --- OLD path: scrollToTrueBottom(attempts: 8) ---
+        let oldResult = try runBottomStick(
+            items: items, appState: appState, useNewPrimitive: false,
+            snapshotPath: "\(Self.outputDir)/spike-open-oldpin__new.png")
+        findings.append("OLD scrollToTrueBottom(attempts: 8):")
+        findings.append("  wall-clock: \(String(format: "%.1f", oldResult.millis)) ms")
+        findings.append("  last fragment in visible clip rect: \(oldResult.lastFragmentVisible)")
+        findings.append("  last fragment frame: \(oldResult.lastFragmentFrameDesc)")
+        findings.append("  visible clip rect: \(oldResult.visibleRectDesc)")
+        findings.append("  snapshot: \(Self.outputDir)/spike-open-oldpin__new.png")
+        findings.append("")
+
+        findings.append("ASSERT (new): last fragment intersects visible clip rect == \(newResult.lastFragmentVisible)")
+
+        try findings.joined(separator: "\n").write(
+            toFile: "\(Self.outputDir)/SPIKE-BOTTOMSTICK.txt", atomically: true, encoding: .utf8)
+
+        // Hard assert the spike's success criterion for the NEW primitive.
+        #expect(newResult.lastFragmentVisible, "newest content must be visible after scrollViewportToEnd()")
+        // Performance guard: must be O(visible), not a full-layout multi-second cost.
+        #expect(newResult.millis < 500, "scrollViewportToEnd() took \(newResult.millis) ms — should be O(visible)")
+    }
+
+    // MARK: - Async-fix harness (LIVE timing, no forced layout)
+
+    /// LIVE-timing harness that catches the bottom-stick blind spot.
+    ///
+    /// `renderBottomStickSpike`/`renderOpen` MASKED the open-lands-mid-document bug
+    /// because they manually pump layout (`forceFullLayout`/`forceViewportLayout`
+    /// ~12x) AROUND the production scroll call, forcing the convergence work the
+    /// production code is supposed to drive on its own — a false green. This harness
+    /// NEVER forces layout; it only advances the clock (`await Task.sleep`) so the
+    /// production code's own runloop turns fire, modelling the live app.
+    ///
+    /// It checks BOTH directions so the assertion provably has teeth:
+    ///
+    ///   - BASELINE (the broken behavior): a SINGLE `scrollToEndOfDocument(nil)`
+    ///     with NO convergence. On this long real session it parks ~230pt short —
+    ///     `scrollToEndOfDocument` resolves against a content size that only grows
+    ///     on the NEXT async layout pass — so the realized newest fragment lands
+    ///     BELOW the visible clip rect. We assert the tail is NOT visible, proving
+    ///     the measurement actually fails when the viewport mislands (this is the
+    ///     headless analog of the live "opens mid-document" symptom; a measurement
+    ///     that can't catch it is a useless green).
+    ///   - PRODUCTION: the async-recursive `scrollViewportToEnd()`, called exactly
+    ///     as `makeNSView` does, then only the clock drained. We assert the realized
+    ///     newest fragment lands WITHIN the visible clip rect.
+    ///
+    /// Both run on the FULL real session at 680x600 in an offscreen window. The
+    /// production viewport is snapshotted to `\(outputDir)/asyncfix-open__new.png`.
+    /// Inert unless `TBD_TRANSCRIPT_COMPARE=1`.
+    ///
+    ///     TBD_TRANSCRIPT_COMPARE=1 swift test --filter TranscriptScrollCompareHarness
+    @Test("async-fix LIVE open lands on newest content (gated by TBD_TRANSCRIPT_COMPARE=1)")
+    func renderAsyncFixOpen() async throws {
+        guard ProcessInfo.processInfo.environment["TBD_TRANSCRIPT_COMPARE"] == "1" else {
+            #expect(true)
+            return
+        }
+
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
+
+        let thisSessionPath = ProcessInfo.processInfo.environment["TBD_COMPARE_THIS_SESSION"]
+            ?? "/private/tmp/claude-501/-Users-chang-tbd-worktrees-tbd-transcript-row-flatten"
+                + "/6F6A46F5-0E30-4CF8-A06C-A5C628760FF5/scratchpad/this-session-6F6A46F5.jsonl"
+        guard fm.fileExists(atPath: thisSessionPath) else {
+            Issue.record("full session not found at \(thisSessionPath)")
+            return
+        }
+
+        let items = TranscriptCompareRealSessions.parse(filePath: thisSessionPath)
+
+        let suiteName = "asyncfix-open-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        // --- BASELINE: single scrollToEndOfDocument, NO convergence. Models the
+        // live "opens mid-document" symptom; must FAIL the tail-visible check so we
+        // know the assertion isn't a trivial pass. ---
+        let baseline = try makeOpenScene(items: items, appState: appState)
+        baseline.textView.scrollToEndOfDocument(nil)
+        baseline.scrollView.reflectScrolledClipView(baseline.scrollView.contentView)
+        await drainMainQueue(budget: 2.0)
+        let baselineVisible = realizedTailVisible(
+            textView: baseline.textView, scrollView: baseline.scrollView)
+        let baselineMessage = "BASELINE single scrollToEndOfDocument is expected to park short of the "
+            + "bottom on a long session (tail OFF-screen). If this now passes, the "
+            + "tail-visible measurement has lost its teeth and the production check "
+            + "below would be a false green."
+        #expect(!baselineVisible, "\(baselineMessage)")
+
+        // --- PRODUCTION: async-recursive scrollViewportToEnd(), exactly as
+        // makeNSView calls it, then only the clock drained. Must PASS. ---
+        let scene = try makeOpenScene(items: items, appState: appState)
+        // The production Coordinator uses `[weak self]` in its async-recursive turns
+        // (it's owned by SwiftUI's representable Context in the live app); keep the
+        // local Coordinator alive across the whole drain (the `defer` below) so those
+        // turns aren't dropped by ARC releasing it after its last syntactic use.
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        scene.coordinator.scrollViewportToEnd()
+        await drainMainQueue(budget: 2.0)
+
+        // Repaint bubbles exactly as the live pane would (still no forced layout).
+        (scene.textView as? ReadOnlySTTextView)?.setBubblesNeedDisplay()
+        await drainMainQueue(budget: 0.3)
+
+        let prodVisible = realizedTailVisible(textView: scene.textView, scrollView: scene.scrollView)
+        try snapshotViewport(scrollView: scene.scrollView, to: "\(Self.outputDir)/asyncfix-open__new.png")
+        let prodMessage = "LIVE async open must land the newest content in the visible clip rect "
+            + "— FAILS on a non-converging (single-scroll / synchronous) path, "
+            + "PASSES on the async-recursive scrollViewportToEnd()."
+        #expect(prodVisible, "\(prodMessage)")
+    }
+
+    /// The scene-under-test: a production-wired offscreen scroll view + coordinator.
+    private struct OpenScene {
+        let scrollView: NSScrollView
+        let textView: STTextView
+        let coordinator: STTextViewTranscriptView.Coordinator
+        /// Retains the offscreen window so the scroll view stays installed.
+        let window: NSWindow
+    }
+
+    /// Builds an offscreen 680x600 scroll view wired to a production `Coordinator`
+    /// over `items`, exactly as `makeNSView` does (adopting STTextView's storage,
+    /// binding the document, rebuilding). Does NOT scroll or force any layout.
+    private func makeOpenScene(items: [TranscriptItem], appState: AppState) throws -> OpenScene {
+        let context = TranscriptCardContext(
+            terminalID: nil,
+            openTranscriptOverlay: { _ in },
+            navigateToThread: { _ in },
+            appState: appState
+        )
+        let coordinator = STTextViewTranscriptView.Coordinator(
+            document: TranscriptDocument(context: context)
+        )
+
+        let scrollView = ReadOnlySTTextView.scrollableTextView()
+        guard let textView = scrollView.documentView as? STTextView else {
+            throw HarnessError.couldNotMakeBitmap
+        }
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isHorizontallyResizable = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+
+        let nodes = transcriptRenderNodes(from: items)
+        if let contentStorage = textView.textContentManager as? NSTextContentStorage {
+            let textStorage = contentStorage.textStorage ?? {
+                let created = NSTextStorage()
+                contentStorage.textStorage = created
+                return created
+            }()
+            coordinator.document.bind(to: textStorage)
+            coordinator.document.rebuild(nodes)
+        } else {
+            coordinator.document.rebuild(nodes)
+            textView.attributedText = coordinator.document.storage
+        }
+        coordinator.textView = textView
+        coordinator.scrollView = scrollView
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: Self.width, height: Self.viewportHeight),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = scrollView
+        scrollView.frame = NSRect(x: 0, y: 0, width: Self.width, height: Self.viewportHeight)
+        scrollView.hasVerticalScroller = true
+
+        return OpenScene(scrollView: scrollView, textView: textView, coordinator: coordinator, window: window)
+    }
+
+    /// Whether the realized LAST text layout fragment (the newest content)
+    /// intersects the current visible clip rect. Uses `.reverse` only (NO
+    /// `.ensuresLayout`) so it measures what is ACTUALLY realized on screen, not a
+    /// fragment a forced layout pass would conjure.
+    private func realizedTailVisible(textView: STTextView, scrollView: NSScrollView) -> Bool {
+        let layoutManager = textView.textLayoutManager
+        var lastFragmentFrame: CGRect?
+        layoutManager.enumerateTextLayoutFragments(
+            from: layoutManager.documentRange.endLocation,
+            options: [.reverse]
+        ) { fragment in
+            lastFragmentFrame = fragment.layoutFragmentFrame
+            return false
+        }
+        let visibleRect = scrollView.contentView.documentVisibleRect
+        return lastFragmentFrame.map { visibleRect.intersects($0) } ?? false
+    }
+
+    /// Advances ONLY the clock for `budget` seconds, letting the production
+    /// async-recursive convergence turns (`DispatchQueue.main.async`) AND AppKit
+    /// layout drain. Does NOT force any TextKit layout — production code must drive
+    /// it; the harness only advances time.
+    ///
+    /// Why `await`-based and not a bare `CFRunLoopRunInMode` spin: under Swift
+    /// Testing the test body runs inside a Swift Concurrency task on the main
+    /// actor, and the main dispatch queue is serviced by the concurrency main
+    /// executor. A synchronous `CFRunLoop` spin NEVER yields to that executor, so
+    /// `DispatchQueue.main.async` blocks (the production turns) sit un-drained until
+    /// the test returns — a verified failure mode (a nested-dispatch probe counted
+    /// 0 ticks across a 1s synchronous spin). And `CFRunLoopRunInMode` can't even be
+    /// called from an `async` context. `await Task.sleep` yields to the main
+    /// executor on every slice, so the queued production turns (and the AppKit
+    /// layout they trigger) actually run between slices — modelling the live,
+    /// continuously-running main runloop without the harness forcing any layout.
+    private func drainMainQueue(budget: TimeInterval) async {
+        let deadline = Date().addingTimeInterval(budget)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)  // 10ms — yields to the main executor
+        }
+    }
+
+    private struct BottomStickResult {
+        let millis: Double
+        let lastFragmentVisible: Bool
+        let lastFragmentFrameDesc: String
+        let visibleRectDesc: String
+    }
+
+    /// Wires a production Coordinator on the full doc, runs either the new or old
+    /// bottom-stick, times it, asserts the last fragment vs the visible clip rect,
+    /// and snapshots the viewport.
+    private func runBottomStick(
+        items: [TranscriptItem],
+        appState: AppState,
+        useNewPrimitive: Bool,
+        snapshotPath: String
+    ) throws -> BottomStickResult {
+        let context = TranscriptCardContext(
+            terminalID: nil,
+            openTranscriptOverlay: { _ in },
+            navigateToThread: { _ in },
+            appState: appState
+        )
+        let coordinator = STTextViewTranscriptView.Coordinator(
+            document: TranscriptDocument(context: context)
+        )
+
+        let scrollView = ReadOnlySTTextView.scrollableTextView()
+        guard let textView = scrollView.documentView as? STTextView else {
+            throw HarnessError.couldNotMakeBitmap
+        }
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isHorizontallyResizable = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+
+        let nodes = transcriptRenderNodes(from: items)
+        if let contentStorage = textView.textContentManager as? NSTextContentStorage {
+            let textStorage = contentStorage.textStorage ?? {
+                let created = NSTextStorage()
+                contentStorage.textStorage = created
+                return created
+            }()
+            coordinator.document.bind(to: textStorage)
+            coordinator.document.rebuild(nodes)
+        } else {
+            coordinator.document.rebuild(nodes)
+            textView.attributedText = coordinator.document.storage
+        }
+        coordinator.textView = textView
+        coordinator.scrollView = scrollView
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: Self.width, height: Self.viewportHeight),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = scrollView
+        scrollView.frame = NSRect(x: 0, y: 0, width: Self.width, height: Self.viewportHeight)
+        scrollView.hasVerticalScroller = true
+
+        // Let an initial viewport layout settle (mirrors makeNSView install) so the
+        // measurement starts from a realistic state — but do NOT force full layout.
+        forceViewportLayout(textView)
+        pumpRunLoop()
+
+        let start = Date()
+        if useNewPrimitive {
+            coordinator.scrollViewportToEnd()
+            // Synchronous loop; pump once so the clip-view reflect settles.
+            pumpRunLoop()
+        } else {
+            coordinator.scrollToTrueBottom(attempts: 8)
+            // OLD path defers via DispatchQueue.main.async — pump the runloop so the
+            // recursive retries run, matching the live (async) behavior.
+            for _ in 0..<16 {
+                forceViewportLayout(textView)
+                pumpRunLoop()
+            }
+        }
+        let millis = Date().timeIntervalSince(start) * 1000
+
+        (textView as? ReadOnlySTTextView)?.setBubblesNeedDisplay()
+        forceViewportLayout(textView)
+        pumpRunLoop()
+
+        // Measure: does the LAST layout fragment intersect the visible clip rect?
+        let layoutManager = textView.textLayoutManager
+        var lastFragmentFrame: CGRect?
+        layoutManager.enumerateTextLayoutFragments(
+            from: layoutManager.documentRange.endLocation,
+            options: [.reverse, .ensuresLayout]
+        ) { fragment in
+            lastFragmentFrame = fragment.layoutFragmentFrame
+            return false
+        }
+        let visibleRect = scrollView.contentView.documentVisibleRect
+        let lastFragmentVisible = lastFragmentFrame.map { visibleRect.intersects($0) } ?? false
+
+        try snapshotViewport(scrollView: scrollView, to: snapshotPath)
+
+        return BottomStickResult(
+            millis: millis,
+            lastFragmentVisible: lastFragmentVisible,
+            lastFragmentFrameDesc: lastFragmentFrame.map { "\($0)" } ?? "nil",
+            visibleRectDesc: "\(visibleRect)"
+        )
+    }
+
     // MARK: - Scrolling NEW path
 
     /// Hosts the NEW STTextView in a fixed-viewport scroll view, scrolls to four
