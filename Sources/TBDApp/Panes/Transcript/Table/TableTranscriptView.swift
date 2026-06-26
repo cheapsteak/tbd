@@ -35,15 +35,15 @@ struct TableTranscriptView: NSViewRepresentable {
     func makeNSView(context ctx: Context) -> NSScrollView {
         let coordinator = ctx.coordinator
 
-        // FIX 1(a): disable AppKit's off-screen row-height ESTIMATION. On Ventura+
+        // Disable AppKit's off-screen row-height ESTIMATION. On Ventura+
         // NSTableView estimates the height of not-yet-realized rows from the rows
-        // it has already measured; for a transcript whose row heights vary wildly
-        // that guess is far too large, so a row reserves too much space and then
-        // visibly shrinks (the collapsing blank gap) when it scrolls into view and
-        // `heightOfRow` returns the real height. Turning estimation off forces the
-        // table to ask `heightOfRow` for the REAL height of every row up front —
-        // which is a pure cache hit because we precompute all heights eagerly
-        // (FIX 1(b)). The authoritative register now happens at app launch
+        // it has already measured (a single blended value); for a transcript whose
+        // row heights vary wildly that guess is far off, so a row reserves the
+        // wrong space and then visibly jumps when it scrolls into view. Turning it
+        // off forces AppKit to ask OUR `heightOfRow` for every row — which returns
+        // the cached EXACT height when present, else a GOOD per-kind estimate we
+        // compute ourselves (much better than AppKit's single blended value). The
+        // authoritative register happens at app launch
         // (`applicationWillFinishLaunching`) so it precedes ANY NSTableView; this
         // redundant register is harmless. `register` (not `set`) means it never
         // persists into the real plist, per repo UserDefaults rules.
@@ -85,10 +85,14 @@ struct TableTranscriptView: NSViewRepresentable {
         let nodes = nodesProvider()
         coordinator.nodes = nodes
         coordinator.previousNodes = nodes
-        // FIX 1(b): eagerly measure + cache EVERY row's exact height before the
-        // table asks `heightOfRow`, so the first layout is all cache hits and no
-        // row ever reserves a provisional/estimated height.
-        coordinator.precomputeAllHeights()
+        // LAZY MEASUREMENT (#129): eagerly measure + cache only the BOTTOM window
+        // of rows (the open-at-bottom viewport + buffer) — a bounded, constant-time
+        // cost regardless of session length. Older rows are sized by the cheap
+        // per-kind estimate in `heightOfRow` until they scroll into view, where
+        // `viewFor` measures them exactly and corrects. The instrumented variant
+        // emits the `table.openperf` summary (now a SMALL precomputeMs) behind the
+        // table-pane gate.
+        coordinator.precomputeBottomWindowInstrumented()
         tableView.reloadData()
 
         // Pin the initial open to the newest message (last row), deferred so the
@@ -137,6 +141,7 @@ struct TableTranscriptView: NSViewRepresentable {
         static let columnID = NSUserInterfaceItemIdentifier("transcript")
         private static let cellID = NSUserInterfaceItemIdentifier("transcriptCell")
         private static let bubbleCellID = NSUserInterfaceItemIdentifier("bubbleCell")
+        private static let activityCellID = NSUserInterfaceItemIdentifier("activityCell")
         private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
         let context: TranscriptCardContext
@@ -185,6 +190,28 @@ struct TableTranscriptView: NSViewRepresentable {
         /// storage/layout-manager allocation is paid once.
         private let blockMeasurer = MessageBlockMeasurer()
 
+        /// Open-path precompute instrumentation (#129 freeze hunt). Per-category
+        /// elapsed time + counts accumulated inside `measuredHeight`, summarized
+        /// in ONE `table.openperf` log line after `precomputeBottomWindow()`. All
+        /// nanoseconds; converted to ms at log time. Reset at the start of each
+        /// precompute so the figures describe that precompute pass alone.
+        struct OpenPerf {
+            var chatBubbleNanos: UInt64 = 0
+            var chatBubbleRenderNanos: UInt64 = 0
+            var chatBubbleMeasureNanos: UInt64 = 0
+            var activityNanos: UInt64 = 0
+            var askNanos: UInt64 = 0
+            var chatBubbleCount = 0
+            var activityCount = 0
+            var askCount = 0
+        }
+        private var openPerf = OpenPerf()
+
+        /// Counts `tableView(_:heightOfRow:)` calls. Read once shortly after open
+        /// (one-shot dispatch) to learn whether AppKit asks for ALL rows' heights
+        /// or only a visible subset — informing whether lazy measurement helps.
+        private var heightOfRowCalls = 0
+
         init(context: TranscriptCardContext) {
             self.context = context
             super.init()
@@ -202,27 +229,83 @@ struct TableTranscriptView: NSViewRepresentable {
             return composed
         }
 
-        /// FIX 1(b): eagerly measure and cache EVERY present row's exact height at
-        /// the current column width, so the table's first `heightOfRow` walk (and
-        /// every subsequent one until content changes) is a pure cache hit and no
-        /// row is ever sized from an estimate. Cheap: bubble rows measure via the
-        /// TextKit `usedRect` path (~0.04ms/row); hosted (SwiftUI) rows go through
-        /// the reused measuring controller. Idempotent — already-cached rows are
-        /// skipped — so calling it before each streaming insert only measures the
-        /// newly-present rows.
-        func precomputeAllHeights() {
+        /// Number of rows at the BOTTOM of the list to measure EXACTLY up front.
+        /// The pane opens anchored to the newest message, so this covers the open
+        /// viewport plus a scroll buffer; every other (older) row carries the cheap
+        /// per-kind estimate from `heightOfRow` until it is realized (and then
+        /// measured exactly + corrected in `viewFor`). Bounded so the open cost is
+        /// constant regardless of session length. (#129)
+        static let bottomEagerWindow = 40
+
+        /// LAZY measurement: eagerly measure + cache the EXACT height of ONLY the
+        /// bottom `bottomEagerWindow` rows — the open-at-bottom viewport plus a
+        /// buffer — rather than every row. The remaining (older) rows are sized by
+        /// the cheap per-kind ESTIMATE in `heightOfRow` until they scroll into view,
+        /// at which point `viewFor` measures them exactly and corrects. This makes
+        /// the open cost constant-time in session length (was O(rows): a 1612-node
+        /// session spent ~3.9s measuring all 861 bubbles here). Idempotent — an
+        /// already-cached row is a no-op — so the streaming append/update paths can
+        /// call it to measure just their newly-present bottom rows. (#129)
+        func precomputeBottomWindow() {
             let width = columnWidth
             guard width > 1 else { return }
-            for node in nodes {
-                _ = measuredHeight(for: node, width: width)
+            let start = max(0, nodes.count - Self.bottomEagerWindow)
+            for index in start..<nodes.count {
+                _ = measuredHeight(for: nodes[index], width: width)
             }
         }
 
-        /// Test backstop: number of present rows whose exact height is already
-        /// cached at the current column width. When this equals `nodes.count`
-        /// after `precomputeAllHeights()`, every `tableView(_:heightOfRow:)` is a
-        /// pure cache hit (no estimate, no on-realize re-measure) — the property
-        /// FIX 1 depends on. (#129)
+        /// Open-path precompute + instrumentation (#129 freeze hunt). Resets the
+        /// per-category accumulators, runs `precomputeBottomWindow()` measuring its
+        /// wall-clock, then emits ONE `table.openperf` summary line: total node
+        /// count, precompute ms (now the bounded BOTTOM-WINDOW cost only), and the
+        /// per-category ms/count breakdown (chatBubble prose/table split into render
+        /// vs measure, native activity, and the hosted askUserQuestion path). It
+        /// also arms a one-shot dispatch to log how many `heightOfRow` calls AppKit
+        /// made shortly after open.
+        ///
+        /// Called ONLY from the table pane's `makeNSView`, so the cost is
+        /// confined behind the `useTableViewTranscript` gate. (#129)
+        func precomputeBottomWindowInstrumented() {
+            openPerf = OpenPerf()
+            heightOfRowCalls = 0
+            let start = DispatchTime.now().uptimeNanoseconds
+            precomputeBottomWindow()
+            let precomputeNanos = DispatchTime.now().uptimeNanoseconds &- start
+
+            func ms(_ nanos: UInt64) -> Double { Double(nanos) / 1_000_000 }
+            let p = openPerf
+            Self.log.info(
+                """
+                table.openperf nodeCount=\(self.nodes.count, privacy: .public) \
+                precomputeMs=\(ms(precomputeNanos), format: .fixed(precision: 1), privacy: .public) \
+                chatBubbleMs=\(ms(p.chatBubbleNanos), format: .fixed(precision: 1), privacy: .public) \
+                chatBubbleCount=\(p.chatBubbleCount, privacy: .public) \
+                markdownRenderMs=\(ms(p.chatBubbleRenderNanos), format: .fixed(precision: 1), privacy: .public) \
+                textMeasureMs=\(ms(p.chatBubbleMeasureNanos), format: .fixed(precision: 1), privacy: .public) \
+                activityMs=\(ms(p.activityNanos), format: .fixed(precision: 1), privacy: .public) \
+                activityCount=\(p.activityCount, privacy: .public) \
+                askUserQuestionMs=\(ms(p.askNanos), format: .fixed(precision: 1), privacy: .public) \
+                askUserQuestionCount=\(p.askCount, privacy: .public)
+                """
+            )
+
+            // One-shot: report how many heightOfRow calls landed during the first
+            // run-loop turn after open (ALL rows ⇒ no lazy-measure win; a small
+            // subset ⇒ lazy measurement could defer most of the precompute cost).
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                Self.log.info(
+                    "table.openperf.heightCalls heightOfRowCallsDuringOpen=\(self.heightOfRowCalls, privacy: .public) nodeCount=\(self.nodes.count, privacy: .public)")
+            }
+        }
+
+        /// Test backstop: number of present rows whose EXACT height is already
+        /// cached at the current column width. After `precomputeBottomWindow()`
+        /// this is the bottom-window count (≤ `bottomEagerWindow`); the rest are
+        /// sized by the per-kind estimate until realized. A realized row also
+        /// becomes exact (measured + corrected in `viewFor`), so this grows as the
+        /// user scrolls. (#129)
         var cachedHeightRowCount: Int {
             let width = columnWidth
             return nodes.reduce(into: 0) { count, node in
@@ -246,16 +329,41 @@ struct TableTranscriptView: NSViewRepresentable {
                 // prose, one-shot `sizeThatFits` for tables) summed with
                 // inter-block spacing, plus fixed chrome. This makes the row height
                 // equal the cell's drawn block-stack height by construction.
+                //
+                // Instrumented in two phases so we know whether the cost is
+                // RENDERING (markdown → attributed string, incl. Highlightr syntax
+                // highlighting of fenced code) or MEASURING (TK1 `usedRect`). (#129)
+                let branchStart = DispatchTime.now().uptimeNanoseconds
                 let role = TranscriptBubbleGeometry.role(for: item)
+                let renderStart = DispatchTime.now().uptimeNanoseconds
                 let blocks = composedBubbleBlocks(for: node, item: item)
+                let renderEnd = DispatchTime.now().uptimeNanoseconds
                 let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role)
                 let blocksHeight = blockMeasurer.blocksHeight(blocks, bodyWidth: bodyWidth)
+                let measureEnd = DispatchTime.now().uptimeNanoseconds
                 height = TranscriptBubbleGeometry.rowHeight(blocksHeight: blocksHeight)
+                openPerf.chatBubbleNanos &+= measureEnd &- branchStart
+                openPerf.chatBubbleRenderNanos &+= renderEnd &- renderStart
+                openPerf.chatBubbleMeasureNanos &+= measureEnd &- renderEnd
+                openPerf.chatBubbleCount += 1
+            } else if let presentation = ActivityRowFormatter.presentation(for: node) {
+                // Native activity rows are ONE line by construction (the title is
+                // truncated, never wrapped), so their height is a fixed chrome
+                // height — no `sizeThatFits`, no SwiftUI work. This is what keeps
+                // these rows off the per-row hosting precompute cost. (#129)
+                let branchStart = DispatchTime.now().uptimeNanoseconds
+                height = Self.activityRowHeight(style: presentation.style)
+                openPerf.activityNanos &+= DispatchTime.now().uptimeNanoseconds &- branchStart
+                openPerf.activityCount += 1
             } else {
+                // Remaining hosted (SwiftUI) path — currently only AskUserQuestion.
+                let branchStart = DispatchTime.now().uptimeNanoseconds
                 measuringController.rootView = AnyView(rowRootView(for: node))
                 let proposed = NSSize(width: width, height: .greatestFiniteMagnitude)
                 let measured = measuringController.sizeThatFits(in: proposed).height
                 height = measured > 0 ? measured : 44
+                openPerf.askNanos &+= DispatchTime.now().uptimeNanoseconds &- branchStart
+                openPerf.askCount += 1
             }
 
             heightCache[key] = height
@@ -282,26 +390,26 @@ struct TableTranscriptView: NSViewRepresentable {
         // MARK: NSTableViewDelegate
 
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-            guard row >= 0, row < nodes.count else { return measuredHeight(for: nil, width: columnWidth) }
-            // AUTHORITATIVE + PRECOMPUTED: this returns the row's exact natural
-            // content height, which `precomputeAllHeights()` already measured and
-            // cached for every present row at the current `(id, contentVersion,
-            // width)`. So this is a pure cache-hit lookup — never an estimate and
-            // never a provisional/placeholder value.
-            //
-            // This is deliberately NOT the estimate-then-`noteHeightOfRows`-correct
-            // approach. That path returned a low estimate here and patched the real
-            // height in after the row was realized — but the correction did not
-            // reliably re-lay the row, and on Ventura+ AppKit ALSO estimated
-            // off-screen rows from already-measured ones, so a row reserved too
-            // much space and then visibly shrank as it scrolled in (the collapsing
-            // blank gap). Disabling estimation (FIX 1a) + precomputing every height
-            // (FIX 1b) makes this an exact cache hit and removes the jank.
-            //
-            // `measuredHeight` is retained as a defensive fallback only: if AppKit
-            // ever asks for a row we somehow did not precompute, it measures it
-            // once and caches it rather than returning a guess.
-            return measuredHeight(for: nodes[row], width: columnWidth)
+            // Open-path instrumentation (#129): count how many heightOfRow calls
+            // AppKit makes so we can tell whether it asks for every row up front
+            // or only the visible window. Logged once via the one-shot dispatch.
+            heightOfRowCalls += 1
+            let width = columnWidth
+            guard row >= 0, row < nodes.count else { return Self.estimate(for: nil, width: width) }
+            let node = nodes[row]
+
+            // LAZY MEASUREMENT (#129): if this row's EXACT height is already cached
+            // (bottom-window precompute, or a previously-realized row), return it —
+            // a pure cache hit. Otherwise return a GOOD cheap per-kind estimate (no
+            // TextKit/SwiftUI layout). The row is then measured exactly when it is
+            // realized in `viewFor`, which corrects the estimate via
+            // `noteHeightOfRows`. We bias estimates slightly so corrections tend to
+            // GROW rows (less jarring than a shrink). Returning our OWN estimate —
+            // not relying on AppKit's single blended estimate (which we disabled) —
+            // is what keeps a deep scroll-up landing close before the correction.
+            let key = HeightKey(id: node.id, version: node.contentVersion, width: width)
+            if let cached = heightCache[key] { return cached }
+            return Self.estimate(for: node, width: width)
         }
 
         func tableView(
@@ -312,11 +420,75 @@ struct TableTranscriptView: NSViewRepresentable {
             guard row >= 0, row < nodes.count else { return nil }
             let node = nodes[row]
 
-            // Dual dispatch: chat bubbles render as exactly-measured attributed
-            // text in a selectable NSTextView (render height == measure height by
+            // LAZY MEASUREMENT (#129): note whether this row's EXACT height was
+            // already cached BEFORE we build the cell. If it was NOT (the row was
+            // sized by the estimate in `heightOfRow`), the cell-building path below
+            // measures and caches the exact height as a side effect; once the cell
+            // is configured we compare the now-cached exact height to the estimate
+            // AppKit used and, if they differ, ask AppKit to re-lay just this row.
+            let width = columnWidth
+            let wasExact = isExactHeightCached(node, width: width)
+            let estimateUsed = wasExact ? 0 : Self.estimate(for: node, width: width)
+            let cell = makeCell(tableView, node: node, row: row, width: width)
+            if !wasExact {
+                correctRowHeightIfNeeded(
+                    tableView, row: row, node: node, width: width, estimate: estimateUsed)
+            }
+            return cell
+        }
+
+        /// Whether `node`'s exact height is already in the cache at `width` — i.e.
+        /// `heightOfRow` returned an exact value (not the estimate) for this row.
+        private func isExactHeightCached(_ node: TranscriptRenderNode, width: CGFloat) -> Bool {
+            heightCache[HeightKey(id: node.id, version: node.contentVersion, width: width)] != nil
+        }
+
+        /// If the now-cached EXACT height differs from the `estimate` AppKit used
+        /// for a freshly-realized (previously-estimated) row, ask AppKit to re-lay
+        /// just this row, wrapped in a zero-duration animation so the height change
+        /// is instant (no animated grow/shrink). Only on-screen rows reach here, so
+        /// the correction is bounded to what the user can actually see. (#129)
+        private func correctRowHeightIfNeeded(
+            _ tableView: NSTableView,
+            row: Int,
+            node: TranscriptRenderNode,
+            width: CGFloat,
+            estimate: CGFloat
+        ) {
+            let key = HeightKey(id: node.id, version: node.contentVersion, width: width)
+            guard let exact = heightCache[key], abs(exact - estimate) > 0.5 else { return }
+            guard tableView.numberOfRows > row else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0
+                tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+            }
+        }
+
+        /// Builds the cell for `node`, measuring its exact height as a side effect
+        /// (the per-kind cell configure all flow through `measuredHeight`, which
+        /// caches). Dual/triple dispatch: chat bubbles → attributed bubble cell,
+        /// native activity rows → `ActivityRowCellView`, AskUserQuestion → SwiftUI
+        /// hosting cell.
+        private func makeCell(
+            _ tableView: NSTableView,
+            node: TranscriptRenderNode,
+            row: Int,
+            width: CGFloat
+        ) -> NSView? {
+            // Chat bubbles render as exactly-measured attributed text in a
+            // selectable NSTextView (render height == measure height by
             // construction); every other kind keeps the SwiftUI hosting path.
             if case .chatBubble(let item) = node.kind {
                 return bubbleView(tableView, node: node, item: item)
+            }
+
+            // Native activity rows (tool headers, system reminders, skill bodies,
+            // subagent summaries) render in ONE AppKit `ActivityRowCellView` — no
+            // per-row `NSHostingController`. Only AskUserQuestion (a full
+            // multi-bubble card) falls through to the SwiftUI hosting path below
+            // (its presentation is nil).
+            if let presentation = ActivityRowFormatter.presentation(for: node) {
+                return activityView(tableView, node: node, presentation: presentation)
             }
 
             let cell = dequeueOrMakeCell(tableView)
@@ -326,7 +498,6 @@ struct TableTranscriptView: NSViewRepresentable {
             // by construction and removes the live clip/gap that an unconstrained
             // hosting-view width (wrapping at a different width than measurement)
             // produced.
-            let width = columnWidth
             let reservedHeight = measuredHeight(for: node, width: width)
             cell.setContentBox(width: width, height: reservedHeight)
             cell.hostingView.rootView = AnyView(rowRootView(for: node))
@@ -365,6 +536,45 @@ struct TableTranscriptView: NSViewRepresentable {
             return cell
         }
 
+        /// Dequeues (or makes) the native activity cell and configures it from
+        /// `presentation`, locked to `columnWidth × measuredHeight`. The click
+        /// closure routes to the transcript overlay (most kinds) or the thread
+        /// navigation (Agent/Task) per the presentation's target; a nil target
+        /// (plain subagent summary) is a no-op.
+        private func activityView(
+            _ tableView: NSTableView,
+            node: TranscriptRenderNode,
+            presentation: ActivityRowPresentation
+        ) -> NSView {
+            let cell: ActivityRowCellView
+            if let reused = tableView.makeView(withIdentifier: Self.activityCellID, owner: self)
+                as? ActivityRowCellView {
+                cell = reused
+            } else {
+                cell = ActivityRowCellView()
+                cell.identifier = Self.activityCellID
+            }
+            let width = columnWidth
+            let height = measuredHeight(for: node, width: width)
+            let openOverlay = context.openTranscriptOverlay
+            let navigate = context.navigateToThread
+            let onOpen: (() -> Void)?
+            if let target = presentation.openTargetID {
+                onOpen = { openOverlay?(target) }
+            } else if let target = presentation.navigateTargetID {
+                onOpen = { navigate?(target) }
+            } else {
+                onOpen = nil
+            }
+            cell.configure(
+                presentation: presentation,
+                columnWidth: width,
+                height: height,
+                onOpen: onOpen
+            )
+            return cell
+        }
+
         private func dequeueOrMakeCell(_ tableView: NSTableView) -> TranscriptHostingCellView {
             if let reused = tableView.makeView(withIdentifier: Self.cellID, owner: self)
                 as? TranscriptHostingCellView {
@@ -390,49 +600,151 @@ struct TableTranscriptView: NSViewRepresentable {
                 // ~600pt empty gaps. Pinning vertical to the content's natural
                 // height makes the measured height equal the rendered height. (#129)
                 .fixedSize(horizontal: false, vertical: true)
+                // The table pane is display-of-history with a single height
+                // measurement per row, so its AskUserQuestion cards must render
+                // statically (non-collapsible, fixed height) — otherwise a tap
+                // collapses a historic card and breaks the cached row height.
+                // The pending-question interaction lives in the live SwiftUI
+                // pane, which leaves this env false. (#129)
+                .environment(\.transcriptStaticCards, true)
                 .environment(\.openTranscriptOverlay, context.openTranscriptOverlay)
                 .environment(\.navigateToThread, context.navigateToThread)
                 .environmentObjectIfPresent(context.appState)
         }
 
-        // MARK: Estimate
+        // MARK: Activity-row height
 
-        /// Cheap, LOW-biased height estimate from node kind + text length. No
-        /// SwiftUI work — pure arithmetic so `heightOfRow` is O(1) before the real
-        /// measurement lands. Biased low so rows grow (never shrink-then-jump)
-        /// when the real height is patched in.
-        nonisolated static func estimate(for node: TranscriptRenderNode?, width: CGFloat) -> CGFloat {
-            guard let node else { return 32 }
-            let charsPerLine = max(Int((width - 24) / 7.5), 20)
-            let textLen: Int
-            switch node.kind {
-            case .chatBubble(let item):
-                textLen = Self.chatBubbleEstimateLength(item)
-            case .systemReminder(_, _, let text, _), .skillBody(_, let text, _):
-                textLen = text.count
-            case .toolCall(_, let name, let inputJSON, _, let result, _):
-                textLen = name.count + min(inputJSON.count, 200) + min(result?.text.count ?? 0, 400)
-            case .subagentSummary:
-                return 40
+        /// Single-line subheadline height + vertical insets for a native activity
+        /// row. Exact because the row is one truncated line: the title's tallest
+        /// font is subheadline; the plain summary variant uses caption2. Vertical
+        /// insets are the chrome's 4 (top) + 4 (bottom), and the row is at least
+        /// as tall as the 14pt icon.
+        private static let chromeRowHeight: CGFloat = {
+            let font = NSFont.preferredFont(forTextStyle: .subheadline)
+            let line = ceil(font.ascender - font.descender + font.leading)
+            return ceil(max(line, 14) + 4 + 4)
+        }()
+
+        // The plain subagent-summary variant mirrors `SubagentSummaryRow`: a bare
+        // caption2 HStack with NO vertical chrome padding, so its height is just
+        // the caption2 line height (matching the SwiftUI oracle, ~13pt).
+        private static let plainSummaryRowHeight: CGFloat = {
+            let font = NSFont.preferredFont(forTextStyle: .caption2)
+            return ceil(font.ascender - font.descender + font.leading)
+        }()
+
+        static func activityRowHeight(style: ActivityRowPresentation.RowStyle) -> CGFloat {
+            switch style {
+            case .chrome: return chromeRowHeight
+            case .plainSummary: return plainSummaryRowHeight
             }
-            let lines = max(1, (textLen + charsPerLine - 1) / charsPerLine)
-            // ~18pt/line + chrome, biased a touch low.
-            return CGFloat(lines) * 18 + 28
         }
 
-        /// Text length of a chat-bubble item for the cheap height estimate.
-        nonisolated static func chatBubbleEstimateLength(_ item: TranscriptItem) -> Int {
-            switch item {
-            case .userPrompt(_, let text, _),
-                 .assistantText(_, let text, _, _),
-                 .thinking(_, let text, _),
-                 .systemReminder(_, _, let text, _):
-                return text.count
-            case .toolCall(_, let name, _, _, _, _, _, _):
-                return name.count
-            case .slashCommand(_, let name, let args, _):
-                return name.count + (args?.count ?? 0)
+        // MARK: Estimate
+
+        /// Average rendered width of a body character in the chat-bubble prose font
+        /// at the column's wrapping width — used to approximate the wrapped line
+        /// count for a chat bubble WITHOUT laying out any text. Empirical for the
+        /// system body font at this size; biased slightly LOW (fewer chars/line ⇒
+        /// MORE estimated lines) so estimates tend to over- rather than
+        /// under-shoot, which makes the on-realize correction GROW the row (a
+        /// shrink is more jarring than a grow). (#129)
+        private static let avgBubbleCharWidth: CGFloat = 7.0
+        /// Estimated rendered height of one wrapped prose line in the chat bubble.
+        private static let estimatedBubbleLineHeight: CGFloat = 18
+        /// Estimated height of one GFM table row (cell + border), and the header.
+        private static let estimatedTableRowHeight: CGFloat = 28
+
+        /// GOOD cheap per-kind height ESTIMATE — pure arithmetic, NO TextKit or
+        /// SwiftUI layout — returned by `heightOfRow` for a row whose exact height
+        /// is not yet cached. Biased slightly so the on-realize correction tends to
+        /// GROW the row rather than shrink it. (#129)
+        ///
+        /// * chatBubble: approximate wrapped-line count from the body text length
+        ///   (`ceil(textLength / charsPerLine)`, `charsPerLine ≈ bodyWidth /
+        ///   avgCharWidth`) × line height, + the bubble's fixed chrome. If the
+        ///   message contains a GFM table, the (cheap, regex-free) table row count
+        ///   contributes `rows × tableRowHeight + header`.
+        /// * activity rows (systemReminder / skillBody / non-Ask toolCall /
+        ///   subagentSummary): the row is ONE truncated line, so its height is the
+        ///   EXACT fixed chrome height (`activityRowHeight`) — cheap and exact, no
+        ///   estimate error.
+        /// * askUserQuestion (a hosted toolCall): a rough constant; the realized
+        ///   card measures exactly and corrects.
+        static func estimate(for node: TranscriptRenderNode?, width: CGFloat) -> CGFloat {
+            guard let node else { return 32 }
+            switch node.kind {
+            case .chatBubble(let item):
+                return chatBubbleEstimate(item, badgeUsage: node.badgeUsage, columnWidth: width)
+            case .systemReminder, .skillBody:
+                return activityRowHeight(style: .chrome)
+            case .subagentSummary:
+                return activityRowHeight(style: .plainSummary)
+            case .toolCall(_, let name, _, _, _, _):
+                // AskUserQuestion is the one toolCall that stays a hosted SwiftUI
+                // card (its activity presentation is nil); every other toolCall is
+                // a one-line chrome activity row.
+                if name == "AskUserQuestion" { return Self.askUserQuestionEstimate }
+                return activityRowHeight(style: .chrome)
             }
+        }
+
+        /// Rough constant for an unrealized AskUserQuestion card (header + a couple
+        /// of option bubbles). Corrected exactly when realized.
+        static let askUserQuestionEstimate: CGFloat = 180
+
+        /// Arithmetic height estimate for a chat bubble: wrapped prose lines × line
+        /// height + any embedded GFM table + fixed bubble chrome. No layout.
+        private static func chatBubbleEstimate(
+            _ item: TranscriptItem,
+            badgeUsage: TokenUsage?,
+            columnWidth: CGFloat
+        ) -> CGFloat {
+            let role = TranscriptBubbleGeometry.role(for: item)
+            let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: columnWidth, role: role)
+            let charsPerLine = max(Int(bodyWidth / avgBubbleCharWidth), 12)
+            let text = TranscriptBubbleGeometry.text(for: item)
+
+            // Prose lines: count explicit newlines (each forces a line break) plus
+            // the wrapped lines each non-empty paragraph contributes. A bubble that
+            // carries a usage badge adds one trailing line.
+            var proseLines = 0
+            for paragraph in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                let len = paragraph.count
+                proseLines += max(1, (len + charsPerLine - 1) / charsPerLine)
+            }
+            if proseLines == 0 { proseLines = 1 }
+            if badgeUsage != nil { proseLines += 1 }
+
+            var blocksHeight = CGFloat(proseLines) * estimatedBubbleLineHeight
+
+            // GFM table block: cheaply count pipe-prefixed-or-containing rows in the
+            // source (header + separator + body) without rendering. Each grid row
+            // is ~tableRowHeight tall.
+            let tableRows = estimatedTableRowCount(in: text)
+            if tableRows > 0 {
+                blocksHeight += CGFloat(tableRows) * estimatedTableRowHeight
+                    + TranscriptBubbleGeometry.interBlockSpacing
+            }
+
+            return TranscriptBubbleGeometry.rowHeight(blocksHeight: max(blocksHeight, estimatedBubbleLineHeight))
+        }
+
+        /// Cheap count of GFM table grid rows in `text` — lines that start (after
+        /// trimming) with `|`. Includes the header but EXCLUDES the `|---|`
+        /// separator line (which renders as a border, not a row). Pure string scan,
+        /// no markdown parse. (#129)
+        private static func estimatedTableRowCount(in text: String) -> Int {
+            var count = 0
+            for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                guard line.hasPrefix("|") else { continue }
+                // Skip the GFM separator row (only |, -, :, space).
+                let body = line.filter { $0 != "|" && $0 != "-" && $0 != ":" && $0 != " " }
+                if body.isEmpty { continue }
+                count += 1
+            }
+            return count
         }
 
         // MARK: Streaming update
@@ -456,7 +768,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 composedCache.removeAll(keepingCapacity: true)
                 nodes = newNodes
                 previousNodes = newNodes
-                precomputeAllHeights()
+                precomputeBottomWindow()
                 tableView.reloadData()
                 recomputeAtBottom(atBottom)
                 return
@@ -477,25 +789,27 @@ struct TableTranscriptView: NSViewRepresentable {
             case .noop:
                 break
             case .rebuild:
-                // True rebuild: clear the cache, recompute every height, reload.
+                // True rebuild: clear the cache, measure the bottom window exactly,
+                // reload (older rows lazily estimate + correct on realize).
                 heightCache.removeAll(keepingCapacity: true)
                 composedCache.removeAll(keepingCapacity: true)
-                precomputeAllHeights()
+                precomputeBottomWindow()
                 tableView.reloadData()
             case let .append(fromIndex):
                 let newCount = newNodes.count
                 guard newCount > fromIndex, fromIndex <= oldCount else {
                     heightCache.removeAll(keepingCapacity: true)
                     composedCache.removeAll(keepingCapacity: true)
-                    precomputeAllHeights()
+                    precomputeBottomWindow()
                     tableView.reloadData()
                     break
                 }
-                // FIX 1(d): precompute the inserted rows' EXACT heights BEFORE the
-                // insert, so the table never asks `heightOfRow` for an unmeasured
-                // row (no estimate, no shrink-on-realize). `precomputeAllHeights`
-                // is idempotent, so this only measures the new rows.
-                precomputeAllHeights()
+                // Measure the newly-appended bottom rows EXACTLY before the insert,
+                // so the streaming tail (which is on-screen) never displays from an
+                // estimate. `precomputeBottomWindow` measures the bottom window —
+                // which contains the just-appended rows — and is idempotent, so it
+                // only measures rows not already cached.
+                precomputeBottomWindow()
                 let inserted = IndexSet(integersIn: fromIndex..<newCount)
                 tableView.insertRows(at: inserted, withAnimation: [])
             case .updateLast:

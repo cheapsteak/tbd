@@ -12,6 +12,39 @@ extension TranscriptRenderNode {
         )
     }
 
+    /// A tool-call node carrying an optional result + truncation marker, for
+    /// formatter badge/line-count coverage.
+    static func makeToolCall(
+        id: String, name: String, inputJSON: String,
+        inputTruncatedTo: Int? = nil, result: ToolResult? = nil, timestamp: Date? = nil
+    ) -> TranscriptRenderNode {
+        TranscriptRenderNode(
+            id: id,
+            kind: .toolCall(
+                id: id, name: name, inputJSON: inputJSON,
+                inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp),
+            badgeUsage: nil
+        )
+    }
+
+    static func makeSystemReminder(
+        id: String, kind: SystemKind, text: String, timestamp: Date? = nil
+    ) -> TranscriptRenderNode {
+        TranscriptRenderNode(
+            id: id,
+            kind: .systemReminder(id: id, kind: kind, text: text, timestamp: timestamp),
+            badgeUsage: nil
+        )
+    }
+
+    static func makeSkillBody(id: String, text: String, timestamp: Date? = nil) -> TranscriptRenderNode {
+        TranscriptRenderNode(
+            id: id,
+            kind: .skillBody(id: id, text: text, timestamp: timestamp),
+            badgeUsage: nil
+        )
+    }
+
     static func makeAssistantText(id: String, text: String) -> TranscriptRenderNode {
         TranscriptRenderNode(
             id: id,

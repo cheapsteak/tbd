@@ -66,20 +66,32 @@ struct TableTranscriptHarness {
         let scene = makeScene(items: items, appState: appState, fixedSize: true)
         defer { withExtendedLifetime(scene.coordinator) {} }
 
-        // --- FIX 1(b): eager precompute populates EVERY row's height ---
-        // Production `makeNSView` calls this before `reloadData`; the harness
-        // builds the coordinator directly, so call it here and assert the cache is
-        // fully populated — i.e. every `heightOfRow` will be a pure cache hit (no
-        // estimate, no shrink-on-realize). Selection/jank are LIVE-only; this is
-        // the headless backstop for the precompute invariant.
+        // --- LAZY MEASUREMENT (#129): bottom-window precompute, not all rows ---
+        // Production `makeNSView` calls this before `reloadData`; the harness builds
+        // the coordinator directly, so call it here. It measures EXACTLY only the
+        // bottom window (the open-at-bottom viewport + buffer); older rows are sized
+        // by the cheap per-kind estimate in `heightOfRow` until realized. Assert the
+        // bottom-window invariant (cached count is the bounded window, NOT all rows)
+        // and that `heightOfRow` never returns 0/negative for ANY row (no clip from
+        // a zero estimate). Visible rows being EXACT is verified by the oracle check
+        // over the visible window further down.
         let precomputeStart = Date()
-        scene.coordinator.precomputeAllHeights()
+        scene.coordinator.precomputeBottomWindow()
         let precomputeMillis = Date().timeIntervalSince(precomputeStart) * 1000
         let cachedRows = scene.coordinator.cachedHeightRowCount
         let nodeCount = transcriptRenderNodes(from: items).count
-        #expect(cachedRows == nodeCount,
-                Comment(rawValue: "precomputeAllHeights left \(nodeCount - cachedRows) rows "
-                    + "unmeasured — heightOfRow would miss the cache for those"))
+        let expectedWindow = min(nodeCount, TableTranscriptView.Coordinator.bottomEagerWindow)
+        #expect(cachedRows == expectedWindow,
+                Comment(rawValue: "bottom-window precompute should cache exactly \(expectedWindow) "
+                    + "rows (the bottom window), but cached \(cachedRows)"))
+        // heightOfRow must never return a zero/negative height — a 0 would clip the
+        // row to nothing. Every estimated AND every cached row must be positive.
+        var nonPositive: [Int] = []
+        for row in 0..<nodeCount where scene.coordinator.tableView(scene.tableView, heightOfRow: row) <= 0 {
+            nonPositive.append(row)
+        }
+        #expect(nonPositive.isEmpty,
+                Comment(rawValue: "heightOfRow returned <= 0 (would clip) for rows \(nonPositive)"))
 
         // --- (c) lazy load + per-op timing during initial reload + first layout ---
         // Initial paint, as the live app does it: reloadData + run loop. We do NOT
@@ -147,8 +159,9 @@ struct TableTranscriptHarness {
         findings.append("    lastRow=\(lastRow) rect=\(lastRowRect) visible=\(visibleRect)")
         findings.append("(b) oracle violations (must be 0): \(violations.count)")
         for v in violations { findings.append("    \(v)") }
-        findings.append("FIX 1b eager precompute: \(cachedRows)/\(nodeCount) rows cached in "
-            + "\(String(format: "%.1f", precomputeMillis)) ms (heightOfRow is then all cache hits)")
+        findings.append("bottom-window precompute: \(cachedRows)/\(nodeCount) rows cached exactly in "
+            + "\(String(format: "%.1f", precomputeMillis)) ms "
+            + "(rest sized by per-kind estimate until realized)")
         findings.append("(c) lazy load: realized \(realizedAfterLoad)/\(nodes.count) cells (ok=\(lazyOK))")
         findings.append("    heightOfRow fired \(heightCallsAfterLoad)/\(nodes.count) times by full layout")
         findings.append("    INITIAL PAINT (reloadData + run loop, no forced full layout): "
@@ -795,6 +808,11 @@ struct TableTranscriptHarness {
 
         let scene = makeScene(items: items, appState: appState, fixedSize: true)
         defer { withExtendedLifetime(scene.coordinator) {} }
+        // This test asserts heightOfRow == realized for EVERY bubble row, so every
+        // row must have its EXACT height cached (not the estimate). The fixture is
+        // < bottomEagerWindow rows, so the bottom-window precompute measures them
+        // all exactly. (#129 lazy measurement.)
+        scene.coordinator.precomputeBottomWindow()
         scene.tableView.reloadData()
         settle(scene.tableView)
 
@@ -863,6 +881,41 @@ struct TableTranscriptHarness {
         let failMessage = "render != measure for some bubble row (max delta \(maxDelta)pt): "
             + deltas.joined(separator: "; ")
         #expect(maxDelta <= 1.0, Comment(rawValue: failMessage))
+    }
+
+    // MARK: - Native activity-cell dispatch
+
+    /// Confirms `viewFor` routes each kind to the right cell type: a Bash
+    /// tool-call row and the systemReminder row produce a native
+    /// `ActivityRowCellView`, the subagentSummary row produces a native
+    /// `ActivityRowCellView` (plain variant), while the AskUserQuestion row
+    /// stays SwiftUI-hosted (`TranscriptHostingCellView`). Cheap + headless: it
+    /// only asks the coordinator for cells, so it runs in normal `swift test`.
+    @Test("native activity cells: Bash + systemReminder dispatch to ActivityRowCellView; AskUserQuestion stays hosted")
+    func activityCellDispatch() {
+        let suiteName = "table-harness-activity-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = Self.allKindsFixture()
+        let nodes = transcriptRenderNodes(from: items)
+        let scene = makeScene(items: items, appState: appState, fixedSize: true)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+
+        func cell(forID id: String) -> NSView? {
+            guard let row = nodes.firstIndex(where: { $0.id == id }) else { return nil }
+            return scene.coordinator.tableView(scene.tableView, viewFor: nil, row: row)
+        }
+
+        #expect(cell(forID: "k-bash") is ActivityRowCellView,
+                "Bash tool-call row must dispatch to the native ActivityRowCellView")
+        #expect(cell(forID: "k-reminder") is ActivityRowCellView,
+                "systemReminder row must dispatch to the native ActivityRowCellView")
+        #expect(cell(forID: "k-task#subagent") is ActivityRowCellView,
+                "subagentSummary row must dispatch to the native ActivityRowCellView")
+        #expect(cell(forID: "k-ask") is TranscriptHostingCellView,
+                "AskUserQuestion row must stay SwiftUI-hosted (TranscriptHostingCellView)")
     }
 
     // MARK: - Spot anchors (user-named clipping symptoms)
