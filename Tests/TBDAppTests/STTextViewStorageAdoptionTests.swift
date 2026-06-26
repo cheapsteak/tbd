@@ -19,7 +19,7 @@ import Testing
 struct STTextViewStorageAdoptionTests {
 
     private func ctx() -> TranscriptCardContext {
-        TranscriptCardContext(terminalID: nil, openTranscriptOverlay: nil, navigateToThread: nil, appState: nil)
+        TranscriptCardContext(terminalID: nil, openTranscriptOverlay: nil, appState: nil)
     }
 
     /// Build a headless STTextView and return it together with its own

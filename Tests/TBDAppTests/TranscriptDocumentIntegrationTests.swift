@@ -12,7 +12,6 @@ struct TranscriptDocumentIntegrationTests {
         TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: nil,
-            navigateToThread: nil,
             appState: nil
         )
     }

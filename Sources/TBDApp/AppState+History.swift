@@ -111,8 +111,6 @@ extension AppState {
     /// Select a session and load its transcript (stale-while-revalidate: skip if already loaded).
     func selectSession(_ summary: SessionSummary, worktreeID: UUID) async {
         selectedSessionIDs[worktreeID] = summary.sessionId
-        // Reset drill-in: a freshly selected session always starts on Main.
-        historyThreadPath[worktreeID] = []
         guard sessionTranscripts[summary.sessionId] == nil else { return }
         sessionTranscriptLoading.insert(summary.sessionId)
         defer { sessionTranscriptLoading.remove(summary.sessionId) }

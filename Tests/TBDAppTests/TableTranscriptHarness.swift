@@ -545,7 +545,6 @@ struct TableTranscriptHarness {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            navigateToThread: { _ in },
             appState: appState
         )
         let coordinator = InstrumentedCoordinator(context: context, useFixedSize: fixedSize)
@@ -887,10 +886,9 @@ struct TableTranscriptHarness {
 
     /// Confirms `viewFor` routes each kind to the right cell type: a Bash
     /// tool-call row and the systemReminder row produce a native
-    /// `ActivityRowCellView`, the subagentSummary row produces a native
-    /// `ActivityRowCellView` (plain variant), while the AskUserQuestion row
-    /// stays SwiftUI-hosted (`TranscriptHostingCellView`). Cheap + headless: it
-    /// only asks the coordinator for cells, so it runs in normal `swift test`.
+    /// `ActivityRowCellView`, while the AskUserQuestion row stays SwiftUI-hosted
+    /// (`TranscriptHostingCellView`). Cheap + headless: it only asks the
+    /// coordinator for cells, so it runs in normal `swift test`.
     @Test("native activity cells: Bash + systemReminder dispatch to ActivityRowCellView; AskUserQuestion stays hosted")
     func activityCellDispatch() {
         let suiteName = "table-harness-activity-\(UUID().uuidString)"
@@ -912,8 +910,6 @@ struct TableTranscriptHarness {
                 "Bash tool-call row must dispatch to the native ActivityRowCellView")
         #expect(cell(forID: "k-reminder") is ActivityRowCellView,
                 "systemReminder row must dispatch to the native ActivityRowCellView")
-        #expect(cell(forID: "k-task#subagent") is ActivityRowCellView,
-                "subagentSummary row must dispatch to the native ActivityRowCellView")
         #expect(cell(forID: "k-ask") is TranscriptHostingCellView,
                 "AskUserQuestion row must stay SwiftUI-hosted (TranscriptHostingCellView)")
     }

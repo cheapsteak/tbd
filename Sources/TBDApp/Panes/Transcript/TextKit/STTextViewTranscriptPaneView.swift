@@ -76,10 +76,6 @@ struct STTextViewTranscriptPaneView: View {
         return appState.sessionTranscripts[sid] ?? []
     }
 
-    private var path: [String] {
-        appState.liveThreadPath[terminalID] ?? []
-    }
-
     /// Process-lifetime cache of the perf-harness config; inert (nil) in production.
     private static let harnessConfigCache: TranscriptPerfHarnessConfig? =
         TranscriptPerfHarness.config(from: ProcessInfo.processInfo.environment)
@@ -90,7 +86,7 @@ struct STTextViewTranscriptPaneView: View {
         TranscriptPerfHarness.displayedMessages(
             harnessActive: harnessConfig != nil,
             harness: harnessMessages,
-            real: resolveThread(root: messages, path: path)
+            real: messages
         )
     }
 
@@ -175,9 +171,6 @@ struct STTextViewTranscriptPaneView: View {
         let cardContext = TranscriptCardContext(
             terminalID: terminalID,
             openTranscriptOverlay: openTranscriptOverlay,
-            navigateToThread: { id in
-                appState.liveThreadPath[terminalID, default: []].append(id)
-            },
             appState: appState
         )
         STTextViewTranscriptView(
@@ -254,8 +247,7 @@ struct STTextViewTranscriptPaneView: View {
         // session this terminal resolved to and how. (#129)
         let sid = currentSessionID
         let rootCount = sid.map { appState.sessionTranscripts[$0]?.count ?? 0 } ?? 0
-        let threadPath = path
-        let resolved = resolveThread(root: messages, path: threadPath)
+        let resolved = messages
         Self.diagLog.debug(
             "resolve sid term=\(tidShort, privacy: .public) sid=\(sid ?? "nil", privacy: .public) lastSessionID=\(self.lastSessionID ?? "nil", privacy: .public) source=terminal.claudeSessionID"
         )
@@ -263,7 +255,7 @@ struct STTextViewTranscriptPaneView: View {
             "messages term=\(tidShort, privacy: .public) sid=\(sid ?? "nil", privacy: .public) rootCount=\(rootCount, privacy: .public)"
         )
         Self.diagLog.debug(
-            "thread term=\(tidShort, privacy: .public) pathCount=\(threadPath.count, privacy: .public) path=\(threadPath.joined(separator: ","), privacy: .public) displayedCount=\(resolved.count, privacy: .public)"
+            "thread term=\(tidShort, privacy: .public) displayedCount=\(resolved.count, privacy: .public)"
         )
         if let first = resolved.first {
             let (role, text) = Self.diagLabel(first)
@@ -359,7 +351,6 @@ struct STTextViewTranscriptPaneView: View {
             Self.diagLog.debug(
                 "rollover term=\(tidShort, privacy: .public) last=\(last, privacy: .public) current=\(sid, privacy: .public) action=reset"
             )
-            liveThreadPathReset()
         } else if lastSessionID == nil {
             // Diag: first poll, no prior sid to compare. (#129)
             Self.diagLog.debug(
@@ -412,10 +403,9 @@ struct STTextViewTranscriptPaneView: View {
                 Self.diagLog.debug(
                     "messages term=\(tidShort, privacy: .public) sid=\(resolvedSID, privacy: .public) rootCount=\(rootCount, privacy: .public)"
                 )
-                let threadPath = path
-                let resolved = resolveThread(root: messages, path: threadPath)
+                let resolved = messages
                 Self.diagLog.debug(
-                    "thread term=\(tidShort, privacy: .public) pathCount=\(threadPath.count, privacy: .public) path=\(threadPath.joined(separator: ","), privacy: .public) displayedCount=\(resolved.count, privacy: .public)"
+                    "thread term=\(tidShort, privacy: .public) displayedCount=\(resolved.count, privacy: .public)"
                 )
                 if let first = resolved.first {
                     let (role, text) = Self.diagLabel(first)
@@ -434,11 +424,6 @@ struct STTextViewTranscriptPaneView: View {
         let pollElapsed = ContinuousClock.now - pollStart
         let pollMs = Int(pollElapsed.components.seconds * 1000 + pollElapsed.components.attoseconds / 1_000_000_000_000_000)
         Self.perfLog.debug("textkit.pollOnce.end sid=\(sidShort, privacy: .public) elapsed_ms=\(pollMs, privacy: .public) changed=\(changed, privacy: .public) count=\(finalCount, privacy: .public)")
-    }
-
-    /// Clears the subagent drill path for this terminal on session rollover.
-    private func liveThreadPathReset() {
-        appState.liveThreadPath[terminalID] = []
     }
 
     private func messagesEqual(_ a: [TranscriptItem], _ b: [TranscriptItem]) -> Bool {

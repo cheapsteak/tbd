@@ -360,7 +360,6 @@ struct TranscriptForcedLayoutBench {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            navigateToThread: { _ in },
             appState: appState
         )
         let document = TranscriptDocument(context: context)
@@ -444,7 +443,6 @@ struct TranscriptForcedLayoutBench {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            navigateToThread: { _ in },
             appState: appState
         )
         let document = TranscriptDocument(context: context)

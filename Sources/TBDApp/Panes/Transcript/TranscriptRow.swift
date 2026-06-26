@@ -84,8 +84,11 @@ struct TranscriptRow: View {
         case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let ts):
             toolCard(id: id, name: name, inputJSON: inputJSON,
                      inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts)
-        case .subagentSummary(_, let count, let agentType):
-            SubagentSummaryRow(count: count, agentType: agentType)
+        case .subagentSummary:
+            // Subagent summaries are no longer surfaced in the transcript; the
+            // enum case is retained for Codable/source compatibility but is
+            // never produced by `transcriptRenderNodes(from:)`.
+            EmptyView()
         }
     }
 

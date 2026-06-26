@@ -1197,31 +1197,19 @@ extension RPCRouter {
             return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
         }
 
-        // Prefer hook-reported path; derive the subagents directory from
-        // either the stored path's parent or the legacy projectDir.
+        // The transcript renders parent-file items only (Task/Agent tool calls
+        // and their results live in the parent JSONL), so the full-body lookup
+        // scans only the primary session file — subagent JSONLs are never opened.
         let primaryPath: String
-        let subagentsDir: URL
         if let storedPath = terminal.transcriptPath, !storedPath.isEmpty {
             primaryPath = storedPath
-            let parent = (storedPath as NSString).deletingLastPathComponent
-            subagentsDir = URL(fileURLWithPath: parent)
-                .appendingPathComponent(sessionID)
-                .appendingPathComponent("subagents")
         } else {
             guard let projectDir = ClaudeProjectDirectory.resolve(worktreePath: worktree.path) else {
                 return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: "Output no longer available."))
             }
             primaryPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
-            subagentsDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
         }
-        var paths = [primaryPath]
-        if let subFiles = try? FileManager.default.contentsOfDirectory(at: subagentsDir, includingPropertiesForKeys: nil) {
-            paths.append(contentsOf: subFiles
-                .filter { $0.pathExtension == "jsonl" }
-                .sorted { $0.lastPathComponent < $1.lastPathComponent }
-                .map { $0.path })
-        }
-        let text = TranscriptParser.lookupFullBody(filePaths: paths, itemID: params.itemID)
+        let text = TranscriptParser.lookupFullBody(filePath: primaryPath, itemID: params.itemID)
             ?? "Output no longer available."
 
         return try RPCResponse(result: TerminalTranscriptItemFullBodyResult(text: text))

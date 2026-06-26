@@ -47,7 +47,6 @@ struct TranscriptCardAttachmentTests {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            navigateToThread: { _ in },
             appState: appState
         )
 

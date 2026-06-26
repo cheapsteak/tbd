@@ -83,15 +83,17 @@ struct ActivityRowFormatterTests {
         #expect(titleText(p).contains("in Sources"))
     }
 
-    @Test("Agent/Task: sparkles icon + navigate target (not open)")
+    @Test("Agent/Task: sparkles icon + opens the overlay like any other tool card")
     func agent() throws {
         let node = TranscriptRenderNode.makeToolCall(
             id: "t1", name: "Task",
             inputJSON: #"{"description":"Investigate","subagent_type":"Explore"}"#)
         let p = try #require(ActivityRowFormatter.presentation(for: node))
         #expect(p.iconSystemName == "sparkles")
-        #expect(p.navigateTargetID == "t1")
-        #expect(p.openTargetID == nil)
+        // Subagent drill-in was removed: Agent/Task rows open the standard
+        // overlay (input + result), not a nested thread.
+        #expect(p.openTargetID == "t1")
+        #expect(p.navigateTargetID == nil)
         #expect(titleText(p).contains("Investigate"))
     }
 

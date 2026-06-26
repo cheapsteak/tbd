@@ -308,7 +308,6 @@ struct TranscriptScrollCompareHarness {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            navigateToThread: { _ in },
             appState: appState
         )
         let coordinator = STTextViewTranscriptView.Coordinator(
@@ -414,7 +413,6 @@ struct TranscriptScrollCompareHarness {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            navigateToThread: { _ in },
             appState: appState
         )
         let coordinator = STTextViewTranscriptView.Coordinator(
@@ -517,7 +515,6 @@ struct TranscriptScrollCompareHarness {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            navigateToThread: { _ in },
             appState: appState
         )
         let document = TranscriptDocument(context: context)
@@ -613,7 +610,6 @@ struct TranscriptScrollCompareHarness {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            navigateToThread: { _ in },
             appState: appState
         )
         let coordinator = STTextViewTranscriptView.Coordinator(

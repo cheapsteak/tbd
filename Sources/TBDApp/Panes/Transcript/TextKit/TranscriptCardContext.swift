@@ -7,6 +7,5 @@ import SwiftUI
 struct TranscriptCardContext {
     let terminalID: UUID?
     let openTranscriptOverlay: (@MainActor (String) -> Void)?
-    let navigateToThread: (@MainActor (String) -> Void)?
     let appState: AppState?
 }

@@ -6,7 +6,7 @@ import Testing
 @Suite("Transcript document builder")
 struct TranscriptDocumentBuilderTests {
     private func ctx() -> TranscriptCardContext {
-        TranscriptCardContext(terminalID: nil, openTranscriptOverlay: nil, navigateToThread: nil, appState: nil)
+        TranscriptCardContext(terminalID: nil, openTranscriptOverlay: nil, appState: nil)
     }
 
     @Test("assistant chat bubble renders header + markdown body")

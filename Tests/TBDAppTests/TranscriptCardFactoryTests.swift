@@ -6,7 +6,7 @@ import Testing
 @Suite("Transcript card factory")
 struct TranscriptCardFactoryTests {
     private func ctx() -> TranscriptCardContext {
-        TranscriptCardContext(terminalID: nil, openTranscriptOverlay: nil, navigateToThread: nil, appState: nil)
+        TranscriptCardContext(terminalID: nil, openTranscriptOverlay: nil, appState: nil)
     }
 
     @Test("interactive tool call yields a card")

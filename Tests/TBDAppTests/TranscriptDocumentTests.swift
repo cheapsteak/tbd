@@ -6,7 +6,7 @@ import Testing
 @Suite("Transcript document")
 struct TranscriptDocumentTests {
     private func ctx() -> TranscriptCardContext {
-        TranscriptCardContext(terminalID: nil, openTranscriptOverlay: nil, navigateToThread: nil, appState: nil)
+        TranscriptCardContext(terminalID: nil, openTranscriptOverlay: nil, appState: nil)
     }
 
     @Test("append grows length and records the node range; earlier ranges stable")

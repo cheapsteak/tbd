@@ -67,7 +67,6 @@ enum TranscriptCardFactory {
         AnyView(
             view
                 .environment(\.openTranscriptOverlay, context.openTranscriptOverlay)
-                .environment(\.navigateToThread, context.navigateToThread)
         )
     }
 
@@ -184,7 +183,6 @@ enum TranscriptCardFactory {
                 )
                 .environmentObject(appState)
                 .environment(\.openTranscriptOverlay, context.openTranscriptOverlay)
-                .environment(\.navigateToThread, context.navigateToThread)
             )
         default:
             return wrap(

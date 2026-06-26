@@ -33,6 +33,11 @@ struct TableTranscriptView: NSViewRepresentable {
     }
 
     func makeNSView(context ctx: Context) -> NSScrollView {
+        // OPEN-PATH BOUNDARY TIMING (#129 freeze hunt). Permanent-but-off: emitted
+        // at `.debug` so it is silent + free by default; re-enable with:
+        //   log stream --level debug --predicate
+        //     'subsystem == "com.tbd.app" AND category == "table-transcript"'
+        let makeStart = DispatchTime.now().uptimeNanoseconds
         let coordinator = ctx.coordinator
 
         // Disable AppKit's off-screen row-height ESTIMATION. On Ventura+
@@ -99,6 +104,20 @@ struct TableTranscriptView: NSViewRepresentable {
         // table has performed its first layout pass and row frames exist.
         DispatchQueue.main.async {
             coordinator.scrollToEnd(animated: false)
+            // Re-pin once more on the NEXT runloop turn. The first scroll-to-end
+            // lands on the bottom window's exact heights, but a row realizing just
+            // above the viewport can still fire a zero-duration height correction
+            // after this turn; with anchoring removed that correction no longer
+            // compensates the offset, so a second `scrollToEnd` reasserts the
+            // bottom after those corrections settle. (#129)
+            DispatchQueue.main.async {
+                coordinator.scrollToEnd(animated: false)
+                // First layout has settled (bottom window measured, initial
+                // scroll-to-end + its re-pin applied). One-shot boundary marker.
+                let settledMs = Double(DispatchTime.now().uptimeNanoseconds &- makeStart) / 1_000_000
+                Self.log.debug(
+                    "table.open.firstLayoutSettled ms=\(settledMs, format: .fixed(precision: 1), privacy: .public)")
+            }
         }
 
         Self.warmHighlightrOnce()
@@ -109,6 +128,10 @@ struct TableTranscriptView: NSViewRepresentable {
             "table.estimation canEstimate=\(UserDefaults.standard.bool(forKey: "NSTableViewCanEstimateRowHeights"), privacy: .public) usesAutomaticRowHeights=\(tableView.usesAutomaticRowHeights, privacy: .public)")
 
         Self.log.debug("table.installed rows=\(nodes.count, privacy: .public)")
+
+        let makeNSViewMs = Double(DispatchTime.now().uptimeNanoseconds &- makeStart) / 1_000_000
+        Self.log.debug(
+            "table.open.makeNSViewDone ms=\(makeNSViewMs, format: .fixed(precision: 1), privacy: .public) rows=\(nodes.count, privacy: .public)")
         return scrollView
     }
 
@@ -156,6 +179,14 @@ struct TableTranscriptView: NSViewRepresentable {
         /// A re-poll that leaves a row's id+version unchanged reuses the cached
         /// height; a width change invalidates every entry (heights re-flow).
         private var heightCache: [HeightKey: CGFloat] = [:]
+        /// Cheap per-kind ESTIMATE cache, keyed identically to `heightCache`.
+        /// `heightOfRow` is called ~3×/row by AppKit and each compute scans the
+        /// message text; caching the estimate turns those repeat scans into hash
+        /// hits (~3× fewer `estimate(...)` computes per open). An entry here is
+        /// SUPERSEDED by the exact height the moment a row is realized + measured
+        /// in `viewFor` (the exact cache is consulted first), and both caches are
+        /// cleared together on a width change / rebuild. (#129)
+        private var estimateCache: [HeightKey: CGFloat] = [:]
         /// The column width the cache was last computed against. When the table's
         /// width changes, the cache is cleared and the table reloaded.
         private var cachedColumnWidth: CGFloat = 0
@@ -275,7 +306,11 @@ struct TableTranscriptView: NSViewRepresentable {
 
             func ms(_ nanos: UInt64) -> Double { Double(nanos) / 1_000_000 }
             let p = openPerf
-            Self.log.info(
+            // `.debug` so these perf summaries are silent + free by default. Read
+            // them back with:
+            //   log stream --level debug --predicate
+            //     'subsystem == "com.tbd.app" AND category == "table-transcript"'
+            Self.log.debug(
                 """
                 table.openperf nodeCount=\(self.nodes.count, privacy: .public) \
                 precomputeMs=\(ms(precomputeNanos), format: .fixed(precision: 1), privacy: .public) \
@@ -295,7 +330,7 @@ struct TableTranscriptView: NSViewRepresentable {
             // subset ⇒ lazy measurement could defer most of the precompute cost).
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                Self.log.info(
+                Self.log.debug(
                     "table.openperf.heightCalls heightOfRowCallsDuringOpen=\(self.heightOfRowCalls, privacy: .public) nodeCount=\(self.nodes.count, privacy: .public)")
             }
         }
@@ -409,7 +444,15 @@ struct TableTranscriptView: NSViewRepresentable {
             // is what keeps a deep scroll-up landing close before the correction.
             let key = HeightKey(id: node.id, version: node.contentVersion, width: width)
             if let cached = heightCache[key] { return cached }
-            return Self.estimate(for: node, width: width)
+            // Lazy estimate: serve a cached estimate if we already computed one for
+            // this key, else compute it ONCE and cache. AppKit asks for a row's
+            // height repeatedly (~3×) before realizing it; without this cache each
+            // ask re-scans the message text. The exact cache above always wins, so
+            // a realized row stops hitting the estimate path entirely. (#129)
+            if let cachedEstimate = estimateCache[key] { return cachedEstimate }
+            let estimate = Self.estimate(for: node, width: width)
+            estimateCache[key] = estimate
+            return estimate
         }
 
         func tableView(
@@ -447,7 +490,10 @@ struct TableTranscriptView: NSViewRepresentable {
         /// for a freshly-realized (previously-estimated) row, ask AppKit to re-lay
         /// just this row, wrapped in a zero-duration animation so the height change
         /// is instant (no animated grow/shrink). Only on-screen rows reach here, so
-        /// the correction is bounded to what the user can actually see. (#129)
+        /// the correction is bounded to what the user can actually see. No
+        /// scroll-offset compensation: the initial open pins to the bottom via
+        /// `scrollToEnd`, and a realize-time correction must not drag the viewport
+        /// away from there. (#129)
         private func correctRowHeightIfNeeded(
             _ tableView: NSTableView,
             row: Int,
@@ -458,6 +504,7 @@ struct TableTranscriptView: NSViewRepresentable {
             let key = HeightKey(id: node.id, version: node.contentVersion, width: width)
             guard let exact = heightCache[key], abs(exact - estimate) > 0.5 else { return }
             guard tableView.numberOfRows > row else { return }
+
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0
                 tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
@@ -557,13 +604,12 @@ struct TableTranscriptView: NSViewRepresentable {
             let width = columnWidth
             let height = measuredHeight(for: node, width: width)
             let openOverlay = context.openTranscriptOverlay
-            let navigate = context.navigateToThread
             let onOpen: (() -> Void)?
             if let target = presentation.openTargetID {
                 onOpen = { openOverlay?(target) }
-            } else if let target = presentation.navigateTargetID {
-                onOpen = { navigate?(target) }
             } else {
+                // `navigateTargetID` is retained on the presentation for source
+                // compatibility but is never set — subagent drill-in was removed.
                 onOpen = nil
             }
             cell.configure(
@@ -608,7 +654,6 @@ struct TableTranscriptView: NSViewRepresentable {
                 // pane, which leaves this env false. (#129)
                 .environment(\.transcriptStaticCards, true)
                 .environment(\.openTranscriptOverlay, context.openTranscriptOverlay)
-                .environment(\.navigateToThread, context.navigateToThread)
                 .environmentObjectIfPresent(context.appState)
         }
 
@@ -765,6 +810,7 @@ struct TableTranscriptView: NSViewRepresentable {
             if abs(width - cachedColumnWidth) > 0.5 {
                 cachedColumnWidth = width
                 heightCache.removeAll(keepingCapacity: true)
+                estimateCache.removeAll(keepingCapacity: true)
                 composedCache.removeAll(keepingCapacity: true)
                 nodes = newNodes
                 previousNodes = newNodes
@@ -792,6 +838,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 // True rebuild: clear the cache, measure the bottom window exactly,
                 // reload (older rows lazily estimate + correct on realize).
                 heightCache.removeAll(keepingCapacity: true)
+                estimateCache.removeAll(keepingCapacity: true)
                 composedCache.removeAll(keepingCapacity: true)
                 precomputeBottomWindow()
                 tableView.reloadData()
@@ -799,6 +846,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 let newCount = newNodes.count
                 guard newCount > fromIndex, fromIndex <= oldCount else {
                     heightCache.removeAll(keepingCapacity: true)
+                    estimateCache.removeAll(keepingCapacity: true)
                     composedCache.removeAll(keepingCapacity: true)
                     precomputeBottomWindow()
                     tableView.reloadData()
@@ -851,6 +899,12 @@ struct TableTranscriptView: NSViewRepresentable {
         private func invalidateHeight(for node: TranscriptRenderNode) {
             for key in heightCache.keys where key.id == node.id {
                 heightCache.removeValue(forKey: key)
+            }
+            // Drop any cached estimate for this node too, so a growing streaming
+            // bubble re-estimates (and re-measures) at its new content rather than
+            // serving the stale estimate the first poll cached. (#129)
+            for key in estimateCache.keys where key.id == node.id {
+                estimateCache.removeValue(forKey: key)
             }
         }
 

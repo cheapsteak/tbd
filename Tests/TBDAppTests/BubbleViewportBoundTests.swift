@@ -22,7 +22,6 @@ struct BubbleViewportBoundTests {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: nil,
-            navigateToThread: nil,
             appState: nil
         )
         let document = TranscriptDocument(context: context)

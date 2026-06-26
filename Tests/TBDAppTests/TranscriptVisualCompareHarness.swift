@@ -118,7 +118,6 @@ struct TranscriptVisualCompareHarness {
     ) throws -> CGFloat {
         let root = TranscriptItemsView(items: items, terminalID: nil, atBottom: .constant(true))
             .environment(\.openTranscriptOverlay, { _ in })
-            .environment(\.navigateToThread, { _ in })
             .environment(\.openFilePreview, { _ in })
             .environmentObject(appState)
             .frame(width: Self.width)
@@ -150,7 +149,6 @@ struct TranscriptVisualCompareHarness {
         let context = TranscriptCardContext(
             terminalID: nil,
             openTranscriptOverlay: { _ in },
-            navigateToThread: { _ in },
             appState: appState
         )
         let document = TranscriptDocument(context: context)

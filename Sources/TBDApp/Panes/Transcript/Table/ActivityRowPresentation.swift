@@ -357,8 +357,8 @@ enum ActivityRowFormatter {
             timestamp: timestamp,
             isError: result?.isError == true,
             badges: badges,
-            openTargetID: nil,
-            navigateTargetID: id
+            openTargetID: id,
+            navigateTargetID: nil
         )
     }
 

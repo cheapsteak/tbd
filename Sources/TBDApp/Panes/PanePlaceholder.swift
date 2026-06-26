@@ -114,15 +114,6 @@ struct PanePlaceholder: View {
         .applyTranscriptCopyPathContextMenu(path: transcriptPath)
     }
 
-    /// Description of the current drilled-into subagent for the heading, or nil
-    /// at the Main level. Resolves against the terminal's live transcript.
-    private func liveThreadHeadingLabel(terminalID: UUID, path: [String]) -> String? {
-        guard !path.isEmpty,
-              let sessionID = terminal(for: terminalID)?.claudeSessionID,
-              let items = appState.sessionTranscripts[sessionID] else { return nil }
-        return threadLabel(root: items, path: path)
-    }
-
     /// Resolved Claude session JSONL path for liveTranscript panes; nil otherwise.
     private var transcriptPath: String? {
         if case .liveTranscript(_, let terminalID) = content {
@@ -167,26 +158,12 @@ struct PanePlaceholder: View {
             EditableNoteTitle(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):
             let term = terminal(for: terminalID)
-            let path = appState.liveThreadPath[terminalID] ?? []
-            let label = liveThreadHeadingLabel(terminalID: terminalID, path: path)
             HStack(spacing: 4) {
-                if path.isEmpty {
-                    Image(systemName: "text.bubble")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 10)
-                    Text(term?.label ?? "Transcript")
-                } else {
-                    Button {
-                        appState.liveThreadPath[terminalID]?.removeLast()
-                    } label: {
-                        HStack(spacing: 2) {
-                            Image(systemName: "chevron.left")
-                            Text(label ?? "Subagent").lineLimit(1)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
+                Image(systemName: "text.bubble")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 10)
+                Text(term?.label ?? "Transcript")
             }
         }
     }

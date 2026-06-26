@@ -36,6 +36,24 @@ struct TableTranscriptPaneView: View {
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "live-transcript")
 
+    /// OPEN-PATH BOUNDARY TIMING (#129 freeze hunt). Permanent-but-off: emitted
+    /// at `.debug` so it is silent + free by default; re-enable with:
+    ///   log stream --level debug --predicate
+    ///     'subsystem == "com.tbd.app" AND category == "table-transcript"'
+    /// These fire ONCE on first open, not on every 1.5s poll. A reference-type
+    /// holder so mutating it from non-mutating contexts (the poll loop, the
+    /// node-build closure) needs no `@State` write-back.
+    private static let openLog = Logger(subsystem: "com.tbd.app", category: "table-transcript")
+    @State private var openTiming = OpenTiming()
+
+    /// One-shot open-timing latches + the pane-appear clock origin.
+    private final class OpenTiming {
+        let paneAppearNanos = DispatchTime.now().uptimeNanoseconds
+        var didLogFetch = false
+        var didLogNodes = false
+        var didLogFirstRender = false
+    }
+
     private var terminal: Terminal? {
         appState.terminals[worktreeID]?.first { $0.id == terminalID }
     }
@@ -49,12 +67,8 @@ struct TableTranscriptPaneView: View {
         return appState.sessionTranscripts[sid] ?? []
     }
 
-    private var path: [String] {
-        appState.liveThreadPath[terminalID] ?? []
-    }
-
     private var displayedMessages: [TranscriptItem] {
-        resolveThread(root: messages, path: path)
+        messages
     }
 
     var body: some View {
@@ -120,16 +134,13 @@ struct TableTranscriptPaneView: View {
         let cardContext = TranscriptCardContext(
             terminalID: terminalID,
             openTranscriptOverlay: openTranscriptOverlay,
-            navigateToThread: { id in
-                appState.liveThreadPath[terminalID, default: []].append(id)
-            },
             appState: appState
         )
         TableTranscriptView(
             context: cardContext,
             atBottom: $atBottom,
             scrollToBottomToken: scrollToBottomToken,
-            nodesProvider: { transcriptRenderNodes(from: displayedMessages) }
+            nodesProvider: { timedRenderNodes(from: displayedMessages) }
         )
         // Compose the terminal with its current Claude session so a session
         // rollover within one terminal tears down and rebuilds the stateful
@@ -165,6 +176,30 @@ struct TableTranscriptPaneView: View {
         }
     }
 
+    // MARK: - Open-path node build (timed, one-shot)
+
+    /// Builds the render nodes, emitting one-shot `.debug` boundary markers for
+    /// the FIRST non-empty build (`table.open.nodesBuilt`) and the first render
+    /// reaching the table (`table.open.firstRender`, measured from pane appear).
+    private func timedRenderNodes(from messages: [TranscriptItem]) -> [TranscriptRenderNode] {
+        let timing = openTiming
+        let buildStart = DispatchTime.now().uptimeNanoseconds
+        let nodes = transcriptRenderNodes(from: messages)
+        if !timing.didLogNodes, !nodes.isEmpty {
+            timing.didLogNodes = true
+            let ms = Double(DispatchTime.now().uptimeNanoseconds &- buildStart) / 1_000_000
+            Self.openLog.debug(
+                "table.open.nodesBuilt ms=\(ms, format: .fixed(precision: 1), privacy: .public) nodeCount=\(nodes.count, privacy: .public)")
+        }
+        if !timing.didLogFirstRender, !nodes.isEmpty {
+            timing.didLogFirstRender = true
+            let ms = Double(DispatchTime.now().uptimeNanoseconds &- timing.paneAppearNanos) / 1_000_000
+            Self.openLog.debug(
+                "table.open.firstRender ms=\(ms, format: .fixed(precision: 1), privacy: .public)")
+        }
+        return nodes
+    }
+
     // MARK: - Polling
 
     private func pollLoop() async {
@@ -182,15 +217,22 @@ struct TableTranscriptPaneView: View {
     private func pollOnce(failureCount: inout Int) async {
         guard let sid = currentSessionID else { return }
 
-        // Detect session rollover: reset the drill path and initial-state guard.
+        // Detect session rollover: reset the initial-state guard.
         if let last = lastSessionID, last != sid {
             hasShownInitialMessages = false
-            appState.liveThreadPath[terminalID] = []
         }
         lastSessionID = sid
 
         do {
+            let fetchStart = DispatchTime.now().uptimeNanoseconds
             let result = try await appState.daemonClient.terminalTranscript(terminalID: terminalID)
+            // One-shot RPC round-trip marker for the FIRST poll on open.
+            if !openTiming.didLogFetch {
+                openTiming.didLogFetch = true
+                let ms = Double(DispatchTime.now().uptimeNanoseconds &- fetchStart) / 1_000_000
+                Self.openLog.debug(
+                    "table.open.fetchDone ms=\(ms, format: .fixed(precision: 1), privacy: .public) itemCount=\(result.messages.count, privacy: .public)")
+            }
             failureCount = 0
             let resolvedSID = result.sessionID ?? sid
             await MainActor.run {
