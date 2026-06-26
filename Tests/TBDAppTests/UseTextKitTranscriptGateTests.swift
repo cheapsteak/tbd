@@ -59,12 +59,12 @@ struct UseTableViewTranscriptGateTests {
         return d
     }
 
-    @Test("unset defaults to false (fail closed)")
-    func unsetIsFalse() {
+    @Test("unset defaults to true (table pane is the default renderer)")
+    func unsetIsTrue() {
         let name = "tableview-gate-unset"
         let d = suite(name)
         defer { d.removePersistentDomain(forName: name) }
-        #expect(AppState.useTableViewTranscript(defaults: d) == false)
+        #expect(AppState.useTableViewTranscript(defaults: d) == true)
     }
 
     @Test("true enables the table pane")
@@ -90,7 +90,7 @@ struct UseTableViewTranscriptGateTests {
         #expect(TranscriptRenderer.resolve(useTableView: false, useTextKit: false) == .swiftUI)
     }
 
-    @Test("false read of the accessor (fail closed)")
+    @Test("returns false only when the user explicitly turns it off")
     func falseIsFalse() {
         let name = "tableview-gate-false"
         let d = suite(name)

@@ -41,7 +41,7 @@ struct PanePlaceholder: View {
     @State private var didCopyURL = false
     @AppStorage(AppState.enableTranscriptKey) private var transcriptFeatureEnabled = false
     @AppStorage(AppState.useTextKitTranscriptKey) private var useTextKitTranscript = false
-    @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript = false
+    @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript = true
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {

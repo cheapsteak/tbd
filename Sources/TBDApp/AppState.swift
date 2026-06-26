@@ -1497,15 +1497,18 @@ final class AppState: ObservableObject {
     /// TextKit 2 / STTextView renderer: the table pane reuses the existing
     /// SwiftUI row views (`SelectableTranscriptRow`) hosted per-cell with an
     /// explicit height cache, replacing the fragile single-document TextKit
-    /// approach. Defaults false. (#129)
+    /// approach. Defaults true — the table pane is the default renderer; the
+    /// Settings toggle can turn it off to fall back to the legacy SwiftUI pane
+    /// for comparison. (#129)
     static let useTableViewTranscriptKey = "useTableViewTranscript"
 
-    /// Fail-closed read of the NSTableView transcript toggle for non-View callers
-    /// (the View layer uses `@AppStorage` directly). Only meaningful when
-    /// `transcriptFeatureEnabled` is also true. Takes precedence over
-    /// `useTextKitTranscript` when both are set.
+    /// Read of the NSTableView transcript toggle for non-View callers (the View
+    /// layer uses `@AppStorage` directly). Only meaningful when
+    /// `transcriptFeatureEnabled` is also true. Defaults true (the table pane is
+    /// the default renderer); returns false only when the user explicitly turns
+    /// it off. Takes precedence over `useTextKitTranscript` when set.
     static func useTableViewTranscript(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: useTableViewTranscriptKey) as? Bool ?? false
+        defaults.object(forKey: useTableViewTranscriptKey) as? Bool ?? true
     }
 
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.
