@@ -36,8 +36,16 @@ enum TranscriptBubbleGeometry {
     static let outerNear: CGFloat = 12
     /// Outer top/bottom padding.
     static let outerVertical: CGFloat = 4
-    /// bubbleBody inner horizontal insets (11 leading + 11 trailing).
-    static let bodyHorizontal: CGFloat = 22
+    /// bubbleBody inner horizontal insets. User bubbles keep an 11pt inset on each
+    /// side (visible chat-bubble padding). Assistant messages have no visible bubble,
+    /// so they use ZERO horizontal inset — content sits flush at the box edge so it
+    /// aligns with the header and the 12pt tool-row inset.
+    static func bodyHorizontal(for role: Role) -> CGFloat {
+        switch role {
+        case .user: return 22
+        case .assistant: return 0
+        }
+    }
     /// bubbleBody inner vertical insets (8 top + 8 bottom).
     static let bodyVertical: CGFloat = 16
     /// VStack header→body spacing.
@@ -55,7 +63,7 @@ enum TranscriptBubbleGeometry {
     /// assistant bubble drops the gutter and spans the full column. Measure and
     /// render pass the SAME role, so heights can't drift.
     static func bodyWidth(columnWidth: CGFloat, role: Role) -> CGFloat {
-        max(columnWidth - outerHorizontal(for: role) - bodyHorizontal, 1)
+        max(columnWidth - outerHorizontal(for: role) - bodyHorizontal(for: role), 1)
     }
 
     /// Total row height: summed block heights + inter-block spacing + fixed chrome
@@ -335,6 +343,8 @@ final class TranscriptBubbleCellView: NSTableCellView {
     private var boxLeading: NSLayoutConstraint!
     private var boxTrailing: NSLayoutConstraint!
     private var boxWidth: NSLayoutConstraint!
+    private var blockLeading: NSLayoutConstraint!
+    private var blockTrailing: NSLayoutConstraint!
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -375,6 +385,10 @@ final class TranscriptBubbleCellView: NSTableCellView {
         boxLeading = backgroundBox.leadingAnchor.constraint(equalTo: leadingAnchor)
         boxTrailing = backgroundBox.trailingAnchor.constraint(equalTo: trailingAnchor)
         boxWidth = backgroundBox.widthAnchor.constraint(equalToConstant: 1)
+        // Block-stack↔box horizontal insets, role-adjustable in `configure`
+        // (initial constant 0 is fine — `configure` sets the real per-role value).
+        blockLeading = blockStack.leadingAnchor.constraint(equalTo: backgroundBox.leadingAnchor, constant: 0)
+        blockTrailing = blockStack.trailingAnchor.constraint(equalTo: backgroundBox.trailingAnchor, constant: 0)
 
         NSLayoutConstraint.activate([
             widthConstraint,
@@ -386,10 +400,8 @@ final class TranscriptBubbleCellView: NSTableCellView {
             // rounded-rect frame; the stack sits inside it with symmetric padding.
             blockStack.topAnchor.constraint(
                 equalTo: backgroundBox.topAnchor, constant: g.bodyVertical / 2),
-            blockStack.leadingAnchor.constraint(
-                equalTo: backgroundBox.leadingAnchor, constant: g.bodyHorizontal / 2),
-            blockStack.trailingAnchor.constraint(
-                equalTo: backgroundBox.trailingAnchor, constant: -g.bodyHorizontal / 2),
+            blockLeading,
+            blockTrailing,
             // Pin the box bottom to the stack so the rounded fill encloses ALL
             // blocks with symmetric inner padding.
             backgroundBox.bottomAnchor.constraint(
@@ -426,12 +438,17 @@ final class TranscriptBubbleCellView: NSTableCellView {
         rebuildBlockStack(blocks: blocks, blockHeights: blockHeights, bodyWidth: bodyWidth)
 
         // Box width: user bubbles shrink-to-fit (right-anchored), assistant fills.
-        let bubbleWidth = bodyWidth + g.bodyHorizontal
+        // Per-role block-stack inset: user keeps the 11pt-per-side bubble padding,
+        // assistant sits flush at the box edge (0) so content aligns with the header.
+        let bodyInset = g.bodyHorizontal(for: role) / 2
+        blockLeading.constant = bodyInset
+        blockTrailing.constant = -bodyInset
+        let bubbleWidth = bodyWidth + g.bodyHorizontal(for: role)
         switch role {
         case .user:
             // Measure the widest prose block and clamp to the available bubble.
             let usedWidth = userContentWidth(blocks: blocks, bodyWidth: bodyWidth)
-            let fitWidth = min(usedWidth + g.bodyHorizontal, bubbleWidth)
+            let fitWidth = min(usedWidth + g.bodyHorizontal(for: role), bubbleWidth)
             applyUserAnchor(width: max(fitWidth, 1))
         case .assistant:
             applyAssistantAnchor(bubbleWidth: bubbleWidth)
@@ -557,7 +574,9 @@ final class TranscriptBubbleCellView: NSTableCellView {
 
         headerTrailing.isActive = false
         headerLeading.isActive = true
-        headerLeading.constant = g.outerNear + g.headerInset
+        // Header sits flush at `outerNear` (12) — the same x as the assistant body
+        // (zero body inset) and the 12pt tool-row inset — forming one vertical line.
+        headerLeading.constant = g.outerNear
         header.alignment = .left
     }
 
