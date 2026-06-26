@@ -27,6 +27,7 @@ struct SessionEventCommand: AsyncParsableCommand {
         let session_id: String?
         let transcript_path: String?
         let source: String?
+        let cwd: String?
     }
 
     mutating func run() async throws {
@@ -64,7 +65,8 @@ struct SessionEventCommand: AsyncParsableCommand {
                     terminalID: terminalID,
                     sessionID: sessionID,
                     transcriptPath: payload.transcript_path,
-                    source: payload.source
+                    source: payload.source,
+                    cwd: payload.cwd
                 )
             )
         } catch {

@@ -16,6 +16,12 @@ struct TranscriptRow: View {
     let node: TranscriptRenderNode
     let terminalID: UUID?
 
+    /// When true, cards in this row render statically (no expand/collapse). Set
+    /// by the NSTableView pane via `EnvironmentValues.transcriptStaticCards` so
+    /// historic `AskUserQuestionCard`s are non-interactive; the live SwiftUI pane
+    /// leaves it false. (#129)
+    @Environment(\.transcriptStaticCards) private var staticCards
+
     var body: some View {
         // Per-row signpost so a hang trace identifies which row was being
         // evaluated when the main thread stalled. Metadata (kind, length, id)
@@ -78,8 +84,11 @@ struct TranscriptRow: View {
         case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let ts):
             toolCard(id: id, name: name, inputJSON: inputJSON,
                      inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts)
-        case .subagentSummary(_, let count, let agentType):
-            SubagentSummaryRow(count: count, agentType: agentType)
+        case .subagentSummary:
+            // Subagent summaries are no longer surfaced in the transcript; the
+            // enum case is retained for Codable/source compatibility but is
+            // never produced by `transcriptRenderNodes(from:)`.
+            EmptyView()
         }
     }
 
@@ -102,7 +111,7 @@ struct TranscriptRow: View {
         case "Task", "Agent":
             AgentCard(id: id, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
         case "AskUserQuestion":
-            AskUserQuestionCard(id: id, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
+            AskUserQuestionCard(id: id, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID, staticHeight: staticCards)
         default:
             GenericToolCard(id: id, name: name, inputJSON: inputJSON, inputTruncatedTo: inputTruncatedTo, result: result, timestamp: timestamp, terminalID: terminalID)
         }

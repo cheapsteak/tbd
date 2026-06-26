@@ -40,6 +40,8 @@ struct PanePlaceholder: View {
     @StateObject private var webviewState = WebviewState()
     @State private var didCopyURL = false
     @AppStorage(AppState.enableTranscriptKey) private var transcriptFeatureEnabled = false
+    @AppStorage(AppState.useTextKitTranscriptKey) private var useTextKitTranscript = false
+    @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript = true
 
     /// Find the Terminal model matching a terminal ID in this pane's worktree.
     private func terminal(for id: UUID) -> Terminal? {
@@ -112,15 +114,6 @@ struct PanePlaceholder: View {
         .applyTranscriptCopyPathContextMenu(path: transcriptPath)
     }
 
-    /// Description of the current drilled-into subagent for the heading, or nil
-    /// at the Main level. Resolves against the terminal's live transcript.
-    private func liveThreadHeadingLabel(terminalID: UUID, path: [String]) -> String? {
-        guard !path.isEmpty,
-              let sessionID = terminal(for: terminalID)?.claudeSessionID,
-              let items = appState.sessionTranscripts[sessionID] else { return nil }
-        return threadLabel(root: items, path: path)
-    }
-
     /// Resolved Claude session JSONL path for liveTranscript panes; nil otherwise.
     private var transcriptPath: String? {
         if case .liveTranscript(_, let terminalID) = content {
@@ -165,26 +158,12 @@ struct PanePlaceholder: View {
             EditableNoteTitle(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):
             let term = terminal(for: terminalID)
-            let path = appState.liveThreadPath[terminalID] ?? []
-            let label = liveThreadHeadingLabel(terminalID: terminalID, path: path)
             HStack(spacing: 4) {
-                if path.isEmpty {
-                    Image(systemName: "text.bubble")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 10)
-                    Text(term?.label ?? "Transcript")
-                } else {
-                    Button {
-                        appState.liveThreadPath[terminalID]?.removeLast()
-                    } label: {
-                        HStack(spacing: 2) {
-                            Image(systemName: "chevron.left")
-                            Text(label ?? "Subagent").lineLimit(1)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
+                Image(systemName: "text.bubble")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 10)
+                Text(term?.label ?? "Transcript")
             }
         }
     }
@@ -281,14 +260,22 @@ struct PanePlaceholder: View {
             NotePaneView(noteID: noteID, worktreeID: worktree.id)
         case .liveTranscript(_, let terminalID):
             if transcriptFeatureEnabled {
-                LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
-                    .environment(\.openFilePreview, { path in
-                        let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                        layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
-                    })
-                    .environment(\.openTranscriptOverlay) { itemID in
-                        overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
+                Group {
+                    if useTableViewTranscript {
+                        TableTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
+                    } else if useTextKitTranscript {
+                        STTextViewTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
+                    } else {
+                        LiveTranscriptPaneView(terminalID: terminalID, worktreeID: worktree.id)
                     }
+                }
+                .environment(\.openFilePreview, { path in
+                    let newContent = PaneContent.codeViewer(id: UUID(), path: path)
+                    layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                })
+                .environment(\.openTranscriptOverlay) { itemID in
+                    overlayCoordinator.open(terminalID: terminalID, itemID: itemID)
+                }
             } else {
                 transcriptDisabledPlaceholder
             }

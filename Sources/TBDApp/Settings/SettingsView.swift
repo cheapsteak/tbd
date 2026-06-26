@@ -36,6 +36,7 @@ struct GeneralSettingsTab: View {
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = false
+    @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript: Bool = true
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
@@ -150,6 +151,9 @@ struct GeneralSettingsTab: View {
                     .help("Experimental: exit idle Claude instances when you switch away and resume them when you switch back, freeing memory. Off by default — may interrupt long-running work.")
                 Toggle("Live transcript pane", isOn: $enableTranscript)
                     .help("Experimental: show a chat-style live transcript pane for Claude sessions. Off by default — may freeze the app on very large transcripts.")
+                Toggle("New transcript renderer", isOn: $useTableViewTranscript)
+                    .help("On by default. Off falls back to the legacy renderer (for comparison).")
+                    .disabled(!enableTranscript)
             }
         }
         .formStyle(.grouped)

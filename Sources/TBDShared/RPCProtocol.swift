@@ -1037,8 +1037,14 @@ public struct ConversationMessage: Codable, Sendable {
 
 public struct TerminalTranscriptParams: Codable, Sendable {
     public let terminalID: UUID
-    public init(terminalID: UUID) {
+    /// When nil (the default), the daemon returns the FULL parsed transcript —
+    /// the original behavior, decoded identically by older encoded params that
+    /// never wrote this field. When set, the daemon returns only the last N
+    /// visible items (tail-first fast open for the table pane).
+    public let tailLimit: Int?
+    public init(terminalID: UUID, tailLimit: Int? = nil) {
         self.terminalID = terminalID
+        self.tailLimit = tailLimit
     }
 }
 
@@ -1078,11 +1084,25 @@ public struct TerminalSessionEventParams: Codable, Sendable {
     public let sessionID: String
     public let transcriptPath: String?
     public let source: String?
-    public init(terminalID: UUID, sessionID: String, transcriptPath: String?, source: String?) {
+    /// Claude's reported working directory (`cwd` in the SessionStart hook
+    /// payload). Transient — used only to validate that the reported session
+    /// belongs to the target terminal's worktree, guarding against a foreign
+    /// Claude session (e.g. a multi-agent teammate that inherited the
+    /// terminal's `TBD_TERMINAL_ID` env) hijacking the session pointer.
+    /// Optional for backward compatibility with older CLIs that don't send it.
+    public let cwd: String?
+    public init(
+        terminalID: UUID,
+        sessionID: String,
+        transcriptPath: String?,
+        source: String?,
+        cwd: String? = nil
+    ) {
         self.terminalID = terminalID
         self.sessionID = sessionID
         self.transcriptPath = transcriptPath
         self.source = source
+        self.cwd = cwd
     }
 }
 

@@ -26,6 +26,32 @@ extension EnvironmentValues {
     }
 }
 
+/// Environment key controlling whether a transcript row should render its cards
+/// in STABLE/NON-INTERACTIVE mode (currently only `AskUserQuestionCard`).
+///
+/// The NSTableView transcript pane is display-of-history: it hosts each row in a
+/// height-cached `NSHostingView` measured ONCE at install. An interactive
+/// AskUserQuestion card whose question bubble expands/collapses on tap would
+/// change its rendered height after that single measurement — so in the table
+/// pane a click on a historic card collapses it and the row's reserved height no
+/// longer matches. Flipping this env to `true` (set only on the table path)
+/// makes `AskUserQuestionCard` render with `staticHeight: true`: always-expanded,
+/// no toggle chevron, and the async-growth truncation footers suppressed. The
+/// live SwiftUI pane leaves this `false`, so its (possibly pending) question card
+/// stays interactive. (#129)
+private struct TranscriptStaticCardsKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+extension EnvironmentValues {
+    /// True iff transcript cards in this row should render statically (no
+    /// expand/collapse, fixed height). See `TranscriptStaticCardsKey`.
+    var transcriptStaticCards: Bool {
+        get { self[TranscriptStaticCardsKey.self] }
+        set { self[TranscriptStaticCardsKey.self] = newValue }
+    }
+}
+
 /// Conditionally applies `.textSelection(.enabled)` based on
 /// `EnvironmentValues.transcriptTextSelection`.
 ///

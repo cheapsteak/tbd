@@ -370,8 +370,6 @@ final class AppState: ObservableObject {
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
     @Published var sessionTranscripts: [String: [TranscriptItem]] = [:]  // sessionId → items
-    @Published var historyThreadPath: [UUID: [String]] = [:]   // worktreeID → subagent drill path
-    @Published var liveThreadPath: [UUID: [String]] = [:]      // terminalID → subagent drill path
     @Published var sessionTranscriptLoading: Set<String> = []
 
     /// Raw most-recent-first log of recently-visited worktrees, the recency
@@ -1492,6 +1490,37 @@ final class AppState: ObservableObject {
     /// the `@AppStorage` default.
     static func transcriptFeatureEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: enableTranscriptKey) as? Bool ?? false
+    }
+
+    /// UserDefaults key for the second-stage gate: when the experimental
+    /// transcript is enabled, this picks the TextKit 2 / STTextView renderer
+    /// over the SwiftUI `LiveTranscriptPaneView`. Defaults false. (#129)
+    static let useTextKitTranscriptKey = "useTextKitTranscript"
+
+    /// Fail-closed read of the TextKit 2 transcript toggle for non-View callers
+    /// (the View layer uses `@AppStorage` directly). Only meaningful when
+    /// `transcriptFeatureEnabled` is also true.
+    static func useTextKitTranscript(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: useTextKitTranscriptKey) as? Bool ?? false
+    }
+
+    /// UserDefaults key for the NSTableView-based transcript renderer. When the
+    /// experimental transcript is enabled, this gate takes precedence over the
+    /// TextKit 2 / STTextView renderer: the table pane reuses the existing
+    /// SwiftUI row views (`SelectableTranscriptRow`) hosted per-cell with an
+    /// explicit height cache, replacing the fragile single-document TextKit
+    /// approach. Defaults true — the table pane is the default renderer; the
+    /// Settings toggle can turn it off to fall back to the legacy SwiftUI pane
+    /// for comparison. (#129)
+    static let useTableViewTranscriptKey = "useTableViewTranscript"
+
+    /// Read of the NSTableView transcript toggle for non-View callers (the View
+    /// layer uses `@AppStorage` directly). Only meaningful when
+    /// `transcriptFeatureEnabled` is also true. Defaults true (the table pane is
+    /// the default renderer); returns false only when the user explicitly turns
+    /// it off. Takes precedence over `useTextKitTranscript` when set.
+    static func useTableViewTranscript(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: useTableViewTranscriptKey) as? Bool ?? true
     }
 
     /// UserDefaults key for a Claude spawn-env setting, by registry ID.

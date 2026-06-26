@@ -20,36 +20,30 @@ enum TranscriptParser {
     }()
 
     /// Parse a top-level Claude session JSONL into transcript items in file order.
-    /// Subagent (sidechain) JSONLs referenced by Task tool_results are recursively
-    /// parsed and attached to the corresponding `.toolCall` items.
+    ///
+    /// Only the PARENT file is read. Task/Agent tool calls render as ordinary
+    /// tool cards (their description + result); the parser deliberately does NOT
+    /// open the `<sessionID>/subagents/agent-*.jsonl` files. Recursively parsing
+    /// every subagent transcript made opening a session with many subagents cost
+    /// O(all subagent bytes) — ~13s on heavy sessions — for content the UI no
+    /// longer surfaces. Parse cost is now O(parent file).
     static func parse(filePath: String) -> [TranscriptItem] {
         let basename = (filePath as NSString).lastPathComponent
         perfLog.debug("parse.start file=\(basename, privacy: .public)")
         let start = ContinuousClock.now
         var totalBytes = 0
-        var subagentCount = 0
-        let result = parse(
-            filePath: filePath,
-            visitedAgentIDs: [],
-            skipSidechain: true,
-            totalBytes: &totalBytes,
-            subagentCount: &subagentCount
-        )
+        let result = parse(filePath: filePath, totalBytes: &totalBytes)
         let elapsed = ContinuousClock.now - start
         let ms = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
-        perfLog.debug("parse.end file=\(basename, privacy: .public) elapsed_ms=\(ms, privacy: .public) items=\(result.count, privacy: .public) bytes=\(totalBytes, privacy: .public) subagents=\(subagentCount, privacy: .public)")
+        perfLog.debug("parse.end file=\(basename, privacy: .public) elapsed_ms=\(ms, privacy: .public) items=\(result.count, privacy: .public) bytes=\(totalBytes, privacy: .public)")
         return result
     }
 
-    /// Recursive worker. `visitedAgentIDs` prevents cycles between subagent files.
-    /// `skipSidechain == true` for the parent (top-level) JSONL; `false` when
-    /// parsing a subagent file (whose lines all carry `isSidechain: true`).
+    /// Worker that reads a single Claude JSONL file. Sidechain (subagent) lines
+    /// in the parent file are skipped; subagent files are never opened.
     private static func parse(
         filePath: String,
-        visitedAgentIDs: Set<String>,
-        skipSidechain: Bool,
-        totalBytes: inout Int,
-        subagentCount: inout Int
+        totalBytes: inout Int
     ) -> [TranscriptItem] {
         guard let data = FileManager.default.contents(atPath: filePath),
               let content = String(data: data, encoding: .utf8) else {
@@ -57,7 +51,7 @@ enum TranscriptParser {
         }
         totalBytes += data.count
 
-        // First pass: collect raw line dicts; index tool_results and agent ids.
+        // First pass: collect raw line dicts; index tool_results.
         var rawLines: [[String: Any]] = []
         // Parallel to rawLines. Stable per-line identifier used as a fallback
         // when a line is missing the `uuid` field. Using a fresh UUID() here
@@ -67,7 +61,6 @@ enum TranscriptParser {
         // fallback is defensive.
         var stableIDs: [String] = []
         var toolResultsByID: [String: ToolResult] = [:]
-        var agentIDByToolUseID: [String: String] = [:]
 
         var lineIndex = 0
         for line in content.components(separatedBy: "\n") where !line.isEmpty {
@@ -87,43 +80,137 @@ enum TranscriptParser {
                     guard let id = block["tool_use_id"] as? String else { continue }
                     toolResultsByID[id] = extractToolResult(from: block)
                 }
-                // `toolUseResult` is a top-level per-line field, so we can only attribute
-                // its `agentId` unambiguously when there's exactly one tool_result block
-                // in the line. Multi-block lines (parallel Task dispatches in the same
-                // user message) skip the mapping; the parent Task tool_use will render
-                // without a subagent disclosure rather than misattribute the inner
-                // conversation. Single-block lines are the common case in practice.
-                if toolResultBlocks.count == 1,
-                   let block = toolResultBlocks.first,
-                   let id = block["tool_use_id"] as? String,
-                   let resultMeta = json["toolUseResult"] as? [String: Any],
-                   let agentID = resultMeta["agentId"] as? String {
-                    agentIDByToolUseID[id] = agentID
+            }
+        }
+
+        return buildItems(rawLines: rawLines, stableIDs: stableIDs, toolResultsByID: toolResultsByID)
+    }
+
+    /// Tail-parse path: returns only the LAST `limit` visible items, fast.
+    ///
+    /// Approach: read ONLY the last `chunkBytes` of the file (seek to
+    /// `max(0, fileSize - chunkBytes)`, read to EOF) instead of the whole file.
+    /// On a ~30MB JSONL we therefore decode/split a few hundred KB rather than
+    /// 30MB — the full-file UTF8 decode + line-split was the dominant cost
+    /// (~910ms measured) even though we only JSON-parse the last few lines.
+    ///
+    /// The chunk usually starts mid-line. We find the FIRST newline in the chunk
+    /// and discard everything up to and including it (the partial leading line) —
+    /// UNLESS the chunk started at offset 0 (whole file fit), in which case we
+    /// keep all of it. Dropping the partial prefix also sidesteps a possible
+    /// mid-UTF8-character split at the seek boundary.
+    ///
+    /// Correctness guard: if the chunk yields FEWER than `limit` visible items
+    /// (very large items, or a tiny tail window), we double `chunkBytes` and
+    /// retry, up to the full file size — so edge cases stay correct. In the
+    /// common case the first ~1MB chunk holds far more than `limit` items and no
+    /// retry happens.
+    ///
+    /// Identical-bottom guarantee: this calls the SAME `buildItems` helper as
+    /// the full parse, so the items it produces for the windowed lines are
+    /// byte-identical to the corresponding bottom of the full parse — the
+    /// tail→full UI swap therefore does not shift the visible bottom.
+    static func parseTail(filePath: String, limit: Int) -> [TranscriptItem] {
+        guard let handle = FileHandle(forReadingAtPath: filePath) else { return [] }
+        defer { try? handle.close() }
+        guard let fileSize = (try? handle.seekToEnd()).map({ Int($0) }) else { return [] }
+
+        // Start ~1MB; far below a 30MB file, far above `limit` items of lines.
+        var chunkBytes = 1 << 20
+
+        while true {
+            let readSize = min(chunkBytes, fileSize)
+            let offset = fileSize - readSize
+            let coveredWholeFile = offset == 0
+
+            guard (try? handle.seek(toOffset: UInt64(offset))) != nil,
+                  let chunk = try? handle.readToEnd() else {
+                return []
+            }
+
+            // Drop the partial leading line unless we read from offset 0.
+            // The bytes up to and including the first '\n' are a line fragment
+            // (and may straddle a UTF8 character); discarding them is safe.
+            let bytes: Data
+            if coveredWholeFile {
+                bytes = chunk
+            } else if let nl = chunk.firstIndex(of: UInt8(ascii: "\n")) {
+                bytes = chunk[chunk.index(after: nl)...]
+            } else {
+                // No newline in the chunk: the tail is one giant partial line.
+                // Grow (or give up if we already read the whole file).
+                bytes = Data()
+            }
+
+            if let content = String(data: bytes, encoding: .utf8) {
+                let items = parseTailWindow(content: content)
+                if items.count >= limit || coveredWholeFile {
+                    return Array(items.suffix(limit))
+                }
+            } else if coveredWholeFile {
+                // Whole file isn't decodable as UTF8 — match the empty contract.
+                return []
+            }
+
+            // Underflow (or undecodable chunk): grow and retry.
+            if coveredWholeFile { return [] }
+            chunkBytes *= 2
+        }
+    }
+
+    /// Parse a decoded tail window (a suffix of the file's lines, each line
+    /// whole) into transcript items. Builds a window-local `toolResultsByID` so
+    /// a tool_use+tool_result pair within the window folds together; a tool_use
+    /// whose result fell outside the window renders without a result —
+    /// acceptable, matching today's behavior at any truncation boundary.
+    ///
+    /// stableIDs here use a "tail-<n>" fallback only for synthetic/malformed
+    /// lines that lack a `uuid`; real Claude lines always carry one, so the
+    /// fallback never participates in the tail→full identical-bottom comparison.
+    private static func parseTailWindow(content: String) -> [TranscriptItem] {
+        var rawLines: [[String: Any]] = []
+        var stableIDs: [String] = []
+        var toolResultsByID: [String: ToolResult] = [:]
+
+        var lineIndex = 0
+        for line in content.components(separatedBy: "\n") where !line.isEmpty {
+            defer { lineIndex += 1 }
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                continue
+            }
+            rawLines.append(json)
+            stableIDs.append((json["uuid"] as? String) ?? "tail-\(lineIndex)")
+
+            if json["type"] as? String == "user",
+               let message = json["message"] as? [String: Any],
+               let array = message["content"] as? [[String: Any]] {
+                let toolResultBlocks = array.filter { ($0["type"] as? String) == "tool_result" }
+                for block in toolResultBlocks {
+                    guard let id = block["tool_use_id"] as? String else { continue }
+                    toolResultsByID[id] = extractToolResult(from: block)
                 }
             }
         }
 
-        // Resolve subagent paths relative to the parent file.
-        // Path scheme: <projectDir>/<sessionID>.jsonl   ↔
-        //              <projectDir>/<sessionID>/subagents/agent-<agentID>.jsonl
-        let parentURL = URL(fileURLWithPath: filePath)
-        let projectDir = parentURL.deletingLastPathComponent()
-        let sessionID = parentURL.deletingPathExtension().lastPathComponent
-        // For top-level files, the subagents dir is keyed by sessionID.
-        // For subagent files (already inside .../<sessionID>/subagents/), we need
-        // to use the SAME subagents dir for nested subagent resolution.
-        let subagentsDir: URL
-        if skipSidechain {
-            subagentsDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
-        } else {
-            // We're already inside a subagents/ dir; reuse it for nested agents.
-            subagentsDir = projectDir
-        }
+        return buildItems(rawLines: rawLines, stableIDs: stableIDs, toolResultsByID: toolResultsByID)
+    }
 
+    /// Shared core: turn an array of raw line dicts (+ parallel stableIDs and a
+    /// tool_use_id→result index) into `[TranscriptItem]`. Both the full `parse`
+    /// and the tail `parseTail` call this, guaranteeing the tail's items are
+    /// byte-identical to the bottom of the full parse for the same lines.
+    private static func buildItems(
+        rawLines: [[String: Any]],
+        stableIDs: [String],
+        toolResultsByID: [String: ToolResult]
+    ) -> [TranscriptItem] {
         var items: [TranscriptItem] = []
 
         for (i, json) in rawLines.enumerated() {
-            if skipSidechain, json["isSidechain"] as? Bool == true { continue }
+            // Subagent (sidechain) lines belong to a nested agent's own
+            // conversation; the parent transcript drops them entirely.
+            if json["isSidechain"] as? Bool == true { continue }
 
             let lineUUID = stableIDs[i]
             let timestamp = (json["timestamp"] as? String).flatMap { iso8601.date(from: $0) }
@@ -153,17 +240,6 @@ enum TranscriptParser {
             if typeStr == "user", UserMessageClassifier.isRealUserMessage(json),
                let text = UserMessageClassifier.extractText(json) {
                 items.append(.userPrompt(id: lineUUID, text: text, timestamp: timestamp))
-                continue
-            }
-
-            // Sidechain user lines that aren't classified as system reminders and
-            // aren't a "real" user message under isRealUserMessage's heuristics
-            // (which is keyed on the array form) — fall back to treating string
-            // content as a user prompt.
-            if !skipSidechain, typeStr == "user",
-               let message = json["message"] as? [String: Any],
-               let s = message["content"] as? String, !s.isEmpty {
-                items.append(.userPrompt(id: lineUUID, text: s, timestamp: timestamp))
                 continue
             }
 
@@ -209,21 +285,13 @@ enum TranscriptParser {
                         }()
                         let result = toolResultsByID[toolID]
 
-                        var subagent: Subagent? = nil
-                        if name == "Task" || name == "Agent", let agentID = agentIDByToolUseID[toolID] {
-                            subagent = resolveSubagent(
-                                agentID: agentID,
-                                subagentsDir: subagentsDir,
-                                visitedAgentIDs: visitedAgentIDs,
-                                totalBytes: &totalBytes,
-                                subagentCount: &subagentCount
-                            )
-                        }
-
+                        // Task/Agent tool calls render as ordinary tool cards.
+                        // We never open the nested subagent transcript, so
+                        // `subagent` is always nil.
                         items.append(.toolCall(
                             id: toolID, name: name, inputJSON: inputJSON,
                             inputTruncatedTo: inputTruncatedTo,
-                            result: result, subagent: subagent, timestamp: timestamp,
+                            result: result, subagent: nil, timestamp: timestamp,
                             usage: usage
                         ))
                     default:
@@ -255,52 +323,6 @@ enum TranscriptParser {
             cacheCreationTokens: cacheCreation,
             cacheReadTokens: cacheRead
         )
-    }
-
-    private static func resolveSubagent(
-        agentID: String,
-        subagentsDir: URL,
-        visitedAgentIDs: Set<String>,
-        totalBytes: inout Int,
-        subagentCount: inout Int
-    ) -> Subagent? {
-        if visitedAgentIDs.contains(agentID) {
-            // Cycle detected — surface a single system reminder noting it.
-            let cycleNote: TranscriptItem = .systemReminder(
-                id: "cycle-\(agentID)",
-                kind: .other,
-                text: "Subagent recursion cycle detected for agent \(agentID); halting nested parse.",
-                timestamp: nil
-            )
-            return Subagent(agentID: agentID, agentType: nil, items: [cycleNote])
-        }
-
-        let jsonlPath = subagentsDir.appendingPathComponent("agent-\(agentID).jsonl").path
-        guard FileManager.default.fileExists(atPath: jsonlPath) else { return nil }
-
-        subagentCount += 1
-        var nextVisited = visitedAgentIDs
-        nextVisited.insert(agentID)
-        let items = parse(
-            filePath: jsonlPath,
-            visitedAgentIDs: nextVisited,
-            skipSidechain: false,
-            totalBytes: &totalBytes,
-            subagentCount: &subagentCount
-        )
-
-        let metaPath = subagentsDir.appendingPathComponent("agent-\(agentID).meta.json").path
-        let agentType = readAgentType(from: metaPath)
-
-        return Subagent(agentID: agentID, agentType: agentType, items: items)
-    }
-
-    private static func readAgentType(from metaPath: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: metaPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-        return json["agentType"] as? String ?? json["agent_type"] as? String
     }
 
     // MARK: - helpers
@@ -378,18 +400,6 @@ enum TranscriptParser {
         if let array = message["content"] as? [[String: Any]] {
             return array.first(where: { $0["type"] as? String == "text" })
                 .flatMap { $0["text"] as? String }
-        }
-        return nil
-    }
-
-    /// Returns the un-truncated body text for an item id by searching the
-    /// supplied JSONL files in order. Returns nil if the id isn't found in
-    /// any of them.
-    static func lookupFullBody(filePaths: [String], itemID: String) -> String? {
-        for path in filePaths {
-            if let hit = lookupFullBody(filePath: path, itemID: itemID) {
-                return hit
-            }
         }
         return nil
     }

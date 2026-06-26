@@ -139,23 +139,17 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
                 ))
             }
 
-        case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, let subagent, let ts, _):
+        case .toolCall(let id, let name, let inputJSON, let inputTruncatedTo, let result, _, let ts, _):
+            // Task/Agent tool calls render as ordinary tool cards. The subagent
+            // timeline is intentionally NOT surfaced in the transcript, so no
+            // `.subagentSummary` node is emitted and the `subagent` payload is
+            // ignored.
             out.append(TranscriptRenderNode(
                 id: id,
                 kind: .toolCall(id: id, name: name, inputJSON: inputJSON,
                                 inputTruncatedTo: inputTruncatedTo, result: result, timestamp: ts),
                 badgeUsage: badge
             ))
-            if let subagent {
-                let visibleCount = subagent.items.filter { !isHiddenInTranscript($0) }.count
-                if visibleCount > 0 {
-                    out.append(TranscriptRenderNode(
-                        id: "\(id)#subagent",
-                        kind: .subagentSummary(parentItemID: id, count: visibleCount, agentType: subagent.agentType),
-                        badgeUsage: nil
-                    ))
-                }
-            }
 
         case .thinking, .slashCommand:
             // .thinking is filtered earlier by isHiddenInTranscript;
@@ -170,9 +164,8 @@ nonisolated func transcriptRenderNodes(from items: [TranscriptItem]) -> [Transcr
 
 /// Returns the id of the *last rendered* TranscriptRenderNode for these items
 /// without materializing the full node array. Walks `items` from the end,
-/// skipping hidden items, and accounts for the fact that a `.toolCall` with
-/// non-empty visible subagent items emits an additional `subagentSummary`
-/// node *after* its toolCall node — i.e. the actual trailing row.
+/// skipping hidden items. Each visible item maps to exactly one render node
+/// sharing its id (`.toolCall` no longer emits a trailing subagent node).
 ///
 /// Use this anywhere a scroll target previously read `items.last?.id`. With
 /// the render-node flattening the trailing rendered row is no longer
@@ -181,15 +174,8 @@ nonisolated func lastRenderedNodeID(for items: [TranscriptItem]) -> String? {
     for item in items.reversed() {
         if isHiddenInTranscript(item) { continue }
         switch item {
-        case .toolCall(let id, _, _, _, _, let subagent, _, _):
-            if let subagent {
-                let visibleCount = subagent.items.filter { !isHiddenInTranscript($0) }.count
-                if visibleCount > 0 {
-                    return "\(id)#subagent"
-                }
-            }
-            return id
-        case .userPrompt(let id, _, _),
+        case .toolCall(let id, _, _, _, _, _, _, _),
+             .userPrompt(let id, _, _),
              .assistantText(let id, _, _, _),
              .systemReminder(let id, _, _, _):
             return id

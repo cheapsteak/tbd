@@ -14,6 +14,14 @@ struct AskUserQuestionCard: View {
     let result: ToolResult?
     let timestamp: Date?
     let terminalID: UUID?
+    /// When true the card renders at a STABLE height that never changes after
+    /// first layout: question bubbles are always-expanded and non-collapsible,
+    /// and the async `fetchFull`/`fetchFullInput` truncation footers are
+    /// suppressed. This is required for the read-only TextKit2 transcript, whose
+    /// card attachments reserve vertical space from a SINGLE measurement at
+    /// layout time — any post-measure growth would overlap the next message.
+    /// Defaults to false so the live (interactive) usage is unchanged. (#129)
+    var staticHeight: Bool = false
 
     @State private var fullResultText: String? = nil
     @State private var fullInputJSON: String? = nil
@@ -89,7 +97,8 @@ struct AskUserQuestionCard: View {
                     QuestionBubble(
                         question: q,
                         timestamp: timestamp,
-                        selectedIndices: match?.selectedIndices ?? []
+                        selectedIndices: match?.selectedIndices ?? [],
+                        staticHeight: staticHeight
                     )
                     AnswerSlot(
                         match: match,
@@ -117,17 +126,24 @@ struct AskUserQuestionCard: View {
                 fallbackQuestionBlock
             }
 
-            if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
-                TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
-                    Task { await fetchFullInput() }
+            // The truncation footers trigger an async fetch that GROWS the card
+            // after first render. In `staticHeight` mode (the read-only TextKit2
+            // transcript) that post-measure growth would overlap the next
+            // message, so they're suppressed — the card shows content as
+            // available at build time and never changes height. (#129)
+            if !staticHeight {
+                if let cap = inputTruncatedTo, fullInputJSON == nil, terminalID != nil {
+                    TruncationFooter(truncatedTo: cap, currentLength: inputJSON.count) {
+                        Task { await fetchFullInput() }
+                    }
+                    .padding(.horizontal, 12)
                 }
-                .padding(.horizontal, 12)
-            }
-            if let r = result, let cap = r.truncatedTo, fullResultText == nil, terminalID != nil {
-                TruncationFooter(truncatedTo: cap, currentLength: r.text.count) {
-                    Task { await fetchFull() }
+                if let r = result, let cap = r.truncatedTo, fullResultText == nil, terminalID != nil {
+                    TruncationFooter(truncatedTo: cap, currentLength: r.text.count) {
+                        Task { await fetchFull() }
+                    }
+                    .padding(.horizontal, 12)
                 }
-                .padding(.horizontal, 12)
             }
             if result?.isError == true {
                 HStack(spacing: 0) {
@@ -198,8 +214,15 @@ private struct QuestionBubble: View {
     let question: AskUserQuestionCard.Question
     let timestamp: Date?
     let selectedIndices: Set<Int>
+    /// When true the bubble is always-expanded and the disclosure toggle is
+    /// inert, so the bubble's height never changes after first render — required
+    /// by the single-measurement TextKit2 transcript attachment. (#129)
+    var staticHeight: Bool = false
 
     @State private var expanded = true
+
+    /// Effective expansion: forced open (and immutable) in static-height mode.
+    private var isExpanded: Bool { staticHeight || expanded }
 
     private var hasHeader: Bool {
         if let h = question.header, !h.isEmpty, h != question.question {
@@ -212,12 +235,18 @@ private struct QuestionBubble: View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 roleHeader
-                Button {
-                    expanded.toggle()
-                } label: {
+                if staticHeight {
+                    // Always-expanded, non-interactive: no toggle means the
+                    // bubble's height is fixed once rendered.
                     bubbleBody
+                } else {
+                    Button {
+                        expanded.toggle()
+                    } label: {
+                        bubbleBody
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 52)
@@ -240,9 +269,13 @@ private struct QuestionBubble: View {
 
     @ViewBuilder
     private var chevron: some View {
-        Image(systemName: expanded ? "chevron.down" : "chevron.right")
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+        // No disclosure affordance in static-height mode — the bubble can't
+        // collapse, so a chevron would be misleading.
+        if !staticHeight {
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
     }
 
     @ViewBuilder
@@ -276,7 +309,7 @@ private struct QuestionBubble: View {
                 }
             }
 
-            if expanded {
+            if isExpanded {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(question.options.enumerated()), id: \.offset) { idx, option in
                         OptionRow(option: option, selected: selectedIndices.contains(idx))

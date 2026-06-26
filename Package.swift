@@ -19,6 +19,8 @@ let package = Package(
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
         .package(url: "https://github.com/LebJe/TOMLKit", from: "0.6.0"),
+        .package(url: "https://github.com/apple/swift-markdown", from: "0.4.0"),
+        .package(url: "https://github.com/krzyzanowskim/STTextView", from: "2.3.8"),
     ],
     targets: [
         .target(
@@ -96,6 +98,8 @@ let package = Package(
                 .product(name: "TOMLKit", package: "TOMLKit"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "Markdown", package: "swift-markdown"),
+                .product(name: "STTextView", package: "STTextView"),
             ],
             path: "Sources/TBDApp",
             resources: [.copy("Resources/Icons")],

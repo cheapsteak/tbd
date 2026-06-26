@@ -184,6 +184,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         lifecycleLogger.info("willFinishLaunching")
 
+        // FIX 1(a): disable AppKit's off-screen NSTableView row-height ESTIMATION
+        // process-wide, at the EARLIEST launch point — before ANY NSTableView (the
+        // worktree sidebar, the transcript table) is created. Registering it only
+        // in the transcript pane's makeNSView was too late: AppKit may have already
+        // stood up other tables with estimation in effect, leaving off-screen
+        // transcript rows estimated (wildly wrong for varying heights → the
+        // collapsing blank gap on scroll). `register` (not `set`) means this never
+        // persists into the real plist, per repo UserDefaults rules.
+        UserDefaults.standard.register(defaults: ["NSTableViewCanEstimateRowHeights": false])
+
         // Install crash handlers before any AppKit/SwiftUI code can throw or trap.
         // The Obj-C exception preprocessor must come first — it's our only chance
         // to capture the reason for exceptions that AppKit converts to SIGTRAP via

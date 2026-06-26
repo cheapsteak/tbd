@@ -94,7 +94,10 @@ struct TranscriptParserTests {
         }
     }
 
-    @Test func subagent_attached_when_file_exists() throws {
+    @Test func task_tool_renders_as_plain_card_without_subagent() throws {
+        // A Task tool call with an existing subagent JSONL on disk: the parser
+        // must NOT open the subagent file. The tool call renders as an ordinary
+        // card (name + result) with a nil subagent payload.
         let projectDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("parser-sub-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
@@ -112,6 +115,7 @@ struct TranscriptParserTests {
         ].joined(separator: "\n")
         try parent.write(toFile: parentPath, atomically: true, encoding: .utf8)
 
+        // Subagent file exists on disk but must be ignored.
         let sub = [
             #"{"type":"user","isSidechain":true,"uuid":"sub-u1","timestamp":"2026-05-05T10:00:05Z","message":{"role":"user","content":"go explore"}}"#,
             #"{"type":"assistant","isSidechain":true,"uuid":"sub-a1","timestamp":"2026-05-05T10:00:10Z","message":{"role":"assistant","content":[{"type":"text","text":"on it"}]}}"#,
@@ -120,131 +124,12 @@ struct TranscriptParserTests {
 
         let items = TranscriptParser.parse(filePath: parentPath)
         #expect(items.count == 1)
-        guard case .toolCall(_, let name, _, _, _, let subagent, _, _) = items[0] else {
+        guard case .toolCall(_, let name, _, _, let result, let subagent, _, _) = items[0] else {
             Issue.record("expected .toolCall"); return
         }
         #expect(name == "Task")
-        #expect(subagent?.agentID == "AGENTX")
-        #expect(subagent?.items.count == 2, "subagent should have its own user prompt + assistant text")
-    }
-
-    @Test func subagent_attached_for_Agent_named_tool() throws {
-        let projectDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("parser-sub-agent-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: projectDir) }
-
-        let sessionID = "SESSION2"
-        let parentPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
-        let subDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
-        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
-        let subPath = subDir.appendingPathComponent("agent-AGENTX2.jsonl").path
-
-        let parent = [
-            #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"explore"}}]}}"#,
-            #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T10:00:30Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent","content":"agent done"}]},"toolUseResult":{"agentId":"AGENTX2","agentType":"feature-dev:code-explorer"}}"#,
-        ].joined(separator: "\n")
-        try parent.write(toFile: parentPath, atomically: true, encoding: .utf8)
-
-        let sub = [
-            #"{"type":"user","isSidechain":true,"uuid":"sub-u1","timestamp":"2026-05-05T10:00:05Z","message":{"role":"user","content":"go explore"}}"#,
-            #"{"type":"assistant","isSidechain":true,"uuid":"sub-a1","timestamp":"2026-05-05T10:00:10Z","message":{"role":"assistant","content":[{"type":"text","text":"on it"}]}}"#,
-        ].joined(separator: "\n")
-        try sub.write(toFile: subPath, atomically: true, encoding: .utf8)
-
-        let items = TranscriptParser.parse(filePath: parentPath)
-        #expect(items.count == 1)
-        guard case .toolCall(_, let name, _, _, _, let subagent, _, _) = items[0] else {
-            Issue.record("expected .toolCall"); return
-        }
-        #expect(name == "Agent")
-        #expect(subagent?.agentID == "AGENTX2")
-        #expect(subagent?.items.count == 2, "subagent should have its own user prompt + assistant text")
-    }
-
-    @Test func subagent_meta_provides_agent_type() throws {
-        let projectDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("parser-sub-meta-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: projectDir) }
-
-        let sessionID = "SM"
-        let parentPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
-        let subDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
-        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
-
-        try [
-            #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_task","name":"Task","input":{}}]}}"#,
-            #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T10:00:30Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_task","content":"done"}]},"toolUseResult":{"agentId":"AM"}}"#,
-        ].joined(separator: "\n").write(toFile: parentPath, atomically: true, encoding: .utf8)
-
-        try #"{"type":"user","isSidechain":true,"uuid":"s1","timestamp":"2026-05-05T10:00:10Z","message":{"role":"user","content":"hi"}}"#
-            .write(toFile: subDir.appendingPathComponent("agent-AM.jsonl").path, atomically: true, encoding: .utf8)
-        try #"{"agentType":"feature-dev:code-reviewer"}"#
-            .write(toFile: subDir.appendingPathComponent("agent-AM.meta.json").path, atomically: true, encoding: .utf8)
-
-        let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, _, let subagent, _, _) = items[0] else {
-            Issue.record("expected .toolCall"); return
-        }
-        #expect(subagent?.agentType == "feature-dev:code-reviewer")
-    }
-
-    @Test func subagent_missing_file_yields_nil_subagent() throws {
-        let projectDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("parser-sub-missing-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: projectDir) }
-
-        let parentPath = projectDir.appendingPathComponent("S.jsonl").path
-        let parent = [
-            #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_task","name":"Task","input":{}}]}}"#,
-            #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T10:00:30Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_task","content":"done"}]},"toolUseResult":{"agentId":"NOTHERE"}}"#,
-        ].joined(separator: "\n")
-        try parent.write(toFile: parentPath, atomically: true, encoding: .utf8)
-
-        let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, _, let subagent, _, _) = items[0] else {
-            Issue.record("expected .toolCall"); return
-        }
-        #expect(subagent == nil, "missing subagent file → nil subagent, parent still renders")
-    }
-
-    @Test func subagent_recursion_two_levels() throws {
-        let projectDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("parser-sub-deep-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: projectDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: projectDir) }
-
-        let sessionID = "S2"
-        let parentPath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
-        let subDir = projectDir.appendingPathComponent(sessionID).appendingPathComponent("subagents")
-        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
-
-        try [
-            #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_outer","name":"Task","input":{}}]}}"#,
-            #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T10:01:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_outer","content":"outer done"}]},"toolUseResult":{"agentId":"AOUTER"}}"#,
-        ].joined(separator: "\n").write(toFile: parentPath, atomically: true, encoding: .utf8)
-
-        try [
-            #"{"type":"user","isSidechain":true,"uuid":"o-u1","timestamp":"2026-05-05T10:00:10Z","message":{"role":"user","content":"go"}}"#,
-            #"{"type":"assistant","isSidechain":true,"uuid":"o-a1","timestamp":"2026-05-05T10:00:20Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_inner","name":"Task","input":{}}]}}"#,
-            #"{"type":"user","isSidechain":true,"uuid":"o-u2","timestamp":"2026-05-05T10:00:50Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_inner","content":"inner done"}]},"toolUseResult":{"agentId":"AINNER"}}"#,
-        ].joined(separator: "\n").write(toFile: subDir.appendingPathComponent("agent-AOUTER.jsonl").path, atomically: true, encoding: .utf8)
-
-        try [
-            #"{"type":"user","isSidechain":true,"uuid":"i-u1","timestamp":"2026-05-05T10:00:30Z","message":{"role":"user","content":"deep"}}"#,
-            #"{"type":"assistant","isSidechain":true,"uuid":"i-a1","timestamp":"2026-05-05T10:00:40Z","message":{"role":"assistant","content":[{"type":"text","text":"deep done"}]}}"#,
-        ].joined(separator: "\n").write(toFile: subDir.appendingPathComponent("agent-AINNER.jsonl").path, atomically: true, encoding: .utf8)
-
-        let items = TranscriptParser.parse(filePath: parentPath)
-        guard case .toolCall(_, _, _, _, _, let outer, _, _) = items[0],
-              let outerItems = outer?.items, outerItems.count >= 2,
-              case .toolCall(_, _, _, _, _, let inner, _, _) = outerItems[1] else {
-            Issue.record("recursive structure mismatched"); return
-        }
-        #expect(inner?.agentID == "AINNER")
-        #expect(inner?.items.count == 2)
+        #expect(subagent == nil, "subagent file must NOT be opened — payload is always nil")
+        #expect(result?.text == "agent done", "parent tool_result still renders")
     }
 
     @Test func tool_result_truncated_when_over_char_cap() throws {
@@ -338,42 +223,6 @@ struct TranscriptParserTests {
         } else {
             Issue.record("expected .userPrompt with slash command text")
         }
-    }
-
-    @Test func lookupFullBody_searches_subagent_files_via_multipath_overload() throws {
-        // Parent JSONL contains a Task tool_use; the inner Bash tool_use_id and
-        // its tool_result live ONLY in the subagent JSONL. The multi-path
-        // overload must find the inner id by falling back to the second file.
-        let parentLine = #"{"type":"user","uuid":"u-parent","timestamp":"2026-05-05T10:00:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_task","content":"agent done"}]},"toolUseResult":{"agentId":"agent-1"}}"#
-        let parentTmp = try writeTempJSONL(parentLine)
-        defer { try? FileManager.default.removeItem(atPath: parentTmp) }
-
-        let bigPayload = String(repeating: "z", count: 5000)
-        let escaped = bigPayload // no newlines, safe to embed
-        let subLine = "{\"type\":\"user\",\"uuid\":\"u-sub\",\"timestamp\":\"2026-05-05T10:00:01Z\",\"isSidechain\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_inner_bash\",\"content\":\"\(escaped)\"}]}}"
-        let subTmp = try writeTempJSONL(subLine)
-        defer { try? FileManager.default.removeItem(atPath: subTmp) }
-
-        // Inner id is NOT in the parent — must fall through to the subagent file.
-        let hit = TranscriptParser.lookupFullBody(
-            filePaths: [parentTmp, subTmp],
-            itemID: "toolu_inner_bash"
-        )
-        #expect(hit == bigPayload)
-
-        // And when the id IS in the parent, the parent is returned (order matters).
-        let parentHit = TranscriptParser.lookupFullBody(
-            filePaths: [parentTmp, subTmp],
-            itemID: "toolu_task"
-        )
-        #expect(parentHit == "agent done")
-
-        // Missing in both → nil.
-        let miss = TranscriptParser.lookupFullBody(
-            filePaths: [parentTmp, subTmp],
-            itemID: "toolu_nope"
-        )
-        #expect(miss == nil)
     }
 
     @Test func inputTruncatesLargeStringField() throws {
@@ -511,6 +360,132 @@ struct TranscriptParserTests {
         } else {
             Issue.record("expected only the main assistant text item")
         }
+    }
+
+    // MARK: - parseTail
+
+    /// Maps an item to a comparable signature (id + discriminator + key text)
+    /// so tail items can be asserted byte-identical to the full parse's bottom.
+    private func signature(_ item: TranscriptItem) -> String {
+        switch item {
+        case .userPrompt(let id, let t, _): return "userPrompt|\(id)|\(t)"
+        case .assistantText(let id, let t, _, _): return "assistantText|\(id)|\(t)"
+        case .thinking(let id, let t, _): return "thinking|\(id)|\(t)"
+        case .systemReminder(let id, let kind, let t, _): return "systemReminder|\(id)|\(kind)|\(t)"
+        case .toolCall(let id, let name, _, _, let result, _, _, _):
+            return "toolCall|\(id)|\(name)|\(result?.text ?? "<nil>")"
+        case .slashCommand(let id, let name, let args, _):
+            return "slashCommand|\(id)|\(name)|\(args ?? "")"
+        }
+    }
+
+    @Test func parseTail_returns_same_last_N_items_as_full_parse() throws {
+        // Build a synthetic session with > N visible items, including a
+        // tool_use+tool_result pair INSIDE the tail window so the
+        // window-only toolResultsByID still folds the result in.
+        var lines: [String] = []
+        for i in 0..<30 {
+            let ts = "2026-05-05T10:00:\(String(format: "%02d", i))Z"
+            if i % 2 == 0 {
+                lines.append(
+                    "{\"type\":\"user\",\"uuid\":\"u\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"user\",\"content\":\"hello \(i)\"}}")
+            } else {
+                lines.append(
+                    "{\"type\":\"assistant\",\"uuid\":\"a\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reply \(i)\"}]}}")
+            }
+        }
+        // A tool_use immediately followed by its tool_result, near the end so
+        // both fall inside a limit=10 window.
+        lines.append(
+            #"{"type":"assistant","uuid":"atool","timestamp":"2026-05-05T10:00:30Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_tail","name":"Read","input":{"file_path":"/x"}}]}}"#)
+        lines.append(
+            #"{"type":"user","uuid":"utool","timestamp":"2026-05-05T10:00:31Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_tail","content":"tail file contents"}]}}"#)
+
+        let tmp = try writeTempJSONL(lines.joined(separator: "\n"))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let full = TranscriptParser.parse(filePath: tmp)
+        #expect(full.count > 10, "fixture must produce more than N visible items")
+
+        let tail = TranscriptParser.parseTail(filePath: tmp, limit: 10)
+        #expect(tail.count == min(10, full.count))
+
+        // The tail's tool_use must have folded in its result (window-local
+        // toolResultsByID), proving the in-window pairing works.
+        let toolItem = tail.first { item in
+            if case .toolCall = item { return true }
+            return false
+        }
+        if case .toolCall(_, _, _, _, let r, _, _, _)? = toolItem {
+            #expect(r?.text == "tail file contents")
+        } else {
+            Issue.record("expected a folded tool_use in the tail window")
+        }
+
+        // ids AND content must match exactly between full.suffix(10) and tail.
+        let fullSigs = full.suffix(10).map(signature)
+        let tailSigs = tail.map(signature)
+        #expect(fullSigs == tailSigs, "tail must be byte-identical to the bottom of the full parse")
+    }
+
+    @Test func parseTail_seeks_mid_line_in_large_file_and_matches_full_tail() throws {
+        // Build a file LARGER than the 1MB tail chunk so parseTail's seek lands
+        // mid-line, exercising the partial-first-line discard. We pad each
+        // assistant line's text with filler bytes to inflate the file past the
+        // chunk threshold without inflating the visible-item count.
+        let filler = String(repeating: "x", count: 4000)
+        var lines: [String] = []
+        // ~400 lines * ~4KB filler each ≈ 1.6MB > 1MB chunk.
+        for i in 0..<400 {
+            let ts = "2026-05-05T10:00:\(String(format: "%02d", i % 60))Z"
+            if i % 2 == 0 {
+                lines.append(
+                    "{\"type\":\"user\",\"uuid\":\"u\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"user\",\"content\":\"hello \(i) \(filler)\"}}")
+            } else {
+                lines.append(
+                    "{\"type\":\"assistant\",\"uuid\":\"a\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reply \(i) \(filler)\"}]}}")
+            }
+        }
+
+        let tmp = try writeTempJSONL(lines.joined(separator: "\n"))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        // Confirm the fixture actually exceeds the 1MB tail chunk so the seek
+        // is guaranteed to start mid-line (else the test wouldn't prove the
+        // partial-line discard).
+        let size = try FileManager.default.attributesOfItem(atPath: tmp)[.size] as? Int ?? 0
+        #expect(size > (1 << 20), "fixture must exceed the 1MB tail chunk to force a mid-line seek")
+
+        let full = TranscriptParser.parse(filePath: tmp)
+        let tail = TranscriptParser.parseTail(filePath: tmp, limit: 10)
+        #expect(tail.count == 10)
+
+        // Despite the seek landing mid-line, the discarded partial prefix must
+        // not corrupt the bottom: tail == full.suffix(10), exactly.
+        let fullSigs = full.suffix(10).map(signature)
+        let tailSigs = tail.map(signature)
+        #expect(fullSigs == tailSigs, "tail from a mid-line seek must equal the bottom of the full parse")
+    }
+
+    @Test func parseTail_grows_chunk_when_items_exceed_window() throws {
+        // A handful of HUGE items: each line is far larger than typical, so a
+        // small initial window might underflow `limit` and force a grow. Even
+        // with the 1MB default this stays correct; the assertion is that the
+        // grow-on-underflow path still returns the full parse's exact bottom.
+        let huge = String(repeating: "y", count: 200_000)
+        var lines: [String] = []
+        for i in 0..<8 {
+            let ts = "2026-05-05T10:00:0\(i)Z"
+            lines.append(
+                "{\"type\":\"assistant\",\"uuid\":\"a\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"\(huge) \(i)\"}]}}")
+        }
+        let tmp = try writeTempJSONL(lines.joined(separator: "\n"))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let full = TranscriptParser.parse(filePath: tmp)
+        let tail = TranscriptParser.parseTail(filePath: tmp, limit: 5)
+        #expect(tail.count == 5)
+        #expect(full.suffix(5).map(signature) == tail.map(signature))
     }
 
     // MARK: - helpers
