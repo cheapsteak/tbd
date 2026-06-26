@@ -397,7 +397,8 @@ struct TableTranscriptView: NSViewRepresentable {
                 let renderStart = DispatchTime.now().uptimeNanoseconds
                 let blocks = composedBubbleBlocks(for: node, item: item)
                 let renderEnd = DispatchTime.now().uptimeNanoseconds
-                let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: width)
+                let bodyWidth = TranscriptBubbleGeometry.bodyWidth(
+                    columnWidth: width, role: TranscriptBubbleGeometry.role(for: item))
                 // Measure each block once and CACHE the per-block heights so the
                 // realized cell reuses them (no NSHostingController re-alloc for a
                 // table block on scroll). The row's body height is the SAME summed-
@@ -614,7 +615,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 sourceText: TranscriptBubbleGeometry.text(for: item),
                 role: role,
                 header: TranscriptBubbleGeometry.header(for: item),
-                bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width),
+                bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role),
                 columnWidth: width,
                 cachedHeight: height
             )
@@ -780,7 +781,8 @@ struct TableTranscriptView: NSViewRepresentable {
             badgeUsage: TokenUsage?,
             columnWidth: CGFloat
         ) -> CGFloat {
-            let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: columnWidth)
+            let bodyWidth = TranscriptBubbleGeometry.bodyWidth(
+                columnWidth: columnWidth, role: TranscriptBubbleGeometry.role(for: item))
             let charsPerLine = max(Int(bodyWidth / avgBubbleCharWidth), 12)
             let text = TranscriptBubbleGeometry.text(for: item)
 
