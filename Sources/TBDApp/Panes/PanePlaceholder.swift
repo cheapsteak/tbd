@@ -192,15 +192,19 @@ struct PanePlaceholder: View {
             .buttonStyle(.borderless)
 
             if terminal(for: terminalID)?.isClaudeResumable == true && transcriptFeatureEnabled {
-                Button(action: { openTranscript(terminalID: terminalID) }) {
+                let transcriptOpen = isTranscriptOpen(terminalID: terminalID)
+                Button(action: { toggleTranscriptPane(terminalID: terminalID) }) {
                     HStack(spacing: 2) {
-                        Image(systemName: "text.bubble")
+                        Image(systemName: transcriptOpen ? "text.bubble.fill" : "text.bubble")
                         Text("Transcript")
                     }
                     .font(.caption)
+                    .foregroundStyle(transcriptOpen ? Color.accentColor : Color.primary)
                 }
                 .buttonStyle(.borderless)
-                .help("Open a chat-style live transcript pane")
+                .help(transcriptOpen
+                    ? "Hide the chat-style live transcript pane"
+                    : "Show the chat-style live transcript pane")
             }
 
         case .webview:
@@ -498,12 +502,12 @@ struct PanePlaceholder: View {
         }
     }
 
-    private func openTranscript(terminalID: UUID) {
-        layout = layout.splitPane(
-            id: content.paneID,
-            direction: .horizontal,
-            newContent: .liveTranscript(id: UUID(), terminalID: terminalID)
-        )
+    private func toggleTranscriptPane(terminalID: UUID) {
+        layout = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
+    }
+
+    private func isTranscriptOpen(terminalID: UUID) -> Bool {
+        layout.firstPaneID(where: { isLiveTranscriptPane($0, for: terminalID) }) != nil
     }
 
     /// Creates a real terminal via the daemon, then inserts it as a split pane.
