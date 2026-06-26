@@ -86,6 +86,12 @@ struct TableTranscriptView: NSViewRepresentable {
         coordinator.tableView = tableView
         coordinator.scrollView = scrollView
         coordinator.lastScrollToken = scrollToBottomToken
+        coordinator.atBottomBinding = $atBottom
+        // Track the live scroll position so the jump-to-bottom button hides the
+        // moment the viewport reaches the bottom — by the button OR a manual
+        // scroll. Without this the flag only updated on node changes, so a
+        // scroll-to-bottom left the button stuck on screen.
+        coordinator.startObservingScroll()
 
         let nodes = nodesProvider()
         coordinator.nodes = nodes
@@ -174,6 +180,11 @@ struct TableTranscriptView: NSViewRepresentable {
         var nodes: [TranscriptRenderNode] = []
         var previousNodes: [TranscriptRenderNode] = []
         var lastScrollToken = 0
+
+        /// Live binding driving the floating jump-to-bottom button. Held so the
+        /// clip-bounds observer can keep it in sync with the ACTUAL scroll
+        /// position — not just on node updates. Refreshed every `update(...)`.
+        var atBottomBinding: Binding<Bool>?
 
         /// Explicit per-row height cache, keyed by `(id, contentVersion, width)`.
         /// A re-poll that leaves a row's id+version unchanged reuses the cached
@@ -834,6 +845,9 @@ struct TableTranscriptView: NSViewRepresentable {
         /// `TranscriptStreamPlan`. Captures at-bottom BEFORE the edit so a grown
         /// document doesn't misjudge whether to follow the tail.
         func update(nodes newNodes: [TranscriptRenderNode], atBottom: Binding<Bool>) {
+            // Keep the observer's binding fresh (SwiftUI hands us a new binding
+            // each update).
+            atBottomBinding = atBottom
             // `scrollView` must exist (downstream `scrollToEnd` / `isAtBottom`
             // read it via the stored property); bind it only to gate on presence.
             guard let tableView, scrollView != nil else { return }
@@ -959,6 +973,36 @@ struct TableTranscriptView: NSViewRepresentable {
         }
 
         // MARK: Scrolling / at-bottom
+
+        /// Subscribe to clip-bounds changes so `atBottom` reflects the LIVE scroll
+        /// position. AppKit posts this on the main thread during every scroll
+        /// (button-driven or manual), so the jump-to-bottom button hides as soon
+        /// as the viewport reaches the bottom and reappears when the user scrolls
+        /// away — instead of only re-evaluating on a node update.
+        func startObservingScroll() {
+            guard let clip = scrollView?.contentView else { return }
+            clip.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(clipBoundsDidChange),
+                name: NSView.boundsDidChangeNotification,
+                object: clip
+            )
+        }
+
+        @objc private func clipBoundsDidChange() {
+            guard let binding = atBottomBinding else { return }
+            let value = isAtBottom()
+            // Only write on a transition so a scroll gesture flips the flag at
+            // most twice (entering/leaving the bottom), not once per frame.
+            if binding.wrappedValue != value {
+                binding.wrappedValue = value
+            }
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
 
         /// Whether the clip is within ~120pt of the document bottom (the
         /// follow-the-tail threshold shared with the TextKit path).
