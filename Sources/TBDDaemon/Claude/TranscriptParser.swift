@@ -83,6 +83,128 @@ enum TranscriptParser {
             }
         }
 
+        return buildItems(rawLines: rawLines, stableIDs: stableIDs, toolResultsByID: toolResultsByID)
+    }
+
+    /// Tail-parse path: returns only the LAST `limit` visible items, fast.
+    ///
+    /// Approach: read ONLY the last `chunkBytes` of the file (seek to
+    /// `max(0, fileSize - chunkBytes)`, read to EOF) instead of the whole file.
+    /// On a ~30MB JSONL we therefore decode/split a few hundred KB rather than
+    /// 30MB — the full-file UTF8 decode + line-split was the dominant cost
+    /// (~910ms measured) even though we only JSON-parse the last few lines.
+    ///
+    /// The chunk usually starts mid-line. We find the FIRST newline in the chunk
+    /// and discard everything up to and including it (the partial leading line) —
+    /// UNLESS the chunk started at offset 0 (whole file fit), in which case we
+    /// keep all of it. Dropping the partial prefix also sidesteps a possible
+    /// mid-UTF8-character split at the seek boundary.
+    ///
+    /// Correctness guard: if the chunk yields FEWER than `limit` visible items
+    /// (very large items, or a tiny tail window), we double `chunkBytes` and
+    /// retry, up to the full file size — so edge cases stay correct. In the
+    /// common case the first ~1MB chunk holds far more than `limit` items and no
+    /// retry happens.
+    ///
+    /// Identical-bottom guarantee: this calls the SAME `buildItems` helper as
+    /// the full parse, so the items it produces for the windowed lines are
+    /// byte-identical to the corresponding bottom of the full parse — the
+    /// tail→full UI swap therefore does not shift the visible bottom.
+    static func parseTail(filePath: String, limit: Int) -> [TranscriptItem] {
+        guard let handle = FileHandle(forReadingAtPath: filePath) else { return [] }
+        defer { try? handle.close() }
+        guard let fileSize = (try? handle.seekToEnd()).map({ Int($0) }) else { return [] }
+
+        // Start ~1MB; far below a 30MB file, far above `limit` items of lines.
+        var chunkBytes = 1 << 20
+
+        while true {
+            let readSize = min(chunkBytes, fileSize)
+            let offset = fileSize - readSize
+            let coveredWholeFile = offset == 0
+
+            guard (try? handle.seek(toOffset: UInt64(offset))) != nil,
+                  let chunk = try? handle.readToEnd() else {
+                return []
+            }
+
+            // Drop the partial leading line unless we read from offset 0.
+            // The bytes up to and including the first '\n' are a line fragment
+            // (and may straddle a UTF8 character); discarding them is safe.
+            let bytes: Data
+            if coveredWholeFile {
+                bytes = chunk
+            } else if let nl = chunk.firstIndex(of: UInt8(ascii: "\n")) {
+                bytes = chunk[chunk.index(after: nl)...]
+            } else {
+                // No newline in the chunk: the tail is one giant partial line.
+                // Grow (or give up if we already read the whole file).
+                bytes = Data()
+            }
+
+            if let content = String(data: bytes, encoding: .utf8) {
+                let items = parseTailWindow(content: content)
+                if items.count >= limit || coveredWholeFile {
+                    return Array(items.suffix(limit))
+                }
+            } else if coveredWholeFile {
+                // Whole file isn't decodable as UTF8 — match the empty contract.
+                return []
+            }
+
+            // Underflow (or undecodable chunk): grow and retry.
+            if coveredWholeFile { return [] }
+            chunkBytes *= 2
+        }
+    }
+
+    /// Parse a decoded tail window (a suffix of the file's lines, each line
+    /// whole) into transcript items. Builds a window-local `toolResultsByID` so
+    /// a tool_use+tool_result pair within the window folds together; a tool_use
+    /// whose result fell outside the window renders without a result —
+    /// acceptable, matching today's behavior at any truncation boundary.
+    ///
+    /// stableIDs here use a "tail-<n>" fallback only for synthetic/malformed
+    /// lines that lack a `uuid`; real Claude lines always carry one, so the
+    /// fallback never participates in the tail→full identical-bottom comparison.
+    private static func parseTailWindow(content: String) -> [TranscriptItem] {
+        var rawLines: [[String: Any]] = []
+        var stableIDs: [String] = []
+        var toolResultsByID: [String: ToolResult] = [:]
+
+        var lineIndex = 0
+        for line in content.components(separatedBy: "\n") where !line.isEmpty {
+            defer { lineIndex += 1 }
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                continue
+            }
+            rawLines.append(json)
+            stableIDs.append((json["uuid"] as? String) ?? "tail-\(lineIndex)")
+
+            if json["type"] as? String == "user",
+               let message = json["message"] as? [String: Any],
+               let array = message["content"] as? [[String: Any]] {
+                let toolResultBlocks = array.filter { ($0["type"] as? String) == "tool_result" }
+                for block in toolResultBlocks {
+                    guard let id = block["tool_use_id"] as? String else { continue }
+                    toolResultsByID[id] = extractToolResult(from: block)
+                }
+            }
+        }
+
+        return buildItems(rawLines: rawLines, stableIDs: stableIDs, toolResultsByID: toolResultsByID)
+    }
+
+    /// Shared core: turn an array of raw line dicts (+ parallel stableIDs and a
+    /// tool_use_id→result index) into `[TranscriptItem]`. Both the full `parse`
+    /// and the tail `parseTail` call this, guaranteeing the tail's items are
+    /// byte-identical to the bottom of the full parse for the same lines.
+    private static func buildItems(
+        rawLines: [[String: Any]],
+        stableIDs: [String],
+        toolResultsByID: [String: ToolResult]
+    ) -> [TranscriptItem] {
         var items: [TranscriptItem] = []
 
         for (i, json) in rawLines.enumerated() {

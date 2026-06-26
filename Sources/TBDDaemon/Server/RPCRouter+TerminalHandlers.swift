@@ -1164,7 +1164,12 @@ extension RPCRouter {
             filePath = projectDir.appendingPathComponent("\(sessionID).jsonl").path
         }
         let parsed: [TranscriptItem]
-        if let cached = await TranscriptParseCache.shared.get(filePath: filePath) {
+        if let tailLimit = params.tailLimit {
+            // Tail-first fast open (table pane): JSON-parse only a bounded window
+            // of the last lines. Never touch TranscriptParseCache for this path —
+            // the tail result is a partial view and must not poison the full cache.
+            parsed = TranscriptParser.parseTail(filePath: filePath, limit: tailLimit)
+        } else if let cached = await TranscriptParseCache.shared.get(filePath: filePath) {
             parsed = cached
         } else {
             parsed = TranscriptParser.parse(filePath: filePath)

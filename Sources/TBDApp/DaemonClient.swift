@@ -1010,12 +1010,12 @@ actor DaemonClient {
     /// Load the full chat transcript for a terminal's current Claude session.
     /// Returns empty messages and nil sessionID if the terminal has no session yet;
     /// returns empty messages and a sessionID if the session JSONL doesn't exist yet.
-    func terminalTranscript(terminalID: UUID) async throws -> TerminalTranscriptResult {
+    func terminalTranscript(terminalID: UUID, tailLimit: Int? = nil) async throws -> TerminalTranscriptResult {
         perfTranscriptLog.debug("client.rpc.start method=terminalTranscript")
         let start = ContinuousClock.now
         let request = try RPCRequest(
             method: RPCMethod.terminalTranscript,
-            params: TerminalTranscriptParams(terminalID: terminalID)
+            params: TerminalTranscriptParams(terminalID: terminalID, tailLimit: tailLimit)
         )
         let response = try await sendRawAsync(request)
         guard response.success else {

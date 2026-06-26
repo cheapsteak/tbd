@@ -362,6 +362,132 @@ struct TranscriptParserTests {
         }
     }
 
+    // MARK: - parseTail
+
+    /// Maps an item to a comparable signature (id + discriminator + key text)
+    /// so tail items can be asserted byte-identical to the full parse's bottom.
+    private func signature(_ item: TranscriptItem) -> String {
+        switch item {
+        case .userPrompt(let id, let t, _): return "userPrompt|\(id)|\(t)"
+        case .assistantText(let id, let t, _, _): return "assistantText|\(id)|\(t)"
+        case .thinking(let id, let t, _): return "thinking|\(id)|\(t)"
+        case .systemReminder(let id, let kind, let t, _): return "systemReminder|\(id)|\(kind)|\(t)"
+        case .toolCall(let id, let name, _, _, let result, _, _, _):
+            return "toolCall|\(id)|\(name)|\(result?.text ?? "<nil>")"
+        case .slashCommand(let id, let name, let args, _):
+            return "slashCommand|\(id)|\(name)|\(args ?? "")"
+        }
+    }
+
+    @Test func parseTail_returns_same_last_N_items_as_full_parse() throws {
+        // Build a synthetic session with > N visible items, including a
+        // tool_use+tool_result pair INSIDE the tail window so the
+        // window-only toolResultsByID still folds the result in.
+        var lines: [String] = []
+        for i in 0..<30 {
+            let ts = "2026-05-05T10:00:\(String(format: "%02d", i))Z"
+            if i % 2 == 0 {
+                lines.append(
+                    "{\"type\":\"user\",\"uuid\":\"u\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"user\",\"content\":\"hello \(i)\"}}")
+            } else {
+                lines.append(
+                    "{\"type\":\"assistant\",\"uuid\":\"a\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reply \(i)\"}]}}")
+            }
+        }
+        // A tool_use immediately followed by its tool_result, near the end so
+        // both fall inside a limit=10 window.
+        lines.append(
+            #"{"type":"assistant","uuid":"atool","timestamp":"2026-05-05T10:00:30Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_tail","name":"Read","input":{"file_path":"/x"}}]}}"#)
+        lines.append(
+            #"{"type":"user","uuid":"utool","timestamp":"2026-05-05T10:00:31Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_tail","content":"tail file contents"}]}}"#)
+
+        let tmp = try writeTempJSONL(lines.joined(separator: "\n"))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let full = TranscriptParser.parse(filePath: tmp)
+        #expect(full.count > 10, "fixture must produce more than N visible items")
+
+        let tail = TranscriptParser.parseTail(filePath: tmp, limit: 10)
+        #expect(tail.count == min(10, full.count))
+
+        // The tail's tool_use must have folded in its result (window-local
+        // toolResultsByID), proving the in-window pairing works.
+        let toolItem = tail.first { item in
+            if case .toolCall = item { return true }
+            return false
+        }
+        if case .toolCall(_, _, _, _, let r, _, _, _)? = toolItem {
+            #expect(r?.text == "tail file contents")
+        } else {
+            Issue.record("expected a folded tool_use in the tail window")
+        }
+
+        // ids AND content must match exactly between full.suffix(10) and tail.
+        let fullSigs = full.suffix(10).map(signature)
+        let tailSigs = tail.map(signature)
+        #expect(fullSigs == tailSigs, "tail must be byte-identical to the bottom of the full parse")
+    }
+
+    @Test func parseTail_seeks_mid_line_in_large_file_and_matches_full_tail() throws {
+        // Build a file LARGER than the 1MB tail chunk so parseTail's seek lands
+        // mid-line, exercising the partial-first-line discard. We pad each
+        // assistant line's text with filler bytes to inflate the file past the
+        // chunk threshold without inflating the visible-item count.
+        let filler = String(repeating: "x", count: 4000)
+        var lines: [String] = []
+        // ~400 lines * ~4KB filler each ≈ 1.6MB > 1MB chunk.
+        for i in 0..<400 {
+            let ts = "2026-05-05T10:00:\(String(format: "%02d", i % 60))Z"
+            if i % 2 == 0 {
+                lines.append(
+                    "{\"type\":\"user\",\"uuid\":\"u\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"user\",\"content\":\"hello \(i) \(filler)\"}}")
+            } else {
+                lines.append(
+                    "{\"type\":\"assistant\",\"uuid\":\"a\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"reply \(i) \(filler)\"}]}}")
+            }
+        }
+
+        let tmp = try writeTempJSONL(lines.joined(separator: "\n"))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        // Confirm the fixture actually exceeds the 1MB tail chunk so the seek
+        // is guaranteed to start mid-line (else the test wouldn't prove the
+        // partial-line discard).
+        let size = try FileManager.default.attributesOfItem(atPath: tmp)[.size] as? Int ?? 0
+        #expect(size > (1 << 20), "fixture must exceed the 1MB tail chunk to force a mid-line seek")
+
+        let full = TranscriptParser.parse(filePath: tmp)
+        let tail = TranscriptParser.parseTail(filePath: tmp, limit: 10)
+        #expect(tail.count == 10)
+
+        // Despite the seek landing mid-line, the discarded partial prefix must
+        // not corrupt the bottom: tail == full.suffix(10), exactly.
+        let fullSigs = full.suffix(10).map(signature)
+        let tailSigs = tail.map(signature)
+        #expect(fullSigs == tailSigs, "tail from a mid-line seek must equal the bottom of the full parse")
+    }
+
+    @Test func parseTail_grows_chunk_when_items_exceed_window() throws {
+        // A handful of HUGE items: each line is far larger than typical, so a
+        // small initial window might underflow `limit` and force a grow. Even
+        // with the 1MB default this stays correct; the assertion is that the
+        // grow-on-underflow path still returns the full parse's exact bottom.
+        let huge = String(repeating: "y", count: 200_000)
+        var lines: [String] = []
+        for i in 0..<8 {
+            let ts = "2026-05-05T10:00:0\(i)Z"
+            lines.append(
+                "{\"type\":\"assistant\",\"uuid\":\"a\(i)\",\"timestamp\":\"\(ts)\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"\(huge) \(i)\"}]}}")
+        }
+        let tmp = try writeTempJSONL(lines.joined(separator: "\n"))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let full = TranscriptParser.parse(filePath: tmp)
+        let tail = TranscriptParser.parseTail(filePath: tmp, limit: 5)
+        #expect(tail.count == 5)
+        #expect(full.suffix(5).map(signature) == tail.map(signature))
+    }
+
     // MARK: - helpers
 
     private func writeTempJSONL(_ contents: String) throws -> String {

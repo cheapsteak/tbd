@@ -22,8 +22,18 @@ struct TableTranscriptPaneView: View {
     private let pollInterval: TimeInterval = 1.5
     private let errorThreshold = 3
 
+    /// Tail-first open: the FIRST fetch asks the daemon for only the last N
+    /// visible items (fast even on 2000+ item / 30MB sessions), renders them,
+    /// then immediately backfills the FULL transcript in the same poll. The
+    /// tail IS the bottom of the full list, so the tail→full swap re-pins to an
+    /// unchanged bottom via the existing `.rebuild` path.
+    private let tailLimit = 60
+
     @State private var loadError: String?
     @State private var hasShownInitialMessages = false
+    /// False until the full transcript has been fetched for the current session.
+    /// Drives the two-phase first-load and resets on session rollover.
+    @State private var hasLoadedFull = false
     @State private var lastSessionID: String?
     @State private var retryToken = 0
 
@@ -217,22 +227,65 @@ struct TableTranscriptPaneView: View {
     private func pollOnce(failureCount: inout Int) async {
         guard let sid = currentSessionID else { return }
 
-        // Detect session rollover: reset the initial-state guard.
+        // Detect session rollover: reset the initial-state guard and force the
+        // next first-load to re-run the tail-first two-phase fetch.
         if let last = lastSessionID, last != sid {
             hasShownInitialMessages = false
+            hasLoadedFull = false
         }
         lastSessionID = sid
 
         do {
-            let fetchStart = DispatchTime.now().uptimeNanoseconds
-            let result = try await appState.daemonClient.terminalTranscript(terminalID: terminalID)
-            // One-shot RPC round-trip marker for the FIRST poll on open.
-            if !openTiming.didLogFetch {
-                openTiming.didLogFetch = true
-                let ms = Double(DispatchTime.now().uptimeNanoseconds &- fetchStart) / 1_000_000
-                Self.openLog.debug(
-                    "table.open.fetchDone ms=\(ms, format: .fixed(precision: 1), privacy: .public) itemCount=\(result.messages.count, privacy: .public)")
+            if !hasLoadedFull {
+                // FIRST load (tail-first): fetch only the last N items (fast),
+                // render them, then immediately backfill the full transcript —
+                // both within this one pollOnce call, not on the next 1.5s tick.
+                let fetchStart = DispatchTime.now().uptimeNanoseconds
+                let tail = try await appState.daemonClient.terminalTranscript(
+                    terminalID: terminalID, tailLimit: tailLimit)
+                // One-shot RPC round-trip marker — now the SMALL tail fetch.
+                if !openTiming.didLogFetch {
+                    openTiming.didLogFetch = true
+                    let ms = Double(DispatchTime.now().uptimeNanoseconds &- fetchStart) / 1_000_000
+                    Self.openLog.debug(
+                        "table.open.fetchDone ms=\(ms, format: .fixed(precision: 1), privacy: .public) itemCount=\(tail.messages.count, privacy: .public)")
+                }
+                let tailSID = tail.sessionID ?? sid
+                await MainActor.run {
+                    let prev = appState.sessionTranscripts[tailSID] ?? []
+                    if prev != tail.messages {
+                        appState.sessionTranscripts[tailSID] = tail.messages
+                        appState.touchSessionTranscript(tailSID)
+                    }
+                    if !tail.messages.isEmpty {
+                        hasShownInitialMessages = true
+                    }
+                }
+
+                // Backfill: the full transcript carries the earlier items the
+                // tail lacks. The store write flows through the normal update
+                // path → `.rebuild`, which re-pins the (unchanged) bottom.
+                let full = try await appState.daemonClient.terminalTranscript(terminalID: terminalID)
+                let fullSID = full.sessionID ?? sid
+                await MainActor.run {
+                    let prev = appState.sessionTranscripts[fullSID] ?? []
+                    if prev != full.messages {
+                        appState.sessionTranscripts[fullSID] = full.messages
+                        appState.touchSessionTranscript(fullSID)
+                    }
+                    if !full.messages.isEmpty {
+                        hasShownInitialMessages = true
+                    }
+                }
+                // Only mark fully-loaded once the full fetch succeeds; if it
+                // threw above we never reach here, so the next poll retries.
+                hasLoadedFull = true
+                failureCount = 0
+                return
             }
+
+            // Subsequent polls: full transcript fetch, as before.
+            let result = try await appState.daemonClient.terminalTranscript(terminalID: terminalID)
             failureCount = 0
             let resolvedSID = result.sessionID ?? sid
             await MainActor.run {
