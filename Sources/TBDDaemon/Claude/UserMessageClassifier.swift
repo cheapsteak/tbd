@@ -15,6 +15,10 @@ enum UserMessageClassifier {
         "<tool_result",
         "<local-command-",
         "<environment_details",
+        // Background-task notification envelopes injected into the user role
+        // (both the bare tag and the SYSTEM NOTIFICATION preamble form).
+        "<task-notification",
+        "[SYSTEM NOTIFICATION",
     ]
 
     /// Case-insensitive substrings that mark injected context blocks (checked after trimming leading `# `).
@@ -93,6 +97,13 @@ enum UserMessageClassifier {
             text = (array.first(where: { $0["type"] as? String == "text" })?["text"] as? String) ?? ""
         } else {
             return nil
+        }
+
+        // Background-task notifications are harness-injected into the user role.
+        // Surface them as a dedicated system kind so they render as a clickable
+        // activity row (with the full text available in the detail overlay).
+        if text.hasPrefix("<task-notification") || text.hasPrefix("[SYSTEM NOTIFICATION") {
+            return .taskNotification
         }
 
         if text.hasPrefix("Base directory for this skill:") { return .skillBody }

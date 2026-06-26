@@ -161,6 +161,7 @@ struct TranscriptOverlayView: View {
             case .hookOutput:         return "hook"
             case .environmentDetails: return "env"
             case .slashEnvelope:      return "command"
+            case .taskNotification:   return "Background"
             case .other:              return "info"
             }
         case .userPrompt:   return "User"

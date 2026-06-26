@@ -78,6 +78,26 @@ struct UserMessageClassifierTests {
         #expect(UserMessageClassifier.isRealUserMessage(l) == true)
         #expect(UserMessageClassifier.extractText(l) == nil)
     }
+
+    @Test("task-notification string is not a real user message")
+    func filtersTaskNotificationString() {
+        let l = line("user", role: "user", content: "<task-notification>\n<task-id>abc</task-id>\n</task-notification>")
+        #expect(UserMessageClassifier.isRealUserMessage(l) == false)
+    }
+
+    @Test("SYSTEM NOTIFICATION preamble string is not a real user message")
+    func filtersSystemNotificationPreambleString() {
+        let l = line("user", role: "user", content: "[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event.\n<task-notification>\n<task-id>abc</task-id>\n</task-notification>")
+        #expect(UserMessageClassifier.isRealUserMessage(l) == false)
+    }
+
+    @Test("task-notification array content is not a real user message")
+    func filtersTaskNotificationArray() {
+        let l = line("user", role: "user", content: [
+            ["type": "text", "text": "<task-notification>\n<task-id>abc</task-id>\n</task-notification>"]
+        ])
+        #expect(UserMessageClassifier.isRealUserMessage(l) == false)
+    }
 }
 
 @Suite("UserMessageClassifier.classify")
@@ -163,5 +183,17 @@ struct UserMessageClassifierClassifyTests {
     @Test func user_typed_data_tag_prompt_returns_nil() {
         let line = userLine("<data>some xml</data>")
         #expect(UserMessageClassifier.classify(line) == nil)
+    }
+
+    @Test func task_notification_returns_task_notification_kind() {
+        let line = userLine("<task-notification>\n<task-id>abc</task-id>\n</task-notification>")
+        #expect(UserMessageClassifier.classify(line) == .taskNotification)
+        #expect(UserMessageClassifier.isRealUserMessage(line) == false)
+    }
+
+    @Test func system_notification_preamble_returns_task_notification_kind() {
+        let line = userLine("[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event.\n<task-notification>\n<task-id>abc</task-id>\n</task-notification>")
+        #expect(UserMessageClassifier.classify(line) == .taskNotification)
+        #expect(UserMessageClassifier.isRealUserMessage(line) == false)
     }
 }
