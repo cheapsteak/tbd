@@ -289,6 +289,15 @@ struct SessionTranscriptView: View {
     /// shown only when the user has consciously scrolled up.
     @State private var atBottom: Bool = true
 
+    /// Incremented by the jump-to-bottom button to ask the table to scroll to
+    /// the last row (NSTableView renderer path).
+    @State private var scrollToBottomToken: Int = 0
+
+    /// Route the history viewer through the same `TableTranscriptView` the live
+    /// pane uses (default), keeping the legacy SwiftUI `ScrollView`/`LazyVStack`
+    /// path as the toggle-off fallback. (#129)
+    @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript = true
+
     private var messages: [TranscriptItem] {
         appState.sessionTranscripts[sessionId] ?? []
     }
@@ -356,6 +365,64 @@ struct SessionTranscriptView: View {
                         .font(.callout)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if useTableViewTranscript {
+                TableTranscriptView(
+                    context: TranscriptCardContext(
+                        terminalID: nil,
+                        openTranscriptOverlay: { itemID in
+                            overlayCoordinator.open(
+                                terminalID: nil,
+                                itemID: itemID,
+                                historySessionID: sessionId
+                            )
+                        },
+                        appState: appState
+                    ),
+                    atBottom: $atBottom,
+                    scrollToBottomToken: scrollToBottomToken,
+                    nodesProvider: { transcriptRenderNodes(from: messages) }
+                )
+                // Rebuild the stateful Coordinator when the selected session changes.
+                .id(sessionId)
+                .overlay(alignment: .bottomTrailing) {
+                    if !atBottom {
+                        Button {
+                            scrollToBottomToken &+= 1
+                        } label: {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: 28))
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, Color.accentColor)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .shadow(radius: 4)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(16)
+                        .transition(.scale(scale: 0.5).combined(with: .opacity))
+                        .help("Scroll to bottom")
+                    }
+                }
+                .animation(.easeInOut(duration: 0.2), value: atBottom)
+                .onAppear {
+                    HangWatchdog.shared.recordContext { snap in
+                        snap.focusedTerminalIDShort = nil
+                        snap.transcriptItemCount = messages.count
+                        snap.paneLabel = "history"
+                    }
+                }
+                .onChange(of: messages.count) { _, newCount in
+                    HangWatchdog.shared.recordContext { snap in
+                        snap.transcriptItemCount = newCount
+                        snap.paneLabel = "history"
+                    }
+                }
+                .onDisappear {
+                    HangWatchdog.shared.recordContext { snap in
+                        snap.focusedTerminalIDShort = nil
+                        snap.transcriptItemCount = nil
+                        snap.paneLabel = nil
+                    }
+                }
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
