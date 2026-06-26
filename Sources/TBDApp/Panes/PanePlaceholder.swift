@@ -193,7 +193,7 @@ struct PanePlaceholder: View {
 
             if terminal(for: terminalID)?.isClaudeResumable == true && transcriptFeatureEnabled {
                 let transcriptOpen = isTranscriptOpen(terminalID: terminalID)
-                Button(action: { openTranscript(terminalID: terminalID) }) {
+                Button(action: { toggleTranscriptPane(terminalID: terminalID) }) {
                     HStack(spacing: 2) {
                         Image(systemName: transcriptOpen ? "text.bubble.fill" : "text.bubble")
                         Text("Transcript")
@@ -502,7 +502,7 @@ struct PanePlaceholder: View {
         }
     }
 
-    private func openTranscript(terminalID: UUID) {
+    private func toggleTranscriptPane(terminalID: UUID) {
         layout = toggleTranscript(into: layout, terminalID: terminalID, fromPaneID: content.paneID)
     }
 
