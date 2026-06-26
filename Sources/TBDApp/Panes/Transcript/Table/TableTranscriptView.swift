@@ -992,7 +992,7 @@ struct TableTranscriptView: NSViewRepresentable {
 
         @objc private func clipBoundsDidChange() {
             guard let binding = atBottomBinding else { return }
-            let value = isAtBottom()
+            let value = isViewportAtBottomForButton()
             // Only write on a transition so a scroll gesture flips the flag at
             // most twice (entering/leaving the bottom), not once per frame.
             if binding.wrappedValue != value {
@@ -1004,14 +1004,39 @@ struct TableTranscriptView: NSViewRepresentable {
             NotificationCenter.default.removeObserver(self)
         }
 
-        /// Whether the clip is within ~120pt of the document bottom (the
-        /// follow-the-tail threshold shared with the TextKit path).
-        private func isAtBottom() -> Bool {
-            guard let scrollView, let documentView = scrollView.documentView else { return true }
+        /// Vertical gap between the viewport's bottom edge and the document
+        /// bottom, in points (≤0 when the last content is flush with or above the
+        /// viewport bottom).
+        private func viewportGapToBottom() -> CGFloat {
+            guard let scrollView, let documentView = scrollView.documentView else { return 0 }
             let clip = scrollView.contentView
             let visibleMaxY = clip.bounds.origin.y + clip.bounds.height
-            let docMaxY = documentView.frame.height
-            return TranscriptStreamPlan.isNearBottom(documentMaxY: docMaxY, visibleMaxY: visibleMaxY)
+            return documentView.frame.height - visibleMaxY
+        }
+
+        /// Whether the clip is within ~120pt of the document bottom — the tight
+        /// FOLLOW-THE-TAIL threshold (shared with the TextKit path). Kept small so
+        /// a modest upward scroll stops new streamed content from yanking the
+        /// viewport back down.
+        private func isAtBottom() -> Bool {
+            guard scrollView?.documentView != nil else { return true }
+            return TranscriptStreamPlan.isNearBottom(
+                documentMaxY: viewportGapToBottom(), visibleMaxY: 0)
+        }
+
+        /// Whether the viewport is close enough to the bottom to HIDE the floating
+        /// jump-to-bottom button. Deliberately looser than `isAtBottom()`: the
+        /// button only appears once you're a meaningful distance away — at least
+        /// 400pt or half a viewport, whichever is larger. This keeps it from
+        /// lingering after a near-bottom landing (a small residual gap from
+        /// lazy-height realization no longer pins it open) and from flickering
+        /// near the bottom, while leaving stream auto-scroll on the tight
+        /// threshold above.
+        private func isViewportAtBottomForButton() -> Bool {
+            guard let scrollView, scrollView.documentView != nil else { return true }
+            let viewportHeight = scrollView.contentView.bounds.height
+            let threshold = max(400, viewportHeight * 0.5)
+            return viewportGapToBottom() <= threshold
         }
 
         func scrollToEnd(animated: Bool) {
@@ -1034,7 +1059,7 @@ struct TableTranscriptView: NSViewRepresentable {
         private func recomputeAtBottom(_ atBottom: Binding<Bool>) {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                atBottom.wrappedValue = self.isAtBottom()
+                atBottom.wrappedValue = self.isViewportAtBottomForButton()
             }
         }
     }
