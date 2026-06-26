@@ -115,6 +115,49 @@ struct ActivityRowFormatterTests {
         #expect(p.openTargetID == "s1")
     }
 
+    @Test("Task notification → clock icon, 'Background · <summary>' title, status badge")
+    func taskNotification() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "t1", kind: .taskNotification,
+            text: "<task-notification>\n<status>completed</status>\n<summary>Agent \"X\" came to rest</summary>\n</task-notification>")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.iconSystemName == "clock.arrow.circlepath")
+        #expect(titleText(p).contains("Background"))
+        #expect(titleText(p).contains("Agent \"X\" came to rest"))
+        #expect(p.badges == [ActivityRowBadge(text: "completed", kind: .neutral)])
+        #expect(p.openTargetID == "t1")
+        #expect(p.titleTruncation == .byTruncatingTail)
+    }
+
+    @Test("Task notification with no <summary> → falls back to status text")
+    func taskNotificationFallbackToStatus() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "t2", kind: .taskNotification,
+            text: "<task-notification>\n<status>running</status>\n</task-notification>")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(titleText(p).contains("running"))
+        #expect(p.badges == [ActivityRowBadge(text: "running", kind: .neutral)])
+    }
+
+    @Test("Task notification with no summary or status → 'Background task', no badge")
+    func taskNotificationFallbackToDefault() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "t3", kind: .taskNotification,
+            text: "<task-notification>\n<task-id>abc</task-id>\n</task-notification>")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(titleText(p).contains("Background task"))
+        #expect(p.badges.isEmpty)
+    }
+
+    @Test("Task notification with failing status → error badge kind")
+    func taskNotificationErrorBadge() throws {
+        let node = TranscriptRenderNode.makeSystemReminder(
+            id: "t4", kind: .taskNotification,
+            text: "<task-notification>\n<status>failed</status>\n<summary>boom</summary>\n</task-notification>")
+        let p = try #require(ActivityRowFormatter.presentation(for: node))
+        #expect(p.badges == [ActivityRowBadge(text: "failed", kind: .error)])
+    }
+
     @Test("Skill body → 'Skill' + skill-name segments")
     func skillBody() throws {
         let node = TranscriptRenderNode.makeSkillBody(

@@ -211,6 +211,47 @@ struct TranscriptParserTests {
         }
     }
 
+    @Test func task_notification_emits_system_reminder_with_full_text() throws {
+        // A real user prompt, then a background-task notification injected into
+        // the user role, then an assistant reply. The task-notification must
+        // produce a single .systemReminder(kind: .taskNotification) item whose
+        // text preserves the original <task-notification> content (for the
+        // detail overlay).
+        let lines = [
+            #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"user","content":"Please run the build."}}"#,
+            #"{"type":"user","uuid":"u2","timestamp":"2026-05-05T10:00:01Z","message":{"role":"user","content":"<task-notification>\n<status>completed</status>\n<summary>Build finished</summary>\n</task-notification>"}}"#,
+            #"{"type":"assistant","uuid":"a1","timestamp":"2026-05-05T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Build started."}]}}"#,
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 3, "task-notification line must produce a system reminder item")
+
+        let userPrompts = items.compactMap { item -> String? in
+            if case .userPrompt(_, let t, _) = item { return t }
+            return nil
+        }
+        #expect(userPrompts == ["Please run the build."])
+
+        let assistantTexts = items.compactMap { item -> String? in
+            if case .assistantText(_, let t, _, _) = item { return t }
+            return nil
+        }
+        #expect(assistantTexts == ["Build started."])
+
+        // Exactly one .systemReminder with kind .taskNotification preserving the
+        // full original notification text.
+        let reminders = items.compactMap { item -> (SystemKind, String)? in
+            if case .systemReminder(_, let kind, let text, _) = item { return (kind, text) }
+            return nil
+        }
+        #expect(reminders.count == 1)
+        #expect(reminders.first?.0 == .taskNotification)
+        #expect(reminders.first?.1.contains("<task-notification>") == true)
+        #expect(reminders.first?.1.contains("Build finished") == true)
+    }
+
     @Test func slash_envelope_emits_user_prompt_with_command_text() throws {
         let line = #"{"type":"user","uuid":"u1","timestamp":"2026-05-05T10:00:00Z","message":{"role":"user","content":"<command-name>/pr</command-name><command-message>pr</command-message><command-args></command-args>"}}"#
         let tmp = try writeTempJSONL(line)

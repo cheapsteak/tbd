@@ -97,8 +97,8 @@ enum ActivityRowFormatter {
         switch node.kind {
         case .chatBubble:
             return nil
-        case let .systemReminder(id, kind, _, ts):
-            return systemReminder(id: id, kind: kind, timestamp: ts)
+        case let .systemReminder(id, kind, text, ts):
+            return systemReminder(id: id, kind: kind, text: text, timestamp: ts)
         case let .skillBody(id, text, ts):
             return skillBody(id: id, text: text, timestamp: ts)
         case let .toolCall(id, name, inputJSON, inputTruncatedTo, result, ts):
@@ -381,8 +381,14 @@ enum ActivityRowFormatter {
     // MARK: System reminder (SystemReminderRow)
 
     private static func systemReminder(
-        id: String, kind: SystemKind, timestamp: Date?
+        id: String, kind: SystemKind, text: String, timestamp: Date?
     ) -> ActivityRowPresentation {
+        // Background-task notifications get a richer presentation: a
+        // "Background · <summary>" title with the status surfaced as a badge.
+        if kind == .taskNotification {
+            return taskNotification(id: id, text: text, timestamp: timestamp)
+        }
+
         let label: String = {
             switch kind {
             case .toolReminder: return "system-reminder"
@@ -390,6 +396,7 @@ enum ActivityRowFormatter {
             case .environmentDetails: return "env"
             case .slashEnvelope: return "command"
             case .skillBody: return "skill"
+            case .taskNotification: return "background"
             case .other: return "info"
             }
         }()
@@ -401,6 +408,69 @@ enum ActivityRowFormatter {
             badges: [ActivityRowBadge(text: label, kind: .neutral)],
             openTargetID: id
         )
+    }
+
+    // MARK: Task notification (background-task activity row)
+
+    /// Builds the activity-row presentation for a background-task notification.
+    /// Surfaces the `<summary>` as the row title and the `<status>` as a badge;
+    /// the full original text remains available via the click-to-open overlay.
+    private static func taskNotification(
+        id: String, text: String, timestamp: Date?
+    ) -> ActivityRowPresentation {
+        let (summary, status) = parseTaskNotification(text)
+        let titleSegments: [ActivityRowSegment] = [
+            ActivityRowSegment(text: "Background", style: .primary),
+            ActivityRowSegment(text: "·", style: .tertiary),
+            ActivityRowSegment(text: summary, style: .secondary)
+        ]
+        var badges: [ActivityRowBadge] = []
+        if !status.isEmpty {
+            let lower = status.lowercased()
+            let kind: ActivityRowBadge.Kind =
+                (lower.contains("fail") || lower.contains("error")) ? .error : .neutral
+            badges.append(ActivityRowBadge(text: status, kind: kind))
+        }
+        return ActivityRowPresentation(
+            iconSystemName: "clock.arrow.circlepath",
+            titleSegments: titleSegments,
+            timestamp: timestamp,
+            isError: false,
+            badges: badges,
+            openTargetID: id,
+            titleTruncation: .byTruncatingTail
+        )
+    }
+
+    /// Extracts `(summary, status)` from a `<task-notification>` envelope using
+    /// plain string scanning (no regex). Returns the substrings between
+    /// `<summary>…</summary>` and `<status>…</status>`, trimmed. When `<summary>`
+    /// is absent, falls back to the status (or "Background task" if neither is
+    /// present). The status component is "" when absent.
+    static func parseTaskNotification(_ text: String) -> (summary: String, status: String) {
+        let summary = extractTagBody(in: text, tag: "summary") ?? ""
+        let status = extractTagBody(in: text, tag: "status") ?? ""
+        let resolvedSummary: String
+        if !summary.isEmpty {
+            resolvedSummary = summary
+        } else if !status.isEmpty {
+            resolvedSummary = status
+        } else {
+            resolvedSummary = "Background task"
+        }
+        return (resolvedSummary, status)
+    }
+
+    /// Returns the trimmed substring between `<tag>` and `</tag>`, or nil.
+    private static func extractTagBody(in text: String, tag: String) -> String? {
+        let open = "<\(tag)>"
+        let close = "</\(tag)>"
+        guard
+            let openRange = text.range(of: open),
+            let closeRange = text.range(of: close, range: openRange.upperBound..<text.endIndex)
+        else { return nil }
+        return text[openRange.upperBound..<closeRange.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: Skill body (SkillBodyRow)

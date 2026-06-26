@@ -649,6 +649,7 @@ public enum SystemKind: String, Codable, Sendable, Equatable, Hashable {
     case environmentDetails
     case slashEnvelope
     case skillBody
+    case taskNotification
     case other
 }
 
