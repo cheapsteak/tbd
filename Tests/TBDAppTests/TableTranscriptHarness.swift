@@ -405,7 +405,8 @@ struct TableTranscriptHarness {
         // SwiftUI hosting oracle.
         if case .chatBubble(let item) = node.kind {
             let blocks = TranscriptBubbleGeometry.composedBlocks(for: item, badgeUsage: node.badgeUsage)
-            let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: Self.width)
+            let bodyWidth = TranscriptBubbleGeometry.bodyWidth(
+                columnWidth: Self.width, role: TranscriptBubbleGeometry.role(for: item))
             let blocksHeight = MessageBlockMeasurer().blocksHeight(blocks, bodyWidth: bodyWidth)
             return TranscriptBubbleGeometry.rowHeight(blocksHeight: blocksHeight)
         }
