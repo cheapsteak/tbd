@@ -881,6 +881,62 @@ struct TableTranscriptHarness {
         #expect(maxDelta <= 1.0, Comment(rawValue: failMessage))
     }
 
+    // MARK: - Per-block height cache (table reuse: no re-measure)
+
+    /// A table-containing bubble's per-block heights are CACHED by the Coordinator
+    /// when it sizes the row, so a scroll-reused `TranscriptBubbleCellView` lays
+    /// its blocks out from the cache rather than re-allocating an
+    /// `NSHostingController` to re-measure the table block on every dequeue. Cheap +
+    /// headless: runs in normal `swift test`. (#129)
+    @Test("table bubble: per-block heights are cached and feed the reused cell (no re-measure)")
+    func tableBlockHeightsCachedOnReuse() throws {
+        let suiteName = "table-harness-blockcache-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = Self.bubbleFixture()  // contains "b-table" (prose + GFM table + prose)
+        let nodes = transcriptRenderNodes(from: items)
+        let scene = makeScene(items: items, appState: appState, fixedSize: true)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+
+        // Size the bottom window — this measures the table bubble and caches its
+        // per-block heights as a side effect.
+        scene.coordinator.precomputeBottomWindow()
+
+        let tableRow = try #require(nodes.firstIndex { $0.id == "b-table" })
+        let node = nodes[tableRow]
+
+        // The per-block height cache is POPULATED before any cell is built — so the
+        // first `viewFor` (and every reuse after) is a cache hit, never a measure.
+        let cached = try #require(
+            scene.coordinator.cachedBlockHeights(for: node),
+            "table bubble's per-block heights must be cached after sizing")
+        #expect(cached.count >= 2, "a prose+table(+prose) bubble must cache a height per block")
+        #expect(cached.allSatisfy { $0 > 0 }, "every cached block height must be positive")
+
+        // The cell built via the reuse path (`viewFor`) renders at the cached
+        // height: its realized drawn height equals `heightOfRow` within ~1pt, with
+        // the blocks fed from the cache (no re-measure). render == measure.
+        let measured = scene.coordinator.tableView(scene.tableView, heightOfRow: tableRow)
+        let cell = try #require(
+            scene.coordinator.tableView(scene.tableView, viewFor: nil, row: tableRow)
+                as? TranscriptBubbleCellView,
+            "table bubble row must dispatch to TranscriptBubbleCellView")
+        cell.layoutSubtreeIfNeeded()
+        #expect(abs(cell.realizedRowHeight - measured) <= 1.0,
+                Comment(rawValue: "reused table bubble must render at the cached height "
+                    + "(realized=\(cell.realizedRowHeight) measured=\(measured))"))
+
+        // The cached per-block body height + chrome must equal the row height the
+        // cache fed — proving the cache is the single source of truth for the row.
+        let bodyHeight = MessageBlockMeasurer().blocksHeight(fromBlockHeights: cached)
+        let expectedRowHeight = TranscriptBubbleGeometry.rowHeight(blocksHeight: bodyHeight)
+        #expect(abs(expectedRowHeight - measured) <= 0.5,
+                Comment(rawValue: "cached block heights must sum (with chrome) to the row height "
+                    + "(fromCache=\(expectedRowHeight) measured=\(measured))"))
+    }
+
     // MARK: - Native activity-cell dispatch
 
     /// Confirms `viewFor` routes each kind to the right cell type: a Bash

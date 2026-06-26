@@ -216,6 +216,23 @@ struct TableTranscriptView: NSViewRepresentable {
             let version: UInt64
         }
 
+        /// Per-block measured heights for chat-bubble rows, keyed by
+        /// `(node.id, contentVersion, width)`. Populated when `measuredHeight`
+        /// sizes a bubble (it measures each block to sum the row height anyway, so
+        /// it captures them here for free) and consumed by `bubbleView` so a
+        /// scroll-reused `TranscriptBubbleCellView` lays its blocks out from the
+        /// cache instead of re-measuring — notably avoiding a fresh
+        /// `NSHostingController.sizeThatFits` for every `.table` block on every
+        /// dequeue. Cleared alongside `heightCache`/`estimateCache` on a
+        /// width-change / rebuild, and per-node on `updateLast`. (#129)
+        private var blockHeightCache: [BlockHeightKey: [CGFloat]] = [:]
+
+        struct BlockHeightKey: Hashable {
+            let id: String
+            let version: UInt64
+            let width: CGFloat
+        }
+
         /// Reusable per-block measurer (TextKit-1 `usedRect` for prose, one-shot
         /// `sizeThatFits` for tables). Owned by the Coordinator so the
         /// storage/layout-manager allocation is paid once.
@@ -335,6 +352,14 @@ struct TableTranscriptView: NSViewRepresentable {
             }
         }
 
+        /// Test backstop: the cached per-block heights for `node` at the current
+        /// column width, or nil if none are cached. Non-nil means a scroll-reused
+        /// bubble cell will lay its blocks out from this cache rather than
+        /// re-measuring (no `NSHostingController` re-alloc for a table block). (#129)
+        func cachedBlockHeights(for node: TranscriptRenderNode) -> [CGFloat]? {
+            blockHeightCache[BlockHeightKey(id: node.id, version: node.contentVersion, width: columnWidth)]
+        }
+
         /// Test backstop: number of present rows whose EXACT height is already
         /// cached at the current column width. After `precomputeBottomWindow()`
         /// this is the bottom-window count (≤ `bottomEagerWindow`); the rest are
@@ -373,7 +398,13 @@ struct TableTranscriptView: NSViewRepresentable {
                 let blocks = composedBubbleBlocks(for: node, item: item)
                 let renderEnd = DispatchTime.now().uptimeNanoseconds
                 let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: width)
-                let blocksHeight = blockMeasurer.blocksHeight(blocks, bodyWidth: bodyWidth)
+                // Measure each block once and CACHE the per-block heights so the
+                // realized cell reuses them (no NSHostingController re-alloc for a
+                // table block on scroll). The row's body height is the SAME summed-
+                // plus-spacing form, so render == measure by construction.
+                let perBlock = blockMeasurer.blockHeights(blocks, bodyWidth: bodyWidth)
+                blockHeightCache[BlockHeightKey(id: node.id, version: node.contentVersion, width: width)] = perBlock
+                let blocksHeight = blockMeasurer.blocksHeight(fromBlockHeights: perBlock)
                 let measureEnd = DispatchTime.now().uptimeNanoseconds
                 height = TranscriptBubbleGeometry.rowHeight(blocksHeight: blocksHeight)
                 openPerf.chatBubbleNanos &+= measureEnd &- branchStart
@@ -569,9 +600,17 @@ struct TableTranscriptView: NSViewRepresentable {
             let width = columnWidth
             let role: TranscriptBubbleGeometry.Role = TranscriptBubbleGeometry.role(for: item)
             let blocks = composedBubbleBlocks(for: node, item: item)
+            // `measuredHeight` caches the row height AND (for a chat bubble) the
+            // per-block heights as a side effect, so reading the block-height cache
+            // afterward is a hit on the common scroll-reuse path — the cell then
+            // never re-measures a table block. A miss (defensive) hands an empty
+            // array; the cell re-measures per block.
             let height = measuredHeight(for: node, width: width)
+            let blockHeights = blockHeightCache[
+                BlockHeightKey(id: node.id, version: node.contentVersion, width: width)] ?? []
             cell.configure(
                 blocks: blocks,
+                blockHeights: blockHeights,
                 sourceText: TranscriptBubbleGeometry.text(for: item),
                 role: role,
                 header: TranscriptBubbleGeometry.header(for: item),
@@ -807,6 +846,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 heightCache.removeAll(keepingCapacity: true)
                 estimateCache.removeAll(keepingCapacity: true)
                 composedCache.removeAll(keepingCapacity: true)
+                blockHeightCache.removeAll(keepingCapacity: true)
                 nodes = newNodes
                 previousNodes = newNodes
                 precomputeBottomWindow()
@@ -835,6 +875,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 heightCache.removeAll(keepingCapacity: true)
                 estimateCache.removeAll(keepingCapacity: true)
                 composedCache.removeAll(keepingCapacity: true)
+                blockHeightCache.removeAll(keepingCapacity: true)
                 precomputeBottomWindow()
                 tableView.reloadData()
             case let .append(fromIndex):
@@ -843,6 +884,7 @@ struct TableTranscriptView: NSViewRepresentable {
                     heightCache.removeAll(keepingCapacity: true)
                     estimateCache.removeAll(keepingCapacity: true)
                     composedCache.removeAll(keepingCapacity: true)
+                    blockHeightCache.removeAll(keepingCapacity: true)
                     precomputeBottomWindow()
                     tableView.reloadData()
                     break
@@ -900,6 +942,11 @@ struct TableTranscriptView: NSViewRepresentable {
             // serving the stale estimate the first poll cached. (#129)
             for key in estimateCache.keys where key.id == node.id {
                 estimateCache.removeValue(forKey: key)
+            }
+            // Drop this node's cached per-block heights — they'll be re-measured
+            // (and re-cached) when the grown bubble is re-sized.
+            for key in blockHeightCache.keys where key.id == node.id {
+                blockHeightCache.removeValue(forKey: key)
             }
         }
 

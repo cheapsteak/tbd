@@ -193,11 +193,28 @@ final class MessageBlockMeasurer {
         }
     }
 
+    /// Per-block measured heights at `bodyWidth`, in block order. The summed-plus-
+    /// spacing form is `blocksHeight`; exposing the per-block array lets the
+    /// Coordinator cache each block's height so a scroll-reused cell can lay blocks
+    /// out from the cache without re-measuring (notably avoiding the table block's
+    /// `NSHostingController.sizeThatFits` on every dequeue). (#129)
+    func blockHeights(_ blocks: [MessageBlock], bodyWidth: CGFloat) -> [CGFloat] {
+        blocks.map { height(of: $0, bodyWidth: bodyWidth) }
+    }
+
     /// Summed height of `blocks` plus inter-block spacing between them.
     func blocksHeight(_ blocks: [MessageBlock], bodyWidth: CGFloat) -> CGFloat {
-        guard !blocks.isEmpty else { return 0 }
-        let total = blocks.reduce(CGFloat(0)) { $0 + height(of: $1, bodyWidth: bodyWidth) }
-        let spacing = TranscriptBubbleGeometry.interBlockSpacing * CGFloat(blocks.count - 1)
+        blocksHeight(fromBlockHeights: blockHeights(blocks, bodyWidth: bodyWidth))
+    }
+
+    /// Summed height of already-measured per-block `heights` plus inter-block
+    /// spacing between them. The single source of truth for turning a block-height
+    /// array into a row's body height, so cache-fed and freshly-measured paths
+    /// agree by construction.
+    func blocksHeight(fromBlockHeights heights: [CGFloat]) -> CGFloat {
+        guard !heights.isEmpty else { return 0 }
+        let total = heights.reduce(0, +)
+        let spacing = TranscriptBubbleGeometry.interBlockSpacing * CGFloat(heights.count - 1)
         return total + spacing
     }
 
@@ -375,6 +392,7 @@ final class TranscriptBubbleCellView: NSTableCellView {
     /// rebuilds the block stack so a reused cell never shows stale content.
     func configure(
         blocks: [MessageBlock],
+        blockHeights: [CGFloat],
         sourceText: String,
         role: TranscriptBubbleGeometry.Role,
         header headerText: String,
@@ -394,7 +412,7 @@ final class TranscriptBubbleCellView: NSTableCellView {
         header.stringValue = headerText
         backgroundBox.fillColor = g.backgroundColor(for: role)
 
-        rebuildBlockStack(blocks: blocks, bodyWidth: bodyWidth)
+        rebuildBlockStack(blocks: blocks, blockHeights: blockHeights, bodyWidth: bodyWidth)
 
         // Box width: user bubbles shrink-to-fit (right-anchored), assistant fills.
         let bubbleWidth = bodyWidth + g.bodyHorizontal
@@ -413,15 +431,26 @@ final class TranscriptBubbleCellView: NSTableCellView {
     /// each width-pinned to `bodyWidth` (so prose wraps and tables span exactly
     /// the width their height was measured at) and height-pinned to its measured
     /// height (so render height == row height by construction).
-    private func rebuildBlockStack(blocks: [MessageBlock], bodyWidth: CGFloat) {
+    ///
+    /// `blockHeights` are the per-block heights the Coordinator already measured
+    /// (and cached) when it sized the row — so a scroll-reused cell lays its blocks
+    /// out from the cache with ZERO re-measurement, notably never re-allocating an
+    /// `NSHostingController` to re-measure a `.table` block. The defensive fallback
+    /// (a missing/short `blockHeights` array) re-measures the affected block so the
+    /// cell can never render at a wrong height. (#129)
+    private func rebuildBlockStack(blocks: [MessageBlock], blockHeights: [CGFloat], bodyWidth: CGFloat) {
         for view in blockStack.arrangedSubviews {
             blockStack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
 
         let width = max(bodyWidth, 1)
-        for block in blocks {
-            let height = measurer.height(of: block, bodyWidth: width)
+        for (index, block) in blocks.enumerated() {
+            // Cache hit (the common scroll-reuse path): use the Coordinator's
+            // pre-measured height. Miss (defensive): re-measure this one block.
+            let height: CGFloat = (index < blockHeights.count)
+                ? blockHeights[index]
+                : measurer.height(of: block, bodyWidth: width)
             let view: NSView
             switch block {
             case .prose(let string):
