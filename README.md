@@ -4,6 +4,13 @@ A macOS native app for managing git worktrees and terminals, designed for multi-
 
 TBD gives you a unified interface to spin up isolated worktrees, run Claude Code sessions in embedded terminals, and orchestrate parallel development across branches — all from a single SwiftUI app.
 
+
+
+https://github.com/user-attachments/assets/85881cde-dbac-47a9-a65c-45c684c92460
+
+
+
+
 ## Architecture
 
 Three components communicate over a Unix socket using a JSON RPC protocol:
