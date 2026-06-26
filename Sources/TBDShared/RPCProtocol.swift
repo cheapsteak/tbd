@@ -1020,7 +1020,7 @@ public struct TerminalTranscriptParams: Codable, Sendable {
     /// the original behavior, decoded identically by older encoded params that
     /// never wrote this field. When set, the daemon returns only the last N
     /// visible items (tail-first fast open for the table pane).
-    public var tailLimit: Int?
+    public let tailLimit: Int?
     public init(terminalID: UUID, tailLimit: Int? = nil) {
         self.terminalID = terminalID
         self.tailLimit = tailLimit
