@@ -89,19 +89,8 @@ enum MarkdownAttributedRenderer {
         // prose ends with a hard line break that `usedRect` counts as an extra
         // empty line fragment — ~one line of dead space at the bottom of every
         // block. Trim the trailing run of newlines/whitespace so the prose ends
-        // at its last visible glyph. Guard the all-whitespace/empty case so we
-        // never delete an empty range. (#129)
-        let whitespace = CharacterSet.whitespacesAndNewlines
-        let ns = run.string as NSString
-        var end = ns.length
-        while end > 0,
-              let scalar = Unicode.Scalar(ns.character(at: end - 1)),
-              whitespace.contains(scalar) {
-            end -= 1
-        }
-        if end < ns.length {
-            run.deleteCharacters(in: NSRange(location: end, length: ns.length - end))
-        }
+        // at its last visible glyph. (#129)
+        AttributedStringVisitor.trimTrailingNewlines(run)
         return NSAttributedString(attributedString: run)
     }
 }
@@ -221,6 +210,12 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
         inner.enumerateAttribute(.foregroundColor, in: full, options: []) { value, range, _ in
             if value == nil { inner.addAttribute(.foregroundColor, value: theme.blockquoteColor, range: range) }
         }
+        // The blockquote's child paragraph already appended its own trailing "\n"
+        // (every block visitor does). The `paragraph()` wrapper below appends one
+        // more, so the quote ended with "\n\n" — a blank line before the following
+        // block. Trim the inner trailing newline run so the wrapper's single
+        // terminator is the only one.
+        Self.trimTrailingNewlines(inner)
         let style = NSMutableParagraphStyle()
         style.headIndent = theme.listIndent
         style.firstLineHeadIndent = theme.listIndent
@@ -272,6 +267,24 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
         inner.addAttribute(.paragraphStyle, value: style, range: full)
         inner.append(NSAttributedString(string: "\n"))
         return inner
+    }
+
+    /// Removes the trailing run of whitespace/newline characters from `s` in
+    /// place. Block visitors append a paragraph-terminating "\n"; callers that
+    /// wrap or finalize a block use this to drop a redundant terminator (which
+    /// would otherwise render as a blank line / dead bottom space).
+    static func trimTrailingNewlines(_ s: NSMutableAttributedString) {
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        let ns = s.string as NSString
+        var end = ns.length
+        while end > 0,
+              let scalar = Unicode.Scalar(ns.character(at: end - 1)),
+              whitespace.contains(scalar) {
+            end -= 1
+        }
+        if end < ns.length {
+            s.deleteCharacters(in: NSRange(location: end, length: ns.length - end))
+        }
     }
 
     private mutating func visitListItem(_ item: ListItem, marker: String) -> NSAttributedString {
