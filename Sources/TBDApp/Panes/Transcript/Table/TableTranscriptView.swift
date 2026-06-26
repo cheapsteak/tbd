@@ -369,11 +369,10 @@ struct TableTranscriptView: NSViewRepresentable {
                 // RENDERING (markdown → attributed string, incl. Highlightr syntax
                 // highlighting of fenced code) or MEASURING (TK1 `usedRect`). (#129)
                 let branchStart = DispatchTime.now().uptimeNanoseconds
-                let role = TranscriptBubbleGeometry.role(for: item)
                 let renderStart = DispatchTime.now().uptimeNanoseconds
                 let blocks = composedBubbleBlocks(for: node, item: item)
                 let renderEnd = DispatchTime.now().uptimeNanoseconds
-                let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role)
+                let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: width)
                 let blocksHeight = blockMeasurer.blocksHeight(blocks, bodyWidth: bodyWidth)
                 let measureEnd = DispatchTime.now().uptimeNanoseconds
                 height = TranscriptBubbleGeometry.rowHeight(blocksHeight: blocksHeight)
@@ -576,7 +575,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 sourceText: TranscriptBubbleGeometry.text(for: item),
                 role: role,
                 header: TranscriptBubbleGeometry.header(for: item),
-                bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width, role: role),
+                bodyWidth: TranscriptBubbleGeometry.bodyWidth(columnWidth: width),
                 columnWidth: width,
                 cachedHeight: height
             )
@@ -745,8 +744,7 @@ struct TableTranscriptView: NSViewRepresentable {
             badgeUsage: TokenUsage?,
             columnWidth: CGFloat
         ) -> CGFloat {
-            let role = TranscriptBubbleGeometry.role(for: item)
-            let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: columnWidth, role: role)
+            let bodyWidth = TranscriptBubbleGeometry.bodyWidth(columnWidth: columnWidth)
             let charsPerLine = max(Int(bodyWidth / avgBubbleCharWidth), 12)
             let text = TranscriptBubbleGeometry.text(for: item)
 

@@ -6,7 +6,7 @@ import TBDShared
 ///
 /// A message is an ordered list of typed `MessageBlock`s (prose / table) rendered
 /// into ONE bubble as a vertical stack. `heightOfRow` (measure) and `viewFor`
-/// (render) both flow through the SAME `bodyWidth(columnWidth:role:)` and the SAME
+/// (render) both flow through the SAME `bodyWidth(columnWidth:)` and the SAME
 /// `[MessageBlock]`, so the row height and the cell's drawn height cannot drift.
 /// Mirrors `ChatBubbleView`'s chrome (#129).
 @MainActor
@@ -40,8 +40,10 @@ enum TranscriptBubbleGeometry {
     static let interBlockSpacing: CGFloat = 6
 
     /// Single source of truth for the text container width used by BOTH the
-    /// measurer and the cell's NSTextView.
-    static func bodyWidth(columnWidth: CGFloat, role: Role) -> CGFloat {
+    /// measurer and the cell's NSTextView. Role-independent — the body width
+    /// folds the same opposite-side gutter into the chrome inset regardless of
+    /// which side the bubble anchors to.
+    static func bodyWidth(columnWidth: CGFloat) -> CGFloat {
         max(columnWidth - outerHorizontal - bodyHorizontal, 1)
     }
 
