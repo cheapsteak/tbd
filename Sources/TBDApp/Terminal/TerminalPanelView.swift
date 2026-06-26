@@ -565,10 +565,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         func handleOutgoingInput(_ data: ArraySlice<UInt8>) {
-            guard data.contains(0x03) else { return }
+            let isCtrlC = data.contains(0x03)
+            // A standalone Escape keypress arrives as a single 0x1b byte. Arrow keys,
+            // Alt-combos, and other escape sequences arrive as multi-byte ESC sequences
+            // (0x1b 0x5b ...), so requiring count == 1 keeps navigation keys from being
+            // mistaken for a halt.
+            let isEsc = data.count == 1 && data.first == 0x1b
+            guard isCtrlC || isEsc else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.appState?.handleTerminalInterrupt(terminalID: self.panelID)
+                self.appState?.handleTerminalInterrupt(terminalID: self.panelID, viaEscape: isEsc)
             }
         }
 
