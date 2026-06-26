@@ -39,7 +39,6 @@ struct ActivityRowFormatterTests {
         #expect(text.contains("/Users/x/Sources/Foo.swift"))
         #expect(text.contains("lines 10–14"))
         #expect(p.openTargetID == "r1")
-        #expect(p.navigateTargetID == nil)
     }
 
     @Test("Bash with failing result: terminal icon + error badge text 'failed'")
@@ -93,7 +92,6 @@ struct ActivityRowFormatterTests {
         // Subagent drill-in was removed: Agent/Task rows open the standard
         // overlay (input + result), not a nested thread.
         #expect(p.openTargetID == "t1")
-        #expect(p.navigateTargetID == nil)
         #expect(titleText(p).contains("Investigate"))
     }
 
@@ -137,7 +135,6 @@ struct ActivityRowFormatterTests {
         #expect(p.iconSystemName == "person.2")
         #expect(p.style == .plainSummary)
         #expect(p.openTargetID == nil)
-        #expect(p.navigateTargetID == nil)
         #expect(p.timestamp == nil)
         #expect(titleText(p) == "3 subagent activities · Explore")
     }

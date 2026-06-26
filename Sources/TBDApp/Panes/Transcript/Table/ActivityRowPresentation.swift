@@ -59,8 +59,6 @@ struct ActivityRowPresentation: Equatable {
     let badges: [ActivityRowBadge]
     /// `openTranscriptOverlay(id)` target — most kinds.
     let openTargetID: String?
-    /// `navigateToThread(id)` target — Agent/Task only.
-    let navigateTargetID: String?
     /// Title truncation: `.byTruncatingMiddle` for Read (file path), else tail.
     let titleTruncation: NSLineBreakMode
     let style: RowStyle
@@ -72,7 +70,6 @@ struct ActivityRowPresentation: Equatable {
         isError: Bool,
         badges: [ActivityRowBadge],
         openTargetID: String?,
-        navigateTargetID: String?,
         titleTruncation: NSLineBreakMode = .byTruncatingTail,
         style: RowStyle = .chrome
     ) {
@@ -82,7 +79,6 @@ struct ActivityRowPresentation: Equatable {
         self.isError = isError
         self.badges = badges
         self.openTargetID = openTargetID
-        self.navigateTargetID = navigateTargetID
         self.titleTruncation = titleTruncation
         self.style = style
     }
@@ -90,7 +86,7 @@ struct ActivityRowPresentation: Equatable {
 
 /// Pure formatter mapping a `TranscriptRenderNode` to its native-cell
 /// presentation. Ports each SwiftUI card's header (icon + summary string + badge
-/// logic + open/navigate target) EXACTLY. Returns `nil` for kinds that stay
+/// logic + open target) EXACTLY. Returns `nil` for kinds that stay
 /// SwiftUI-hosted: `.chatBubble` (already native via `TranscriptBubbleCellView`)
 /// and `.toolCall` named `AskUserQuestion` (a full multi-bubble card). (#129)
 enum ActivityRowFormatter {
@@ -170,7 +166,6 @@ enum ActivityRowFormatter {
             isError: false,
             badges: [],
             openTargetID: id,
-            navigateTargetID: nil,
             titleTruncation: .byTruncatingMiddle
         )
     }
@@ -222,8 +217,7 @@ enum ActivityRowFormatter {
             timestamp: timestamp,
             isError: result?.isError == true,
             badges: badges,
-            openTargetID: id,
-            navigateTargetID: nil
+            openTargetID: id
         )
     }
 
@@ -254,8 +248,7 @@ enum ActivityRowFormatter {
             timestamp: timestamp,
             isError: false,
             badges: [],
-            openTargetID: id,
-            navigateTargetID: nil
+            openTargetID: id
         )
     }
 
@@ -293,8 +286,7 @@ enum ActivityRowFormatter {
             timestamp: timestamp,
             isError: result?.isError == true,
             badges: badges,
-            openTargetID: id,
-            navigateTargetID: nil
+            openTargetID: id
         )
     }
 
@@ -322,8 +314,7 @@ enum ActivityRowFormatter {
             timestamp: timestamp,
             isError: false,
             badges: [],
-            openTargetID: id,
-            navigateTargetID: nil
+            openTargetID: id
         )
     }
 
@@ -357,8 +348,7 @@ enum ActivityRowFormatter {
             timestamp: timestamp,
             isError: result?.isError == true,
             badges: badges,
-            openTargetID: id,
-            navigateTargetID: nil
+            openTargetID: id
         )
     }
 
@@ -384,8 +374,7 @@ enum ActivityRowFormatter {
             timestamp: timestamp,
             isError: result?.isError == true,
             badges: badges,
-            openTargetID: id,
-            navigateTargetID: nil
+            openTargetID: id
         )
     }
 
@@ -410,8 +399,7 @@ enum ActivityRowFormatter {
             timestamp: timestamp,
             isError: false,
             badges: [ActivityRowBadge(text: label, kind: .neutral)],
-            openTargetID: id,
-            navigateTargetID: nil
+            openTargetID: id
         )
     }
 
@@ -437,8 +425,7 @@ enum ActivityRowFormatter {
             timestamp: timestamp,
             isError: false,
             badges: [],
-            openTargetID: id,
-            navigateTargetID: nil
+            openTargetID: id
         )
     }
 
@@ -459,7 +446,6 @@ enum ActivityRowFormatter {
             isError: false,
             badges: [],
             openTargetID: nil,
-            navigateTargetID: nil,
             style: .plainSummary
         )
     }

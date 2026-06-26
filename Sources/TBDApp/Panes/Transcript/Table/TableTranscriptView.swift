@@ -603,13 +603,10 @@ struct TableTranscriptView: NSViewRepresentable {
             let width = columnWidth
             let height = measuredHeight(for: node, width: width)
             let openOverlay = context.openTranscriptOverlay
-            let onOpen: (() -> Void)?
-            if let target = presentation.openTargetID {
-                onOpen = { openOverlay?(target) }
-            } else {
-                // `navigateTargetID` is retained on the presentation for source
-                // compatibility but is never set — subagent drill-in was removed.
-                onOpen = nil
+            // The formatter only ever sets `openTargetID` (subagent drill-in was
+            // removed); a nil target (plain subagent summary) is a no-op.
+            let onOpen: (() -> Void)? = presentation.openTargetID.map { target in
+                { openOverlay?(target) }
             }
             cell.configure(
                 presentation: presentation,
