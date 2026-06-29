@@ -86,6 +86,12 @@ struct TableTranscriptView: NSViewRepresentable {
         coordinator.tableView = tableView
         coordinator.scrollView = scrollView
         coordinator.lastScrollToken = scrollToBottomToken
+        coordinator.atBottomBinding = $atBottom
+        // Track the live scroll position so the jump-to-bottom button hides the
+        // moment the viewport reaches the bottom — by the button OR a manual
+        // scroll. Without this the flag only updated on node changes, so a
+        // scroll-to-bottom left the button stuck on screen.
+        coordinator.startObservingScroll()
 
         let nodes = nodesProvider()
         coordinator.nodes = nodes
@@ -165,6 +171,11 @@ struct TableTranscriptView: NSViewRepresentable {
         var nodes: [TranscriptRenderNode] = []
         var previousNodes: [TranscriptRenderNode] = []
         var lastScrollToken = 0
+
+        /// Live binding driving the floating jump-to-bottom button. Held so the
+        /// clip-bounds observer can keep it in sync with the ACTUAL scroll
+        /// position — not just on node updates. Refreshed every `update(...)`.
+        var atBottomBinding: Binding<Bool>?
 
         /// Explicit per-row height cache, keyed by `(id, contentVersion, width)`.
         /// A re-poll that leaves a row's id+version unchanged reuses the cached
@@ -826,6 +837,9 @@ struct TableTranscriptView: NSViewRepresentable {
         /// `TranscriptStreamPlan`. Captures at-bottom BEFORE the edit so a grown
         /// document doesn't misjudge whether to follow the tail.
         func update(nodes newNodes: [TranscriptRenderNode], atBottom: Binding<Bool>) {
+            // Keep the observer's binding fresh (SwiftUI hands us a new binding
+            // each update).
+            atBottomBinding = atBottom
             // `scrollView` must exist (downstream `scrollToEnd` / `isAtBottom`
             // read it via the stored property); bind it only to gate on presence.
             guard let tableView, scrollView != nil else { return }
@@ -952,14 +966,69 @@ struct TableTranscriptView: NSViewRepresentable {
 
         // MARK: Scrolling / at-bottom
 
-        /// Whether the clip is within ~120pt of the document bottom (the
-        /// follow-the-tail threshold shared with the TextKit path).
-        private func isAtBottom() -> Bool {
-            guard let scrollView, let documentView = scrollView.documentView else { return true }
+        /// Subscribe to clip-bounds changes so `atBottom` reflects the LIVE scroll
+        /// position. AppKit posts this on the main thread during every scroll
+        /// (button-driven or manual), so the jump-to-bottom button hides as soon
+        /// as the viewport reaches the bottom and reappears when the user scrolls
+        /// away — instead of only re-evaluating on a node update.
+        func startObservingScroll() {
+            guard let clip = scrollView?.contentView else { return }
+            clip.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(clipBoundsDidChange),
+                name: NSView.boundsDidChangeNotification,
+                object: clip
+            )
+        }
+
+        @objc private func clipBoundsDidChange() {
+            guard let binding = atBottomBinding else { return }
+            let value = isViewportAtBottomForButton()
+            // Only write on a transition so a scroll gesture flips the flag at
+            // most twice (entering/leaving the bottom), not once per frame.
+            if binding.wrappedValue != value {
+                binding.wrappedValue = value
+            }
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        /// Vertical gap between the viewport's bottom edge and the document
+        /// bottom, in points (≤0 when the last content is flush with or above the
+        /// viewport bottom).
+        private func viewportGapToBottom() -> CGFloat {
+            guard let scrollView, let documentView = scrollView.documentView else { return 0 }
             let clip = scrollView.contentView
             let visibleMaxY = clip.bounds.origin.y + clip.bounds.height
-            let docMaxY = documentView.frame.height
-            return TranscriptStreamPlan.isNearBottom(documentMaxY: docMaxY, visibleMaxY: visibleMaxY)
+            return documentView.frame.height - visibleMaxY
+        }
+
+        /// Whether the clip is within ~120pt of the document bottom — the tight
+        /// FOLLOW-THE-TAIL threshold (shared with the TextKit path). Kept small so
+        /// a modest upward scroll stops new streamed content from yanking the
+        /// viewport back down.
+        private func isAtBottom() -> Bool {
+            guard scrollView?.documentView != nil else { return true }
+            return TranscriptStreamPlan.isNearBottom(
+                documentMaxY: viewportGapToBottom(), visibleMaxY: 0)
+        }
+
+        /// Whether the viewport is close enough to the bottom to HIDE the floating
+        /// jump-to-bottom button. Deliberately looser than `isAtBottom()`: the
+        /// button only appears once you're a meaningful distance away — at least
+        /// 400pt or half a viewport, whichever is larger. This keeps it from
+        /// lingering after a near-bottom landing (a small residual gap from
+        /// lazy-height realization no longer pins it open) and from flickering
+        /// near the bottom, while leaving stream auto-scroll on the tight
+        /// threshold above.
+        private func isViewportAtBottomForButton() -> Bool {
+            guard let scrollView, scrollView.documentView != nil else { return true }
+            let viewportHeight = scrollView.contentView.bounds.height
+            let threshold = max(400, viewportHeight * 0.5)
+            return viewportGapToBottom() <= threshold
         }
 
         func scrollToEnd(animated: Bool) {
@@ -982,7 +1051,7 @@ struct TableTranscriptView: NSViewRepresentable {
         private func recomputeAtBottom(_ atBottom: Binding<Bool>) {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                atBottom.wrappedValue = self.isAtBottom()
+                atBottom.wrappedValue = self.isViewportAtBottomForButton()
             }
         }
     }
