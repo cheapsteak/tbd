@@ -5,6 +5,7 @@ import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "socket")
+private let perfLogger = Logger(subsystem: "com.tbd.daemon", category: "perf-rpc")
 
 /// A Unix domain socket server that accepts newline-delimited JSON RPC requests.
 ///
@@ -18,6 +19,10 @@ public final class SocketServer: Sendable {
 
     /// Number of currently connected clients. Updated atomically.
     private let _connectedClients = ManagedAtomic<Int>(0)
+
+    /// Bounds the number of concurrently-running RPC handlers (and thus the
+    /// concurrent git/gh subprocess fan-out) across all connections.
+    private let limiter = RPCConcurrencyLimiter()
 
     public var connectedClients: Int {
         _connectedClients.load(ordering: .relaxed)
@@ -40,12 +45,17 @@ public final class SocketServer: Sendable {
 
         let router = self.router
         let connectedClients = self._connectedClients
+        let limiter = self.limiter
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 64)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
-                    let handler = SocketRPCHandler(router: router, connectedClients: connectedClients)
+                    let handler = SocketRPCHandler(
+                        router: router,
+                        connectedClients: connectedClients,
+                        limiter: limiter
+                    )
                     try channel.pipeline.syncOperations.addHandler(handler)
                 }
             }
@@ -129,11 +139,13 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
 
     private let router: RPCRouter
     private let connectedClients: ManagedAtomic<Int>
+    private let limiter: RPCConcurrencyLimiter
     private var buffer: String = ""
 
-    init(router: RPCRouter, connectedClients: ManagedAtomic<Int>) {
+    init(router: RPCRouter, connectedClients: ManagedAtomic<Int>, limiter: RPCConcurrencyLimiter) {
         self.router = router
         self.connectedClients = connectedClients
+        self.limiter = limiter
     }
 
     func channelActive(context: ChannelHandlerContext) {
@@ -160,18 +172,29 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
 
             let wrappedCtx = SendableContext(context: context)
             let router = self.router
+            let limiter = self.limiter
             Task {
-                await Self.processLine(trimmed, router: router, wrappedCtx: wrappedCtx)
+                await Self.processLine(trimmed, router: router, limiter: limiter, wrappedCtx: wrappedCtx)
             }
         }
     }
 
-    private static func processLine(_ line: String, router: RPCRouter, wrappedCtx: SendableContext) async {
+    private static func processLine(
+        _ line: String,
+        router: RPCRouter,
+        limiter: RPCConcurrencyLimiter,
+        wrappedCtx: SendableContext
+    ) async {
         guard let data = line.data(using: .utf8) else { return }
 
-        // Check for state.subscribe — handle as a streaming subscription
-        if let request = try? JSONDecoder().decode(RPCRequest.self, from: data),
-           request.method == RPCMethod.stateSubscribe {
+        // Decode once: the subscribe check needs the method, and the normal
+        // path reuses it for the signpost label + in-flight gauge.
+        let request = try? JSONDecoder().decode(RPCRequest.self, from: data)
+
+        // Check for state.subscribe — handle as a streaming subscription.
+        // This path BYPASSES the concurrency limiter: it holds its socket open
+        // indefinitely and must never occupy a limiter slot.
+        if request?.method == RPCMethod.stateSubscribe {
             let sendableCtx = wrappedCtx
 
             // Register subscriber; callback streams deltas as newline-delimited JSON.
@@ -218,8 +241,28 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
             return
         }
 
-        // Normal (non-subscribe) request path
+        // Normal (non-subscribe) request path. Gate on the concurrency limiter
+        // so a connection burst can't spawn unbounded concurrent handlers (and
+        // their git/gh subprocesses). The expensive work is `handleRaw`; the
+        // slot is released as soon as it returns (response encoding below does
+        // no subprocess fan-out). `release()` is an actor method and so cannot
+        // run from a `defer`, but there is no throwing/early-exit point between
+        // acquire and release, so the slot is always returned.
+        let method = request?.method ?? "unknown"
+        let inFlight = await limiter.acquire()
+        // Cheap in-flight gauge: only log when contention is notable, never at
+        // info on every request.
+        if inFlight > RPCConcurrencyLimiter.maxConcurrentRPCs / 2 {
+            perfLogger.debug("rpc in-flight high: \(inFlight, privacy: .public)")
+        }
+
+        let signposter = RPCSignposts.signposter
+        let signpostID = signposter.makeSignpostID()
+        let intervalState = signposter.beginInterval("rpc.handle", id: signpostID, "\(method, privacy: .public)")
         let response = await router.handleRaw(data)
+        signposter.endInterval("rpc.handle", intervalState)
+
+        await limiter.release()
 
         do {
             let responseData = try JSONEncoder().encode(response)
