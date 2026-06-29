@@ -335,6 +335,12 @@ final class TranscriptBubbleCellView: NSTableCellView {
     /// Source text of the whole message, for ⌘C / "Copy message".
     private var messageSourceText: String = ""
 
+    /// Monotonic token bumped on every (re)build of the block stack. Async syntax-
+    /// highlight completions capture the value current when they were dispatched
+    /// and bail if it changed (scroll-reuse / reconfigure recycled the cell onto a
+    /// different message), so colors never land on a stale/detached text view. (#129)
+    private var highlightGeneration = 0
+
     // Cell-box + role-dependent anchoring constraints (assigned post-super.init).
     private var widthConstraint: NSLayoutConstraint!
     private var heightConstraint: NSLayoutConstraint!
@@ -467,6 +473,11 @@ final class TranscriptBubbleCellView: NSTableCellView {
     /// (a missing/short `blockHeights` array) re-measures the affected block so the
     /// cell can never render at a wrong height. (#129)
     private func rebuildBlockStack(blocks: [MessageBlock], blockHeights: [CGFloat], bodyWidth: CGFloat) {
+        // Invalidate any in-flight async syntax-highlight completions targeting the
+        // previous content: a recycled cell rebuilds onto a different message, so
+        // those completions must become no-ops (see `applyAsyncHighlights`).
+        highlightGeneration &+= 1
+
         for view in blockStack.arrangedSubviews {
             blockStack.removeArrangedSubview(view)
             view.removeFromSuperview()
@@ -519,7 +530,40 @@ final class TranscriptBubbleCellView: NSTableCellView {
             width: max(bodyWidth, 1), height: CGFloat.greatestFiniteMagnitude)
         textView.textStorage?.setAttributedString(string)
         textView.setSelectedRange(NSRange(location: 0, length: 0))
+        applyAsyncHighlights(in: string, textView: textView)
         return textView
+    }
+
+    /// Finds every `.tbdCodeHighlight`-marked code run in `string` and asks the
+    /// off-main `CodeHighlightService` to syntax-highlight it. Each completion
+    /// (already on the main thread) re-applies only `.foregroundColor` over the
+    /// run's characters — colors only, so no relayout — guarded against scroll-reuse
+    /// staleness via the generation token + a weak text-view capture. (#129)
+    private func applyAsyncHighlights(in string: NSAttributedString, textView: NSTextView) {
+        let ns = string.string as NSString
+        let full = NSRange(location: 0, length: string.length)
+        string.enumerateAttribute(.tbdCodeHighlight, in: full, options: []) { value, range, _ in
+            guard let language = value as? String, range.length > 0 else { return }
+            let code = ns.substring(with: range)
+            let captured = highlightGeneration
+            CodeHighlightService.shared.highlight(
+                code: code, language: language, theme: .chatBubble
+            ) { [weak self, weak textView] colorRuns in
+                guard let self, let textView, self.highlightGeneration == captured else { return }
+                guard let storage = textView.textStorage else { return }
+                let storageLength = storage.length
+                storage.beginEditing()
+                for run in colorRuns {
+                    let offset = NSRange(location: range.location + run.range.location, length: run.range.length)
+                    // Clamp defensively: the storage must still contain the offset
+                    // range (it does unless the content changed, which the
+                    // generation guard already rules out).
+                    guard offset.location + offset.length <= storageLength else { continue }
+                    storage.addAttribute(.foregroundColor, value: run.color, range: offset)
+                }
+                storage.endEditing()
+            }
+        }
     }
 
     /// A table block hosted in an `NSHostingView` over the native grid.

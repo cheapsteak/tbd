@@ -75,12 +75,35 @@ struct MarkdownAttributedRendererTests {
         #expect(seeColor == TranscriptTextTheme.chatBubble.blockquoteColor)
     }
 
-    @Test("fenced code uses a monospaced font and a background")
+    @Test("fenced code renders plain monospaced and marks a language block for async highlight")
     func codeBlock() {
         let s = MarkdownAttributedRenderer.render("```swift\nlet x = 1\n```")
         let f = s.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        // Plain render: monospaced font + the literal code text survive. Syntax
+        // highlighting is now applied asynchronously off the main thread (#129), so
+        // the synchronous render carries NO highlight colors — only the marker.
         #expect(f?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
         #expect(s.string.contains("let x = 1"))
+
+        // A fenced block WITH a language carries the `.tbdCodeHighlight` marker
+        // (value == the language) over its code characters.
+        let codeRange = (s.string as NSString).range(of: "let x = 1")
+        let marker = s.attribute(.tbdCodeHighlight, at: codeRange.location, effectiveRange: nil) as? String
+        #expect(marker == "swift")
+    }
+
+    @Test("fenced code WITHOUT a language is plain and carries no async-highlight marker")
+    func codeBlockNoLanguage() {
+        let s = MarkdownAttributedRenderer.render("```\nplain text\n```")
+        let f = s.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        #expect(f?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
+        #expect(s.string.contains("plain text"))
+        // No language → stays plain forever → no marker anywhere.
+        var foundMarker = false
+        s.enumerateAttribute(.tbdCodeHighlight, in: NSRange(location: 0, length: s.length)) { v, _, _ in
+            if v != nil { foundMarker = true }
+        }
+        #expect(!foundMarker)
     }
 
     @Test("GFM table becomes a single grid-view attachment carrying its cell text")
