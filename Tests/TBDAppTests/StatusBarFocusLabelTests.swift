@@ -114,3 +114,23 @@ struct StatusBarFocusLabelTests {
         #expect(label == nil)
     }
 }
+
+@Suite("StatusBarView.leftLabelBehavior")
+struct StatusBarLeftLabelBehaviorTests {
+
+    @Test("single worktree selected copies its path with path tooltip")
+    func singleWorktreeCopiesPath() {
+        let behavior = StatusBarView.leftLabelBehavior(selectedWorktreePath: "/tmp/feat-branch")
+
+        #expect(behavior == .copyPath("/tmp/feat-branch"))
+        #expect(behavior.tooltip == "/tmp/feat-branch")
+    }
+
+    @Test("no single worktree selected reveals in sidebar")
+    func noSingleWorktreeReveals() {
+        let behavior = StatusBarView.leftLabelBehavior(selectedWorktreePath: nil)
+
+        #expect(behavior == .revealInSidebar)
+        #expect(behavior.tooltip == "Reveal in sidebar")
+    }
+}
