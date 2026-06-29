@@ -1,49 +1,49 @@
 import AppKit
-import Highlightr
 
-/// Renders a fenced code block as a syntax-highlighted `NSAttributedString`.
+extension NSAttributedString.Key {
+    /// Marks a fenced code-block run (range == the block's code characters) that
+    /// SHOULD be syntax-highlighted later, off the main thread. Its value is the
+    /// language `String`. Present only when the block declared a language; a
+    /// language-less block stays plain forever and carries no marker. (#129)
+    static let tbdCodeHighlight = NSAttributedString.Key("tbdCodeHighlight")
+}
+
+/// Renders a fenced code block as a PLAIN monospaced `NSAttributedString`.
 ///
-/// Highlightr wraps highlight.js and its init is expensive (~300 ms on first call
-/// because it loads the full highlight.js runtime). A single `@MainActor` static
-/// instance is cached so subsequent calls are fast. (#129)
+/// Syntax highlighting (JavaScriptCore / highlight.js) is intentionally NOT done
+/// here: doing it synchronously on the main thread — in height measurement and
+/// first paint — caused a hard freeze (the lazy JSCore VM init can stall tens of
+/// seconds under memory pressure). Instead this renders plain text and, when the
+/// block has a language, attaches a `.tbdCodeHighlight` marker over the code range
+/// so the cell can colorize it asynchronously via `CodeHighlightService`. Because
+/// the font (`theme.codeFont`) is fixed here and the async pass only adds
+/// `.foregroundColor`, layout/height never changes — `render == measure` holds. (#129)
 @MainActor
 enum MarkdownCodeBlock {
-    private static let highlightr: Highlightr? = {
-        let h = Highlightr()
-        h?.setTheme(to: "xcode")
-        return h
-    }()
-
-    /// Returns an `NSAttributedString` for the given fenced code block.
+    /// Returns a PLAIN monospaced `NSAttributedString` for the given fenced code block.
     ///
-    /// - Colors come from Highlightr/highlight.js (syntax highlighting).
-    /// - Font is always `theme.codeFont` (monospaced, project-size) — overrides
-    ///   whatever font Highlightr set so we stay on the design system.
+    /// - Font is `theme.codeFont` (monospaced, project-size).
     /// - Background (`theme.codeBackground`) is applied as `.backgroundColor`.
     /// - A paragraph style with head/tail indent (8 pt) indents the block visually.
+    /// - When `language != nil`, a `.tbdCodeHighlight` marker (value = the language)
+    ///   is attached over the code's characters so the cell can highlight it later.
     static func attributed(code: String, language: String?, theme: TranscriptTextTheme) -> NSAttributedString {
-        // Try syntax highlighting; fall back to plain monospaced if unavailable.
-        let base: NSMutableAttributedString
-        if let h = highlightr,
-           let lang = language,
-           let highlighted = h.highlight(code, as: lang) {
-            base = NSMutableAttributedString(attributedString: highlighted)
-        } else {
-            base = NSMutableAttributedString(
-                string: code,
-                attributes: [.font: theme.codeFont]
-            )
-        }
+        let base = NSMutableAttributedString(
+            string: code,
+            attributes: [.font: theme.codeFont]
+        )
 
         let full = NSRange(location: 0, length: base.length)
 
-        // Override font: keep highlight COLORS but impose our mono font/size.
-        base.enumerateAttribute(.font, in: full, options: []) { _, range, _ in
-            base.addAttribute(.font, value: theme.codeFont, range: range)
-        }
-
         // Apply code background across the entire block.
         base.addAttribute(.backgroundColor, value: theme.codeBackground, range: full)
+
+        // Mark the code range for async syntax highlighting — only when a language
+        // is present (matches the old "highlight only when language present"
+        // behavior; language-less blocks stay plain forever).
+        if let language, full.length > 0 {
+            base.addAttribute(.tbdCodeHighlight, value: language, range: full)
+        }
 
         // Inset the block with a paragraph style.
         let style = NSMutableParagraphStyle()

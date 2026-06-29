@@ -120,7 +120,11 @@ struct TableTranscriptView: NSViewRepresentable {
             }
         }
 
-        Self.warmHighlightrOnce()
+        // Create the syntax-highlighting JSCore VM OFF the main thread, ahead of
+        // the first code cell. The open path (height precompute + first paint)
+        // renders code blocks as plain monospaced text and never touches
+        // JavaScriptCore — colors are applied asynchronously after display. (#129)
+        CodeHighlightService.shared.warm()
 
         // One-time runtime verification of FIX 1(a): with the app-launch register
         // in place, `canEstimate` must read false by the time any table is set up.
@@ -133,19 +137,6 @@ struct TableTranscriptView: NSViewRepresentable {
         Self.log.debug(
             "table.open.makeNSViewDone ms=\(makeNSViewMs, format: .fixed(precision: 1), privacy: .public) rows=\(nodes.count, privacy: .public)")
         return scrollView
-    }
-
-    /// Highlightr's first init costs ~300ms (it loads the full highlight.js
-    /// runtime). It's `@MainActor`, so we can't move it off the main thread —
-    /// but we can pay it asynchronously at pane install, before the first real
-    /// code bubble needs it. Runs exactly once per process.
-    private static var didWarmHighlightr = false
-    private static func warmHighlightrOnce() {
-        guard !didWarmHighlightr else { return }
-        didWarmHighlightr = true
-        DispatchQueue.main.async {
-            _ = MarkdownCodeBlock.attributed(code: "x", language: "swift", theme: .chatBubble)
-        }
     }
 
     func updateNSView(_ nsView: NSScrollView, context ctx: Context) {
@@ -391,8 +382,9 @@ struct TableTranscriptView: NSViewRepresentable {
                 // equal the cell's drawn block-stack height by construction.
                 //
                 // Instrumented in two phases so we know whether the cost is
-                // RENDERING (markdown → attributed string, incl. Highlightr syntax
-                // highlighting of fenced code) or MEASURING (TK1 `usedRect`). (#129)
+                // RENDERING (markdown → attributed string; fenced code is rendered
+                // PLAIN here — syntax highlighting is async + off-main) or
+                // MEASURING (TK1 `usedRect`). (#129)
                 let branchStart = DispatchTime.now().uptimeNanoseconds
                 let renderStart = DispatchTime.now().uptimeNanoseconds
                 let blocks = composedBubbleBlocks(for: node, item: item)
