@@ -136,6 +136,76 @@ import Testing
     })
 }
 
+@Test func testCreateWorktreeForExistingBranchDeDupesAgainstArchivedRowPath() async throws {
+    // Regression: re-opening an existing branch whose PREVIOUS worktree was
+    // archived must not collide with the archived row's `path` (the
+    // `worktree.path` column is globally UNIQUE, including archived rows).
+    // Archived worktrees keep their `path` but have no directory on disk, so
+    // the old filesystem-only uniqueness check returned the base name
+    // unchanged and the insert threw `UNIQUE constraint failed: worktree.path`.
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    try await shell("git branch existing-feature", at: repoDir)
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    // Simulate the archived previous worktree: a row whose `path` is exactly
+    // what beginCreateWorktree would compute for `existing-feature`, archived,
+    // with NO directory on disk.
+    let layout = WorktreeLayout()
+    let basePath = layout.basePath(for: repo)
+    let archivedPath = (basePath as NSString).appendingPathComponent("existing-feature")
+    #expect(!FileManager.default.fileExists(atPath: archivedPath))
+    _ = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "existing-feature",
+        branch: "existing-feature",
+        path: archivedPath,
+        tmuxServer: "tbd-test",
+        status: .archived
+    )
+
+    // Re-open the same branch. This must NOT throw and must pick a de-duped
+    // folder name distinct from the archived row's path.
+    let pending = try await lifecycle.beginCreateWorktree(
+        repoID: repo.id,
+        branch: "existing-feature",
+        skipClaude: true,
+        useExistingBranch: true
+    )
+    #expect(pending.name == "existing-feature-2")
+    #expect(pending.path != archivedPath)
+    #expect(pending.path.hasSuffix("/existing-feature-2"))
+
+    // Drive completion and confirm the worktree goes active with a real
+    // checkout at the de-duped path.
+    let completion = try await lifecycle.completeCreateWorktree(
+        worktreeID: pending.id,
+        skipClaude: true,
+        existingBranchRef: "existing-feature"
+    )
+    if case .preSessionPending(let phase3) = completion {
+        await phase3.value
+    }
+    let completed = try #require(try await db.worktrees.get(id: pending.id))
+    #expect(completed.status == .active)
+    #expect(FileManager.default.fileExists(atPath: completed.path))
+
+    let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
+    #expect(listed.contains { entry in
+        entry.branch == "existing-feature" && entry.path.hasSuffix("/existing-feature-2")
+    })
+}
+
 @Test func testCreateWorktreeWithExistingBranchFolderConflictAppendsSuffix() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }

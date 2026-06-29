@@ -103,8 +103,14 @@ extension WorktreeLifecycle {
                 : providedBranch
             let sanitized = WorktreeLayout.sanitize(localBranch)
             let baseFolder = sanitized.isEmpty ? "branch" : sanitized
+            // Mirror the global UNIQUE constraint on `worktree.path`: avoid
+            // paths already reserved by ANY row (active, archived, creating,
+            // main). An archived worktree keeps its `path` even after its
+            // directory is deleted, so a filesystem-only check would collide
+            // and the insert would throw `UNIQUE constraint failed`.
+            let reserved = Set(try await db.worktrees.list().map(\.path))
             resolvedName = Self.uniqueFolderName(
-                base: baseFolder, in: canonicalBase
+                base: baseFolder, in: canonicalBase, reserved: reserved
             )
             // The on-disk local branch ends up as `localBranch` (for remote
             // tracking, `--track -b <localName>` creates it; for plain local,
@@ -133,18 +139,24 @@ extension WorktreeLifecycle {
     }
 
     /// Returns `<base>`, or `<base>-2`, `<base>-3`, … — the first folder name
-    /// under `parentDir` that does not yet exist on disk. Caps at -1000 to
-    /// avoid pathological infinite loops; throws via the underlying
+    /// under `parentDir` whose absolute path neither exists on disk NOR is
+    /// already reserved by an existing worktree row (`reserved`). Caps at -1000
+    /// to avoid pathological infinite loops; throws via the underlying
     /// `git worktree add` if every candidate is taken.
-    private static func uniqueFolderName(base: String, in parentDir: String) -> String {
+    private static func uniqueFolderName(
+        base: String, in parentDir: String, reserved: Set<String>
+    ) -> String {
+        func isTaken(_ path: String) -> Bool {
+            FileManager.default.fileExists(atPath: path) || reserved.contains(path)
+        }
         let firstCandidate = (parentDir as NSString).appendingPathComponent(base)
-        if !FileManager.default.fileExists(atPath: firstCandidate) {
+        if !isTaken(firstCandidate) {
             return base
         }
         for suffix in 2...1000 {
             let candidate = "\(base)-\(suffix)"
             let path = (parentDir as NSString).appendingPathComponent(candidate)
-            if !FileManager.default.fileExists(atPath: path) {
+            if !isTaken(path) {
                 return candidate
             }
         }
