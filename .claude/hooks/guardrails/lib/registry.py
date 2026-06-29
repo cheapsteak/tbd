@@ -36,7 +36,14 @@ def load_rules() -> list:
     for module_info in pkgutil.iter_modules(rules_pkg.__path__):
         if module_info.name.startswith("_"):
             continue
-        module = importlib.import_module(f"{_RULES_PACKAGE}.{module_info.name}")
+        try:
+            module = importlib.import_module(f"{_RULES_PACKAGE}.{module_info.name}")
+        except Exception:  # noqa: BLE001 — isolate a single broken rule module
+            # A SyntaxError or missing import in one rule file must not take down
+            # every other rule. Without this guard the exception propagates out of
+            # load_rules(), and the dispatcher's outer fail-open catch then drops
+            # ALL rules — not just the broken one. Skip only the broken module.
+            continue
         module_rules = getattr(module, "RULES", None)
         if not isinstance(module_rules, (list, tuple)):
             continue
