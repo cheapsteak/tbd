@@ -226,6 +226,21 @@ struct MarkdownAttributedRendererTests {
         #expect(measured < oneLine * 1.6)
     }
 
+    @Test("renderBlocks: a blockquote is separated from the next paragraph by a single newline, not a blank line")
+    func blocksBlockquoteSingleTrailingNewline() {
+        let blocks = MarkdownAttributedRenderer.renderBlocks("> quoted line\n\nNext paragraph.")
+        #expect(blocks.count == 1)
+        guard case .prose(let s) = blocks[0] else {
+            Issue.record("expected a single prose block")
+            return
+        }
+        // The blockquote's child paragraph appends its own "\n" and the blockquote
+        // wrapper appended another, so the quote ended with "\n\n" — a blank line
+        // before the following paragraph. It must now be a single line break.
+        #expect(s.string.contains("quoted line\nNext paragraph"))
+        #expect(!s.string.contains("quoted line\n\n"))
+    }
+
     @Test("renderBlocks: a table becomes its own table block, splitting surrounding prose")
     func blocksProseTableProse() {
         let md = """
