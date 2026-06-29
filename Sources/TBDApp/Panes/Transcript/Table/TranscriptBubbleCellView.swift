@@ -547,7 +547,7 @@ final class TranscriptBubbleCellView: NSTableCellView {
             let code = ns.substring(with: range)
             let captured = highlightGeneration
             CodeHighlightService.shared.highlight(
-                code: code, language: language, theme: .chatBubble
+                code: code, language: language
             ) { [weak self, weak textView] colorRuns in
                 guard let self, let textView, self.highlightGeneration == captured else { return }
                 guard let storage = textView.textStorage else { return }

@@ -14,7 +14,7 @@ struct CodeHighlightServiceTests {
         let huge = String(repeating: "let x = 1\n", count: 4_000) // ~40k UTF-16
         let runs: [HighlightColorRun] = await withCheckedContinuation { continuation in
             CodeHighlightService.shared.highlight(
-                code: huge, language: "swift", theme: .chatBubble
+                code: huge, language: "swift"
             ) { result in
                 continuation.resume(returning: result)
             }
@@ -30,7 +30,7 @@ struct CodeHighlightServiceTests {
         let code = "let x = 1"
         let runs: [HighlightColorRun] = await withCheckedContinuation { continuation in
             CodeHighlightService.shared.highlight(
-                code: code, language: "swift", theme: .chatBubble
+                code: code, language: "swift"
             ) { result in
                 continuation.resume(returning: result)
             }

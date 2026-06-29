@@ -76,7 +76,6 @@ final class CodeHighlightService {
     func highlight(
         code: String,
         language: String,
-        theme: TranscriptTextTheme,
         completion: @escaping @MainActor ([HighlightColorRun]) -> Void
     ) {
         let utf16Count = code.utf16.count
