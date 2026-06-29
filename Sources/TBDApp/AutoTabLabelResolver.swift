@@ -37,6 +37,10 @@ enum AutoTabLabelResolver {
             return TerminalLabel.codex
         }
 
+        if terminal?.label == "setup" {
+            return "Setup"
+        }
+
         return "Terminal \(fallbackIndex + 1)"
     }
 }

@@ -46,6 +46,26 @@ struct AutoTabLabelResolverTests {
         #expect(label == "Terminal 3")
     }
 
+    @Test func setupTerminalUsesSetupLabel() {
+        let terminal = Terminal(
+            worktreeID: UUID(),
+            tmuxWindowID: "@1",
+            tmuxPaneID: "%1",
+            label: "setup",
+            kind: .shell
+        )
+
+        let label = AutoTabLabelResolver.terminalLabel(
+            terminal: terminal,
+            fallbackIndex: 2,
+            modelProfiles: [],
+            worktreeTabs: [],
+            worktreeTerminals: []
+        )
+
+        #expect(label == "Setup")
+    }
+
     @Test func claudeProfileUsesProfileNameAndPosition() {
         let worktreeID = UUID()
         let profileID = UUID()
