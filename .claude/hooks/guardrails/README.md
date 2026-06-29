@@ -18,7 +18,7 @@ could not prevent it; a `PreToolUse` hook can. See `rules/background_jobs.py`.
 ## Architecture
 
 ```
-.claude/settings.json            ONE PreToolUse entry (matcher "Bash|Edit|Write") → dispatch.py
+.claude/settings.json            ONE PreToolUse entry (matcher "Bash") → dispatch.py
 .claude/hooks/guardrails/
   dispatch.py                    entrypoint: read stdin JSON, run rules, aggregate, fail-open
   lib/rule.py                    Rule base class + Decision value
