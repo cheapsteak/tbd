@@ -138,11 +138,13 @@ struct ContentView: View {
                             // Split button: label = primary click (open PR); the
                             // attached chevron opens the menu.
                             Menu {
-                                if let worktree = appState.findWorktree(id: worktreeID) {
-                                    let armed = appState.effectiveAutoArchive(for: worktree)
+                                if appState.findWorktree(id: worktreeID) != nil {
                                     let blocked = !appState.children(of: worktreeID).isEmpty
                                     Toggle("Auto-archive worktree on PR merge", isOn: Binding(
-                                        get: { armed },
+                                        get: {
+                                            appState.findWorktree(id: worktreeID)
+                                                .map { appState.effectiveAutoArchive(for: $0) } ?? false
+                                        },
                                         set: { newValue in
                                             Task { await appState.setAutoArchive(worktreeID: worktreeID, enabled: newValue) }
                                         }
@@ -150,7 +152,9 @@ struct ContentView: View {
                                     .disabled(blocked)
                                 }
                             } label: {
-                                PRButtonLabel(prStatus: prStatus)
+                                let armed = appState.findWorktree(id: worktreeID)
+                                    .map { appState.effectiveAutoArchive(for: $0) } ?? false
+                                PRButtonLabel(prStatus: prStatus, isAutoArchiveArmed: armed)
                             } primaryAction: {
                                 let existingTabs = appState.tabs[worktreeID] ?? []
                                 if let existingIndex = existingTabs.firstIndex(where: {
@@ -347,6 +351,7 @@ private func overlayFrameIsWindowRoot(
 
 private struct PRButtonLabel: View {
     let prStatus: PRStatus
+    let isAutoArchiveArmed: Bool
     // Re-bake the colored icon when the appearance flips (the baked image is
     // non-template, so it can't auto-adapt the way a tinted template would).
     @Environment(\.colorScheme) private var colorScheme
@@ -364,6 +369,18 @@ private struct PRButtonLabel: View {
             Text(verbatim: "#\(prStatus.number)")
                 .font(.caption)
                 .fontWeight(.medium)
+            if isAutoArchiveArmed {
+                // At-a-glance indicator that auto-archive-on-merge is armed for
+                // this worktree. A toolbar Menu label renders SF Symbols
+                // monochrome (AppKit tints them) — that's fine and desirable
+                // here, so a plain template Image needs no baked color.
+                Image(systemName: "archivebox")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 11, height: 11)
+                    .help("Auto-archive on PR merge is on")
+                    .accessibilityLabel("Auto-archive on PR merge is on")
+            }
         }
     }
 
