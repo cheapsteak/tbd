@@ -74,6 +74,19 @@ class BackgroundJobsAllowTests(unittest.TestCase):
         )
         self.assertIsNone(_check(command))
 
+    def test_trap_with_multiple_signals_allows(self):
+        # `trap '...kill...' TERM EXIT` is the idiomatic multi-signal form. EXIT
+        # is not the sole trapped signal, so the old `\1\s+EXIT` regex false-denied
+        # this safe command. The trap kills captured PIDs (not `kill 0`), so this
+        # exercises the trap branch rather than the kill-0 fallback.
+        command = (
+            'pids=""\n'
+            'trap \'kill $pids\' INT TERM EXIT\n'
+            "for n in 1 2 3 4; do yes >/dev/null & pids=\"$pids $!\"; done\n"
+            "swift test"
+        )
+        self.assertIsNone(_check(command))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -80,8 +80,16 @@ def _is_background_load_loop(command: str) -> bool:
 
 def _has_robust_teardown(command: str) -> bool:
     """True if the command cleans up via a process-group/parent-aware teardown."""
-    # trap '...kill...' EXIT  or  trap "...kill..." EXIT
-    if re.search(r"trap\s+(['\"]).*?kill.*?\1\s+EXIT", command, flags=re.DOTALL):
+    # trap '...kill...' EXIT  or  trap "...kill..." EXIT — including the idiomatic
+    # multi-signal forms `trap 'kill $p' TERM EXIT` / `... INT TERM EXIT`, where
+    # EXIT is not the sole trapped signal. `(?:\s+\S+)*` lets other signal names
+    # sit between the closing quote and EXIT; `\1\s+EXIT` alone missed those and
+    # produced a false deny on a safe, properly-trapped command.
+    if re.search(
+        r"trap\s+(['\"]).*?kill.*?\1(?:\s+\S+)*\s+EXIT\b",
+        command,
+        flags=re.DOTALL,
+    ):
         return True
     # kill 0  (kills the whole process group)
     if re.search(r"\bkill\s+(?:-\S+\s+)?0\b", command):
