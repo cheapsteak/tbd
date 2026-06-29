@@ -1,8 +1,12 @@
+import AppKit
 import SwiftUI
 import TBDShared
 
 struct StatusBarView: View {
     @EnvironmentObject var appState: AppState
+
+    /// Transient "Copied" feedback shown after the left label copies a path.
+    @State private var didCopy = false
 
     private var selectedWorktreeInfo: (path: String, repoID: UUID)? {
         guard appState.selectedWorktreeIDs.count == 1,
@@ -79,6 +83,34 @@ struct StatusBarView: View {
         }
     }
 
+    /// What the left-side status-bar label does when clicked, and the tooltip it
+    /// shows on hover.
+    ///
+    /// - A single worktree selected (non-nil path): clicking copies the absolute
+    ///   path; the tooltip is that path.
+    /// - Otherwise (repo-only or multi-worktree selection): clicking reveals the
+    ///   selection in the sidebar; the tooltip is `"Reveal in sidebar"`.
+    enum LeftLabelBehavior: Equatable {
+        case copyPath(String)
+        case revealInSidebar
+
+        var tooltip: String {
+            switch self {
+            case .copyPath(let path): return path
+            case .revealInSidebar: return "Reveal in sidebar"
+            }
+        }
+    }
+
+    /// Decide the left-label behavior from the selected worktree's path
+    /// (`nil` when there is no single selected worktree).
+    nonisolated static func leftLabelBehavior(selectedWorktreePath: String?) -> LeftLabelBehavior {
+        if let path = selectedWorktreePath {
+            return .copyPath(path)
+        }
+        return .revealInSidebar
+    }
+
     var body: some View {
         HStack {
             if let label = Self.focusLabel(
@@ -87,12 +119,23 @@ struct StatusBarView: View {
                 repos: appState.repos,
                 selectedRepoID: appState.selectedRepoID
             ) {
-                Button(action: { appState.revealSelectionInSidebar() }) {
-                    Text(label)
-                        .foregroundStyle(.secondary)
+                let behavior = Self.leftLabelBehavior(selectedWorktreePath: selectedWorktreeInfo?.path)
+                switch behavior {
+                case .copyPath(let path):
+                    Button(action: { copyPath(path) }) {
+                        Text(didCopy ? "Copied" : label)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(behavior.tooltip)
+                case .revealInSidebar:
+                    Button(action: { appState.revealSelectionInSidebar() }) {
+                        Text(label)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(behavior.tooltip)
                 }
-                .buttonStyle(.plain)
-                .help("Reveal in sidebar")
             }
             Spacer()
             if let info = selectedWorktreeInfo {
@@ -112,5 +155,15 @@ struct StatusBarView: View {
         .padding(.horizontal)
         .padding(.vertical, 4)
         .background(.bar)
+    }
+
+    private func copyPath(_ path: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+        didCopy = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.2))
+            didCopy = false
+        }
     }
 }
