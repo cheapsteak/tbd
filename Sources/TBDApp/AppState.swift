@@ -6,6 +6,10 @@ import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "AppState")
+/// Dedicated channel for RPC/poll-cadence observability (storm diagnostics).
+/// Silent by default; activate with `log stream --level debug`.
+private let perfRPCLogger = Logger(subsystem: "com.tbd.app", category: "perf-rpc")
+private let perfRPCSignposter = OSSignposter(subsystem: "com.tbd.app", category: "perf-rpc")
 
 /// Transition state for a worktree being revived from the archived view.
 /// Holds a snapshot of the `Worktree` so the row can keep rendering even
@@ -507,6 +511,13 @@ final class AppState: ObservableObject {
     lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     private var pollTimer: Timer?
     private var pollCycle = 0
+    /// True while a poll refresh cycle (the list RPCs) is running. The 2s poll
+    /// timer skips its refresh when this is set, so overlapping cycles can't
+    /// stack into an RPC storm when the daemon is slow (Layer A guard).
+    private var pollCycleInFlight = false
+    /// Count of poll ticks skipped because a previous cycle was still in flight.
+    /// Storm indicator for observability and tests.
+    private(set) var skippedPollCycles = 0
     private var subscriptionTask: Task<Void, Never>?
     let notificationSoundPlayer = NotificationSoundPlayer()
     let macNotificationManager = MacNotificationManager()
@@ -966,11 +977,40 @@ final class AppState: ObservableObject {
         worktrees.values.flatMap { $0 }
     }
 
+    /// Runs `body` only if no poll cycle is currently in flight. Returns true if
+    /// it ran, false if skipped because a previous cycle was still running.
+    ///
+    /// This is the Layer A storm guard: the 2s poll timer frees the main actor
+    /// whenever its refresh `await`s a slow daemon RPC, so without this guard the
+    /// next tick (and the next, and the next) would each spawn another overlapping
+    /// refresh cycle — a positive-feedback RPC storm. Holding a single in-flight
+    /// flag collapses every tick that fires mid-cycle into a cheap skip.
+    @discardableResult
+    func runPollCycleIfIdle(_ body: () async -> Void) async -> Bool {
+        if pollCycleInFlight {
+            skippedPollCycles += 1
+            perfRPCLogger.debug(
+                "poll cycle skipped (in-flight); totalSkipped=\(self.skippedPollCycles, privacy: .public)"
+            )
+            return false
+        }
+        pollCycleInFlight = true
+        defer { pollCycleInFlight = false }
+        let signpostID = perfRPCSignposter.makeSignpostID()
+        let interval = perfRPCSignposter.beginInterval("rpc.pollCycle", id: signpostID)
+        await body()
+        perfRPCSignposter.endInterval("rpc.pollCycle", interval)
+        return true
+    }
+
     /// Poll daemon for state changes every 2 seconds.
     private func startPolling() {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // Connection/reconnection stays OUTSIDE the in-flight guard so a
+                // dropped socket is retried every tick even while a slow refresh
+                // is still draining; only the refresh (the list RPCs) is guarded.
                 if !self.isConnected {
                     // Try to start the daemon if socket doesn't exist
                     if !FileManager.default.fileExists(atPath: TBDConstants.socketPath) {
@@ -982,13 +1022,21 @@ final class AppState: ObservableObject {
                     }
                     if !self.isConnected { return }
                 }
-                await self.refreshAll()
-                if self.subscriptionTask == nil || self.subscriptionTask?.isCancelled == true {
-                    self.startSubscription()
-                }
-                self.pollCycle += 1
-                if self.pollCycle % 15 == 0 {
-                    await self.refreshPRStatuses()
+                // Guard the whole refresh cycle (refreshAll + the every-15th
+                // pr.list) so a slow daemon can never stack overlapping cycles or
+                // run them concurrently. pollCycle is advanced only when a cycle
+                // actually RUNS — skipped ticks don't burn the PR counter, so the
+                // expensive pr.list still lands ~every 15 executed cycles rather
+                // than drifting earlier off wall-clock ticks that did no work.
+                await self.runPollCycleIfIdle {
+                    await self.refreshAll()
+                    if self.subscriptionTask == nil || self.subscriptionTask?.isCancelled == true {
+                        self.startSubscription()
+                    }
+                    self.pollCycle += 1
+                    if self.pollCycle % 15 == 0 {
+                        await self.refreshPRStatuses()
+                    }
                 }
             }
         }

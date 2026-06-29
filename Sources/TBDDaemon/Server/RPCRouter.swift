@@ -28,6 +28,13 @@ public final class RPCRouter: Sendable {
     public let repoSerializer: RepoSerializer
     public let configDirManager: ClaudeProfileConfigDirManager
 
+    /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
+    /// one git enumeration + gh fetch instead of N overlapping ones.
+    let prListCoordinator = PRListCoordinator()
+    /// TTL cache for per-worktree upstream branch lookups, so `pr.list` stops
+    /// spawning a `git config` subprocess per worktree on every poll.
+    let upstreamBranchCache = UpstreamBranchCache()
+
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
 
@@ -260,16 +267,33 @@ public final class RPCRouter: Sendable {
     // MARK: - PR Status
 
     private func handlePRList() async throws -> RPCResponse {
+        // Single-flight: while one enumeration is in flight, concurrent polls
+        // await it and share the snapshot instead of each starting their own
+        // git enumeration + gh fetch.
+        let result = try await prListCoordinator.run { [self] in
+            try await computePRList()
+        }
+        return try RPCResponse(result: result)
+    }
+
+    /// Enumerate active worktrees, enrich each with its (cached) upstream branch,
+    /// refresh PR status, and return the snapshot. Throws on a DB enumeration
+    /// failure so the app sees an RPC error instead of a silently-stale snapshot;
+    /// `PRListCoordinator` propagates the error to every concurrent caller.
+    private func computePRList() async throws -> PRListResult {
         // Fetch fresh PR data for all active worktrees before returning the cache.
-        // This is called every ~30s by the app, so one GraphQL call per poll is acceptable.
         let worktrees = try await db.worktrees.list(status: .active)
         var infos: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String)] = []
         infos.reserveCapacity(worktrees.count)
         for wt in worktrees {
-            let upstreamBranch = await git.upstreamBranchName(
+            // Route the per-worktree `git config` lookup through the TTL cache
+            // so a poll storm doesn't spawn one subprocess per worktree per poll.
+            let upstreamBranch = await upstreamBranchCache.upstreamBranchName(
                 worktreePath: wt.path,
                 branch: wt.branch
-            )
+            ) { [git] in
+                await git.upstreamBranchName(worktreePath: wt.path, branch: wt.branch)
+            }
             infos.append((
                 id: wt.id,
                 branch: wt.branch,
@@ -278,8 +302,9 @@ public final class RPCRouter: Sendable {
             ))
         }
         await prManager.fetchAll(worktrees: infos)
-        let statuses = await prManager.allStatuses()
-        return try RPCResponse(result: PRListResult(statuses: statuses))
+        // Prune at the END so we never drop an entry this pass just populated.
+        await upstreamBranchCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
+        return PRListResult(statuses: await prManager.allStatuses())
     }
 
     private func handlePRRefresh(_ paramsData: Data) async throws -> RPCResponse {
