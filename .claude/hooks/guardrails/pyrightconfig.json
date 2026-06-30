@@ -1,0 +1,5 @@
+{
+  "//": "Pyright's import root must match the runtime sys.path. At runtime dispatch.py inserts .claude/hooks (this dir's parent) onto sys.path, so `import guardrails.*` resolves. `..` is that .claude/hooks directory; declaring it as an extraPath lets Pyright resolve the same absolute `guardrails.lib.*` / `guardrails.rules.*` imports used consistently across dispatch.py, rules, and tests.",
+  "extraPaths": [".."],
+  "reportMissingImports": "error"
+}

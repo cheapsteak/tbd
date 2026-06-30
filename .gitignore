@@ -12,3 +12,8 @@ docs/implementation-plans/
 
 # Brainstorming companion (local-only session artifacts)
 .superpowers/
+
+# Guardrails runtime log (not committed; framework itself IS committed)
+.claude/hooks/guardrails/decisions.log
+.claude/hooks/guardrails/**/__pycache__/
+.claude/hooks/guardrails/__pycache__/
