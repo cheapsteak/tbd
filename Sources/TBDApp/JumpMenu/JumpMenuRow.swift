@@ -17,38 +17,19 @@ struct JumpMenuRow: Identifiable, Equatable {
     let section: Section
 }
 
-/// Color the severity dot. Mirrors WorktreeRowView's logic so the two views
-/// stay visually consistent.
-private func severityColor(_ type: NotificationType) -> Color {
-    switch type {
-    case .error:            return .red
-    case .attentionNeeded, .focusRequest: return .orange
-    case .taskComplete:     return .green
-    case .responseComplete: return .blue
-    }
-}
-
-/// A 6pt dot in the severity color, or a transparent spacer of the same
-/// width so rows without unread notifications still align with rows that
-/// have one.
-private struct SeverityDot: View {
-    let severity: NotificationType?
-    var body: some View {
-        Circle()
-            .fill(severity.map(severityColor) ?? .clear)
-            .frame(width: 6, height: 6)
-    }
-}
-
 struct JumpMenuRowView: View {
     let row: JumpMenuRow
     let isSelected: Bool
 
+    private var suffix: SuffixRowIndicator? {
+        RowStatusIndicator.suffix(notification: row.severity, isWorking: false, isSuspended: false)
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            SeverityDot(severity: row.severity)
             Text(row.displayName)
                 .font(.system(size: 13))
+                .fontWeight(RowStatusIndicator.shouldBoldName(row.severity) ? .bold : .regular)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Text(row.repoName)
@@ -56,6 +37,12 @@ struct JumpMenuRowView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer()
+            if let indicator = suffix, let symbol = indicator.systemImage {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(indicator.color)
+                    .frame(width: 12, height: 12)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)

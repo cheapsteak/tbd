@@ -26,10 +26,7 @@ struct WorktreeRowView: View {
     }
 
     private var hasBoldNotification: Bool {
-        if let n = notification {
-            return n == .responseComplete
-        }
-        return false
+        RowStatusIndicator.shouldBoldName(notification)
     }
 
     private var prPresentation: PRStatusPresentation? {
@@ -48,41 +45,11 @@ struct WorktreeRowView: View {
     }
 
     @ViewBuilder
-    private func rowIcons() -> some View {
-        // Resolved through RowStatusIndicator so at most one indicator renders.
-        // Add new indicators in RowStatusIndicator.resolve, never as stacked icons here.
-        switch RowStatusIndicator.resolve(
+    private func leadingIcon() -> some View {
+        switch RowStatusIndicator.leading(
             isPending: isPending && !isEditing,
-            isWorking: hasWorkingTerminal,
-            notification: notification,
-            isSuspended: hasSuspendedTerminal,
             hasPRStatus: prPresentation != nil
         ) {
-        case .pending:
-            // Static dotted-circle sized to match the 12×12 PR status icon.
-            Image(systemName: "circle.dotted")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 12, height: 12)
-        case .working:
-            // Static asterisk (echoes Claude's ✳ working glyph) sized to match the 12×12 PR status icon.
-            // Light: terracotta #B05730 — readable on light sidebar (~#F1F1F1).
-            // Dark:  Claude coral #D97757 — readable on dark sidebar (~#1E1E1E).
-            Image(systemName: "asterisk")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(adaptiveColor(
-                    light: NSColor(srgbRed: 176 / 255, green: 87 / 255, blue: 48 / 255, alpha: 1),
-                    dark: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1)
-                ))
-                .frame(width: 12, height: 12)
-        case .notificationBadge(let n):
-            Circle()
-                .fill(RowStatusIndicator.badgeColor(for: n))
-                .frame(width: 8, height: 8)
-        case .suspended:
-            Image(systemName: "pause.circle.fill")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
         case .prStatus:
             if let presentation = prPresentation,
                let nsImage = loadIcon(presentation.iconName),
@@ -106,14 +73,54 @@ struct WorktreeRowView: View {
                         : nil
                 }
             }
+        case .pending:
+            Image(systemName: "circle.dotted")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 12, height: 12)
         case nil:
             EmptyView()
         }
     }
 
+    @ViewBuilder
+    private func suffixIcon() -> some View {
+        switch RowStatusIndicator.suffix(
+            notification: notification,
+            isWorking: hasWorkingTerminal,
+            isSuspended: hasSuspendedTerminal
+        ) {
+        case .working:
+            TypingDotsView(color: SuffixRowIndicator.working.color)
+                .frame(width: 14, height: 12)
+                .padding(.leading, -3)
+                .offset(y: 2)
+                .help(Self.suffixHelp(.working))
+        case let indicator?:
+            if let symbol = indicator.systemImage {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(indicator.color)
+                    .frame(width: 12, height: 12)
+                    .help(Self.suffixHelp(indicator))
+            }
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private static func suffixHelp(_ indicator: SuffixRowIndicator) -> String {
+        switch indicator {
+        case .error:     return "Error"
+        case .attention: return "Needs your attention"
+        case .working:   return "Agent is working"
+        case .suspended: return "Suspended"
+        }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            rowIcons()
+            leadingIcon()
             RenameableLabel(
                 text: worktree.displayName,
                 isEditing: $isEditing,
@@ -159,6 +166,7 @@ struct WorktreeRowView: View {
                     }
                 }
             }
+            suffixIcon()
             if let sectionRepoID, sectionRepoID != worktree.repoID,
                let homeRepo = appState.repoName(for: worktree.repoID) {
                 let short = homeRepo.count > 5 ? String(homeRepo.prefix(5)) + "…" : homeRepo
