@@ -95,7 +95,7 @@ struct WorktreeRowView: View {
         ) {
         case .working:
             TypingDotsView(color: SuffixRowIndicator.working.color)
-                .frame(width: 18, height: 12)
+                .frame(width: 14, height: 12)
                 .help("Agent is working")
         case let indicator?:
             if let symbol = indicator.systemImage {

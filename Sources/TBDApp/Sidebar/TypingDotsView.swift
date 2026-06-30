@@ -6,8 +6,8 @@ import SwiftUI
 /// per-frame main-thread or SwiftUI work — unlike the `ProgressView` spinner
 /// it replaces (#266). Animations are paused while the window is occluded.
 final class TypingDotsNSView: NSView {
-    private static let dotDiameter: CGFloat = 4
-    private static let dotSpacing: CGFloat = 3
+    private static let dotDiameter: CGFloat = 3
+    private static let dotSpacing: CGFloat = 2
     private static let pulseKey = "typingPulse"
     private let dotLayers: [CALayer]
     // nonisolated(unsafe): Swift 6 deinit is nonisolated; NSView deinit

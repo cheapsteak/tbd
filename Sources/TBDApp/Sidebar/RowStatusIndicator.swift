@@ -41,10 +41,7 @@ enum SuffixRowIndicator: Equatable {
                 dark: NSColor(srgbRed: 210 / 255, green: 153 / 255, blue: 34 / 255, alpha: 1)
             )
         case .working:
-            return adaptiveColor(
-                light: NSColor(srgbRed: 176 / 255, green: 87 / 255, blue: 48 / 255, alpha: 1),
-                dark: NSColor(srgbRed: 217 / 255, green: 119 / 255, blue: 87 / 255, alpha: 1)
-            )
+            return .secondary
         case .suspended:
             return .secondary
         }
