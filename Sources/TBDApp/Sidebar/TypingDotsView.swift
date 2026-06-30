@@ -47,6 +47,27 @@ final class TypingDotsNSView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    override func layout() {
+        super.layout()
+        let count = dotLayers.count
+        guard count > 0 else { return }
+        let contentWidth = CGFloat(count) * Self.dotDiameter
+            + CGFloat(count - 1) * Self.dotSpacing
+        let startX = ((bounds.width - contentWidth) / 2).rounded()
+        let dotY = ((bounds.height - Self.dotDiameter) / 2).rounded()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (index, dot) in dotLayers.enumerated() {
+            dot.frame = CGRect(
+                x: startX + CGFloat(index) * (Self.dotDiameter + Self.dotSpacing),
+                y: dotY,
+                width: Self.dotDiameter,
+                height: Self.dotDiameter
+            )
+        }
+        CATransaction.commit()
+    }
+
     override var intrinsicContentSize: NSSize {
         let width = CGFloat(dotLayers.count) * Self.dotDiameter
             + CGFloat(dotLayers.count - 1) * Self.dotSpacing
