@@ -71,3 +71,20 @@ struct SuffixRowIndicatorTests {
         #expect(SuffixRowIndicator.working.systemImage == nil)
     }
 }
+
+@Suite("RowStatusIndicator.shouldBoldName")
+struct ShouldBoldNameTests {
+    @Test(arguments: [NotificationType.responseComplete, .attentionNeeded, .focusRequest])
+    func boldsForResponseAndAttention(notification: NotificationType) {
+        #expect(RowStatusIndicator.shouldBoldName(notification) == true)
+    }
+
+    @Test(arguments: [NotificationType.error, .taskComplete])
+    func doesNotBoldForErrorOrTaskComplete(notification: NotificationType) {
+        #expect(RowStatusIndicator.shouldBoldName(notification) == false)
+    }
+
+    @Test func doesNotBoldForNoNotification() {
+        #expect(RowStatusIndicator.shouldBoldName(nil) == false)
+    }
+}

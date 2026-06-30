@@ -26,10 +26,7 @@ struct WorktreeRowView: View {
     }
 
     private var hasBoldNotification: Bool {
-        if let n = notification {
-            return n == .responseComplete || n == .attentionNeeded || n == .focusRequest
-        }
-        return false
+        RowStatusIndicator.shouldBoldName(notification)
     }
 
     private var prPresentation: PRStatusPresentation? {

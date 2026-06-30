@@ -67,6 +67,19 @@ enum RowStatusIndicator {
         return nil
     }
 
+    /// Whether the worktree name should be bold for the given unread
+    /// notification. Bold tracks "you should look here" — a completed response
+    /// or an attention request. Shared by the sidebar row and the jump menu so
+    /// they stay consistent.
+    static func shouldBoldName(_ notification: NotificationType?) -> Bool {
+        switch notification {
+        case .responseComplete, .attentionNeeded, .focusRequest:
+            return true
+        case .error, .taskComplete, .none:
+            return false
+        }
+    }
+
     /// Suffix slot. Priority (highest first): error > attention > working >
     /// suspended. `taskComplete` produces no suffix; `responseComplete` is
     /// surfaced as a bold name in the view, not as a suffix.
