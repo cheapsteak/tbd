@@ -129,8 +129,10 @@ reintroduce the main-thread cost.
 work for working rows. This is cheap insurance; the core correctness does not
 depend on it.
 
-Dot color uses the same `adaptiveColor(light:dark:)` pair as today's working
-asterisk (terracotta `#B05730` light / coral `#D97757` dark).
+Dot color is `.secondary` gray (revised from the original terracotta/coral
+during live review — see the "Live-review revisions" note above). The
+`NSColor` is re-baked on `viewDidChangeEffectiveAppearance()` so the dots track
+a live light↔dark switch.
 
 ## Components
 
@@ -168,7 +170,13 @@ Per the repo rule "add a test for each branch of a gating conditional":
 - **`suffixIndicator`** priority: `error ≻ attention ≻ working ≻ suspended`;
   `focusRequest` resolves to `.attention`; `taskComplete` ⇒ `nil`;
   `responseComplete` ⇒ `nil` (suffix); no state ⇒ `nil`.
-- **Bold name**: `responseComplete` ⇒ bold; every other type ⇒ regular.
+- **Bold name** (`RowStatusIndicator.shouldBoldName`, shared by the sidebar
+  row and the jump menu): `responseComplete` / `attentionNeeded` /
+  `focusRequest` ⇒ bold; `error` / `taskComplete` / none ⇒ regular. Covered by
+  `ShouldBoldNameTests`.
+- **Jump menu** (`JumpMenuRow`): the old colored severity dot is removed too;
+  it now bolds the name and shows the same error/attention suffix glyph via the
+  shared resolver, so the two views stay consistent.
 - **`TypingDotsView`** smoke test: constructs, is layer-backed, holds no
   SwiftUI `@State`. Animation smoothness + the occlusion pause/resume are
   verified live (headless tests can't see CA render-server output).
