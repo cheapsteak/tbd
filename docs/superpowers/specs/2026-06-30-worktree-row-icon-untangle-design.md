@@ -63,7 +63,9 @@ mutually exclusive in practice:
 ### Name
 
 - **Bold** when the unread notification is `responseComplete` (replaces the
-  blue dot). Otherwise regular weight. Existing `hasBoldNotification` logic and
+  blue dot) **or the worktree needs attention** (`attentionNeeded` /
+  `focusRequest` — bold tracks the attention suffix so the two read
+  consistently). Otherwise regular weight. The `hasBoldNotification` logic and
   the truncation-measurement font weight stay in sync with this.
 
 ### Activity suffix — single priority-resolved slot (trailing)
@@ -74,17 +76,23 @@ Resolved highest-first; renders at most one:
 | --- | --- | --- | --- |
 | 1 | error | `exclamationmark.octagon.fill` | red (adaptive) |
 | 2 | attention — `attentionNeeded` **or** `focusRequest` | `hand.raised.fill` | amber (adaptive) |
-| 3 | working — any terminal `activityState == .working` | **dancing dots** (CALayer animation) | terracotta/coral (same adaptive pair as today's asterisk) |
+| 3 | working — any terminal `activityState == .working` | **dancing dots** (CALayer animation), small (3px dots / 2px gap), nudged closer to the name and slightly lower | `.secondary` gray (revised from coral after live review — coral read as too loud) |
 | 4 | suspended — any terminal `suspendedAt != nil` | `pause.circle.fill` | `.secondary` (**unchanged glyph + color**) |
 | — | none | — | — |
+
+> **Live-review revisions (2026-06-30):** the working dots were changed from
+> the terracotta/coral pair to `.secondary` gray and made smaller, then nudged
+> `-3px` toward the name and `+2px` down; and the name now also bolds for the
+> attention state (not just `responseComplete`). The tables above reflect the
+> shipped result.
 
 ### Notification mapping (replaces `badgeColor(for:)`)
 
 | `NotificationType` | Old (dot) | New |
 | --- | --- | --- |
 | `error` (sev 4) | red dot | error suffix (octagon) |
-| `attentionNeeded` (sev 3) | orange dot | attention suffix (hand) |
-| `focusRequest` (sev 3) | orange dot | attention suffix (hand) |
+| `attentionNeeded` (sev 3) | orange dot | attention suffix (hand) **+ bold name** |
+| `focusRequest` (sev 3) | orange dot | attention suffix (hand) **+ bold name** |
 | `taskComplete` (sev 2) | green dot | **nothing** |
 | `responseComplete` (sev 1) | blue dot | **bold name only** |
 
