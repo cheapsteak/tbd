@@ -27,7 +27,7 @@ struct WorktreeRowView: View {
 
     private var hasBoldNotification: Bool {
         if let n = notification {
-            return n == .responseComplete
+            return n == .responseComplete || n == .attentionNeeded || n == .focusRequest
         }
         return false
     }
