@@ -10,18 +10,20 @@ final class TypingDotsNSView: NSView {
     private static let dotSpacing: CGFloat = 2
     private static let pulseKey = "typingPulse"
     private let dotLayers: [CALayer]
+    private var dotColor: NSColor
     // nonisolated(unsafe): Swift 6 deinit is nonisolated; NSView deinit
     // always runs on the main thread in practice, so this is safe.
     nonisolated(unsafe) private var occlusionObserver: (any NSObjectProtocol)?
 
     init(dotColor: NSColor) {
         self.dotLayers = (0..<3).map { _ in CALayer() }
+        self.dotColor = dotColor
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
 
         for (index, dot) in dotLayers.enumerated() {
-            dot.backgroundColor = dotColor.cgColor
+            dot.backgroundColor = self.dotColor.cgColor
             dot.cornerRadius = Self.dotDiameter / 2
             dot.frame = CGRect(
                 x: CGFloat(index) * (Self.dotDiameter + Self.dotSpacing),
@@ -75,7 +77,19 @@ final class TypingDotsNSView: NSView {
     }
 
     func updateColor(_ color: NSColor) {
-        for dot in dotLayers { dot.backgroundColor = color.cgColor }
+        dotColor = color
+        applyDotColor()
+    }
+
+    private func applyDotColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            for dot in dotLayers { dot.backgroundColor = dotColor.cgColor }
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyDotColor()
     }
 
     override func viewDidMoveToWindow() {

@@ -98,7 +98,7 @@ struct WorktreeRowView: View {
                 .frame(width: 14, height: 12)
                 .padding(.leading, -3)
                 .offset(y: 2)
-                .help("Agent is working")
+                .help(Self.suffixHelp(.working))
         case let indicator?:
             if let symbol = indicator.systemImage {
                 Image(systemName: symbol)
