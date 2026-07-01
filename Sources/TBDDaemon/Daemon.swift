@@ -126,11 +126,32 @@ public final class Daemon: Sendable {
         return limit
     }
 
+    /// Decode the mock scenario at `fixturePath` and seed it into `database`.
+    /// Best-effort: a failure is logged and the daemon still starts (empty).
+    static func seedMockDatabase(_ database: TBDDatabase, fixturePath: String) async {
+        let url = URL(fileURLWithPath: fixturePath)
+        do {
+            let data = try Data(contentsOf: url)
+            let scenario = try JSONDecoder().decode(MockScenario.self, from: data)
+            try await MockSeeder().seed(
+                scenario: scenario, into: database,
+                fixtureDirectory: url.deletingLastPathComponent())
+            daemonLogger.info("Mock mode: seeded fixture \(fixturePath, privacy: .public)")
+        } catch {
+            daemonLogger.error("Mock seeding failed for \(fixturePath, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+    }
+
     /// Start the daemon: create config directory, clean up stale state,
     /// initialize database and all managers, start servers, reconcile worktrees.
     public func start() async throws {
         // 0. Raise the file-descriptor limit before any tmux server is spawned.
         Self.raiseFileDescriptorLimit()
+
+        // Mock harness: when TBD_MOCK is set, this daemon seeds a fixture and
+        // skips all live reconciliation so hand-authored state renders as
+        // written. Runs against an isolated TBD_HOME — never the real ~/tbd.
+        let mockMode = MockMode.fromEnvironment(ProcessInfo.processInfo.environment)
 
         // 1. Create ~/tbd/ directory if needed
         let configDir = TBDConstants.configDir.path
@@ -190,6 +211,12 @@ public final class Daemon: Sendable {
         // 5. Initialize database
         let database = try TBDDatabase(path: TBDConstants.databasePath)
         self.db = database
+
+        // 5a. Mock seeding: populate the freshly-migrated DB before servers
+        // accept traffic, so the app never sees an empty-then-populated flash.
+        if case let .enabled(fixturePath) = mockMode {
+            await Self.seedMockDatabase(database, fixturePath: fixturePath)
+        }
 
         // 6. Initialize state subscriptions (before lifecycle/router so they can broadcast)
         let subs = StateSubscriptionManager()
@@ -258,120 +285,124 @@ public final class Daemon: Sendable {
         self.httpServer = http
         try await http.start()
 
-        // 11. Reconcile worktrees for all known repos
-        await rpcRouter.suspendResumeCoordinator.reconcileOnStartup()
-        // Break any cyclic parent pointers in the worktree tree (manual sqlite
-        // edits, future regressions). Once at startup only — the cycle guard
-        // in WorktreeStore.move prevents new cycles via normal operations.
-        do {
-            try await database.worktrees.breakCyclicParents()
-        } catch {
-            daemonLogger.warning("breakCyclicParents failed at startup: \(error.localizedDescription, privacy: .public)")
-        }
-        // Resolve worktree rows stranded in `.creating` by a daemon restart
-        // mid-pre-session-wait. Must run BEFORE the per-repo reconcile loop so
-        // orphaned rows are deleted/flipped first — reconcile only sees
-        // `.active` rows and would otherwise trip the UNIQUE path constraint
-        // re-adopting a stranded checkout. Resumed waits run detached and
-        // never block startup.
-        await lifecycle.recoverCreatingWorktrees()
-        do {
-            let repos = try await database.repos.list()
-            for repo in repos {
-                do {
-                    try await lifecycle.reconcile(repoID: repo.id)
-                } catch {
-                    reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        if mockMode == nil {
+            // 11. Reconcile worktrees for all known repos
+            await rpcRouter.suspendResumeCoordinator.reconcileOnStartup()
+            // Break any cyclic parent pointers in the worktree tree (manual sqlite
+            // edits, future regressions). Once at startup only — the cycle guard
+            // in WorktreeStore.move prevents new cycles via normal operations.
+            do {
+                try await database.worktrees.breakCyclicParents()
+            } catch {
+                daemonLogger.warning("breakCyclicParents failed at startup: \(error.localizedDescription, privacy: .public)")
+            }
+            // Resolve worktree rows stranded in `.creating` by a daemon restart
+            // mid-pre-session-wait. Must run BEFORE the per-repo reconcile loop so
+            // orphaned rows are deleted/flipped first — reconcile only sees
+            // `.active` rows and would otherwise trip the UNIQUE path constraint
+            // re-adopting a stranded checkout. Resumed waits run detached and
+            // never block startup.
+            await lifecycle.recoverCreatingWorktrees()
+            do {
+                let repos = try await database.repos.list()
+                for repo in repos {
+                    do {
+                        try await lifecycle.reconcile(repoID: repo.id)
+                    } catch {
+                        reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+            } catch {
+                reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
+            }
+
+            // 11a-reaper. Reap orphaned/wedged agent processes: sweep now, then periodically.
+            let reaper = AgentReaper(tmux: tmux, signaller: ProductionProcessSignaller())
+            let ownedServers: () async -> [String] = { [database] in
+                guard let repos = try? await database.repos.list() else { return [] }
+                return Array(Set(repos.map { TmuxManager.serverName(forRepoPath: $0.path) }))
+            }
+            self.reaperTask = Task {
+                // Sweep once immediately (cold recovery), then every 60s.
+                await reaper.sweep(servers: await ownedServers())
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(60))
+                    guard !Task.isCancelled else { break }
+                    await reaper.sweep(servers: await ownedServers())
                 }
             }
-        } catch {
-            reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
-        }
 
-        // 11a-reaper. Reap orphaned/wedged agent processes: sweep now, then periodically.
-        let reaper = AgentReaper(tmux: tmux, signaller: ProductionProcessSignaller())
-        let ownedServers: () async -> [String] = { [database] in
-            guard let repos = try? await database.repos.list() else { return [] }
-            return Array(Set(repos.map { TmuxManager.serverName(forRepoPath: $0.path) }))
-        }
-        self.reaperTask = Task {
-            // Sweep once immediately (cold recovery), then every 60s.
-            await reaper.sweep(servers: await ownedServers())
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(60))
-                guard !Task.isCancelled else { break }
-                await reaper.sweep(servers: await ownedServers())
+            // 11a-pre. Prune per-session Claude `fallbackModel` overlay files
+            // orphaned by crashes or teardown paths that didn't clean up. Keep only
+            // files whose key matches a live terminal. Best-effort.
+            do {
+                let liveTerminalIDs = try await database.terminals.list().map { $0.id.uuidString }
+                ClaudeHookOverlay.pruneOrphanedSessionOverlays(liveSessionKeys: liveTerminalIDs)
+            } catch {
+                daemonLogger.warning("Failed to prune orphaned per-session overlays: \(error.localizedDescription, privacy: .public)")
             }
-        }
 
-        // 11a-pre. Prune per-session Claude `fallbackModel` overlay files
-        // orphaned by crashes or teardown paths that didn't clean up. Keep only
-        // files whose key matches a live terminal. Best-effort.
-        do {
-            let liveTerminalIDs = try await database.terminals.list().map { $0.id.uuidString }
-            ClaudeHookOverlay.pruneOrphanedSessionOverlays(liveSessionKeys: liveTerminalIDs)
-        } catch {
-            daemonLogger.warning("Failed to prune orphaned per-session overlays: \(error.localizedDescription, privacy: .public)")
-        }
+            // 11a. Backfill archived worktrees whose branch is missing — repairs
+            // rows whose branch was renamed before archive captured the new name.
+            // Idempotent and best-effort; never throws.
+            await ArchivedWorktreeBackfill(db: database, git: git).run()
 
-        // 11a. Backfill archived worktrees whose branch is missing — repairs
-        // rows whose branch was renamed before archive captured the new name.
-        // Idempotent and best-effort; never throws.
-        await ArchivedWorktreeBackfill(db: database, git: git).run()
+            // 11b. Validate repo health — flips repos with stale paths to .missing.
+            //      Must come *after* reconcile so newly-discovered worktrees see the
+            //      correct status, and *before* the periodic tasks so users get accurate
+            //      [missing] tags as soon as the daemon is up.
+            let healthValidator = RepoHealthValidator(git: git)
+            await healthValidator.validateAll(db: database)
 
-        // 11b. Validate repo health — flips repos with stale paths to .missing.
-        //      Must come *after* reconcile so newly-discovered worktrees see the
-        //      correct status, and *before* the periodic tasks so users get accurate
-        //      [missing] tags as soon as the daemon is up.
-        let healthValidator = RepoHealthValidator(git: git)
-        await healthValidator.validateAll(db: database)
-
-        // 12. Start periodic git fetch for all repos (every 60s)
-        self.gitFetchTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(60))
-                guard !Task.isCancelled else { break }
-                let allRepos = (try? await database.repos.list()) ?? []
-                // Skip .missing repos so we don't spam errors against stale paths
-                // until the user relocates them.
-                for repo in allRepos where repo.status != .missing {
-                    do {
-                        try await git.fetch(repoPath: repo.path, branch: repo.defaultBranch)
-                    } catch {
-                        reconcileLogger.warning("Background fetch failed for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            // 12. Start periodic git fetch for all repos (every 60s)
+            self.gitFetchTask = Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(60))
+                    guard !Task.isCancelled else { break }
+                    let allRepos = (try? await database.repos.list()) ?? []
+                    // Skip .missing repos so we don't spam errors against stale paths
+                    // until the user relocates them.
+                    for repo in allRepos where repo.status != .missing {
+                        do {
+                            try await git.fetch(repoPath: repo.path, branch: repo.defaultBranch)
+                        } catch {
+                            reconcileLogger.warning("Background fetch failed for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        }
                     }
                 }
             }
-        }
 
-        // 12b. Start Claude OAuth usage poller (30-min cadence, 30s stagger).
-        let poller = ClaudeUsagePoller(
-            profiles: database.modelProfiles,
-            usage: database.modelProfileUsage,
-            keychain: { id in try ModelProfileKeychain.load(id: id) },
-            fetcher: LiveClaudeUsageFetcher(),
-            clock: SystemPollerClock(),
-            broadcast: { [weak subs] row in subs?.broadcastModelProfileUsage(row) }
-        )
-        self.claudeUsagePoller = poller
-        rpcRouter.claudeUsagePoller = poller
-        await poller.start()
+            // 12b. Start Claude OAuth usage poller (30-min cadence, 30s stagger).
+            let poller = ClaudeUsagePoller(
+                profiles: database.modelProfiles,
+                usage: database.modelProfileUsage,
+                keychain: { id in try ModelProfileKeychain.load(id: id) },
+                fetcher: LiveClaudeUsageFetcher(),
+                clock: SystemPollerClock(),
+                broadcast: { [weak subs] row in subs?.broadcastModelProfileUsage(row) }
+            )
+            self.claudeUsagePoller = poller
+            rpcRouter.claudeUsagePoller = poller
+            await poller.start()
 
-        daemonLogger.info("Started successfully (PID \(ProcessInfo.processInfo.processIdentifier, privacy: .public))")
+            daemonLogger.info("Started successfully (PID \(ProcessInfo.processInfo.processIdentifier, privacy: .public))")
 
-        // 13. Periodic git status refresh (branch sync, conflict detection)
-        self.gitStatusTask = Task {
-            // Run once immediately (cold recovery), then every 10s
-            while !Task.isCancelled {
-                let allRepos = (try? await database.repos.list()) ?? []
-                // Skip .missing repos to match gitFetchTask — running git
-                // against a stale path produces quiet 10s-cadence noise.
-                for repo in allRepos where repo.status != .missing {
-                    await lifecycle.refreshGitStatuses(repoID: repo.id)
+            // 13. Periodic git status refresh (branch sync, conflict detection)
+            self.gitStatusTask = Task {
+                // Run once immediately (cold recovery), then every 10s
+                while !Task.isCancelled {
+                    let allRepos = (try? await database.repos.list()) ?? []
+                    // Skip .missing repos to match gitFetchTask — running git
+                    // against a stale path produces quiet 10s-cadence noise.
+                    for repo in allRepos where repo.status != .missing {
+                        await lifecycle.refreshGitStatuses(repoID: repo.id)
+                    }
+                    try? await Task.sleep(for: .seconds(10))
+                    guard !Task.isCancelled else { break }
                 }
-                try? await Task.sleep(for: .seconds(10))
-                guard !Task.isCancelled else { break }
             }
+        } else {
+            daemonLogger.info("Mock mode: skipping reconciliation and periodic background tasks")
         }
     }
 
