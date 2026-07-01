@@ -421,9 +421,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct TBDAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var appState = AppState()
+    @StateObject private var appState = AppState(userDefaults: TBDAppMain.resolveUserDefaults())
     @StateObject private var appearance = AppearanceSettings()
     @StateObject private var overlayCoordinator = TranscriptOverlayCoordinator()
+
+    /// Choose the UserDefaults domain for this app instance. The mock harness
+    /// (`TBD_MOCK`) uses an isolated suite so its window frame/appearance never
+    /// write back into the developer's real `TBDApp.plist`.
+    static func resolveUserDefaults(env: [String: String] = ProcessInfo.processInfo.environment) -> UserDefaults {
+        if MockMode.fromEnvironment(env) != nil {
+            return UserDefaults(suiteName: MockMode.appUserDefaultsSuiteName) ?? .standard
+        }
+        return .standard
+    }
 
     init() {
         lifecycleLogger.info("TBDApp launching pid=\(getpid(), privacy: .public)")
