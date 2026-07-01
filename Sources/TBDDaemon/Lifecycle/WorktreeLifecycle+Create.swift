@@ -123,6 +123,11 @@ extension WorktreeLifecycle {
         let worktreePath = (canonicalBase as NSString).appendingPathComponent(resolvedName)
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
 
+        // Creating at this path is an explicit "track it again" — clear any
+        // forget tombstone so reconcile resumes treating the path normally.
+        // No-op when the path was never forgotten.
+        try await db.forgottenWorktrees.delete(path: worktreePath)
+
         // 3. Insert DB row with status = .creating
         let worktree = try await db.worktrees.create(
             repoID: repo.id,

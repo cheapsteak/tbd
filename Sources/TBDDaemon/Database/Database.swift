@@ -20,6 +20,7 @@ public final class TBDDatabase: Sendable {
     public let config: ConfigStore
     public let meta: TBDMetaStore
     public let tabs: TabStore
+    public let forgottenWorktrees: ForgottenWorktreeStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -48,6 +49,7 @@ public final class TBDDatabase: Sendable {
         self.config = ConfigStore(writer: pool)
         self.meta = TBDMetaStore(writer: pool)
         self.tabs = TabStore(writer: pool)
+        self.forgottenWorktrees = ForgottenWorktreeStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -76,6 +78,7 @@ public final class TBDDatabase: Sendable {
         self.config = ConfigStore(writer: queue)
         self.meta = TBDMetaStore(writer: queue)
         self.tabs = TabStore(writer: queue)
+        self.forgottenWorktrees = ForgottenWorktreeStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -626,6 +629,32 @@ public final class TBDDatabase: Sendable {
         migrator.registerMigration("v37_config_scratch_rename_and_profile") { db in
             try db.addColumnIfMissing(table: "config", column: "scratch_rename_prompt", type: .text)
             try db.addColumnIfMissing(table: "config", column: "scratch_profile_override_id", type: .text)
+        }
+
+        // Tombstones for `tbd worktree forget`: reconcile skips re-adopting a
+        // git worktree whose path has a tombstone, so forget sticks even for
+        // paths under a TBD-managed prefix. Keyed by exact absolute path;
+        // cleared when the path is deliberately re-added via adopt/create.
+        //
+        // NOTE: identifier says "v35" but registers after v37 — this migration
+        // shipped as v35_forgotten_worktree on pre-rebase deployments before
+        // upstream took v35–v37, and GRDB identifies migrations by string, so
+        // renaming it would orphan databases that already applied it. New
+        // databases simply apply it here, in registration order. (Precedent:
+        // v33_channel_message_sender_kind already registers after
+        // v33_config_auto_archive_default.) Idempotent via IfNotExists/IfMissing.
+        migrator.registerMigration("v35_forgotten_worktree") { db in
+            try db.createTableIfNotExists("forgotten_worktree") { t in
+                t.primaryKey("path", .text).notNull()
+                t.column("repoID", .text).notNull()
+                t.column("forgottenAt", .datetime).notNull()
+                    .defaults(sql: "CURRENT_TIMESTAMP")
+            }
+            try db.addIndexIfMissing(
+                "idx_forgotten_worktree_repoID",
+                on: "forgotten_worktree",
+                columns: ["repoID"]
+            )
         }
 
         return migrator
