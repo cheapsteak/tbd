@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"mock-session-002","tools":[],"mcp_servers":[],"model":"claude-opus-4-5","permissionMode":"default"}
+{"type":"assistant","message":{"id":"msg_002","type":"message","role":"assistant","content":[{"type":"text","text":"Starting analysis..."}],"model":"claude-opus-4-5","stop_reason":"tool_use","usage":{"input_tokens":200,"output_tokens":30}}}

@@ -1,0 +1,54 @@
+{
+  "repos": [
+    {
+      "path": "/tmp/acme",
+      "displayName": "acme",
+      "defaultBranch": "main",
+      "worktrees": [
+        {
+          "name": "main",
+          "branch": "main",
+          "status": "main"
+        },
+        {
+          "name": "feat-dashboard",
+          "branch": "tbd/feat-dashboard",
+          "prStatus": {
+            "number": 42,
+            "url": "https://github.com/acme/acme/pull/42",
+            "state": "mergeable"
+          },
+          "terminals": [
+            {
+              "kind": "claude",
+              "activityState": "working",
+              "transcriptFixture": "long-session.jsonl"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "/tmp/acme-prod",
+      "displayName": "acme-prod",
+      "defaultBranch": "main",
+      "worktrees": [
+        {
+          "name": "main",
+          "branch": "main",
+          "status": "main"
+        },
+        {
+          "name": "fix-login",
+          "branch": "tbd/fix-login",
+          "terminals": [
+            {
+              "kind": "claude",
+              "activityState": "idle"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
