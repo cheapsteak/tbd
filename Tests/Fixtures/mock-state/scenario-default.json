@@ -1,53 +1,51 @@
 {
   "repos": [
     {
-      "path": "/tmp/acme",
+      "path": "/tmp/tbd-mock/acme",
       "displayName": "acme",
       "defaultBranch": "main",
       "worktrees": [
-        {
-          "name": "main",
-          "branch": "main",
-          "status": "main"
-        },
-        {
-          "name": "feat-dashboard",
-          "branch": "tbd/feat-dashboard",
-          "prStatus": {
-            "number": 42,
-            "url": "https://github.com/acme/acme/pull/42",
-            "state": "mergeable"
-          },
+        { "name": "main", "branch": "main", "displayName": "main", "status": "main",
+          "terminals": [ { "kind": "shell", "label": "shell" } ] },
+        { "name": "20260630-eager-otter", "branch": "tbd/add-csv-export",
+          "displayName": "📊 Add CSV Export", "status": "active",
+          "prStatus": { "number": 41, "url": "https://github.com/acme/acme/pull/41", "state": "mergeable" },
           "terminals": [
-            {
-              "kind": "claude",
-              "activityState": "working",
-              "transcriptFixture": "long-session.jsonl"
-            }
-          ]
-        }
+            { "kind": "claude", "label": "claude", "activityState": "idle",
+              "claudeSessionID": "aaaa0000-0000-0000-0000-000000000041",
+              "transcriptFixture": "long-session.jsonl" }
+          ] },
+        { "name": "20260630-brave-lynx", "branch": "tbd/fix-login-timeout",
+          "displayName": "⏱ Fix Login Timeout", "status": "active", "hasConflicts": true,
+          "prStatus": { "number": 42, "url": "https://github.com/acme/acme/pull/42",
+                        "state": "checksFailed", "reason": "unit tests failing" },
+          "terminals": [
+            { "kind": "claude", "label": "claude", "activityState": "waiting_for_user",
+              "claudeSessionID": "aaaa0000-0000-0000-0000-000000000042",
+              "transcriptFixture": "tool-heavy.jsonl" }
+          ] },
+        { "name": "20260630-brave-lynx-child", "branch": "tbd/fix-login-timeout-followup",
+          "displayName": "↳ Follow-up", "status": "active", "parentName": "20260630-brave-lynx",
+          "terminals": [ { "kind": "codex", "label": "codex", "activityState": "working" } ] },
+        { "name": "20260629-calm-heron", "branch": "tbd/refactor-auth",
+          "displayName": "🔒 Refactor Auth", "status": "archived",
+          "prStatus": { "number": 39, "url": "https://github.com/acme/acme/pull/39", "state": "merged" } }
       ]
     },
     {
-      "path": "/tmp/acme-prod",
+      "path": "/tmp/tbd-mock/acme-prod",
       "displayName": "acme-prod",
       "defaultBranch": "main",
       "worktrees": [
-        {
-          "name": "main",
-          "branch": "main",
-          "status": "main"
-        },
-        {
-          "name": "fix-login",
-          "branch": "tbd/fix-login",
+        { "name": "main", "branch": "main", "displayName": "main", "status": "main" },
+        { "name": "20260630-swift-falcon", "branch": "tbd/hotfix-deploy",
+          "displayName": "🚀 Hotfix Deploy", "status": "active",
+          "prStatus": { "number": 8, "url": "https://github.com/acme/acme-prod/pull/8", "state": "draft" },
           "terminals": [
-            {
-              "kind": "claude",
-              "activityState": "idle"
-            }
-          ]
-        }
+            { "kind": "claude", "label": "claude", "activityState": "working",
+              "claudeSessionID": "bbbb0000-0000-0000-0000-000000000008",
+              "transcriptFixture": "long-session.jsonl", "suspended": true }
+          ] }
       ]
     }
   ]

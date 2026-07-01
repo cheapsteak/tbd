@@ -1,3 +1,6 @@
-{"type":"system","subtype":"init","session_id":"mock-session-001","tools":[],"mcp_servers":[],"model":"claude-opus-4-5","permissionMode":"default"}
-{"type":"assistant","message":{"id":"msg_001","type":"message","role":"assistant","content":[{"type":"text","text":"I'll help you build the dashboard feature. Let me start by exploring the codebase."}],"model":"claude-opus-4-5","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_001","content":[{"type":"text","text":"src/\n  components/\n    Dashboard.tsx\n  pages/\n    index.tsx"}]}]}}
+{"type":"permission-mode","sessionId":"aaaa0000-0000-0000-0000-000000000041","cwd":"/tmp/tbd-mock/acme","gitBranch":"tbd/add-csv-export","permissionMode":"auto"}
+{"type":"user","message":{"role":"user","content":"Add a CSV export button to the reports page."},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll add a CSV export button. First let me look at the reports page component."}]},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here's the plan:\\n\\n1. Add an `exportCSV()` helper.\\n2. Wire it to a toolbar button.\\n3. Add a unit test.\\n\\nLet me implement it now."}]},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
+{"type":"user","message":{"role":"user","content":"Sounds good, go ahead."},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done — the CSV export button is wired up and the test passes."}]},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
