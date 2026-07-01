@@ -231,15 +231,16 @@ struct WorktreeList: AsyncParsableCommand {
             }
             let repos: [Repo] = try client.call(method: RPCMethod.repoList, resultType: [Repo].self)
             let missingRepoIDs = Set(repos.filter { $0.status == .missing }.map { $0.id })
-            let header = String(format: "%-36s  %-24s  %-8s  %s", "ID", "NAME", "STATUS", "BRANCH")
+            let header = tableRow([("ID", 36), ("NAME", 24), ("STATUS", 8), ("BRANCH", 0)])
             print(header)
             print(String(repeating: "-", count: 100))
             for wt in worktrees {
-                let line = String(format: "%-36s  %-24s  %-8s  %s",
-                    wt.id.uuidString as NSString,
-                    wt.displayName as NSString,
-                    wt.status.rawValue as NSString,
-                    wt.branch as NSString)
+                let line = tableRow([
+                    (wt.id.uuidString, 36),
+                    (wt.displayName, 24),
+                    (wt.status.rawValue, 8),
+                    (wt.branch, 0)
+                ])
                 // Scratch spaces (repoID == nil) have no repo to be missing.
                 let tag = (wt.repoID.map(missingRepoIDs.contains) ?? false) ? "  [missing]" : ""
                 print(line + tag)
