@@ -136,7 +136,15 @@ Per the project rule that a behavior-gating conditional gets a test for each bra
 - **Mock gate on:** reconciliation is skipped and the fixture is seeded (assert seeded rows are present *and* a stale-path repo is **not** flipped to `.missing`).
 - **Seeder round-trip:** decode `scenario-default.json` → seed an in-memory DB → assert expected repos/worktrees/terminals, including `transcriptPath` resolution.
 
-The seeder is structured so the reconciliation-gating seam is injectable/testable without launching real servers.
+The reconciliation-gating seam is tested via `Daemon.performStartupReconciliation`, which was extracted from `start()` specifically to enable unit-testing both branches without spawning real socket/HTTP servers or background tasks. `Daemon.start()` itself is not unit-tested (it binds real servers).
+
+**Mock-off branch** (`Tests/TBDDaemonTests/DaemonMockGateTests.swift` — `mockOffRunsReconciliation`):  
+Seeds an in-memory DB with a repo whose path does not exist on disk, calls `performStartupReconciliation(mockMode: nil, ...)`, and asserts `repo.status == .missing` — confirming `RepoHealthValidator` ran.
+
+**Mock-on branch** (`DaemonMockGateTests` — `mockOnSkipsReconciliation`):  
+Seeds the same stale-path repo plus a worktree, calls `performStartupReconciliation(mockMode: .enabled(...), ...)`, and asserts `repo.status == .ok` and the worktree still exists — confirming neither `RepoHealthValidator` nor the reconcile loop ran.
+
+Test file: `Tests/TBDDaemonTests/DaemonMockGateTests.swift`
 
 ## Risks & Mitigations
 

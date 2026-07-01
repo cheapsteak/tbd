@@ -142,6 +142,56 @@ public final class Daemon: Sendable {
         }
     }
 
+    /// The DB-mutating startup reconciliation, gated on mock mode. Extracted
+    /// from `start()` so the mock-mode branch is unit-testable without spawning
+    /// the socket/HTTP servers or background tasks. In mock mode this is a
+    /// no-op so hand-seeded fixtures render exactly as authored.
+    func performStartupReconciliation(
+        mockMode: MockMode?, database: TBDDatabase, git: GitManager, lifecycle: WorktreeLifecycle
+    ) async {
+        guard mockMode == nil else {
+            daemonLogger.info("Mock mode: skipping startup reconciliation")
+            return
+        }
+        // Break any cyclic parent pointers in the worktree tree (manual sqlite
+        // edits, future regressions). Once at startup only — the cycle guard
+        // in WorktreeStore.move prevents new cycles via normal operations.
+        do {
+            try await database.worktrees.breakCyclicParents()
+        } catch {
+            daemonLogger.warning("breakCyclicParents failed at startup: \(error.localizedDescription, privacy: .public)")
+        }
+        // Resolve worktree rows stranded in `.creating` by a daemon restart
+        // mid-pre-session-wait. Must run BEFORE the per-repo reconcile loop so
+        // orphaned rows are deleted/flipped first — reconcile only sees
+        // `.active` rows and would otherwise trip the UNIQUE path constraint
+        // re-adopting a stranded checkout. Resumed waits run detached and
+        // never block startup.
+        await lifecycle.recoverCreatingWorktrees()
+        do {
+            let repos = try await database.repos.list()
+            for repo in repos {
+                do {
+                    try await lifecycle.reconcile(repoID: repo.id)
+                } catch {
+                    reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        } catch {
+            reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
+        }
+        // Backfill archived worktrees whose branch is missing — repairs
+        // rows whose branch was renamed before archive captured the new name.
+        // Idempotent and best-effort; never throws.
+        await ArchivedWorktreeBackfill(db: database, git: git).run()
+        // Validate repo health — flips repos with stale paths to .missing.
+        // Must come *after* reconcile so newly-discovered worktrees see the
+        // correct status, and *before* the periodic tasks so users get accurate
+        // [missing] tags as soon as the daemon is up.
+        let healthValidator = RepoHealthValidator(git: git)
+        await healthValidator.validateAll(db: database)
+    }
+
     /// Start the daemon: create config directory, clean up stale state,
     /// initialize database and all managers, start servers, reconcile worktrees.
     public func start() async throws {
@@ -286,36 +336,14 @@ public final class Daemon: Sendable {
         try await http.start()
 
         if mockMode == nil {
-            // 11. Reconcile worktrees for all known repos
+            // 11. Reconcile suspend/resume state for all worktrees
             await rpcRouter.suspendResumeCoordinator.reconcileOnStartup()
-            // Break any cyclic parent pointers in the worktree tree (manual sqlite
-            // edits, future regressions). Once at startup only — the cycle guard
-            // in WorktreeStore.move prevents new cycles via normal operations.
-            do {
-                try await database.worktrees.breakCyclicParents()
-            } catch {
-                daemonLogger.warning("breakCyclicParents failed at startup: \(error.localizedDescription, privacy: .public)")
-            }
-            // Resolve worktree rows stranded in `.creating` by a daemon restart
-            // mid-pre-session-wait. Must run BEFORE the per-repo reconcile loop so
-            // orphaned rows are deleted/flipped first — reconcile only sees
-            // `.active` rows and would otherwise trip the UNIQUE path constraint
-            // re-adopting a stranded checkout. Resumed waits run detached and
-            // never block startup.
-            await lifecycle.recoverCreatingWorktrees()
-            do {
-                let repos = try await database.repos.list()
-                for repo in repos {
-                    do {
-                        try await lifecycle.reconcile(repoID: repo.id)
-                    } catch {
-                        reconcileLogger.warning("Failed to reconcile repo \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    }
-                }
-            } catch {
-                reconcileLogger.warning("Failed to list repos for reconciliation: \(error.localizedDescription, privacy: .public)")
-            }
+        }
 
+        // 11. Perform DB-mutating reconciliation (skipped in mock mode so fixtures render as authored)
+        await performStartupReconciliation(mockMode: mockMode, database: database, git: git, lifecycle: lifecycle)
+
+        if mockMode == nil {
             // 11a-reaper. Reap orphaned/wedged agent processes: sweep now, then periodically.
             let reaper = AgentReaper(tmux: tmux, signaller: ProductionProcessSignaller())
             let ownedServers: () async -> [String] = { [database] in
@@ -341,18 +369,6 @@ public final class Daemon: Sendable {
             } catch {
                 daemonLogger.warning("Failed to prune orphaned per-session overlays: \(error.localizedDescription, privacy: .public)")
             }
-
-            // 11a. Backfill archived worktrees whose branch is missing — repairs
-            // rows whose branch was renamed before archive captured the new name.
-            // Idempotent and best-effort; never throws.
-            await ArchivedWorktreeBackfill(db: database, git: git).run()
-
-            // 11b. Validate repo health — flips repos with stale paths to .missing.
-            //      Must come *after* reconcile so newly-discovered worktrees see the
-            //      correct status, and *before* the periodic tasks so users get accurate
-            //      [missing] tags as soon as the daemon is up.
-            let healthValidator = RepoHealthValidator(git: git)
-            await healthValidator.validateAll(db: database)
 
             // 12. Start periodic git fetch for all repos (every 60s)
             self.gitFetchTask = Task {
@@ -385,8 +401,6 @@ public final class Daemon: Sendable {
             rpcRouter.claudeUsagePoller = poller
             await poller.start()
 
-            daemonLogger.info("Started successfully (PID \(ProcessInfo.processInfo.processIdentifier, privacy: .public))")
-
             // 13. Periodic git status refresh (branch sync, conflict detection)
             self.gitStatusTask = Task {
                 // Run once immediately (cold recovery), then every 10s
@@ -402,8 +416,10 @@ public final class Daemon: Sendable {
                 }
             }
         } else {
-            daemonLogger.info("Mock mode: skipping reconciliation and periodic background tasks")
+            daemonLogger.info("Mock mode: skipping periodic background tasks")
         }
+
+        daemonLogger.info("Started successfully (PID \(ProcessInfo.processInfo.processIdentifier, privacy: .public))")
     }
 
     /// Stop the daemon: shut down servers, remove PID and socket files.
