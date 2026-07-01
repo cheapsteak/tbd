@@ -113,7 +113,7 @@ Tests/Fixtures/mock-state/
 - `/Applications/TBD.app` and its LaunchServices/`tbd://` registration are **never touched**, so the real instance keeps owning deep links.
 - `mock.sh` gets the app **PID directly**, used to find the window via `CGWindowList`/AppleScript and target `screencapture -l <windowID>` precisely.
 
-**Isolated app settings:** in mock mode the app uses a dedicated `UserDefaults(suiteName: "com.tbd.app.mock")` (AppState already supports `userDefaults:` injection) so the mock's window frame/appearance are deterministic for screenshots and never write back into the real `TBDApp.plist`. The app detects mock mode from the same `TBD_MOCK` env var. Notification authorization / activation side-effects are skipped under mock mode.
+**Isolated app settings:** in mock mode the app routes `AppState` (which persists window frame + layout state) to a dedicated `UserDefaults(suiteName: "com.tbd.app.mock")` (AppState already supports `userDefaults:` injection) so a mock run never writes that state back into the real `TBDApp.plist`. A few other stores (`AppearanceSettings`, emoji/editor "recents") still read `.standard` — deliberately, so the mock inherits the developer's theme for realistic screenshots; the static screenshot flow never mutates them, so nothing leaks back. The app detects mock mode from the same `TBD_MOCK` env var. Notification authorization / activation side-effects are skipped under mock mode.
 
 ### 6. `scripts/mock.sh` surface
 
