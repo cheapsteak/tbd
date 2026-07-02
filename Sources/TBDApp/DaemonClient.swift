@@ -732,6 +732,44 @@ actor DaemonClient {
         )
     }
 
+    /// Request a control-mode attach for one pane; the fd arrives separately
+    /// on the sidecar (see `openAttach`).
+    func attachRequest(worktreeID: UUID, paneID: String, windowID: String) async throws -> AttachRequestResult {
+        try await callAsync(
+            method: RPCMethod.attachRequest,
+            params: AttachRequestParams(worktreeID: worktreeID, paneID: paneID, windowID: windowID),
+            resultType: AttachRequestResult.self
+        )
+    }
+
+    /// Ack that the app's reader is draining the vended fd — opens the
+    /// daemon-side write gate.
+    func attachReady(worktreeID: UUID, paneID: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: paneID)
+        )
+    }
+
+    /// Tell the daemon this pane is no longer rendered; the daemon closes the
+    /// pipe write end and the app-side reader sees EOF.
+    func paneDetach(worktreeID: UUID, paneID: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.paneDetach,
+            params: PaneDetachParams(worktreeID: worktreeID, paneID: paneID)
+        )
+    }
+
+    /// Fetch daemon feature flags (e.g. whether the tmux control-mode gate is
+    /// on). The app cannot read the daemon's env itself — it is launched via
+    /// `open`, which drops shell env.
+    func daemonCapabilities() async throws -> DaemonCapabilitiesResult {
+        try await callNoParamsAsync(
+            method: RPCMethod.daemonCapabilities,
+            resultType: DaemonCapabilitiesResult.self
+        )
+    }
+
     /// Manually suspend a single Claude terminal.
     func terminalSuspend(terminalID: UUID) async throws {
         try await callVoidAsync(

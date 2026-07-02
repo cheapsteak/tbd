@@ -169,6 +169,18 @@ public final class RPCRouter: Sendable {
                 return try await handlePRRefresh(request.paramsData)
             case RPCMethod.claudeSetSpawnPreferences:
                 return try await handleSetClaudeSpawnPreferences(request.paramsData)
+            case RPCMethod.attachRequest:
+                let params = try decoder.decode(AttachRequestParams.self, from: request.paramsData)
+                routerLogger.info("attach.request pane \(params.paneID, privacy: .public) — stub")
+                return try RPCResponse(result: AttachRequestResult(status: "pending"))
+            case RPCMethod.attachReady:
+                _ = try decoder.decode(AttachReadyParams.self, from: request.paramsData)
+                return .ok()
+            case RPCMethod.paneDetach:
+                _ = try decoder.decode(PaneDetachParams.self, from: request.paramsData)
+                return .ok()
+            case RPCMethod.daemonCapabilities:
+                return try handleDaemonCapabilities()
             case RPCMethod.terminalSuspend:
                 return try await handleTerminalSuspend(request.paramsData)
             case RPCMethod.terminalResume:
@@ -268,6 +280,22 @@ public final class RPCRouter: Sendable {
             routerLogger.error("RPC \(request.method, privacy: .public) failed: \(error, privacy: .public)")
             return RPCResponse(error: "\(error)")
         }
+    }
+
+    // MARK: - Capabilities
+
+    /// Report daemon feature flags the app cannot derive locally. The app is
+    /// launched via `open` (LaunchServices), which drops shell env — so the
+    /// control-mode gate state must be asked for, not mirrored.
+    func handleDaemonCapabilities() throws -> RPCResponse {
+        let enabled: Bool
+        if let bridge = controlMode {
+            enabled = ControlModeGate.shouldEnable(
+                environment: bridge.environment, tmuxVersion: bridge.tmuxVersion)
+        } else {
+            enabled = false
+        }
+        return try RPCResponse(result: DaemonCapabilitiesResult(controlModeEnabled: enabled))
     }
 
     // MARK: - PR Status

@@ -511,6 +511,10 @@ final class AppState: ObservableObject {
     /// Lives here — not on any view — so SwiftUI view destruction cannot tear
     /// down an active reader. Keyed by `FDVendHeader.routingKey`.
     let controlModeReaders = ControlModeReaderRegistry()
+    /// Feature flags fetched from the daemon at connect time. Nil until the
+    /// first successful fetch — treated as "control mode off". The app cannot
+    /// derive these locally: it is launched via `open`, which drops shell env.
+    var daemonCapabilities: DaemonCapabilitiesResult?
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     private var pollTimer: Timer?
@@ -1074,6 +1078,7 @@ final class AppState: ObservableObject {
             startSubscription()
             await refreshPRStatuses()
             pushClaudeSpawnPreferences()
+            daemonCapabilities = try? await daemonClient.daemonCapabilities()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }

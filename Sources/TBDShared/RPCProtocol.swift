@@ -108,6 +108,10 @@ public enum RPCMethod {
     public static let terminalResume = "terminal.resume"
     public static let worktreeSuspend = "worktree.suspend"
     public static let worktreeResume = "worktree.resume"
+    public static let attachRequest = "attach.request"
+    public static let attachReady = "attach.ready"
+    public static let paneDetach = "pane.detach"
+    public static let daemonCapabilities = "daemon.capabilities"
     public static let terminalRecreateWindow = "terminal.recreateWindow"
     public static let noteCreate = "note.create"
     public static let noteGet = "note.get"
@@ -871,6 +875,59 @@ public struct SetProfileEnvOverridesParams: Codable, Sendable, Equatable {
 public struct TerminalSuspendParams: Codable, Sendable {
     public let terminalID: UUID
     public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+/// Params for `attach.request` — ask the daemon to vend a control-mode pipe
+/// fd for one pane. Carries `worktreeID` because tmux pane IDs are only
+/// unique per tmux server; the daemon resolves worktree → `tmuxServer` and
+/// keys everything by the (server, paneID) composite.
+public struct AttachRequestParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let paneID: String
+    public let windowID: String
+    public init(worktreeID: UUID, paneID: String, windowID: String) {
+        self.worktreeID = worktreeID
+        self.paneID = paneID
+        self.windowID = windowID
+    }
+}
+
+/// Result of `attach.request`.
+public struct AttachRequestResult: Codable, Sendable {
+    /// One of "pending" (fd vended; waiting for attach.ready) or
+    /// "unavailable" (control mode off / not configured).
+    public let status: String
+    public init(status: String) { self.status = status }
+}
+
+/// Params for `attach.ready` — the app's ack that its reader is draining the
+/// vended fd; opens the daemon-side write gate.
+public struct AttachReadyParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let paneID: String
+    public init(worktreeID: UUID, paneID: String) {
+        self.worktreeID = worktreeID
+        self.paneID = paneID
+    }
+}
+
+/// Params for `pane.detach` — the app stops rendering this pane; the daemon
+/// closes the pipe write end (the app's reader sees EOF).
+public struct PaneDetachParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let paneID: String
+    public init(worktreeID: UUID, paneID: String) {
+        self.worktreeID = worktreeID
+        self.paneID = paneID
+    }
+}
+
+/// Result of `daemon.capabilities` — feature flags the app cannot derive
+/// locally (it is launched via `open`, which drops shell env, so it cannot
+/// read the daemon's gate variables itself).
+public struct DaemonCapabilitiesResult: Codable, Sendable {
+    public let controlModeEnabled: Bool
+    public init(controlModeEnabled: Bool) { self.controlModeEnabled = controlModeEnabled }
 }
 
 public struct TerminalResumeParams: Codable, Sendable {
