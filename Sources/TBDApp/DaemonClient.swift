@@ -45,6 +45,12 @@ actor DaemonClient {
     private let socketPath: String
     private(set) var connected: Bool = false
 
+    /// Sidecar for receiving vended pane fds. Connected eagerly right after
+    /// the RPC socket, so the daemon's accept has completed long before the
+    /// first attach needs it. Failure is non-fatal: control-mode attaches
+    /// will fail and fall back to grouped sessions.
+    let fdSidecar = FDSidecarClient()
+
     /// Upper bound a single one-shot RPC waits for the daemon's response
     /// before failing. Generous so legitimately slow handlers (model-profile
     /// add → Anthropic round-trip; worktree create/revive with blocking
@@ -69,6 +75,7 @@ actor DaemonClient {
     func connect() async -> Bool {
         // First try to connect directly
         if tryConnect() {
+            connectSidecar()
             return true
         }
 
@@ -83,6 +90,7 @@ actor DaemonClient {
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
                 if tryConnect() {
                     daemonClientLogger.info("Connected to daemon after \(attempt) attempts")
+                    connectSidecar()
                     return true
                 }
             }
@@ -93,6 +101,21 @@ actor DaemonClient {
 
         connected = false
         return false
+    }
+
+    /// Connect the FD-vending sidecar right after the RPC socket comes up.
+    /// Eager (not lazy-on-first-attach) so the daemon's accept has completed
+    /// long before any `attach.request` needs `send()` to work. Best-effort:
+    /// on failure control-mode attaches fail and fall back to grouped
+    /// sessions. Idempotent — `FDSidecarClient.connect` no-ops when already
+    /// connected, so reconnect retries are safe.
+    private func connectSidecar() {
+        do {
+            try fdSidecar.connect(path: TBDConstants.vendSocketPath)
+        } catch {
+            daemonClientLogger.warning(
+                "FD sidecar connect failed (control-mode attach unavailable): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Try a single connection attempt (non-async).

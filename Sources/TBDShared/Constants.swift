@@ -35,6 +35,16 @@ public enum TBDConstants {
     /// overflow even though `$configDir/sock` would fit a shallow override.
     public static var socketPath: String { socketPath(environment: ProcessInfo.processInfo.environment) }
 
+    /// Sidecar Unix socket over which the daemon vends file descriptors to
+    /// the app (SCM_RIGHTS). Sibling of `socketPath`.
+    public static func vendSocketPath(environment: [String: String]) -> String {
+        configDir(environment: environment).appendingPathComponent("vend.sock").path
+    }
+
+    /// Sidecar Unix socket over which the daemon vends file descriptors to
+    /// the app (SCM_RIGHTS). Sibling of `socketPath`.
+    public static var vendSocketPath: String { vendSocketPath(environment: ProcessInfo.processInfo.environment) }
+
     public static func databasePath(environment: [String: String]) -> String {
         configDir(environment: environment).appendingPathComponent("state.db").path
     }

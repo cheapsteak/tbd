@@ -65,6 +65,9 @@ public final class Daemon: Sendable {
     /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
     /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
     let controlModeSupervisor = TmuxControlSupervisor()
+    /// Sidecar Unix socket server that vends per-pane file descriptors to the
+    /// app (SCM_RIGHTS). Owned here so it can be stopped on shutdown.
+    let fdVendingServer = FDVendingServer()
     public let pidFile: PIDFile
     public let startTime: Date
 
@@ -217,7 +220,8 @@ public final class Daemon: Sendable {
         let tmuxVersion = await TmuxVersion.detect()
         let controlModeBridge = TmuxControlModeBridge(
             supervisor: controlModeSupervisor,
-            tmuxVersion: tmuxVersion
+            tmuxVersion: tmuxVersion,
+            fdVending: fdVendingServer
         )
 
         var lifecycle = WorktreeLifecycle(
@@ -269,6 +273,15 @@ public final class Daemon: Sendable {
         // is built above, before the server exists, so it can't be an init dep).
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
+
+        // 9a. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
+        // app). Failure is non-fatal: control-mode attaches will fail and the
+        // app falls back to grouped sessions.
+        do {
+            try await fdVendingServer.listen(on: TBDConstants.vendSocketPath)
+        } catch {
+            daemonLogger.error("failed to start FD vending sidecar: \(error.localizedDescription, privacy: .public)")
+        }
 
         // 10. Start HTTP server
         let http = HTTPServer(router: rpcRouter)
@@ -403,6 +416,9 @@ public final class Daemon: Sendable {
 
         // Stop any tmux control-mode connections (no-op when the gate is off).
         await controlModeSupervisor.stopAll()
+
+        // Stop the FD-vending sidecar (closes the listener + any client).
+        await fdVendingServer.stop()
 
         // Cancel background tasks
         sshRefreshTask?.cancel()
