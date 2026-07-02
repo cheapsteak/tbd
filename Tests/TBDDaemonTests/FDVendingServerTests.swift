@@ -58,4 +58,45 @@ struct FDVendingServerTests {
             try await server.send(fd: 0, header: Data())
         }
     }
+
+    @Test("bytes written to the daemon-side pipe reach the client-side reader")
+    func endToEndPipeThroughVendedFD() async throws {
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+        defer { Darwin.close(clientSideFD) }
+
+        let server = FDVendingServer()
+        await server.adoptConnection(fd: serverSideFD)
+        defer { Task { await server.stop() } }
+
+        var pipeFDs: [Int32] = [-1, -1]
+        try pipeFDs.withUnsafeMutableBufferPointer { buf in
+            guard pipe(buf.baseAddress) == 0 else { throw FDChannelError.sendFailed(errno) }
+        }
+        let (readFD, writeFD) = (pipeFDs[0], pipeFDs[1])
+
+        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%42"))
+        try await server.send(fd: readFD, header: header)
+        Darwin.close(readFD)
+
+        let (rxFD, rxHeader) = try FDChannel.receiveFD(from: clientSideFD, headerCapacity: 256)
+        defer { Darwin.close(rxFD) }
+        let decoded = try JSONDecoder().decode(FDVendHeader.self, from: rxHeader)
+        #expect(decoded.paneID == "%42")
+
+        // Write in three chunks, verify the reader assembles them.
+        for chunk in ["ab", "cde", "fgh"] {
+            let data = Data(chunk.utf8)
+            _ = data.withUnsafeBytes { Darwin.write(writeFD, $0.baseAddress, $0.count) }
+        }
+        Darwin.close(writeFD)  // signal EOF
+
+        var received = Data()
+        var buffer = [UInt8](repeating: 0, count: 32)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
+            if n <= 0 { break }
+            received.append(contentsOf: buffer[0..<Int(n)])
+        }
+        #expect(received == Data("abcdefgh".utf8))
+    }
 }
