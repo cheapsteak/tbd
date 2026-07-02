@@ -170,15 +170,11 @@ public final class RPCRouter: Sendable {
             case RPCMethod.claudeSetSpawnPreferences:
                 return try await handleSetClaudeSpawnPreferences(request.paramsData)
             case RPCMethod.attachRequest:
-                let params = try decoder.decode(AttachRequestParams.self, from: request.paramsData)
-                routerLogger.info("attach.request pane \(params.paneID, privacy: .public) — stub")
-                return try RPCResponse(result: AttachRequestResult(status: "pending"))
+                return try await handleAttachRequest(request.paramsData)
             case RPCMethod.attachReady:
-                _ = try decoder.decode(AttachReadyParams.self, from: request.paramsData)
-                return .ok()
+                return try await handleAttachReady(request.paramsData)
             case RPCMethod.paneDetach:
-                _ = try decoder.decode(PaneDetachParams.self, from: request.paramsData)
-                return .ok()
+                return try await handlePaneDetach(request.paramsData)
             case RPCMethod.daemonCapabilities:
                 return try handleDaemonCapabilities()
             case RPCMethod.terminalSuspend:
