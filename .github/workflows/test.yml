@@ -23,6 +23,15 @@ jobs:
       - name: SwiftLint (strict)
         run: swiftlint --strict
 
+  plans-guard:
+    name: No committed implementation plans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for committed implementation plans
+        run: scripts/check-no-committed-plans.sh
+
   test:
     runs-on: macos-15
     steps:
