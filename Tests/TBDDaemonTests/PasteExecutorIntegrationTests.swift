@@ -82,24 +82,40 @@ struct PasteExecutorIntegrationTests {
         return Data(bytes)
     }
 
-    /// Start `head -c count > path` under a raw tty in the session's pane (via
-    /// the plain tmux CLI, before the `-CC` connection attaches), then block
-    /// until `head` is actually the pane's foreground process. Returns the pane
-    /// id. `head` exits after exactly `count` bytes, so the capture file settles
-    /// on its own — no interactive EOF.
+    /// Bootstrap a fresh tmux session whose **pane command is the raw capture
+    /// itself** — `/bin/sh -c 'stty raw -echo; exec head -c count > path'` —
+    /// then block until `head` is the pane's foreground process. Returns the
+    /// pane id.
     ///
-    /// The `awaitPaneCommand` gate is load-bearing: the pane's shell sources its
-    /// rc before it can run the typed command, and pasting into that window
-    /// dumps the payload into the shell's line editor (echoed, never captured)
-    /// instead of `head`'s raw stdin. Polling `#{pane_current_command}` makes
-    /// the handoff deterministic instead of sleep-timed.
+    /// Passing the command straight to `new-session` skips the user's
+    /// interactive zsh and its rc sourcing entirely: the pane reaches `head` in
+    /// milliseconds instead of racing a multi-second shell startup under
+    /// parallel-suite load (the old flake). The `exec` matters: a
+    /// non-interactive `sh -c` does no job control, so a *forked* `head` never
+    /// gets `tcsetpgrp`'d into the tty's foreground group and
+    /// `#{pane_current_command}` would keep reporting `sh`/`bash`. `exec`
+    /// replaces the shell in place, making `head` the pane's own process so the
+    /// command reads back as `head`.
+    ///
+    /// Raw mode (`stty raw -echo`) has no canonical line queue, so the multi-KB
+    /// burst can't trip the ~1 KB cooked-mode limit (`TTYHOG`); `head -c count`
+    /// exits deterministically after exactly `count` bytes, so the capture file
+    /// settles on its own — no interactive EOF. `head` stays the foreground
+    /// process for the whole paste (it only exits once the final byte arrives),
+    /// so the pane exiting afterwards is harmless — the tests read the on-disk
+    /// file, not the pane.
+    ///
+    /// The `awaitPaneCommand` gate stays load-bearing: pasting before `head`
+    /// owns the tty would dump the payload into the shell's line editor instead
+    /// of `head`'s raw stdin. Polling `#{pane_current_command}` makes the
+    /// handoff deterministic instead of sleep-timed.
     private func startRawCapture(server: String, count: Int, outputPath: String) async throws -> String {
+        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main", "-x", "200", "-y", "50",
+                           "/bin/sh", "-c", "stty raw -echo; exec head -c \(count) > \(outputPath)"]),
+                     "failed to bootstrap raw-capture tmux session")
         let paneID = try #require(tmuxCapture(["-L", server, "display-message", "-t", "main", "-p", "#{pane_id}"]),
                                   "could not resolve pane id")
-        try #require(tmux(["-L", server, "send-keys", "-t", paneID,
-                           "stty raw -echo; head -c \(count) > \(outputPath); stty sane", "Enter"]),
-                     "failed to start raw capture in pane")
-        try await awaitPaneCommand(server: server, paneID: paneID, command: "head", timeout: .seconds(5))
+        try await awaitPaneCommand(server: server, paneID: paneID, command: "head", timeout: .seconds(15))
         return paneID
     }
 
@@ -125,8 +141,6 @@ struct PasteExecutorIntegrationTests {
 
         let server = "tbd-paste-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
-        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main", "-x", "200", "-y", "50"]),
-                     "failed to bootstrap test tmux server")
 
         let outPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-paste-out-\(UUID().uuidString).txt").path
@@ -141,7 +155,7 @@ struct PasteExecutorIntegrationTests {
 
         try await PasteExecutor.paste(client: client, paneID: paneID, bytes: payload)
 
-        try await awaitFileBytes(path: outPath, expected: payload, timeout: .seconds(5))
+        try await awaitFileBytes(path: outPath, expected: payload, timeout: .seconds(15))
         await supervisor.stopAll()
     }
 
@@ -154,8 +168,6 @@ struct PasteExecutorIntegrationTests {
 
         let server = "tbd-paste-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
-        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main", "-x", "200", "-y", "50"]),
-                     "failed to bootstrap test tmux server")
 
         let outPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-paste-out-\(UUID().uuidString).txt").path
@@ -173,7 +185,7 @@ struct PasteExecutorIntegrationTests {
         try await PasteExecutor.paste(client: client, paneID: paneID, bytes: first)
         try await PasteExecutor.paste(client: client, paneID: paneID, bytes: second)
 
-        try await awaitFileBytes(path: outPath, expected: first + second, timeout: .seconds(5))
+        try await awaitFileBytes(path: outPath, expected: first + second, timeout: .seconds(15))
         await supervisor.stopAll()
     }
 }

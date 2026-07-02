@@ -48,7 +48,7 @@ struct ControlModeInputRouterIntegrationTests {
     /// contains `marker`, proving the typed bytes reached the pane in order.
     private func waitForCapture(_ client: TmuxControlCommandClient, pane: String,
                                 contains marker: String,
-                                timeout: Duration = .seconds(5)) async throws {
+                                timeout: Duration = .seconds(15)) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             let lines = try await client.send("capture-pane -p -t \(pane)", tolerateErrors: true)
@@ -60,7 +60,7 @@ struct ControlModeInputRouterIntegrationTests {
 
     /// Poll `#{pane_current_command}` until it satisfies `predicate`.
     private func waitForPaneCommand(_ client: TmuxControlCommandClient, pane: String,
-                                    timeout: Duration = .seconds(5),
+                                    timeout: Duration = .seconds(15),
                                     _ predicate: @escaping (String) -> Bool) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
@@ -151,7 +151,11 @@ struct ControlModeInputRouterIntegrationTests {
 
         let server = "tbd-input-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
-        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main", "-x", "80", "-y", "24"]),
+        // Pane command is a bare POSIX `/bin/sh` (no rc sourcing) rather than the
+        // user's interactive zsh: under parallel-suite load, zsh startup alone
+        // could blow the pane-command deadline before `cat` ever ran (the old
+        // flake). /bin/sh starts in a few ms and still runs `cat` / honors Ctrl-C.
+        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main", "-x", "80", "-y", "24", "/bin/sh"]),
                      "failed to bootstrap test tmux server")
 
         let supervisor = TmuxControlSupervisor()
