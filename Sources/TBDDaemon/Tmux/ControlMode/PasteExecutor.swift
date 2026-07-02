@@ -33,8 +33,11 @@ enum PasteExecutor {
             throw PasteError.unsafeTempPath(path)
         }
 
-        try bytes.write(to: tempURL)
+        // Register the cleanup defer BEFORE the write, so a mid-write throw
+        // (e.g. disk full) still removes any partial temp file rather than
+        // orphaning it — the doc comment's "removed in all paths" guarantee.
         defer { try? FileManager.default.removeItem(at: tempURL) }
+        try bytes.write(to: tempURL)
 
         // Unique buffer per call so two concurrent pastes never clobber each
         // other's buffer (input frames interleaving between these two commands
@@ -43,7 +46,18 @@ enum PasteExecutor {
 
         // FIFO keeps these ordered; awaited sequentially so paste follows load.
         _ = try await client.send("load-buffer -b \(bufferName) '\(path)'", tolerateErrors: true)
-        _ = try await client.send(
-            "paste-buffer -d -b \(bufferName) -t \(paneID)", tolerateErrors: true)
+        do {
+            _ = try await client.send(
+                "paste-buffer -d -b \(bufferName) -t \(paneID)", tolerateErrors: true)
+        } catch {
+            // load-buffer succeeded but paste-buffer threw (e.g. the pane died
+            // between the two awaits). The `-d` on paste-buffer would have
+            // deleted the buffer on success; since it didn't run, the uniquely
+            // named buffer would otherwise accumulate forever in the long-lived
+            // `-CC` server. Best-effort delete before rethrowing (result ignored,
+            // errors tolerated — a failed cleanup must not mask the real error).
+            _ = try? await client.send("delete-buffer -b \(bufferName)", tolerateErrors: true)
+            throw error
+        }
     }
 }

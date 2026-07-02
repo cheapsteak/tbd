@@ -214,6 +214,43 @@ struct FDSidecarClientTests {
         #expect(client.isConnected)
     }
 
+    @Test("a valid vend followed by a desync-tripping tail in one read still delivers the fd")
+    func validFrameBeforeDesyncStillDelivers() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        let attachID = UUID()
+        let promise = client.expectFD(worktreeID: worktreeID, paneID: "%desync", attachID: attachID)
+
+        let (readFD, writeFD) = try makePipe()
+        defer { Darwin.close(writeFD) }
+        _ = Data("survives".utf8).withUnsafeBytes { Darwin.write(writeFD, $0.baseAddress, $0.count) }
+
+        // One sendmsg carrying: a complete valid fdVend frame (fd rides the
+        // first byte's SCM_RIGHTS ancillary) IMMEDIATELY followed by a corrupt
+        // outer length (0xFFFFFFFF > the 4 MiB cap) that trips the scanner's
+        // isDesynced flag. The scanner returns the valid frame AND flags desync
+        // in the same `append`; the receive loop must process the returned
+        // frame (delivering the fd) BEFORE breaking on desync. Pre-fix it broke
+        // first and this waiter got .disconnected instead of its fd.
+        let header = try JSONEncoder().encode(
+            FDVendHeader(worktreeID: worktreeID, paneID: "%desync", attachID: attachID))
+        var combined = SidecarFrameCodec.encode(type: .fdVend, payload: header)
+        combined.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF])   // corrupt length → desync
+        try FDChannel.sendFD(readFD, over: daemonSide, frame: combined)
+        Darwin.close(readFD)
+
+        // The valid frame's fd must arrive despite the trailing desync.
+        let rxFD = try await promise.value(timeout: .seconds(2))
+        defer { Darwin.close(rxFD) }
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let n = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
+        #expect(Data(buffer[0..<Int(n)]) == Data("survives".utf8))
+    }
+
     @Test("socket EOF fails pending waiters with disconnected")
     func eofFailsPendingWaiters() async throws {
         let (daemonSide, appSide) = try makeSocketPair()

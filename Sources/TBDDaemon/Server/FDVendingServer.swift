@@ -197,6 +197,12 @@ actor FDVendingServer {
             readLoop: while true {
                 let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
                 if count <= 0 { break }   // 0 = EOF, <0 = error
+                // Process the frames `append` returned FIRST, THEN check
+                // isDesynced (below). A desync-tripping tail can share a read
+                // with the last valid frames, so draining before the break
+                // avoids discarding them. Must stay in lockstep with the app's
+                // receive loop in FDSidecarClient.receiveLoop, which mirrors
+                // this order.
                 for frame in scanner.append(Data(buffer[0..<count])) {
                     guard let type = SidecarFrameType(rawValue: frame.type) else {
                         logger.error("sidecar: unknown frame type \(frame.type, privacy: .public) from app, skipping")

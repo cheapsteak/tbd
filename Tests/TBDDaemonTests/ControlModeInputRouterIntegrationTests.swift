@@ -184,6 +184,54 @@ struct ControlModeInputRouterIntegrationTests {
         router.shutdown()
         await supervisor.stopAll()
     }
+
+    /// Spec (f): input for a dying/nonexistent pane must NOT tear down the
+    /// repo's shared `-CC` connection. Enqueue input for a FAKE pane id (its
+    /// `send-keys -H -t %999` makes tmux emit a `%error`); because every
+    /// keystroke command is issued with `tolerateErrors: true`, the connection
+    /// must survive. Prove it by then routing REAL input to the live bootstrap
+    /// pane through the SAME connection and watching it render.
+    @Test("input to a nonexistent pane errors but does not tear down the -CC connection")
+    func deadPaneInputDoesNotKillConnection() async throws {
+        guard let version = await TmuxVersion.detect(),
+              version >= TmuxVersion.controlModeMinimum else { return }
+
+        let server = "tbd-input-\(UUID().uuidString.prefix(8))"
+        defer { tmux(["-L", server, "kill-server"]) }
+        // rc-free /bin/sh bootstrap (de-flake convention): starts in a few ms
+        // under parallel-suite load, no zsh rc sourcing to race a deadline.
+        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main",
+                           "-x", "80", "-y", "24", "/bin/sh"]),
+                     "failed to bootstrap test tmux server")
+
+        let supervisor = TmuxControlSupervisor()
+        await supervisor.ensureConnection(serverName: server)
+        let client = try await awaitClient(supervisor, server: server)
+        let realPane = try await firstPaneID(client)
+
+        let router = makeRouter(supervisor)
+        let worktreeID = UUID()
+        // Register BOTH a fake pane and the real one on this one server.
+        let fakePane = "%999"
+        router.register(worktreeID: worktreeID, paneID: fakePane, server: server)
+        router.register(worktreeID: worktreeID, paneID: realPane, server: server)
+
+        // Bad input first: send-keys -H -t %999 → tmux %error (tolerated).
+        var bad = Data("DEADPANE".utf8)
+        bad.append(0x0a)
+        router.enqueue(header: SidecarInputHeader(worktreeID: worktreeID, paneID: fakePane), bytes: bad)
+
+        // Good input to the real pane over the SAME connection. If the %error
+        // had torn the -CC connection down, this marker would never render.
+        var good = Data("STILLALIVE".utf8)
+        good.append(0x0a)
+        router.enqueue(header: SidecarInputHeader(worktreeID: worktreeID, paneID: realPane), bytes: good)
+
+        try await waitForCapture(client, pane: realPane, contains: "STILLALIVE")
+
+        router.shutdown()
+        await supervisor.stopAll()
+    }
 }
 
 private enum InputIntegrationError: Error {

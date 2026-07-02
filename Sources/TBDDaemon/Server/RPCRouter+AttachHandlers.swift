@@ -33,6 +33,14 @@ extension RPCRouter {
             // existed before the daemon started would otherwise get a sink
             // with no producer: a permanently blank pane. Idempotent.
             await bridge.supervisor.ensureConnection(serverName: server)
+            // Encode the vend header BEFORE the attach: it needs only `params`,
+            // and hoisting it out keeps every throw AFTER `attach` succeeds
+            // inside the inner do/catch that owns the undo (close readFD,
+            // unregister, detach). Encoding here previously sat between the
+            // attach and that do/catch, so an encode throw leaked the fd, the
+            // orphan pipe, and the input-router registration.
+            let header = try JSONEncoder().encode(
+                FDVendHeader(worktreeID: params.worktreeID, paneID: paneID, attachID: params.attachID))
             let (readFD, generation) = try await bridge.supervisor.attach(server: server, paneID: paneID)
             // Route this pane's future input frames to `server`. Registered now
             // (before the vend) so the vend-failure path can undo it alongside
@@ -41,8 +49,6 @@ extension RPCRouter {
             // timed-out pane still resolves to the live tmux pane, and a
             // re-attach overwrites this entry.
             bridge.inputRouter.register(worktreeID: params.worktreeID, paneID: paneID, server: server)
-            let header = try JSONEncoder().encode(
-                FDVendHeader(worktreeID: params.worktreeID, paneID: paneID, attachID: params.attachID))
             do {
                 try await bridge.fdVending.send(fd: readFD, header: header)
             } catch {

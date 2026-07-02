@@ -137,12 +137,14 @@ final class FDSidecarClient: @unchecked Sendable {
                 break   // EOF or read error
             }
             pendingFDs.append(contentsOf: message.fds)
-            let frames = scanner.append(message.data)
-            if scanner.isDesynced {
-                logger.fault("sidecar: frame scanner desynced, closing connection")
-                break
-            }
-            for frame in frames {
+            // Process the frames `append` returned FIRST, THEN check isDesynced
+            // and break. A desync-tripping tail can arrive in the same read as
+            // the last valid frames; checking before processing would silently
+            // discard those valid frames (their waiters would get .disconnected
+            // instead of their fd). This must stay in lockstep with the daemon's
+            // receive loop in FDVendingServer.startReceiveThread, which likewise
+            // drains the returned frames before its isDesynced break.
+            for frame in scanner.append(message.data) {
                 guard let type = SidecarFrameType(rawValue: frame.type) else {
                     logger.error("sidecar: unknown frame type \(frame.type, privacy: .public), skipping")
                     continue
@@ -156,6 +158,10 @@ final class FDSidecarClient: @unchecked Sendable {
                     // is app → daemon only.
                     logger.error("sidecar: received input frame from daemon (protocol violation), dropping")
                 }
+            }
+            if scanner.isDesynced {
+                logger.fault("sidecar: frame scanner desynced, closing connection")
+                break
             }
         }
         // EOF: fail everything pending, mark disconnected (reconnect is a
