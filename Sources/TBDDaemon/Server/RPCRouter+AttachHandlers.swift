@@ -26,6 +26,13 @@ extension RPCRouter {
         let server = worktree.tmuxServer
         let paneID = params.paneID
         do {
+            // An attach means a pane on this server is about to render via
+            // control mode — make sure the `tmux -CC` connection (the event
+            // producer feeding the fanout) exists. `enableIfGated` only fires
+            // on worktree/terminal CREATION paths, so panes that already
+            // existed before the daemon started would otherwise get a sink
+            // with no producer: a permanently blank pane. Idempotent.
+            await bridge.supervisor.ensureConnection(serverName: server)
             let (readFD, generation) = try await bridge.supervisor.attach(server: server, paneID: paneID)
             let header = try JSONEncoder().encode(
                 FDVendHeader(worktreeID: params.worktreeID, paneID: paneID, attachID: params.attachID))
