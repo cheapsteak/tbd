@@ -18,7 +18,7 @@ struct FDChannelTests {
         return (pair[0], pair[1])
     }
 
-    @Test("a pipe read FD sent over a socketpair still delivers data")
+    @Test("a pipe read FD sent alongside a frame still delivers data")
     func fdSurvivesCrossing() throws {
         let (a, b) = try makeSocketPair()
         defer { Darwin.close(a); Darwin.close(b) }
@@ -32,14 +32,16 @@ struct FDChannelTests {
         let readFD = pipeFDs[0], writeFD = pipeFDs[1]
         defer { Darwin.close(writeFD) }
 
-        let header = Data("marker".utf8)
-        try FDChannel.sendFD(readFD, over: a, header: header)
+        let frame = Data("marker".utf8)
+        try FDChannel.sendFD(readFD, over: a, frame: frame)
         // Sender no longer needs its copy of the pipe read end.
         Darwin.close(readFD)
 
-        let (receivedFD, receivedHeader) = try FDChannel.receiveFD(from: b, headerCapacity: 64)
+        let (data, fds) = try FDChannel.receiveMessage(from: b, capacity: 64)
+        #expect(data == frame)
+        #expect(fds.count == 1)
+        let receivedFD = try #require(fds.first)
         defer { Darwin.close(receivedFD) }
-        #expect(receivedHeader == header)
 
         // Prove the received fd points at the same pipe: write on the original
         // write end and read on the received end.
@@ -52,13 +54,33 @@ struct FDChannelTests {
         #expect(Data(buffer[0..<Int(count)]) == payload)
     }
 
-    @Test("receiveFD throws when the peer closed without sending")
+    @Test("receiveMessage throws when the peer closed without sending")
     func closedPeerFails() throws {
         let (a, b) = try makeSocketPair()
         Darwin.close(a)  // peer closes without sending
         defer { Darwin.close(b) }
         #expect(throws: FDChannelError.self) {
-            _ = try FDChannel.receiveFD(from: b, headerCapacity: 64)
+            _ = try FDChannel.receiveMessage(from: b, capacity: 64)
         }
+    }
+
+    @Test("sendData writes plain bytes (no fd) that the peer reads back")
+    func sendDataNoFD() throws {
+        let (a, b) = try makeSocketPair()
+        defer { Darwin.close(a); Darwin.close(b) }
+
+        let payload = Data("frame-without-fd".utf8)
+        try FDChannel.sendData(payload, over: a)
+
+        let (data, fds) = try FDChannel.receiveMessage(from: b, capacity: 64)
+        #expect(data == payload)
+        #expect(fds.isEmpty)
+    }
+
+    @Test("sendData of empty data is a no-op and does not throw")
+    func sendDataEmpty() throws {
+        let (a, b) = try makeSocketPair()
+        defer { Darwin.close(a); Darwin.close(b) }
+        try FDChannel.sendData(Data(), over: a)   // must not throw or block
     }
 }

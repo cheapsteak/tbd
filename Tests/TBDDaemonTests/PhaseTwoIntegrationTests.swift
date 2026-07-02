@@ -78,7 +78,7 @@ struct PhaseTwoIntegrationTests {
         try await vending.send(fd: readFD, header: header)
         Darwin.close(readFD)  // daemon can drop its copy
 
-        let (rxFD, _) = try FDChannel.receiveFD(from: appSideSocket, headerCapacity: 256)
+        let (rxFD, _) = try SidecarTestSupport.receiveVend(from: appSideSocket)
         defer { Darwin.close(rxFD) }
 
         // Now signal ready and drive a marker through tmux.

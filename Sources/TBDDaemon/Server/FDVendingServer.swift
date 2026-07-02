@@ -9,18 +9,27 @@ enum FDVendingServerError: Error, Equatable {
     case listenFailed(Int32)
 }
 
-/// A tiny per-daemon service that holds the sidecar socket the app connects to
-/// for receiving file descriptors. Phase 2 has exactly one client (the app), so
-/// at most one connection is adopted at a time; a new adoption replaces the
-/// old one.
+/// A tiny per-daemon service that holds the sidecar socket the app connects to.
+/// Phase 2 has exactly one client (the app), so at most one connection is
+/// adopted at a time; a new adoption replaces the old one.
 ///
-/// Phase 2's uses: after the attach orchestrator gets a per-pane pipe read end
-/// from the supervisor, it calls `send(fd:header:)` here to hand it to the app.
+/// M2.1 promotes the sidecar to a **bidirectional framed data channel**:
+/// - daemon → app: `send(fd:header:)` vends a pane read fd wrapped in a
+///   length-prefixed `.fdVend` frame (unchanged semantics, now framed).
+/// - app → daemon: keystroke/paste `.input` frames, decoded on a dedicated
+///   receive `Thread` and delivered via `onInput`.
 ///
-/// The accept loop runs on a dedicated `Thread` — the house pattern for
-/// indefinitely-blocking syscalls (see `TmuxControlConnection`'s reader).
-/// Parking a cooperative-pool task in blocking `accept()` would permanently
-/// eat one of the pool's threads.
+/// **fd ownership with a reader thread.** Each adopted connection gets a
+/// receive thread that OWNS closing that connection's fd: it `close()`s on exit.
+/// `adoptConnection`/`disconnect`/`stop` only `shutdown(fd, SHUT_RDWR)` to signal
+/// the reader — on Darwin, `close()`ing a socket out from under a thread blocked
+/// in `read()` does NOT wake it, but `shutdown()` does. Because the reader owns
+/// the final close, the fd number can never be reused while a stale reader is
+/// still parked on it. Sends run on the actor and target the same fd; sending
+/// on a shut-down fd returns `EPIPE`, which `send()` surfaces as an error.
+///
+/// The accept loop and each receive loop run on dedicated `Thread`s — the house
+/// pattern for indefinitely-blocking syscalls (see `TmuxControlConnection`).
 actor FDVendingServer {
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "fdVending")
     private var clientFD: Int32 = -1
@@ -28,6 +37,26 @@ actor FDVendingServer {
     /// running purely off adopted fds (unit tests).
     private var socketPath: String?
     private var listenerFD: Int32 = -1
+
+    /// Sink for app → daemon input frames. Set once by the daemon wiring BEFORE
+    /// `listen`/`adoptConnection` (M2.2 delivers keystrokes here). Captured per
+    /// connection at adopt time. When nil, input frames are logged and dropped.
+    var onInput: (@Sendable (SidecarInputHeader, Data) -> Void)?
+
+    /// Test seam: invoked (off the actor) when a receive loop exits, so tests
+    /// can await deterministic thread teardown instead of sleeping.
+    var onReceiveLoopExit: (@Sendable () -> Void)?
+
+    /// Install the input sink. Must be called BEFORE `listen`/`adoptConnection`
+    /// — each connection captures the current sink at adopt time.
+    func setOnInput(_ handler: (@Sendable (SidecarInputHeader, Data) -> Void)?) {
+        onInput = handler
+    }
+
+    /// Install the receive-loop-exit test hook (see `onReceiveLoopExit`).
+    func setOnReceiveLoopExit(_ handler: (@Sendable () -> Void)?) {
+        onReceiveLoopExit = handler
+    }
 
     /// Start listening on `path`. Any existing file at `path` is removed first.
     /// Only meaningful in the live daemon; tests should call `adoptConnection`
@@ -85,19 +114,24 @@ actor FDVendingServer {
         thread.start()
     }
 
-    /// Adopt a pre-connected socket fd. Ownership transfers here — do not
-    /// close it in the caller. Replaces any prior connection.
+    /// Adopt a pre-connected socket fd. Ownership transfers here — do not close
+    /// it in the caller. Replaces (and signals teardown of) any prior
+    /// connection, then starts this connection's receive thread.
     func adoptConnection(fd: Int32) {
-        if clientFD >= 0 { Darwin.close(clientFD) }
+        if clientFD >= 0 {
+            shutdown(clientFD, SHUT_RDWR)   // wake the old reader; it owns the close
+            clientFD = -1
+        }
         clientFD = fd
-        logger.info("FD vending client connected (fd \(fd))")
+        startReceiveThread(fd: fd, sink: onInput, onExit: onReceiveLoopExit)
+        logger.info("FD vending client connected (fd \(fd, privacy: .public))")
     }
 
     /// Close the current client connection (if any) without stopping the
-    /// listener.
+    /// listener. Signals the reader, which performs the actual `close()`.
     func disconnect() {
         if clientFD >= 0 {
-            Darwin.close(clientFD)
+            shutdown(clientFD, SHUT_RDWR)
             clientFD = -1
         }
     }
@@ -111,18 +145,69 @@ actor FDVendingServer {
         disconnect()
     }
 
-    /// Send `fd` plus `header` to the currently connected app client. Retries
-    /// briefly while no client is adopted — the app connects eagerly at
-    /// startup, so this only papers over a connect-vs-accept race measured in
-    /// milliseconds.
+    /// Send `fd` plus `header` to the currently connected app client, wrapped in
+    /// a `.fdVend` frame. Retries briefly while no client is adopted — the app
+    /// connects eagerly at startup, so this only papers over a connect-vs-accept
+    /// race measured in milliseconds.
     func send(fd: Int32, header: Data) async throws {
+        let frame = SidecarFrameCodec.encode(type: .fdVend, payload: header)
         for attempt in 0..<10 {
             if clientFD >= 0 {
-                try FDChannel.sendFD(fd, over: clientFD, header: header)
+                try FDChannel.sendFD(fd, over: clientFD, frame: frame)
                 return
             }
             if attempt < 9 { try? await Task.sleep(for: .milliseconds(50)) }
         }
         throw FDVendingServerError.notConnected
+    }
+
+    /// Spawn the receive thread for one connection. The thread reads framed
+    /// bytes, decodes `.input` frames to `onInput`, and OWNS closing `fd` on
+    /// exit (EOF, read error, or scanner desync).
+    private nonisolated func startReceiveThread(
+        fd: Int32,
+        sink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
+        onExit: (@Sendable () -> Void)?
+    ) {
+        let logger = self.logger
+        let thread = Thread {
+            let scanner = SidecarFrameScanner()
+            var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+            readLoop: while true {
+                let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+                if count <= 0 { break }   // 0 = EOF, <0 = error
+                for frame in scanner.append(Data(buffer[0..<count])) {
+                    guard let type = SidecarFrameType(rawValue: frame.type) else {
+                        logger.error("sidecar: unknown frame type \(frame.type, privacy: .public) from app, skipping")
+                        continue
+                    }
+                    switch type {
+                    case .input:
+                        guard let (header, bytes) = try? SidecarFrameCodec.decodeInput(payload: frame.payload) else {
+                            logger.error("sidecar: undecodable input frame, dropping")
+                            continue
+                        }
+                        if let sink {
+                            sink(header, bytes)
+                        } else {
+                            logger.debug("sidecar: input frame with no onInput handler, dropping \(bytes.count, privacy: .public) bytes")
+                        }
+                    case .fdVend:
+                        // The app must never send fd vends — that direction is
+                        // daemon → app only.
+                        logger.error("sidecar: received fdVend frame from app (protocol violation), dropping")
+                    }
+                }
+                if scanner.isDesynced {
+                    logger.fault("sidecar: frame scanner desynced (oversized length), closing connection")
+                    break readLoop
+                }
+            }
+            Darwin.close(fd)   // reader owns the close
+            onExit?()
+        }
+        thread.name = "fd-vending-receive"
+        thread.stackSize = 256 * 1024
+        thread.start()
     }
 }

@@ -33,7 +33,8 @@ struct FDSidecarClientTests {
 
     private func vend(readFD: Int32, worktreeID: UUID, paneID: String, attachID: UUID, over socket: Int32) throws {
         let header = try JSONEncoder().encode(FDVendHeader(worktreeID: worktreeID, paneID: paneID, attachID: attachID))
-        try FDChannel.sendFD(readFD, over: socket, header: header)
+        let frame = SidecarFrameCodec.encode(type: .fdVend, payload: header)
+        try FDChannel.sendFD(readFD, over: socket, frame: frame)
         Darwin.close(readFD)
     }
 
@@ -95,6 +96,74 @@ struct FDSidecarClientTests {
         #expect(Data(buffer[0..<Int(nA)]) == Data("for-A".utf8))
         let nB = buffer.withUnsafeMutableBytes { Darwin.read(rxB, $0.baseAddress, $0.count) }
         #expect(Data(buffer[0..<Int(nB)]) == Data("for-B".utf8))
+    }
+
+    @Test("a vend frame split across writes (fd on the first chunk) still pairs and delivers")
+    func splitFrameVendStillPairs() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        let attachID = UUID()
+        let promise = client.expectFD(worktreeID: worktreeID, paneID: "%split", attachID: attachID)
+
+        let (readFD, writeFD) = try makePipe()
+        defer { Darwin.close(writeFD) }
+        _ = Data("split-ok".utf8).withUnsafeBytes { Darwin.write(writeFD, $0.baseAddress, $0.count) }
+
+        // Build the full vend frame, then send the first byte carrying the fd
+        // (SCM_RIGHTS ancillary rides the first byte of its segment) and the
+        // remainder as a plain write with no ancillary.
+        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: worktreeID, paneID: "%split", attachID: attachID))
+        let frame = SidecarFrameCodec.encode(type: .fdVend, payload: header)
+        let firstChunk = frame.prefix(1)
+        let rest = frame.suffix(from: frame.startIndex + 1)
+        try FDChannel.sendFD(readFD, over: daemonSide, frame: Data(firstChunk))
+        Darwin.close(readFD)
+        try FDChannel.sendData(Data(rest), over: daemonSide)
+
+        let rxFD = try await promise.value(timeout: .seconds(2))
+        defer { Darwin.close(rxFD) }
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let n = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
+        #expect(Data(buffer[0..<Int(n)]) == Data("split-ok".utf8))
+    }
+
+    @Test("sendInput writes a decodable input frame to the daemon side")
+    func sendInputWritesFrame() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        client.sendInput(worktreeID: worktreeID, paneID: "%in", bytes: Data("hi\r".utf8))
+
+        // Read the framed input on the daemon side and decode it.
+        let scanner = SidecarFrameScanner()
+        var decoded: (header: SidecarInputHeader, bytes: Data)?
+        let deadline = ContinuousClock.now + .seconds(2)
+        while decoded == nil && ContinuousClock.now < deadline {
+            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
+            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.input.rawValue {
+                decoded = try SidecarFrameCodec.decodeInput(payload: frame.payload)
+            }
+        }
+        let result = try #require(decoded)
+        #expect(result.header.worktreeID == worktreeID)
+        #expect(result.header.paneID == "%in")
+        #expect(result.bytes == Data("hi\r".utf8))
+    }
+
+    @Test("sendInput while disconnected is dropped without crashing")
+    func sendInputWhileDisconnectedDrops() async throws {
+        let client = FDSidecarClient()   // never connected
+        client.sendInput(worktreeID: UUID(), paneID: "%x", bytes: Data("bytes".utf8))
+        // Give the send queue a beat; reaching here without a crash is the point.
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!client.isConnected)
     }
 
     @Test("value(timeout:) throws timedOut when nothing is vended; a late vend is closed safely")

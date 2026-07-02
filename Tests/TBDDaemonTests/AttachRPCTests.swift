@@ -150,9 +150,8 @@ struct AttachRPCOrchestrationTests {
         let result = try response.decodeResult(AttachRequestResult.self)
         #expect(result.status == "pending")
 
-        let (rxFD, rxHeader) = try FDChannel.receiveFD(from: clientSide, headerCapacity: 256)
+        let (rxFD, header) = try SidecarTestSupport.receiveVend(from: clientSide)
         defer { Darwin.close(rxFD) }
-        let header = try JSONDecoder().decode(FDVendHeader.self, from: rxHeader)
         #expect(header.worktreeID == worktreeID)
         #expect(header.paneID == "%1")
     }
@@ -215,7 +214,7 @@ struct AttachRPCOrchestrationTests {
             params: AttachRequestParams(worktreeID: worktreeID, paneID: "%5", windowID: "@5", attachID: UUID()))
         _ = await router.handle(request)
 
-        let (rxFD, _) = try FDChannel.receiveFD(from: clientSide, headerCapacity: 256)
+        let (rxFD, _) = try SidecarTestSupport.receiveVend(from: clientSide)
         defer { Darwin.close(rxFD) }
 
         // No attach.ready is ever sent. After the timeout, the daemon must
@@ -242,7 +241,7 @@ struct AttachRPCOrchestrationTests {
             method: RPCMethod.attachRequest,
             params: AttachRequestParams(worktreeID: worktreeID, paneID: "%7", windowID: "@7", attachID: UUID()))
         _ = await router.handle(attach)
-        let (rxFD, _) = try FDChannel.receiveFD(from: clientSide, headerCapacity: 256)
+        let (rxFD, _) = try SidecarTestSupport.receiveVend(from: clientSide)
         defer { Darwin.close(rxFD) }
 
         #expect(await supervisor.isReady(server: "tbd-gate-test", paneID: "%7") == false)

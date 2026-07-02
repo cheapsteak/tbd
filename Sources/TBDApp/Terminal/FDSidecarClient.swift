@@ -21,6 +21,10 @@ final class FDSidecarClient: @unchecked Sendable {
     private let lock = NSLock()
     private var socketFD: Int32 = -1
     private var waiters: [String: (Int32?, Error?) -> Void] = [:]
+    /// Serial queue for app → daemon input frames. Keeps `sendInput` off the
+    /// caller's thread (SwiftTerm calls it on the main thread) and serializes
+    /// writes so two frames never interleave on the socket.
+    private let sendQueue = DispatchQueue(label: "fd-sidecar-send")
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return socketFD >= 0 }
 
@@ -89,33 +93,105 @@ final class FDSidecarClient: @unchecked Sendable {
         lock.lock(); waiters[key] = nil; lock.unlock()
     }
 
-    private func receiveLoop(_ fd: Int32) {
-        while true {
-            guard let (rxFD, header) = try? FDChannel.receiveFD(from: fd, headerCapacity: 256) else { break }
-            guard let hdr = try? JSONDecoder().decode(FDVendHeader.self, from: header) else {
-                logger.error("sidecar: undecodable vend header, closing fd")
-                Darwin.close(rxFD)
-                continue
+    /// Send keystroke/paste `bytes` for a pane to the daemon as an `.input`
+    /// frame. Never blocks the caller: encodes inline (cheap) then enqueues the
+    /// write on `sendQueue`. Errors — including a disconnected socket — are
+    /// logged and dropped; the receive loop's EOF path handles daemon death and
+    /// Phase B owns reconnect.
+    func sendInput(worktreeID: UUID, paneID: String, bytes: Data) {
+        let frame: Data
+        do {
+            frame = try SidecarFrameCodec.encodeInput(
+                header: SidecarInputHeader(worktreeID: worktreeID, paneID: paneID), bytes: bytes)
+        } catch {
+            logger.error("sidecar: failed to encode input frame, dropping \(bytes.count, privacy: .public) bytes")
+            return
+        }
+        sendQueue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
+            guard fd >= 0 else {
+                self.logger.error("sidecar: sendInput while disconnected, dropping \(bytes.count, privacy: .public) bytes")
+                return
             }
-            lock.lock()
-            let waiter = waiters.removeValue(forKey: hdr.routingKey)
-            lock.unlock()
-            if let waiter {
-                waiter(rxFD, nil)
-            } else {
-                logger.info("sidecar: no waiter for \(hdr.routingKey, privacy: .public) (stale vend), closing fd")
-                Darwin.close(rxFD)
+            do {
+                try FDChannel.sendData(frame, over: fd)
+            } catch {
+                self.logger.error("sidecar: input send failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    private func receiveLoop(_ fd: Int32) {
+        let scanner = SidecarFrameScanner()
+        // FDs arrive in frame order (SCM_RIGHTS ancillary is delivered with the
+        // first byte of the sendmsg segment, and recvmsg does not read across an
+        // ancillary boundary), so a queue paired FIFO with completed `.fdVend`
+        // frames routes each fd correctly.
+        var pendingFDs: [Int32] = []
+        while true {
+            let message: (data: Data, fds: [Int32])
+            do {
+                message = try FDChannel.receiveMessage(from: fd, capacity: 16 * 1024)
+            } catch {
+                break   // EOF or read error
+            }
+            pendingFDs.append(contentsOf: message.fds)
+            let frames = scanner.append(message.data)
+            if scanner.isDesynced {
+                logger.fault("sidecar: frame scanner desynced, closing connection")
+                break
+            }
+            for frame in frames {
+                guard let type = SidecarFrameType(rawValue: frame.type) else {
+                    logger.error("sidecar: unknown frame type \(frame.type, privacy: .public), skipping")
+                    continue
+                }
+                switch type {
+                case .fdVend:
+                    let rxFD: Int32? = pendingFDs.isEmpty ? nil : pendingFDs.removeFirst()
+                    handleFDVend(headerPayload: frame.payload, fd: rxFD)
+                case .input:
+                    // The daemon must never send input frames — that direction
+                    // is app → daemon only.
+                    logger.error("sidecar: received input frame from daemon (protocol violation), dropping")
+                }
             }
         }
         // EOF: fail everything pending, mark disconnected (reconnect is a
-        // Phase 7 crash-recovery concern).
+        // Phase B crash-recovery concern).
         lock.lock()
         let pending = waiters; waiters = [:]
         socketFD = -1
         lock.unlock()
         Darwin.close(fd)
+        for leftover in pendingFDs { Darwin.close(leftover) }   // fds with no completed frame
         for (_, waiter) in pending { waiter(nil, FDSidecarError.disconnected) }
         logger.info("sidecar receive loop exited")
+    }
+
+    /// Route a completed `.fdVend` frame's paired fd to its waiter, or close it.
+    private func handleFDVend(headerPayload: Data, fd: Int32?) {
+        guard let hdr = try? JSONDecoder().decode(FDVendHeader.self, from: headerPayload) else {
+            logger.error("sidecar: undecodable vend header, closing fd")
+            if let fd { Darwin.close(fd) }
+            return
+        }
+        guard let fd else {
+            // A completed fdVend frame with no paired fd is a protocol bug on
+            // the daemon side — nothing to deliver.
+            logger.error("sidecar: fdVend \(hdr.routingKey, privacy: .public) arrived with no paired fd")
+            return
+        }
+        lock.lock()
+        let waiter = waiters.removeValue(forKey: hdr.routingKey)
+        lock.unlock()
+        if let waiter {
+            waiter(fd, nil)
+        } else {
+            logger.info("sidecar: no waiter for \(hdr.routingKey, privacy: .public) (stale vend), closing fd")
+            Darwin.close(fd)
+        }
     }
 }
 

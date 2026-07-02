@@ -17,7 +17,17 @@ struct FDVendingServerTests {
         return (pair[0], pair[1])
     }
 
-    @Test("adopting a client fd allows sending an fd to that peer")
+    private func makePipe() throws -> (Int32, Int32) {
+        var fds: [Int32] = [-1, -1]
+        try fds.withUnsafeMutableBufferPointer { buf in
+            guard pipe(buf.baseAddress) == 0 else { throw FDChannelError.sendFailed(errno) }
+        }
+        return (fds[0], fds[1])
+    }
+
+    // MARK: daemon → app framed fd vend
+
+    @Test("adopting a client fd allows sending a framed fd to that peer")
     func adoptAndSend() async throws {
         let (serverSideFD, clientSideFD) = try makeSocketPair()
         defer { Darwin.close(clientSideFD) }
@@ -26,22 +36,16 @@ struct FDVendingServerTests {
         await server.adoptConnection(fd: serverSideFD)
         defer { Task { await server.disconnect() } }
 
-        var pipeFDs: [Int32] = [-1, -1]
-        try pipeFDs.withUnsafeMutableBufferPointer { buf in
-            guard pipe(buf.baseAddress) == 0 else {
-                throw FDChannelError.sendFailed(errno)
-            }
-        }
-        let (readFD, writeFD) = (pipeFDs[0], pipeFDs[1])
+        let (readFD, writeFD) = try makePipe()
         defer { Darwin.close(writeFD) }
 
-        let header = Data("hdr".utf8)
+        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%3", attachID: UUID()))
         try await server.send(fd: readFD, header: header)
         Darwin.close(readFD)
 
-        let (rxFD, rxHeader) = try FDChannel.receiveFD(from: clientSideFD, headerCapacity: 32)
+        let (rxFD, rxHeader) = try SidecarTestSupport.receiveVend(from: clientSideFD)
         defer { Darwin.close(rxFD) }
-        #expect(rxHeader == header)
+        #expect(rxHeader.paneID == "%3")
 
         // sanity: the received fd is a real pipe end
         let msg = Data("ok".utf8)
@@ -68,20 +72,15 @@ struct FDVendingServerTests {
         await server.adoptConnection(fd: serverSideFD)
         defer { Task { await server.stop() } }
 
-        var pipeFDs: [Int32] = [-1, -1]
-        try pipeFDs.withUnsafeMutableBufferPointer { buf in
-            guard pipe(buf.baseAddress) == 0 else { throw FDChannelError.sendFailed(errno) }
-        }
-        let (readFD, writeFD) = (pipeFDs[0], pipeFDs[1])
+        let (readFD, writeFD) = try makePipe()
 
         let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%42", attachID: UUID()))
         try await server.send(fd: readFD, header: header)
         Darwin.close(readFD)
 
-        let (rxFD, rxHeader) = try FDChannel.receiveFD(from: clientSideFD, headerCapacity: 256)
+        let (rxFD, rxHeader) = try SidecarTestSupport.receiveVend(from: clientSideFD)
         defer { Darwin.close(rxFD) }
-        let decoded = try JSONDecoder().decode(FDVendHeader.self, from: rxHeader)
-        #expect(decoded.paneID == "%42")
+        #expect(rxHeader.paneID == "%42")
 
         // Write in three chunks, verify the reader assembles them.
         for chunk in ["ab", "cde", "fgh"] {
@@ -98,5 +97,100 @@ struct FDVendingServerTests {
             received.append(contentsOf: buffer[0..<Int(n)])
         }
         #expect(received == Data("abcdefgh".utf8))
+    }
+
+    // MARK: app → daemon input frames
+
+    @Test("an app input frame is delivered to onInput tagged with its header")
+    func inputFrameReachesOnInput() async throws {
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+        defer { Darwin.close(clientSideFD) }
+
+        let collector = SidecarInputCollector()
+        let server = FDVendingServer()
+        await server.setOnInput { header, bytes in collector.record(header, bytes) }
+        await server.adoptConnection(fd: serverSideFD)
+        defer { Task { await server.stop() } }
+
+        let worktreeID = UUID()
+        let frame = try SidecarFrameCodec.encodeInput(
+            header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%7"),
+            bytes: Data("ls -la\r".utf8))
+        try FDChannel.sendData(frame, over: clientSideFD)
+
+        #expect(await waitUntil { collector.count == 1 })
+        let item = try #require(collector.all.first)
+        #expect(item.header.worktreeID == worktreeID)
+        #expect(item.header.paneID == "%7")
+        #expect(item.bytes == Data("ls -la\r".utf8))
+    }
+
+    @Test("0-byte and 4 KiB input payloads both round-trip to onInput")
+    func inputFramePayloadSizes() async throws {
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+        defer { Darwin.close(clientSideFD) }
+
+        let collector = SidecarInputCollector()
+        let server = FDVendingServer()
+        await server.setOnInput { header, bytes in collector.record(header, bytes) }
+        await server.adoptConnection(fd: serverSideFD)
+        defer { Task { await server.stop() } }
+
+        let worktreeID = UUID()
+        let empty = Data()
+        let big = Data(repeating: 0x41, count: 4096)
+        let f0 = try SidecarFrameCodec.encodeInput(
+            header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%0"), bytes: empty)
+        let f1 = try SidecarFrameCodec.encodeInput(
+            header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%1"), bytes: big)
+        try FDChannel.sendData(f0, over: clientSideFD)
+        try FDChannel.sendData(f1, over: clientSideFD)
+
+        #expect(await waitUntil { collector.count == 2 })
+        let items = collector.all
+        #expect(items.contains { $0.header.paneID == "%0" && $0.bytes.isEmpty })
+        #expect(items.contains { $0.header.paneID == "%1" && $0.bytes == big })
+    }
+
+    @Test("two input frames written in one burst arrive as two onInput calls")
+    func twoInputFramesInOneBurst() async throws {
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+        defer { Darwin.close(clientSideFD) }
+
+        let collector = SidecarInputCollector()
+        let server = FDVendingServer()
+        await server.setOnInput { header, bytes in collector.record(header, bytes) }
+        await server.adoptConnection(fd: serverSideFD)
+        defer { Task { await server.stop() } }
+
+        let worktreeID = UUID()
+        var burst = Data()
+        burst.append(try SidecarFrameCodec.encodeInput(
+            header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%a"), bytes: Data("A".utf8)))
+        burst.append(try SidecarFrameCodec.encodeInput(
+            header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%b"), bytes: Data("B".utf8)))
+        try FDChannel.sendData(burst, over: clientSideFD)   // both frames in one write
+
+        #expect(await waitUntil { collector.count == 2 })
+        let panes = collector.all.map(\.header.paneID)
+        #expect(panes.contains("%a"))
+        #expect(panes.contains("%b"))
+    }
+
+    @Test("the receive loop exits when the client disconnects")
+    func receiveLoopExitsOnDisconnect() async throws {
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+
+        let exited = SidecarInputCollector()   // reuse as a thread-safe flag holder
+        let server = FDVendingServer()
+        await server.setOnReceiveLoopExit {
+            exited.record(SidecarInputHeader(worktreeID: UUID(), paneID: ""), Data())
+        }
+        await server.adoptConnection(fd: serverSideFD)
+
+        Darwin.close(clientSideFD)   // app goes away → reader sees EOF
+        #expect(await waitUntil { exited.count == 1 })
+
+        await server.stop()
     }
 }
