@@ -80,10 +80,10 @@ actor TmuxControlSupervisor {
             logger.debug("\(tag, privacy: .public) %output \(pane, privacy: .public) \(bytes.count) bytes")
         case .extendedOutput(let pane, let age, let bytes):
             logger.debug("\(tag, privacy: .public) %extended-output \(pane, privacy: .public) age=\(age)ms \(bytes.count) bytes")
-        case .commandSucceeded(let number, let lines):
-            logger.debug("\(tag, privacy: .public) %end #\(number) \(lines.count) lines")
-        case .commandFailed(let number, let lines):
-            logger.error("\(tag, privacy: .public) %error #\(number) \(lines.count) lines")
+        case .commandSucceeded(let number, let fromClient, let lines):
+            logger.debug("\(tag, privacy: .public) %end #\(number) fromClient=\(fromClient, privacy: .public) \(lines.count) lines")
+        case .commandFailed(let number, let fromClient, let lines):
+            logger.error("\(tag, privacy: .public) %error #\(number) fromClient=\(fromClient, privacy: .public) \(lines.count) lines")
         case .windowAdd(let window):
             logger.info("\(tag, privacy: .public) %window-add \(window, privacy: .public)")
         case .windowClose(let window):

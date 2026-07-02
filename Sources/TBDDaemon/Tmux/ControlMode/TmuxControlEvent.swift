@@ -15,11 +15,14 @@ enum TmuxControlEvent: Equatable {
     case extendedOutput(paneID: String, ageMillis: Int, bytes: Data)
 
     /// A completed `%begin`…`%end` command-response block. `lines` are the raw
-    /// response lines between the markers.
-    case commandSucceeded(number: Int, lines: [String])
+    /// response lines between the markers. `fromClient` is bit 0 of the `%begin`
+    /// flags field: true when the block replies to a command this control client
+    /// wrote, false for the attach greeting and any server-originated block.
+    case commandSucceeded(number: Int, fromClient: Bool, lines: [String])
 
     /// A completed `%begin`…`%error` command-response block (command failed).
-    case commandFailed(number: Int, lines: [String])
+    /// See `commandSucceeded` for `fromClient`.
+    case commandFailed(number: Int, fromClient: Bool, lines: [String])
 
     /// `%window-add @<window>` — a window was created.
     case windowAdd(windowID: String)
