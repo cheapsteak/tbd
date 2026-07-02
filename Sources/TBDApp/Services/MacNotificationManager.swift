@@ -27,6 +27,9 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func requestPermissionIfNeeded() {
+        // The mock harness runs a bundled second instance; a permission prompt
+        // would intrude on staged screenshots. Skip it entirely in mock mode.
+        if MockMode.isActive() { return }
         guard !hasRequestedPermission else { return }
         guard isAvailable else {
             if !hasLoggedUnavailable {

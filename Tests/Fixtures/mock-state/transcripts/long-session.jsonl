@@ -1,0 +1,6 @@
+{"type":"permission-mode","sessionId":"aaaa0000-0000-0000-0000-000000000041","cwd":"/tmp/tbd-mock/acme","gitBranch":"tbd/add-csv-export","permissionMode":"auto"}
+{"type":"user","message":{"role":"user","content":"Add a CSV export button to the reports page."},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll add a CSV export button. First let me look at the reports page component."}]},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here's the plan:\\n\\n1. Add an `exportCSV()` helper.\\n2. Wire it to a toolbar button.\\n3. Add a unit test.\\n\\nLet me implement it now."}]},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
+{"type":"user","message":{"role":"user","content":"Sounds good, go ahead."},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done — the CSV export button is wired up and the test passes."}]},"sessionId":"aaaa0000-0000-0000-0000-000000000041"}
