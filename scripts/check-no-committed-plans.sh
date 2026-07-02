@@ -35,41 +35,54 @@ cd "$(git rev-parse --show-toplevel)"
 # The exact path we deliberately track inside a gitignored plan dir.
 allowlisted="docs/superpowers/plans/CLAUDE.md"
 
-# bash 3.2 (macOS) has no `mapfile`; collect offenders with a portable
-# while-loop and seed the array so `${#offenders[@]}` is legal under `set -u`
-# when nothing matches.
-offenders=()
+# bash 3.2 (macOS) has no `mapfile`; collect offenders with portable while-loops
+# and seed each array so `${#arr[@]}` is legal under `set -u` when nothing
+# matches. Keep the two rules in separate arrays so the failure output can label
+# each hit by the rule that caught it — Rule A can fire on a non-plan force-add
+# (e.g. a `.DS_Store` or a `.lock`), and calling that an "implementation plan"
+# would be misleading.
+rule_a_offenders=()
+rule_b_offenders=()
 
 # Rule A — tracked files that .gitignore would otherwise ignore.
 while IFS= read -r file; do
   [ -z "$file" ] && continue
   [ "$file" = "$allowlisted" ] && continue
-  offenders+=("$file")
+  rule_a_offenders+=("$file")
 done < <(git ls-files -ci --exclude-standard)
 
 # Rule B — tracked *.md carrying the plan header marker. `--cached` scans the
-# index (staged/committed content), matching what a push would carry.
+# index (staged/committed content), matching what a push would carry. Dedupe
+# against Rule A so a force-added plan under a gitignored dir is listed once.
 while IFS= read -r file; do
   [ -z "$file" ] && continue
-  # Skip if already reported by Rule A.
   case "$file" in
     "$allowlisted") continue ;;
   esac
   already=0
-  for seen in ${offenders[@]+"${offenders[@]}"}; do
+  for seen in ${rule_a_offenders[@]+"${rule_a_offenders[@]}"}; do
     [ "$seen" = "$file" ] && already=1 && break
   done
   [ "$already" = "1" ] && continue
-  offenders+=("$file")
+  rule_b_offenders+=("$file")
 done < <(git grep --cached -lF "REQUIRED SUB-SKILL" -- '*.md')
 
-if [ ${#offenders[@]} -gt 0 ]; then
-  echo "[plans-guard] Refusing the tracked tree: implementation plan(s) are committed:" >&2
-  for f in "${offenders[@]}"; do echo "  - $f" >&2; done
+if [ $((${#rule_a_offenders[@]} + ${#rule_b_offenders[@]})) -gt 0 ]; then
+  echo "[plans-guard] Refusing the tracked tree — the following files must not be committed:" >&2
   echo "" >&2
-  echo "Implementation and design plans are local scratch artifacts (see docs/CLAUDE.md)." >&2
-  echo "They go stale fast and have no place in the source tree. Keep them in one of the" >&2
-  echo "gitignored plan dirs and do not stage them:" >&2
+  if [ ${#rule_a_offenders[@]} -gt 0 ]; then
+    echo "Tracked files in gitignored paths (force-added past .gitignore):" >&2
+    for f in "${rule_a_offenders[@]}"; do echo "  - $f" >&2; done
+    echo "" >&2
+  fi
+  if [ ${#rule_b_offenders[@]} -gt 0 ]; then
+    echo "Files carrying the writing-plans header marker:" >&2
+    for f in "${rule_b_offenders[@]}"; do echo "  - $f" >&2; done
+    echo "" >&2
+  fi
+  echo "These are almost always leaked implementation/design plans, which are local" >&2
+  echo "scratch artifacts (see docs/CLAUDE.md). They go stale fast and have no place in" >&2
+  echo "the source tree. Keep them in one of the gitignored plan dirs and do not stage them:" >&2
   echo "    docs/plans/   docs/implementation-plans/   docs/superpowers/plans/" >&2
   echo "" >&2
   echo "If the content is worth keeping, summarize it in the PR description or promote it" >&2
