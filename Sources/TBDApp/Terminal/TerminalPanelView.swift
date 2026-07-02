@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftTerm
 import AppKit
+import TBDShared
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "TerminalPanel")
@@ -208,6 +209,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // Feed snapshot before tmux connects so the user sees the last state
         let snapshot = initialSnapshot
         let suspendedOnCreate = isSuspendedSnapshot
+        // Control-mode branch (Phase 2, opt-in): gate on the DAEMON-reported
+        // capability — the app cannot read TBD_TMUX_CONTROL_MODE itself (it is
+        // launched via `open`, which drops shell env). Resolve the terminal's
+        // worktreeID + paneID up front; if the lookup fails, fall back to the
+        // grouped-sessions path.
+        let controlModeAttach: (worktreeID: UUID, paneID: String)? =
+            appState.daemonCapabilities?.controlModeEnabled == true
+                ? appState.terminals.values.flatMap({ $0 })
+                    .first(where: { $0.id == terminalID })
+                    .map { ($0.worktreeID, $0.tmuxPaneID) }
+                : nil
+        let appStateRef = appState
         // Start tmux client as soon as the view has real dimensions from layout
         tv.onReady = { [weak tv] in
             guard let tv else { return }
@@ -228,13 +241,26 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // `@MainActor` once the tmux args come back.
             Task { [weak coordinator = context.coordinator, weak tv] in
                 guard let coordinator, let tv else { return }
-                await coordinator.startTmuxClient(
-                    terminalView: tv,
-                    bridge: tmuxBridge,
-                    server: tmuxServer,
-                    windowID: tmuxWindowID,
-                    panelID: terminalID
-                )
+                if let controlModeAttach {
+                    await coordinator.startControlModeClient(
+                        terminalView: tv,
+                        appState: appStateRef,
+                        worktreeID: controlModeAttach.worktreeID,
+                        paneID: controlModeAttach.paneID,
+                        bridge: tmuxBridge,
+                        server: tmuxServer,
+                        windowID: tmuxWindowID,
+                        panelID: terminalID
+                    )
+                } else {
+                    await coordinator.startTmuxClient(
+                        terminalView: tv,
+                        bridge: tmuxBridge,
+                        server: tmuxServer,
+                        windowID: tmuxWindowID,
+                        panelID: terminalID
+                    )
+                }
             }
         }
 
@@ -280,6 +306,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         private var clickMonitor: Any?
         private var recreationAttempts = 0
         private static let maxRecreationAttempts = 2
+        /// Set while this panel renders through the control-mode path (Phase 2
+        /// FD vending). `cleanup()` uses these to pair the teardown correctly:
+        /// `pane.detach` RPC first (daemon EOFs the pipe), then flag the
+        /// reader stopped — the reader closes its own fd when the EOF lands.
+        private var controlModeAttach: (worktreeID: UUID, paneID: String, routingKey: String)?
 
         @MainActor
         func syncTabCloseContext(_ context: TabCloseContext?, for terminalID: UUID) {
@@ -498,6 +529,75 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 clickMonitor = nil
             }
             tmuxBridge?.cleanupSession(panelID: panelID, server: tmuxServer)
+            if let attach = controlModeAttach, let appState {
+                controlModeAttach = nil
+                Task {
+                    // Order matters: detach first so the daemon closes the
+                    // pipe's write end (EOF unblocks the reader thread), then
+                    // flag the reader — it closes its own fd on exit.
+                    try? await appState.daemonClient.paneDetach(
+                        worktreeID: attach.worktreeID, paneID: attach.paneID)
+                    await appState.controlModeReaders.remove(routingKey: attach.routingKey)
+                }
+            }
+        }
+
+        /// Render this panel through the control-mode path: request an attach
+        /// (fd arrives via the sidecar), wire a long-lived reader that feeds
+        /// SwiftTerm, then ack `attach.ready` to open the daemon's write gate.
+        /// Any failure falls back to the grouped-sessions path — Phase 2 is
+        /// opt-in and read-only, so degradation must be invisible.
+        @MainActor
+        func startControlModeClient(
+            terminalView: TerminalView,
+            appState: AppState,
+            worktreeID: UUID,
+            paneID: String,
+            bridge: TmuxBridge,
+            server: String,
+            windowID: String,
+            panelID: UUID
+        ) async {
+            // Reader-registry key: one reader per PANE (worktree/pane), not per
+            // attach — a re-attach replaces the pane's reader. Distinct from
+            // the sidecar's per-request demux key, which also carries the
+            // attach nonce.
+            let routingKey = "\(worktreeID.uuidString)/\(paneID)"
+            do {
+                let fd = try await appState.daemonClient.openAttach(
+                    worktreeID: worktreeID, paneID: paneID, windowID: windowID)
+                controlModeAttach = (worktreeID, paneID, routingKey)
+                let weakTV = WeakTerminalRef(terminalView)
+                await appState.controlModeReaders.registerReader(
+                    routingKey: routingKey, fd: fd) { chunk in
+                        let bytes = [UInt8](chunk)
+                        DispatchQueue.main.async {
+                            weakTV.view?.feed(byteArray: bytes[...])
+                        }
+                    }
+                try await appState.daemonClient.attachReady(worktreeID: worktreeID, paneID: paneID)
+                logger.info("control-mode attach live for pane \(paneID, privacy: .public)")
+            } catch {
+                logger.warning("""
+                    control-mode attach failed for pane \(paneID, privacy: .public); \
+                    falling back to grouped sessions: \(error.localizedDescription, privacy: .public)
+                    """)
+                controlModeAttach = nil
+                // Best-effort teardown of any half-completed attach (e.g. fd
+                // received and reader registered, but attach.ready failed):
+                // detach so the daemon EOFs the pipe, then flag the reader.
+                Task {
+                    try? await appState.daemonClient.paneDetach(worktreeID: worktreeID, paneID: paneID)
+                    await appState.controlModeReaders.remove(routingKey: routingKey)
+                }
+                await startTmuxClient(
+                    terminalView: terminalView,
+                    bridge: bridge,
+                    server: server,
+                    windowID: windowID,
+                    panelID: panelID
+                )
+            }
         }
 
         deinit {

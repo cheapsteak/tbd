@@ -85,6 +85,7 @@ extension RPCRouter {
             cols: resolvedCols,
             rows: resolvedRows
         )
+        await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
 
         // Look up repo once for system prompt env vars and Claude session setup
         let repo = try await db.repos.get(id: worktree.repoID)
@@ -385,6 +386,7 @@ extension RPCRouter {
             cols: resolvedCols,
             rows: resolvedRows
         )
+        await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
 
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {

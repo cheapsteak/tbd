@@ -18,6 +18,7 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
     case receiveFailed(String)
     case invalidResponse
     case rpcError(String)
+    case attachUnavailable(String)
 
     var description: String {
         switch self {
@@ -33,6 +34,8 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
             return "Invalid response from daemon"
         case .rpcError(let msg):
             return "RPC error: \(msg)"
+        case .attachUnavailable(let status):
+            return "Control-mode attach unavailable (status: \(status))"
         }
     }
 
@@ -44,6 +47,12 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
 actor DaemonClient {
     private let socketPath: String
     private(set) var connected: Bool = false
+
+    /// Sidecar for receiving vended pane fds. Connected eagerly right after
+    /// the RPC socket, so the daemon's accept has completed long before the
+    /// first attach needs it. Failure is non-fatal: control-mode attaches
+    /// will fail and fall back to grouped sessions.
+    let fdSidecar = FDSidecarClient()
 
     /// Upper bound a single one-shot RPC waits for the daemon's response
     /// before failing. Generous so legitimately slow handlers (model-profile
@@ -69,6 +78,7 @@ actor DaemonClient {
     func connect() async -> Bool {
         // First try to connect directly
         if tryConnect() {
+            connectSidecar()
             return true
         }
 
@@ -83,6 +93,7 @@ actor DaemonClient {
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
                 if tryConnect() {
                     daemonClientLogger.info("Connected to daemon after \(attempt) attempts")
+                    connectSidecar()
                     return true
                 }
             }
@@ -93,6 +104,21 @@ actor DaemonClient {
 
         connected = false
         return false
+    }
+
+    /// Connect the FD-vending sidecar right after the RPC socket comes up.
+    /// Eager (not lazy-on-first-attach) so the daemon's accept has completed
+    /// long before any `attach.request` needs `send()` to work. Best-effort:
+    /// on failure control-mode attaches fail and fall back to grouped
+    /// sessions. Idempotent — `FDSidecarClient.connect` no-ops when already
+    /// connected, so reconnect retries are safe.
+    private func connectSidecar() {
+        do {
+            try fdSidecar.connect(path: TBDConstants.vendSocketPath)
+        } catch {
+            daemonClientLogger.warning(
+                "FD sidecar connect failed (control-mode attach unavailable): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Try a single connection attempt (non-async).
@@ -661,14 +687,6 @@ actor DaemonClient {
         return result.statuses
     }
 
-    /// Notify the daemon which worktrees are currently selected in the app.
-    func worktreeSelectionChanged(selectedWorktreeIDs: Set<UUID>, suspendEnabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.worktreeSelectionChanged,
-            params: WorktreeSelectionChangedParams(selectedWorktreeIDs: Array(selectedWorktreeIDs), suspendEnabled: suspendEnabled)
-        )
-    }
-
     /// Push the user's Claude spawn-env setting overrides to the daemon.
     func setClaudeSpawnPreferences(_ preferences: ClaudeSpawnPreferences) async throws {
         try await callVoidAsync(
@@ -714,6 +732,74 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.modelProfileSetEnvOverrides,
             params: SetProfileEnvOverridesParams(profileID: profileID, overrides: overrides)
+        )
+    }
+
+    /// Request a control-mode attach for one pane; the fd arrives separately
+    /// on the sidecar (see `openAttach`).
+    func attachRequest(
+        worktreeID: UUID, paneID: String, windowID: String, attachID: UUID
+    ) async throws -> AttachRequestResult {
+        try await callAsync(
+            method: RPCMethod.attachRequest,
+            params: AttachRequestParams(
+                worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID),
+            resultType: AttachRequestResult.self
+        )
+    }
+
+    /// Request an attach and receive the vended fd via the sidecar. Returns
+    /// the read fd (ownership passes to the caller's reader). Does NOT send
+    /// `attach.ready` — the caller does that after wiring the reader.
+    ///
+    /// Ordering: the sidecar expectation is registered BEFORE the RPC is
+    /// issued, so the vended fd can never race past its waiter; the header
+    /// demux (`FDSidecarClient`) is what keeps concurrent attaches for
+    /// different panes from cross-delivering fds.
+    func openAttach(worktreeID: UUID, paneID: String, windowID: String) async throws -> Int32 {
+        // Fresh nonce per attach: the daemon echoes it in the vend header, so
+        // a superseded attach's stale fd can never be delivered to this one.
+        let attachID = UUID()
+        let promise = fdSidecar.expectFD(worktreeID: worktreeID, paneID: paneID, attachID: attachID)
+        do {
+            let result = try await attachRequest(
+                worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID)
+            guard result.status == "pending" else {
+                promise.cancel()
+                throw DaemonClientError.attachUnavailable(result.status)
+            }
+        } catch {
+            promise.cancel()
+            throw error
+        }
+        return try await promise.value(timeout: .seconds(5))
+    }
+
+    /// Ack that the app's reader is draining the vended fd — opens the
+    /// daemon-side write gate.
+    func attachReady(worktreeID: UUID, paneID: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: paneID)
+        )
+    }
+
+    /// Tell the daemon this pane is no longer rendered; the daemon closes the
+    /// pipe write end and the app-side reader sees EOF.
+    func paneDetach(worktreeID: UUID, paneID: String) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.paneDetach,
+            params: PaneDetachParams(worktreeID: worktreeID, paneID: paneID)
+        )
+    }
+
+    /// Fetch daemon feature flags (e.g. whether the tmux control-mode gate is
+    /// on). The app cannot read the daemon's env itself — it is launched via
+    /// `open`, which drops shell env.
+    func daemonCapabilities() async throws -> DaemonCapabilitiesResult {
+        try await callNoParamsAsync(
+            method: RPCMethod.daemonCapabilities,
+            resultType: DaemonCapabilitiesResult.self
         )
     }
 

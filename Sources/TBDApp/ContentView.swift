@@ -7,7 +7,6 @@ struct ContentView: View {
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
-    @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspendClaude: Bool = false
     @State private var contentAreaHeight: CGFloat = 600
 
     private var selectedWorktree: Worktree? {
@@ -212,10 +211,6 @@ struct ContentView: View {
                 Task { await appState.refreshPRStatus(worktreeID: worktreeID) }
             }
             Task {
-                try? await appState.daemonClient.worktreeSelectionChanged(
-                    selectedWorktreeIDs: appState.selectedWorktreeIDs,
-                    suspendEnabled: autoSuspendClaude
-                )
                 for worktreeID in newSelection {
                     await appState.refreshTerminals(worktreeID: worktreeID)
                 }

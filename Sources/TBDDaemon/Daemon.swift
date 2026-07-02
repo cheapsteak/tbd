@@ -61,6 +61,13 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
+    /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
+    /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
+    /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
+    let controlModeSupervisor = TmuxControlSupervisor()
+    /// Sidecar Unix socket server that vends per-pane file descriptors to the
+    /// app (SCM_RIGHTS). Owned here so it can be stopped on shutdown.
+    let fdVendingServer = FDVendingServer()
     public let pidFile: PIDFile
     public let startTime: Date
 
@@ -205,12 +212,25 @@ public final class Daemon: Sendable {
             config: database.config
         )
         let pendingQuestions = PendingQuestionStore()
-        let lifecycle = WorktreeLifecycle(
+
+        // Detect the local tmux version once. The control-mode bridge is shared
+        // by lifecycle + router so every `ensureServer()` call site can open a
+        // gated control connection through a single supervisor. When the gate
+        // is off (the default), `enableIfGated` is a no-op.
+        let tmuxVersion = await TmuxVersion.detect()
+        let controlModeBridge = TmuxControlModeBridge(
+            supervisor: controlModeSupervisor,
+            tmuxVersion: tmuxVersion,
+            fdVending: fdVendingServer
+        )
+
+        var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions
         )
+        lifecycle.controlMode = controlModeBridge
         let prManager = PRStatusManager()
 
         // Hydrate PR status cache from the DB so PR icons survive restart, then
@@ -243,6 +263,7 @@ public final class Daemon: Sendable {
             modelProfileResolver: modelProfileResolver,
             pendingQuestions: pendingQuestions
         )
+        rpcRouter.controlMode = controlModeBridge
         self.router = rpcRouter
 
         // 9. Start socket server
@@ -252,6 +273,15 @@ public final class Daemon: Sendable {
         // is built above, before the server exists, so it can't be an init dep).
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
+
+        // 9a. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
+        // app). Failure is non-fatal: control-mode attaches will fail and the
+        // app falls back to grouped sessions.
+        do {
+            try await fdVendingServer.listen(on: TBDConstants.vendSocketPath)
+        } catch {
+            daemonLogger.error("failed to start FD vending sidecar: \(error.localizedDescription, privacy: .public)")
+        }
 
         // 10. Start HTTP server
         let http = HTTPServer(router: rpcRouter)
@@ -383,6 +413,12 @@ public final class Daemon: Sendable {
         if let poller = claudeUsagePoller {
             await poller.stop()
         }
+
+        // Stop any tmux control-mode connections (no-op when the gate is off).
+        await controlModeSupervisor.stopAll()
+
+        // Stop the FD-vending sidecar (closes the listener + any client).
+        await fdVendingServer.stop()
 
         // Cancel background tasks
         sshRefreshTask?.cancel()

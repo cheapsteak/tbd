@@ -438,6 +438,7 @@ extension WorktreeLifecycle {
             cols: resolvedCols,
             rows: resolvedRows
         )
+        await controlMode?.enableIfGated(serverName: tmuxServer)
 
         // Resolve model profile (repo override → global default → none).
         // Failures here must NOT break worktree creation — fall back to keychain login.

@@ -430,7 +430,7 @@ public struct TmuxManager: Sendable {
     // MARK: - Private
 
     /// Resolves the path to the tmux binary, checking common locations.
-    private static func tmuxPath() -> String {
+    static func tmuxPath() -> String {
         for candidate in ["/usr/bin/tmux", "/usr/local/bin/tmux", "/opt/homebrew/bin/tmux"] {
             if FileManager.default.fileExists(atPath: candidate) {
                 return candidate

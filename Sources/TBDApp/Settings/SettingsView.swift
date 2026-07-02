@@ -147,8 +147,8 @@ struct GeneralSettingsTab: View {
             }
 
             Section("Experimental") {
-                Toggle("Auto-suspend idle Claude when switching worktrees", isOn: $autoSuspend)
-                    .help("Experimental: exit idle Claude instances when you switch away and resume them when you switch back, freeing memory. Off by default — may interrupt long-running work.")
+                Toggle("Suspend idle Claude before sleep", isOn: $autoSuspend)
+                    .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
                 Toggle("Live transcript pane", isOn: $enableTranscript)
                     .help("Experimental: show a chat-style live transcript pane for Claude sessions. Off by default — may freeze the app on very large transcripts.")
                 Toggle("New transcript renderer", isOn: $useTableViewTranscript)

@@ -507,6 +507,14 @@ final class AppState: ObservableObject {
 
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
+    /// App-scoped owner of control-mode stream readers (Phase 2 FD vending).
+    /// Lives here — not on any view — so SwiftUI view destruction cannot tear
+    /// down an active reader. Keyed by `FDVendHeader.routingKey`.
+    let controlModeReaders = ControlModeReaderRegistry()
+    /// Feature flags fetched from the daemon at connect time. Nil until the
+    /// first successful fetch — treated as "control mode off". The app cannot
+    /// derive these locally: it is launched via `open`, which drops shell env.
+    var daemonCapabilities: DaemonCapabilitiesResult?
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     private var pollTimer: Timer?
@@ -734,9 +742,8 @@ final class AppState: ObservableObject {
     /// - the current selection is already non-empty
     /// - there are no valid IDs left after filtering stale ones
     ///
-    /// Call this from `connectAndLoadInitialState()` after `refreshAll()` and
-    /// before the `worktreeSelectionChanged` RPC so the daemon learns the real
-    /// restored selection.
+    /// Call this from `connectAndLoadInitialState()` after `refreshAll()` so
+    /// the UI reflects the real restored selection.
     func restoreSavedSelection(validWorktreeIDs: [UUID]) {
         guard selectedWorktreeIDs.isEmpty, pendingDeepLinkID == nil else { return }
         guard let data = userDefaults.data(forKey: Self.selectionOrderKey),
@@ -1050,6 +1057,12 @@ final class AppState: ObservableObject {
         let didConnect = await daemonClient.connect()
         isConnected = didConnect
         if didConnect {
+            // Fetch capabilities BEFORE refreshAll: terminal views are created
+            // as soon as worktree/terminal state lands, and each view decides
+            // grouped-sessions vs control-mode at creation time. Fetching
+            // afterwards would leave every initially-rendered pane on the
+            // grouped path even when the control-mode gate is on.
+            daemonCapabilities = try? await daemonClient.daemonCapabilities()
             await refreshAll()
             // Restore persisted selection before notifying the daemon — the RPC
             // below captures `selectedWorktreeIDs` so the daemon learns the real
@@ -1070,13 +1083,6 @@ final class AppState: ObservableObject {
             await loadModelProfiles()
             startSubscription()
             await refreshPRStatuses()
-            let suspendEnabled = AppState.autoSuspendClaudeEnabled(defaults: userDefaults)
-            Task { [selectedWorktreeIDs] in
-                try? await daemonClient.worktreeSelectionChanged(
-                    selectedWorktreeIDs: selectedWorktreeIDs,
-                    suspendEnabled: suspendEnabled
-                )
-            }
             pushClaudeSpawnPreferences()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
@@ -1463,8 +1469,8 @@ final class AppState: ObservableObject {
 
     /// UserDefaults key mirroring the `@AppStorage("autoSuspendClaude")`
     /// toggle in the Settings → Experimental section. Read from non-View
-    /// contexts (e.g. the daemon-reconnect path) to avoid sending
-    /// `suspendEnabled=true` when the user has not opted in.
+    /// contexts (the pre-sleep suspend hook) so the gate is honored outside
+    /// the View layer.
     static let autoSuspendClaudeKey = "autoSuspendClaude"
 
     /// Whether auto-suspend is enabled. Fails closed: defaults to false when

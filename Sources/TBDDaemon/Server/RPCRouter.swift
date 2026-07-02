@@ -34,6 +34,13 @@ public final class RPCRouter: Sendable {
     /// TTL cache for per-worktree upstream branch lookups, so `pr.list` stops
     /// spawning a `git config` subprocess per worktree on every poll.
     let upstreamBranchCache = UpstreamBranchCache()
+    /// Opt-in tmux control-mode wiring. `nil` when the daemon did not provide
+    /// one (tests, older callers); when present, terminal handlers open a gated
+    /// logging-only `tmux -CC` connection after each `ensureServer()`.
+    ///
+    /// Set by `Daemon` after construction (`internal`, so the public init's
+    /// signature does not leak the internal bridge type).
+    nonisolated(unsafe) var controlMode: TmuxControlModeBridge?
 
     let decoder = JSONDecoder()
     let encoder = JSONEncoder()
@@ -72,6 +79,7 @@ public final class RPCRouter: Sendable {
         self.pendingQuestions = pendingQuestions
         self.repoSerializer = repoSerializer
         self.configDirManager = configDirManager
+        self.controlMode = nil
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -159,10 +167,16 @@ public final class RPCRouter: Sendable {
                 return try await handlePRList()
             case RPCMethod.prRefresh:
                 return try await handlePRRefresh(request.paramsData)
-            case RPCMethod.worktreeSelectionChanged:
-                return try await handleWorktreeSelectionChanged(request.paramsData)
             case RPCMethod.claudeSetSpawnPreferences:
                 return try await handleSetClaudeSpawnPreferences(request.paramsData)
+            case RPCMethod.attachRequest:
+                return try await handleAttachRequest(request.paramsData)
+            case RPCMethod.attachReady:
+                return try await handleAttachReady(request.paramsData)
+            case RPCMethod.paneDetach:
+                return try await handlePaneDetach(request.paramsData)
+            case RPCMethod.daemonCapabilities:
+                return try handleDaemonCapabilities()
             case RPCMethod.terminalSuspend:
                 return try await handleTerminalSuspend(request.paramsData)
             case RPCMethod.terminalResume:
@@ -262,6 +276,22 @@ public final class RPCRouter: Sendable {
             routerLogger.error("RPC \(request.method, privacy: .public) failed: \(error, privacy: .public)")
             return RPCResponse(error: "\(error)")
         }
+    }
+
+    // MARK: - Capabilities
+
+    /// Report daemon feature flags the app cannot derive locally. The app is
+    /// launched via `open` (LaunchServices), which drops shell env — so the
+    /// control-mode gate state must be asked for, not mirrored.
+    func handleDaemonCapabilities() throws -> RPCResponse {
+        let enabled: Bool
+        if let bridge = controlMode {
+            enabled = ControlModeGate.shouldEnable(
+                environment: bridge.environment, tmuxVersion: bridge.tmuxVersion)
+        } else {
+            enabled = false
+        }
+        return try RPCResponse(result: DaemonCapabilitiesResult(controlModeEnabled: enabled))
     }
 
     // MARK: - PR Status
