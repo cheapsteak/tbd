@@ -164,6 +164,12 @@ final class FDSidecarClient: @unchecked Sendable {
         let pending = waiters; waiters = [:]
         socketFD = -1
         lock.unlock()
+        // Barrier before close: a `sendInput` write block may be mid-`write()` on
+        // this same fd right now. `sendFD` was already set to -1 above, so any
+        // block that has NOT yet started sees the guard and drops; this barrier
+        // waits out the one that's already inside `FDChannel.sendData`. Closing
+        // under a mid-`write()` racer risks writing into a recycled fd number.
+        sendQueue.sync {}
         Darwin.close(fd)
         for leftover in pendingFDs { Darwin.close(leftover) }   // fds with no completed frame
         for (_, waiter) in pending { waiter(nil, FDSidecarError.disconnected) }

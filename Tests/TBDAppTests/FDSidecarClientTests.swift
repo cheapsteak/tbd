@@ -166,6 +166,29 @@ struct FDSidecarClientTests {
         #expect(!client.isConnected)
     }
 
+    @Test("sendInput after the receive loop exits is dropped without crashing")
+    func sendInputAfterLoopExitDrops() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        Darwin.close(daemonSide)   // peer dies → receive loop hits EOF and tears down
+
+        // Wait for the loop to finish teardown (socketFD == -1 under the barrier).
+        var spins = 0
+        while client.isConnected && spins < 200 {
+            try await Task.sleep(for: .milliseconds(10))
+            spins += 1
+        }
+        #expect(!client.isConnected)
+
+        // Post-exit send races the just-closed fd: the disconnected guard must
+        // drop it silently — no write into a recycled fd, no crash.
+        client.sendInput(worktreeID: UUID(), paneID: "%late", bytes: Data("late".utf8))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!client.isConnected)
+    }
+
     @Test("value(timeout:) throws timedOut when nothing is vended; a late vend is closed safely")
     func timeoutThenLateVend() async throws {
         let (daemonSide, appSide) = try makeSocketPair()

@@ -19,14 +19,21 @@ enum FDVendingServerError: Error, Equatable {
 /// - app → daemon: keystroke/paste `.input` frames, decoded on a dedicated
 ///   receive `Thread` and delivered via `onInput`.
 ///
-/// **fd ownership with a reader thread.** Each adopted connection gets a
-/// receive thread that OWNS closing that connection's fd: it `close()`s on exit.
-/// `adoptConnection`/`disconnect`/`stop` only `shutdown(fd, SHUT_RDWR)` to signal
-/// the reader — on Darwin, `close()`ing a socket out from under a thread blocked
-/// in `read()` does NOT wake it, but `shutdown()` does. Because the reader owns
-/// the final close, the fd number can never be reused while a stale reader is
-/// still parked on it. Sends run on the actor and target the same fd; sending
-/// on a shut-down fd returns `EPIPE`, which `send()` surfaces as an error.
+/// **fd ownership: readers signal, the actor closes.** Each adopted connection
+/// gets a receive thread, but the thread NEVER closes the connection fd. On loop
+/// exit (EOF, read error, or scanner desync) it hops back onto the actor via
+/// `receiveLoopExited(fd:)`, which clears `clientFD` (if it still names this fd)
+/// and performs the sole `Darwin.close(fd)`. `adoptConnection`/`disconnect`/`stop`
+/// only `shutdown(fd, SHUT_RDWR)` to wake the reader — on Darwin, `close()`ing a
+/// socket out from under a thread blocked in `read()` does NOT wake it, but
+/// `shutdown()` does; the reader then unblocks and signals its own exit.
+///
+/// Making the actor the sole closer closes a stale-fd hole: if the reader closed
+/// the fd on EOF while `clientFD` still held that number, the kernel could recycle
+/// the number for an unrelated pipe/accept/open, and a later `send(fd:header:)`
+/// would `sendmsg()` a vend frame into that UNRELATED fd (cross-fd corruption).
+/// By clearing `clientFD` before/with the close, `send()` sees `clientFD < 0` and
+/// refuses with `.notConnected` instead of writing into a recycled fd.
 ///
 /// The accept loop and each receive loop run on dedicated `Thread`s — the house
 /// pattern for indefinitely-blocking syscalls (see `TmuxControlConnection`).
@@ -43,8 +50,9 @@ actor FDVendingServer {
     /// connection at adopt time. When nil, input frames are logged and dropped.
     var onInput: (@Sendable (SidecarInputHeader, Data) -> Void)?
 
-    /// Test seam: invoked (off the actor) when a receive loop exits, so tests
-    /// can await deterministic thread teardown instead of sleeping.
+    /// Test seam: invoked from `receiveLoopExited` (on the actor) AFTER `clientFD`
+    /// is cleared and the fd closed, so once it fires the stale fd is fully gone —
+    /// tests can await deterministic post-cleanup state instead of sleeping.
     var onReceiveLoopExit: (@Sendable () -> Void)?
 
     /// Install the input sink. Must be called BEFORE `listen`/`adoptConnection`
@@ -119,12 +127,25 @@ actor FDVendingServer {
     /// connection, then starts this connection's receive thread.
     func adoptConnection(fd: Int32) {
         if clientFD >= 0 {
-            shutdown(clientFD, SHUT_RDWR)   // wake the old reader; it owns the close
+            shutdown(clientFD, SHUT_RDWR)   // wake the old reader; it will close its own fd
             clientFD = -1
         }
         clientFD = fd
-        startReceiveThread(fd: fd, sink: onInput, onExit: onReceiveLoopExit)
+        // The old reader will later call `receiveLoopExited(oldFD)`; its
+        // `clientFD == fd` guard ensures that stale signal does NOT clear this
+        // freshly-adopted `clientFD` (different fd number).
+        startReceiveThread(fd: fd, sink: onInput)
         logger.info("FD vending client connected (fd \(fd, privacy: .public))")
+    }
+
+    /// Sole close path for a connection fd. Invoked (on the actor) by a receive
+    /// thread after its read loop exits. The reader has already left `read()`, so
+    /// closing here is safe. Clearing `clientFD` first is what stops a later
+    /// `send()` from writing a vend frame into a recycled fd number.
+    func receiveLoopExited(fd: Int32) {
+        if clientFD == fd { clientFD = -1 }   // guard: a newer adopt may own a different fd now
+        Darwin.close(fd)
+        onReceiveLoopExit?()
     }
 
     /// Close the current client connection (if any) without stopping the
@@ -162,15 +183,15 @@ actor FDVendingServer {
     }
 
     /// Spawn the receive thread for one connection. The thread reads framed
-    /// bytes, decodes `.input` frames to `onInput`, and OWNS closing `fd` on
-    /// exit (EOF, read error, or scanner desync).
+    /// bytes, decodes `.input` frames to `onInput`, and on exit (EOF, read error,
+    /// or scanner desync) signals `receiveLoopExited(fd:)` — it never closes `fd`
+    /// itself. The actor is the sole closer (see the type doc).
     private nonisolated func startReceiveThread(
         fd: Int32,
-        sink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
-        onExit: (@Sendable () -> Void)?
+        sink: (@Sendable (SidecarInputHeader, Data) -> Void)?
     ) {
         let logger = self.logger
-        let thread = Thread {
+        let thread = Thread { [weak self] in
             let scanner = SidecarFrameScanner()
             var buffer = [UInt8](repeating: 0, count: 16 * 1024)
             readLoop: while true {
@@ -203,8 +224,9 @@ actor FDVendingServer {
                     break readLoop
                 }
             }
-            Darwin.close(fd)   // reader owns the close
-            onExit?()
+            // Reader never closes: hop onto the actor, which clears clientFD (if
+            // still this fd) and performs the sole close, then fires the test hook.
+            Task { await self?.receiveLoopExited(fd: fd) }
         }
         thread.name = "fd-vending-receive"
         thread.stackSize = 256 * 1024

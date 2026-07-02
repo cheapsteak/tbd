@@ -177,6 +177,35 @@ struct FDVendingServerTests {
         #expect(panes.contains("%b"))
     }
 
+    @Test("after the app dies, the stale client fd is cleared so send refuses (no cross-fd write)")
+    func sendAfterAppDeathClearsStaleFD() async throws {
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+
+        // Deterministic teardown: the exit hook now fires AFTER the actor clears
+        // clientFD, so once it fires the stale fd is already gone.
+        let exited = SidecarInputCollector()
+        let server = FDVendingServer()
+        await server.setOnReceiveLoopExit {
+            exited.record(SidecarInputHeader(worktreeID: UUID(), paneID: ""), Data())
+        }
+        await server.adoptConnection(fd: serverSideFD)
+
+        Darwin.close(clientSideFD)   // app dies → reader sees EOF
+        #expect(await waitUntil { exited.count == 1 })
+
+        // A real payload fd to vend. The point: send() must REFUSE because the
+        // stale clientFD was cleared — NOT sendmsg() a vend frame into a closed
+        // or recycled fd number.
+        let (readFD, writeFD) = try makePipe()
+        defer { Darwin.close(readFD); Darwin.close(writeFD) }
+        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%stale", attachID: UUID()))
+        await #expect(throws: FDVendingServerError.notConnected) {
+            try await server.send(fd: readFD, header: header)
+        }
+
+        await server.stop()
+    }
+
     @Test("the receive loop exits when the client disconnects")
     func receiveLoopExitsOnDisconnect() async throws {
         let (serverSideFD, clientSideFD) = try makeSocketPair()
