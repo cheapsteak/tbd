@@ -23,17 +23,30 @@ struct TmuxControlModeBridge: Sendable {
     /// (spec, pane lifecycle: "App fails to send attach.ready within timeout
     /// (e.g. 5 s) → daemon cancels attach"). Injectable for tests.
     let readyTimeout: Duration
+    /// Routes app → daemon input frames to `send-keys -H` on the correct
+    /// server's FIFO correlator (M2.2). A reference type shared by every copy
+    /// of this (value) struct, so the daemon's `setOnInput` sink and the attach
+    /// handlers' register/unregister all touch the same router.
+    let inputRouter: ControlModeInputRouter
 
     init(supervisor: TmuxControlSupervisor,
          tmuxVersion: TmuxVersion?,
          environment: [String: String] = ProcessInfo.processInfo.environment,
          fdVending: FDVendingServer,
-         readyTimeout: Duration = .seconds(5)) {
+         readyTimeout: Duration = .seconds(5),
+         inputRouter: ControlModeInputRouter? = nil) {
         self.supervisor = supervisor
         self.tmuxVersion = tmuxVersion
         self.environment = environment
         self.fdVending = fdVending
         self.readyTimeout = readyTimeout
+        // Default-wire the router to this supervisor's correlators so callers
+        // (and tests) that don't care about input get a correctly-wired router
+        // for free; the daemon can still inject one it also holds a handle to.
+        self.inputRouter = inputRouter
+            ?? ControlModeInputRouter(commandProvider: { [supervisor] server in
+                await supervisor.command(server: server)
+            })
     }
 
     /// Open a logging-only `tmux -CC` connection for `serverName` when the

@@ -440,7 +440,15 @@ public final class Daemon: Sendable {
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
 
-        // 9a. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
+        // 9a. Install the app → daemon input sink BEFORE the sidecar listens:
+        // each adopted connection captures `onInput` at adopt time (M2.1
+        // contract), so wiring it after `listen` would miss the app's connect.
+        // The router is the bridge's (default-wired to `controlModeSupervisor`).
+        await fdVendingServer.setOnInput { [inputRouter = controlModeBridge.inputRouter] header, bytes in
+            inputRouter.enqueue(header: header, bytes: bytes)
+        }
+
+        // 9b. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
         // app). Failure is non-fatal: control-mode attaches will fail and the
         // app falls back to grouped sessions.
         do {

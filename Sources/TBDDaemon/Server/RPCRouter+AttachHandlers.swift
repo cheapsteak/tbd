@@ -34,6 +34,13 @@ extension RPCRouter {
             // with no producer: a permanently blank pane. Idempotent.
             await bridge.supervisor.ensureConnection(serverName: server)
             let (readFD, generation) = try await bridge.supervisor.attach(server: server, paneID: paneID)
+            // Route this pane's future input frames to `server`. Registered now
+            // (before the vend) so the vend-failure path can undo it alongside
+            // the fanout detach. The ready-timeout expiry deliberately does NOT
+            // unregister — it has no hook here, and it's harmless: input to a
+            // timed-out pane still resolves to the live tmux pane, and a
+            // re-attach overwrites this entry.
+            bridge.inputRouter.register(worktreeID: params.worktreeID, paneID: paneID, server: server)
             let header = try JSONEncoder().encode(
                 FDVendHeader(worktreeID: params.worktreeID, paneID: paneID, attachID: params.attachID))
             do {
@@ -41,6 +48,7 @@ extension RPCRouter {
             } catch {
                 // Vend failed — undo the attach so no orphan pipe lingers.
                 Darwin.close(readFD)
+                bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: paneID)
                 await bridge.supervisor.detach(server: server, paneID: paneID)
                 throw error
             }
@@ -88,6 +96,7 @@ extension RPCRouter {
         let params = try decoder.decode(PaneDetachParams.self, from: paramsData)
         if let bridge = controlMode,
            let worktree = try? await db.worktrees.get(id: params.worktreeID) {
+            bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: params.paneID)
             await bridge.supervisor.detach(server: worktree.tmuxServer, paneID: params.paneID)
         }
         return .ok()
