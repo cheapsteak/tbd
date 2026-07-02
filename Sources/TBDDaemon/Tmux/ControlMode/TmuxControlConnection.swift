@@ -71,7 +71,8 @@ final class TmuxControlConnection: @unchecked Sendable {
         process.terminationHandler = { [weak self] proc in
             self?.logger.info(
                 "tmux -CC connection for \(server, privacy: .public) exited, status \(proc.terminationStatus)")
-            self?.eventContinuation.finish()
+            // Do NOT finish() the event stream here — the reader thread finishes
+            // it after draining the final read() so no trailing %output is lost.
         }
 
         do {
@@ -98,30 +99,44 @@ final class TmuxControlConnection: @unchecked Sendable {
         thread.start()
     }
 
-    /// Stop the connection: terminate tmux, let the reader drain to EOF, then
-    /// close the pty and finish the stream.
+    /// Stop the connection: escalate SIGTERM → SIGKILL so the child always
+    /// releases the pty slave, then wait for the reader to observe EOF before
+    /// closing the primary fd.
     ///
     /// Order matters. Terminating tmux first makes the child release the pty
-    /// replica, which delivers EOF to the primary and lets the reader's blocked
+    /// slave, which delivers EOF to the primary and lets the reader's blocked
     /// `read()` return cleanly. Only then is it safe to `close()` the primary —
     /// closing it while the reader is still parked in `read()` would leak the
-    /// reader thread in an uninterruptible wait. `readerExited` (with a bounded
-    /// timeout so a misbehaving child can't hang `stop()` forever) gates the
-    /// close on the reader having actually left the syscall.
+    /// reader thread on Darwin. If tmux ignores SIGTERM for 500 ms, escalate to
+    /// SIGKILL (uncatchable — the child cannot resist it), then wait up to a
+    /// further 1.5 s for the reader to exit. `eventContinuation.finish()` is
+    /// called only by the reader thread at the end of `readLoop`, so any
+    /// trailing bytes decoded from the final `read()` are delivered first.
     func stop() {
         ioLock.lock()
         let fd = primaryFD
         primaryFD = -1
         ioLock.unlock()
 
-        if process.isRunning { process.terminate() }
-
-        if fd >= 0 {
-            // Wait for the reader to observe EOF before closing the fd.
-            _ = readerExited.wait(timeout: .now() + 2)
-            Darwin.close(fd)
+        if process.isRunning {
+            process.terminate()
+            if readerExited.wait(timeout: .now() + .milliseconds(500)) == .timedOut {
+                if process.isRunning {
+                    let pid = process.processIdentifier
+                    if pid > 0 {
+                        logger.info("escalating tmux -CC for \(self.serverName, privacy: .public) to SIGKILL after 500ms")
+                        kill(pid, SIGKILL)
+                    }
+                }
+                // Wait again even when the child exited during the first
+                // window: exit delivers EOF, but the reader may not have left
+                // `read()` yet, and closing the fd under a still-blocked
+                // reader is exactly the leak this dance avoids.
+                _ = readerExited.wait(timeout: .now() + .milliseconds(1500))
+            }
         }
-        eventContinuation.finish()
+
+        if fd >= 0 { Darwin.close(fd) }
     }
 
     /// Write a raw tmux command line to the control client's stdin.
