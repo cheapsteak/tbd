@@ -16,7 +16,8 @@ import os
 /// serialized. `parser` is touched exclusively by the reader thread. `primaryFD`
 /// is guarded by `ioLock`. `process` is fully configured in `start()` before
 /// `run()`; afterwards only `terminate()`/`isRunning` are used.
-/// `AsyncStream.Continuation` is itself thread-safe.
+/// `AsyncStream.Continuation` is itself thread-safe. `outputSink` must be set
+/// once BEFORE `start()` and is read only by the reader thread afterwards.
 final class TmuxControlConnection: @unchecked Sendable {
     let serverName: String
     private let tmuxBinary: String
@@ -34,6 +35,14 @@ final class TmuxControlConnection: @unchecked Sendable {
     /// in `read()` does NOT wake that thread, so the fd must only be closed
     /// after the reader has already left the syscall.
     private let readerExited = DispatchSemaphore(value: 0)
+
+    /// Fast-path consumer for render output. When set (BEFORE `start()`),
+    /// `.output`/`.extendedOutput` events are delivered synchronously on the
+    /// reader thread and NOT yielded into `events` — render bytes must not
+    /// queue behind the logging actor in an unbounded AsyncStream, and Phase
+    /// 6's EAGAIN-driven flow control needs writes to hit the pipe the moment
+    /// they are decoded.
+    var outputSink: (@Sendable (TmuxControlEvent) -> Void)?
 
     /// Stream of decoded protocol events. Finishes when the connection stops
     /// or the tmux process exits.
@@ -156,7 +165,12 @@ final class TmuxControlConnection: @unchecked Sendable {
             let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
             if count <= 0 { break }  // 0 = EOF, <0 = error (EIO when the child exits)
             for event in parser.feed(Data(buffer[0..<count])) {
-                eventContinuation.yield(event)
+                switch event {
+                case .output, .extendedOutput:
+                    if let sink = outputSink { sink(event) } else { eventContinuation.yield(event) }
+                default:
+                    eventContinuation.yield(event)
+                }
             }
         }
         // Unblock `stop()`: the reader has left `read()`, so the primary fd can

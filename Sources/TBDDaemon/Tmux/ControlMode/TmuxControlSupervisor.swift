@@ -7,12 +7,19 @@ import os
 actor TmuxControlSupervisor {
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
     private var connections: [String: TmuxControlConnection] = [:]
+    /// Shared per-daemon fanout. Reader threads call `route` directly; the
+    /// actor only mediates attach/ready/detach.
+    private let fanout = PaneFanout()
 
     /// Idempotently ensure a control connection exists for `serverName`.
     /// A no-op if one is already running.
     func ensureConnection(serverName: String) {
         guard connections[serverName] == nil else { return }
         let connection = TmuxControlConnection(serverName: serverName)
+        let fanout = self.fanout
+        connection.outputSink = { [fanout] event in
+            fanout.route(server: serverName, event: event)
+        }
         do {
             try connection.start()
         } catch {
@@ -29,6 +36,32 @@ actor TmuxControlSupervisor {
     func stopAll() {
         for connection in connections.values { connection.stop() }
         connections.removeAll()
+        fanout.closeAll()
+    }
+
+    /// Allocate a per-pane pipe in the fanout and return the read end for the
+    /// RPC layer to vend. The sink starts NOT ready — writes stay gated until
+    /// the app acks with `attach.ready`.
+    func attach(server: String, paneID: String) throws -> Int32 {
+        try fanout.attach(key: PaneKey(server: server, paneID: paneID))
+    }
+
+    func markReady(server: String, paneID: String) {
+        fanout.markReady(key: PaneKey(server: server, paneID: paneID))
+    }
+
+    func isReady(server: String, paneID: String) -> Bool {
+        fanout.isReady(key: PaneKey(server: server, paneID: paneID))
+    }
+
+    func detach(server: String, paneID: String) {
+        fanout.detach(key: PaneKey(server: server, paneID: paneID))
+    }
+
+    /// Cancel an attach the app never acked (spec: 5 s ready timeout).
+    func detachIfNotReady(server: String, paneID: String) {
+        let key = PaneKey(server: server, paneID: paneID)
+        if !fanout.isReady(key: key) { fanout.detach(key: key) }
     }
 
     private func drain(serverName: String, connection: TmuxControlConnection) async {
