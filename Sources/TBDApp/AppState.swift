@@ -507,6 +507,10 @@ final class AppState: ObservableObject {
 
     let daemonClient = DaemonClient()
     let tmuxBridge = TmuxBridge()
+    /// App-scoped owner of control-mode stream readers (Phase 2 FD vending).
+    /// Lives here — not on any view — so SwiftUI view destruction cannot tear
+    /// down an active reader. Keyed by `FDVendHeader.routingKey`.
+    let controlModeReaders = ControlModeReaderRegistry()
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     private var pollTimer: Timer?
