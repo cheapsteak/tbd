@@ -31,8 +31,8 @@ struct FDSidecarClientTests {
         return (fds[0], fds[1])
     }
 
-    private func vend(readFD: Int32, worktreeID: UUID, paneID: String, over socket: Int32) throws {
-        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: worktreeID, paneID: paneID))
+    private func vend(readFD: Int32, worktreeID: UUID, paneID: String, attachID: UUID, over socket: Int32) throws {
+        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: worktreeID, paneID: paneID, attachID: attachID))
         try FDChannel.sendFD(readFD, over: socket, header: header)
         Darwin.close(readFD)
     }
@@ -45,11 +45,12 @@ struct FDSidecarClientTests {
         client.adopt(fd: appSide)
 
         let worktreeID = UUID()
-        let promise = client.expectFD(worktreeID: worktreeID, paneID: "%1")
+        let attachID = UUID()
+        let promise = client.expectFD(worktreeID: worktreeID, paneID: "%1", attachID: attachID)
 
         let (readFD, writeFD) = try makePipe()
         defer { Darwin.close(writeFD) }
-        try vend(readFD: readFD, worktreeID: worktreeID, paneID: "%1", over: daemonSide)
+        try vend(readFD: readFD, worktreeID: worktreeID, paneID: "%1", attachID: attachID, over: daemonSide)
 
         let rxFD = try await promise.value(timeout: .seconds(2))
         defer { Darwin.close(rxFD) }
@@ -70,8 +71,10 @@ struct FDSidecarClientTests {
 
         let worktreeID = UUID()
         // Register A first, B second…
-        let promiseA = client.expectFD(worktreeID: worktreeID, paneID: "%A")
-        let promiseB = client.expectFD(worktreeID: worktreeID, paneID: "%B")
+        let attachA = UUID()
+        let attachB = UUID()
+        let promiseA = client.expectFD(worktreeID: worktreeID, paneID: "%A", attachID: attachA)
+        let promiseB = client.expectFD(worktreeID: worktreeID, paneID: "%B", attachID: attachB)
 
         let (readA, writeA) = try makePipe()
         let (readB, writeB) = try makePipe()
@@ -80,8 +83,8 @@ struct FDSidecarClientTests {
         _ = Data("for-B".utf8).withUnsafeBytes { Darwin.write(writeB, $0.baseAddress, $0.count) }
 
         // …but vend B first, then A (reverse order).
-        try vend(readFD: readB, worktreeID: worktreeID, paneID: "%B", over: daemonSide)
-        try vend(readFD: readA, worktreeID: worktreeID, paneID: "%A", over: daemonSide)
+        try vend(readFD: readB, worktreeID: worktreeID, paneID: "%B", attachID: attachB, over: daemonSide)
+        try vend(readFD: readA, worktreeID: worktreeID, paneID: "%A", attachID: attachA, over: daemonSide)
 
         let rxA = try await promiseA.value(timeout: .seconds(2))
         let rxB = try await promiseB.value(timeout: .seconds(2))
@@ -102,7 +105,8 @@ struct FDSidecarClientTests {
         client.adopt(fd: appSide)
 
         let worktreeID = UUID()
-        let promise = client.expectFD(worktreeID: worktreeID, paneID: "%9")
+        let attachID = UUID()
+        let promise = client.expectFD(worktreeID: worktreeID, paneID: "%9", attachID: attachID)
 
         await #expect(throws: FDSidecarError.self) {
             _ = try await promise.value(timeout: .milliseconds(100))
@@ -112,7 +116,7 @@ struct FDSidecarClientTests {
         // the unmatched fd without crashing.
         let (readFD, writeFD) = try makePipe()
         defer { Darwin.close(writeFD) }
-        try vend(readFD: readFD, worktreeID: worktreeID, paneID: "%9", over: daemonSide)
+        try vend(readFD: readFD, worktreeID: worktreeID, paneID: "%9", attachID: attachID, over: daemonSide)
         try await Task.sleep(for: .milliseconds(200))
         // Reaching here without a crash is the assertion; the client stays usable.
         #expect(client.isConnected)
@@ -124,7 +128,7 @@ struct FDSidecarClientTests {
         let client = FDSidecarClient()
         client.adopt(fd: appSide)
 
-        let promise = client.expectFD(worktreeID: UUID(), paneID: "%3")
+        let promise = client.expectFD(worktreeID: UUID(), paneID: "%3", attachID: UUID())
         Darwin.close(daemonSide)   // daemon goes away
 
         await #expect(throws: FDSidecarError.self) {

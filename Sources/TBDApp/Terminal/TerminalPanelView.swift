@@ -558,10 +558,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             windowID: String,
             panelID: UUID
         ) async {
+            // Reader-registry key: one reader per PANE (worktree/pane), not per
+            // attach — a re-attach replaces the pane's reader. Distinct from
+            // the sidecar's per-request demux key, which also carries the
+            // attach nonce.
+            let routingKey = "\(worktreeID.uuidString)/\(paneID)"
             do {
                 let fd = try await appState.daemonClient.openAttach(
                     worktreeID: worktreeID, paneID: paneID, windowID: windowID)
-                let routingKey = FDVendHeader(worktreeID: worktreeID, paneID: paneID).routingKey
                 controlModeAttach = (worktreeID, paneID, routingKey)
                 let weakTV = WeakTerminalRef(terminalView)
                 await appState.controlModeReaders.registerReader(
@@ -579,6 +583,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     falling back to grouped sessions: \(error.localizedDescription, privacy: .public)
                     """)
                 controlModeAttach = nil
+                // Best-effort teardown of any half-completed attach (e.g. fd
+                // received and reader registered, but attach.ready failed):
+                // detach so the daemon EOFs the pipe, then flag the reader.
+                Task {
+                    try? await appState.daemonClient.paneDetach(worktreeID: worktreeID, paneID: paneID)
+                    await appState.controlModeReaders.remove(routingKey: routingKey)
+                }
                 await startTmuxClient(
                     terminalView: terminalView,
                     bridge: bridge,

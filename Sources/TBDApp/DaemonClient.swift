@@ -737,10 +737,13 @@ actor DaemonClient {
 
     /// Request a control-mode attach for one pane; the fd arrives separately
     /// on the sidecar (see `openAttach`).
-    func attachRequest(worktreeID: UUID, paneID: String, windowID: String) async throws -> AttachRequestResult {
+    func attachRequest(
+        worktreeID: UUID, paneID: String, windowID: String, attachID: UUID
+    ) async throws -> AttachRequestResult {
         try await callAsync(
             method: RPCMethod.attachRequest,
-            params: AttachRequestParams(worktreeID: worktreeID, paneID: paneID, windowID: windowID),
+            params: AttachRequestParams(
+                worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID),
             resultType: AttachRequestResult.self
         )
     }
@@ -754,9 +757,13 @@ actor DaemonClient {
     /// demux (`FDSidecarClient`) is what keeps concurrent attaches for
     /// different panes from cross-delivering fds.
     func openAttach(worktreeID: UUID, paneID: String, windowID: String) async throws -> Int32 {
-        let promise = fdSidecar.expectFD(worktreeID: worktreeID, paneID: paneID)
+        // Fresh nonce per attach: the daemon echoes it in the vend header, so
+        // a superseded attach's stale fd can never be delivered to this one.
+        let attachID = UUID()
+        let promise = fdSidecar.expectFD(worktreeID: worktreeID, paneID: paneID, attachID: attachID)
         do {
-            let result = try await attachRequest(worktreeID: worktreeID, paneID: paneID, windowID: windowID)
+            let result = try await attachRequest(
+                worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID)
             guard result.status == "pending" else {
                 promise.cancel()
                 throw DaemonClientError.attachUnavailable(result.status)

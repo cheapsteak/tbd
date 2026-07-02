@@ -44,7 +44,7 @@ struct AttachRPCStubTests {
         let worktreeID = try await makeWorktree(in: db)
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
-            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%0", windowID: "@0"))
+            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%0", windowID: "@0", attachID: UUID()))
         let response = await router.handle(request)
         #expect(response.success)
         let result = try response.decodeResult(AttachRequestResult.self)
@@ -144,7 +144,7 @@ struct AttachRPCOrchestrationTests {
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
-            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%1", windowID: "@1"))
+            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%1", windowID: "@1", attachID: UUID()))
         let response = await router.handle(request)
         #expect(response.success)
         let result = try response.decodeResult(AttachRequestResult.self)
@@ -173,7 +173,7 @@ struct AttachRPCOrchestrationTests {
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
-            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%2", windowID: "@2"))
+            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%2", windowID: "@2", attachID: UUID()))
         let response = await router.handle(request)
         let result = try response.decodeResult(AttachRequestResult.self)
         #expect(result.status == "unavailable")
@@ -192,7 +192,7 @@ struct AttachRPCOrchestrationTests {
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
-            params: AttachRequestParams(worktreeID: UUID(), paneID: "%9", windowID: "@9"))
+            params: AttachRequestParams(worktreeID: UUID(), paneID: "%9", windowID: "@9", attachID: UUID()))
         let response = await router.handle(request)
         #expect(!response.success)
     }
@@ -212,7 +212,7 @@ struct AttachRPCOrchestrationTests {
 
         let request = try RPCRequest(
             method: RPCMethod.attachRequest,
-            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%5", windowID: "@5"))
+            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%5", windowID: "@5", attachID: UUID()))
         _ = await router.handle(request)
 
         let (rxFD, _) = try FDChannel.receiveFD(from: clientSide, headerCapacity: 256)
@@ -240,7 +240,7 @@ struct AttachRPCOrchestrationTests {
 
         let attach = try RPCRequest(
             method: RPCMethod.attachRequest,
-            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%7", windowID: "@7"))
+            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%7", windowID: "@7", attachID: UUID()))
         _ = await router.handle(attach)
         let (rxFD, _) = try FDChannel.receiveFD(from: clientSide, headerCapacity: 256)
         defer { Darwin.close(rxFD) }

@@ -68,12 +68,13 @@ final class FDSidecarClient: @unchecked Sendable {
         thread.start()
     }
 
-    /// Register interest in the fd for (worktreeID, paneID) and return a
-    /// promise. Registration is SYNCHRONOUS — call this BEFORE issuing
-    /// `attach.request`, so the vended fd can never race past the waiter.
-    /// A second expectation for the same key supersedes (fails) the first.
-    func expectFD(worktreeID: UUID, paneID: String) -> FDPromise {
-        let key = FDVendHeader(worktreeID: worktreeID, paneID: paneID).routingKey
+    /// Register interest in the fd for (worktreeID, paneID, attachID) and
+    /// return a promise. Registration is SYNCHRONOUS — call this BEFORE
+    /// issuing `attach.request`, so the vended fd can never race past the
+    /// waiter. The attachID nonce makes the key unique per request, so two
+    /// in-flight attaches for the same pane each get exactly their own fd.
+    func expectFD(worktreeID: UUID, paneID: String, attachID: UUID) -> FDPromise {
+        let key = FDVendHeader(worktreeID: worktreeID, paneID: paneID, attachID: attachID).routingKey
         let promise = FDPromise()
         lock.lock()
         let old = waiters[key]

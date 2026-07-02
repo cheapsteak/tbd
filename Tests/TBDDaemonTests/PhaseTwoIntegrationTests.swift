@@ -68,13 +68,13 @@ struct PhaseTwoIntegrationTests {
         await supervisor.ensureConnection(serverName: server)
         try await Task.sleep(for: .milliseconds(300))  // let the -CC connection settle
 
-        let readFD = try await supervisor.attach(server: server, paneID: paneID)
+        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
 
         let (daemonSideSocket, appSideSocket) = try makeSocketPair()
         defer { Darwin.close(appSideSocket) }
         let vending = FDVendingServer()
         await vending.adoptConnection(fd: daemonSideSocket)
-        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: paneID))
+        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: paneID, attachID: UUID()))
         try await vending.send(fd: readFD, header: header)
         Darwin.close(readFD)  // daemon can drop its copy
 

@@ -74,7 +74,7 @@ struct FDVendingServerTests {
         }
         let (readFD, writeFD) = (pipeFDs[0], pipeFDs[1])
 
-        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%42"))
+        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%42", attachID: UUID()))
         try await server.send(fd: readFD, header: header)
         Darwin.close(readFD)
 

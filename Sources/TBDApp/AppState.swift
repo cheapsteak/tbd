@@ -1057,6 +1057,12 @@ final class AppState: ObservableObject {
         let didConnect = await daemonClient.connect()
         isConnected = didConnect
         if didConnect {
+            // Fetch capabilities BEFORE refreshAll: terminal views are created
+            // as soon as worktree/terminal state lands, and each view decides
+            // grouped-sessions vs control-mode at creation time. Fetching
+            // afterwards would leave every initially-rendered pane on the
+            // grouped path even when the control-mode gate is on.
+            daemonCapabilities = try? await daemonClient.daemonCapabilities()
             await refreshAll()
             // Restore persisted selection before notifying the daemon — the RPC
             // below captures `selectedWorktreeIDs` so the daemon learns the real
@@ -1078,7 +1084,6 @@ final class AppState: ObservableObject {
             startSubscription()
             await refreshPRStatuses()
             pushClaudeSpawnPreferences()
-            daemonCapabilities = try? await daemonClient.daemonCapabilities()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }

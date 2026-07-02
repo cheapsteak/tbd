@@ -12,7 +12,7 @@ struct PaneFanoutTests {
     func attachedReadyPaneReceivesOutput() throws {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%42")
-        let readFD = try fanout.attach(key: key)
+        let (readFD, _) = try fanout.attach(key: key)
         defer { Darwin.close(readFD) }
         fanout.markReady(key: key)
 
@@ -27,7 +27,7 @@ struct PaneFanoutTests {
     func outputGatedOnReady() throws {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%3")
-        let readFD = try fanout.attach(key: key)
+        let (readFD, _) = try fanout.attach(key: key)
         defer { Darwin.close(readFD) }
 
         fanout.route(server: server, event: .output(paneID: "%3", bytes: Data("early".utf8)))
@@ -44,9 +44,9 @@ struct PaneFanoutTests {
         let fanout = PaneFanout()
         let keyA = PaneKey(server: "server-a", paneID: "%0")
         let keyB = PaneKey(server: "server-b", paneID: "%0")
-        let readA = try fanout.attach(key: keyA)
+        let (readA, _) = try fanout.attach(key: keyA)
         defer { Darwin.close(readA) }
-        let readB = try fanout.attach(key: keyB)
+        let (readB, _) = try fanout.attach(key: keyB)
         defer { Darwin.close(readB) }
         fanout.markReady(key: keyA)
         fanout.markReady(key: keyB)
@@ -67,7 +67,7 @@ struct PaneFanoutTests {
     func detachClosesPipe() throws {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%42")
-        let readFD = try fanout.attach(key: key)
+        let (readFD, _) = try fanout.attach(key: key)
         defer { Darwin.close(readFD) }
 
         fanout.detach(key: key)
@@ -85,11 +85,42 @@ struct PaneFanoutTests {
         #expect(true)
     }
 
+    @Test("a stale ready-timeout from a superseded attach does not kill the fresh attach")
+    func staleTimeoutIsGenerationScoped() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%11")
+
+        // Attach #1 (its ready-timeout timer would hold generation g1)…
+        let (read1, gen1) = try fanout.attach(key: key)
+        defer { Darwin.close(read1) }
+        // …superseded by attach #2 before #1's timer fires.
+        let (read2, gen2) = try fanout.attach(key: key)
+        defer { Darwin.close(read2) }
+        #expect(gen2 > gen1)
+
+        // #1's stale timer fires while #2 is still un-acked: must be a no-op.
+        fanout.detachIfNotReady(key: key, generation: gen1)
+        fanout.markReady(key: key)
+        fanout.route(server: server, event: .output(paneID: "%11", bytes: Data("alive".utf8)))
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let count = buffer.withUnsafeMutableBytes { Darwin.read(read2, $0.baseAddress, $0.count) }
+        #expect(Data(buffer[0..<Int(count)]) == Data("alive".utf8), "fresh attach must survive the stale timer")
+
+        // A CURRENT-generation timer on an un-acked sink still tears down.
+        let key2 = PaneKey(server: server, paneID: "%12")
+        let (read3, gen3) = try fanout.attach(key: key2)
+        defer { Darwin.close(read3) }
+        fanout.detachIfNotReady(key: key2, generation: gen3)
+        var eofBuffer = [UInt8](repeating: 0, count: 8)
+        let eof = eofBuffer.withUnsafeMutableBytes { Darwin.read(read3, $0.baseAddress, $0.count) }
+        #expect(eof == 0, "un-acked attach with a live timer must be torn down (EOF)")
+    }
+
     @Test("a chunk larger than the pipe buffer delivers an intact prefix and drops the rest")
     func partialWriteDropsTailNotMiddle() throws {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%7")
-        let readFD = try fanout.attach(key: key)
+        let (readFD, _) = try fanout.attach(key: key)
         defer { Darwin.close(readFD) }
         fanout.markReady(key: key)
 
@@ -118,7 +149,7 @@ struct TmuxControlSupervisorAttachTests {
     @Test("supervisor wrappers delegate to the fanout")
     func wrappersDelegate() async throws {
         let supervisor = TmuxControlSupervisor()
-        let readFD = try await supervisor.attach(server: "srv", paneID: "%1")
+        let (readFD, _) = try await supervisor.attach(server: "srv", paneID: "%1")
         defer { Darwin.close(readFD) }
         #expect(await supervisor.isReady(server: "srv", paneID: "%1") == false)
         await supervisor.markReady(server: "srv", paneID: "%1")

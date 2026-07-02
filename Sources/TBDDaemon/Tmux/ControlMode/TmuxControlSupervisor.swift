@@ -40,9 +40,10 @@ actor TmuxControlSupervisor {
     }
 
     /// Allocate a per-pane pipe in the fanout and return the read end for the
-    /// RPC layer to vend. The sink starts NOT ready — writes stay gated until
-    /// the app acks with `attach.ready`.
-    func attach(server: String, paneID: String) throws -> Int32 {
+    /// RPC layer to vend, plus the attach's generation (for the ready-timeout
+    /// cancel). The sink starts NOT ready — writes stay gated until the app
+    /// acks with `attach.ready`.
+    func attach(server: String, paneID: String) throws -> (readFD: Int32, generation: UInt64) {
         try fanout.attach(key: PaneKey(server: server, paneID: paneID))
     }
 
@@ -59,9 +60,9 @@ actor TmuxControlSupervisor {
     }
 
     /// Cancel an attach the app never acked (spec: 5 s ready timeout).
-    func detachIfNotReady(server: String, paneID: String) {
-        let key = PaneKey(server: server, paneID: paneID)
-        if !fanout.isReady(key: key) { fanout.detach(key: key) }
+    /// Generation-scoped: a stale timer from a superseded attach is a no-op.
+    func detachIfNotReady(server: String, paneID: String, generation: UInt64) {
+        fanout.detachIfNotReady(key: PaneKey(server: server, paneID: paneID), generation: generation)
     }
 
     private func drain(serverName: String, connection: TmuxControlConnection) async {

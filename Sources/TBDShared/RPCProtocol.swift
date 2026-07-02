@@ -885,10 +885,17 @@ public struct AttachRequestParams: Codable, Sendable {
     public let worktreeID: UUID
     public let paneID: String
     public let windowID: String
-    public init(worktreeID: UUID, paneID: String, windowID: String) {
+    /// Per-request nonce minted by the app and echoed back in the vend
+    /// header, so the app's sidecar demux can tell two in-flight attaches for
+    /// the SAME pane apart (the daemon replaces the pane's pipe on re-attach;
+    /// without the nonce, the superseded attach's dead fd could be delivered
+    /// to the fresh attach's waiter if it arrived first).
+    public let attachID: UUID
+    public init(worktreeID: UUID, paneID: String, windowID: String, attachID: UUID) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.windowID = windowID
+        self.attachID = attachID
     }
 }
 

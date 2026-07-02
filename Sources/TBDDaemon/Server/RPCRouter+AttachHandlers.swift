@@ -26,9 +26,9 @@ extension RPCRouter {
         let server = worktree.tmuxServer
         let paneID = params.paneID
         do {
-            let readFD = try await bridge.supervisor.attach(server: server, paneID: paneID)
+            let (readFD, generation) = try await bridge.supervisor.attach(server: server, paneID: paneID)
             let header = try JSONEncoder().encode(
-                FDVendHeader(worktreeID: params.worktreeID, paneID: paneID))
+                FDVendHeader(worktreeID: params.worktreeID, paneID: paneID, attachID: params.attachID))
             do {
                 try await bridge.fdVending.send(fd: readFD, header: header)
             } catch {
@@ -43,10 +43,12 @@ extension RPCRouter {
             // Spec (pane lifecycle): "App fails to send attach.ready within
             // timeout (e.g. 5 s) → daemon cancels attach" — otherwise an app
             // that died mid-attach leaks the pipe and a permanently-gated sink.
+            // Generation-scoped so a timer outliving a superseded attach can't
+            // kill the fresh attach that replaced it.
             let timeout = bridge.readyTimeout
             Task { [supervisor = bridge.supervisor] in
                 try? await Task.sleep(for: timeout)
-                await supervisor.detachIfNotReady(server: server, paneID: paneID)
+                await supervisor.detachIfNotReady(server: server, paneID: paneID, generation: generation)
             }
             return try RPCResponse(result: AttachRequestResult(status: "pending"))
         } catch {
