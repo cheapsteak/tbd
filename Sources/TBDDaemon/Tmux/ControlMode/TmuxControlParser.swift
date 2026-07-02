@@ -12,7 +12,8 @@ final class TmuxControlParser {
     private var lineBuffer = Data()
 
     /// When inside a `%begin`…`%end`/`%error` block, the in-progress block.
-    private var openBlock: (number: Int, lines: [String])?
+    /// `fromClient` is bit 0 of the `%begin` flags field (see `parseLine`).
+    private var openBlock: (number: Int, fromClient: Bool, lines: [String])?
 
     /// Feed raw stdout bytes; returns events completed by this chunk.
     func feed(_ data: Data) -> [TmuxControlEvent] {
@@ -51,7 +52,11 @@ final class TmuxControlParser {
         case "%extended-output":
             return parseExtendedOutput(fields: fields, line: line)
         case "%begin":
-            openBlock = (number: fields.count >= 3 ? (Int(fields[2]) ?? -1) : -1, lines: [])
+            // `%begin <time> <number> <flags>`; flags bit 0 = replies to a
+            // command this client wrote (missing/malformed → not from client).
+            let fromClient = fields.count >= 4 ? ((Int(fields[3]) ?? 0) & 1) == 1 : false
+            openBlock = (number: fields.count >= 3 ? (Int(fields[2]) ?? -1) : -1,
+                         fromClient: fromClient, lines: [])
             return nil
         case "%window-add":
             return fields.count >= 2 ? .windowAdd(windowID: fields[1]) : .unhandled(line: line)
@@ -107,7 +112,7 @@ final class TmuxControlParser {
         let block = openBlock!
         openBlock = nil
         return line == "%end" || line.hasPrefix("%end ")
-            ? .commandSucceeded(number: block.number, lines: block.lines)
-            : .commandFailed(number: block.number, lines: block.lines)
+            ? .commandSucceeded(number: block.number, fromClient: block.fromClient, lines: block.lines)
+            : .commandFailed(number: block.number, fromClient: block.fromClient, lines: block.lines)
     }
 }

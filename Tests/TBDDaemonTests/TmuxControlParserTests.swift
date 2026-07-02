@@ -97,29 +97,51 @@ struct TmuxControlParserBlockTests {
     @Test("collects a successful command block's lines")
     func successBlock() {
         let events = feed("%begin 123 7 0\nline one\nline two\n%end 123 7 0\n")
-        #expect(events == [.commandSucceeded(number: 7, lines: ["line one", "line two"])])
+        #expect(events == [.commandSucceeded(number: 7, fromClient: false, lines: ["line one", "line two"])])
     }
 
     @Test("reports a failed command block")
     func errorBlock() {
         let events = feed("%begin 1 2 0\nbad command\n%error 1 2 0\n")
-        #expect(events == [.commandFailed(number: 2, lines: ["bad command"])])
+        #expect(events == [.commandFailed(number: 2, fromClient: false, lines: ["bad command"])])
     }
 
     @Test("handles an empty command block")
     func emptyBlock() {
-        #expect(feed("%begin 1 3 0\n%end 1 3 0\n") == [.commandSucceeded(number: 3, lines: [])])
+        #expect(feed("%begin 1 3 0\n%end 1 3 0\n") == [.commandSucceeded(number: 3, fromClient: false, lines: [])])
     }
 
     @Test("closes a block on a bare %end line with no trailing fields")
     func bareEndLine() {
-        #expect(feed("%begin 1 5 0\nx\n%end\n") == [.commandSucceeded(number: 5, lines: ["x"])])
+        #expect(feed("%begin 1 5 0\nx\n%end\n") == [.commandSucceeded(number: 5, fromClient: false, lines: ["x"])])
     }
 
     @Test("emits a notification that follows a block")
     func blockThenNotification() {
         let events = feed("%begin 1 4 0\nx\n%end 1 4 0\n%window-add @9\n")
-        #expect(events == [.commandSucceeded(number: 4, lines: ["x"]),
+        #expect(events == [.commandSucceeded(number: 4, fromClient: false, lines: ["x"]),
                            .windowAdd(windowID: "@9")])
+    }
+
+    // The `%begin` flags field (4th token) is a bitmask; bit 0 set means the
+    // block replies to a command THIS control client wrote. The attach greeting
+    // (and any server-originated block) carries flags 0 → fromClient: false.
+
+    @Test("marks a client-originated success block via the flags bit")
+    func successBlockFromClient() {
+        let events = feed("%begin 1 8 1\nok\n%end 1 8 1\n")
+        #expect(events == [.commandSucceeded(number: 8, fromClient: true, lines: ["ok"])])
+    }
+
+    @Test("marks a client-originated error block via the flags bit")
+    func errorBlockFromClient() {
+        let events = feed("%begin 1 9 1\nnope\n%error 1 9 1\n")
+        #expect(events == [.commandFailed(number: 9, fromClient: true, lines: ["nope"])])
+    }
+
+    @Test("treats a missing flags field as not-from-client")
+    func missingFlagsIsNotFromClient() {
+        let events = feed("%begin 1 6\nx\n%end\n")
+        #expect(events == [.commandSucceeded(number: 6, fromClient: false, lines: ["x"])])
     }
 }
