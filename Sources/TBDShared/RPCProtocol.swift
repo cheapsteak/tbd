@@ -112,6 +112,7 @@ public enum RPCMethod {
     public static let attachRequest = "attach.request"
     public static let attachReady = "attach.ready"
     public static let paneDetach = "pane.detach"
+    public static let panePaste = "pane.paste"
     public static let daemonCapabilities = "daemon.capabilities"
     public static let terminalRecreateWindow = "terminal.recreateWindow"
     public static let noteCreate = "note.create"
@@ -1175,6 +1176,24 @@ public struct PaneDetachParams: Codable, Sendable {
     public init(worktreeID: UUID, paneID: String) {
         self.worktreeID = worktreeID
         self.paneID = paneID
+    }
+}
+
+/// Params for `pane.paste` — a bulk paste (> the app's keystroke threshold)
+/// for a control-mode pane. `bytes` already carries the app's own
+/// bracketed-paste markers when the pane enabled them, so the daemon pastes
+/// WITHOUT `-p` (no double-wrap). `Data` encodes as base64 in the JSON params.
+public struct PanePasteParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let paneID: String
+    public let bytes: Data
+    /// Sanity cap — a paste larger than this is rejected before touching tmux
+    /// (matches the sidecar scanner's spirit; guards against a runaway payload).
+    public static let maxBytes = 8 * 1024 * 1024
+    public init(worktreeID: UUID, paneID: String, bytes: Data) {
+        self.worktreeID = worktreeID
+        self.paneID = paneID
+        self.bytes = bytes
     }
 }
 

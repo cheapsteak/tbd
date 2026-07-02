@@ -660,8 +660,29 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // MARK: - TerminalViewDelegate
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            // Interrupt detection (Ctrl-C / Esc) must keep working in every
+            // path, so run it FIRST regardless of where the bytes go next.
             handleOutgoingInput(data)
-            localProcess?.send(data: data)
+            switch OutgoingInputRoute.decide(
+                controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
+            case .localPTY:
+                localProcess?.send(data: data)
+            case .sidecarInput:
+                guard let attach = controlModeAttach else { return }
+                appState?.daemonClient.fdSidecar.sendInput(
+                    worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: Data(data))
+            case .pasteRPC:
+                guard let attach = controlModeAttach else { return }
+                // Bulk pastes ride the RPC socket (load-buffer + paste-buffer),
+                // not the keystroke sidecar. A keystroke typed in the same
+                // instant travels the sidecar and can overtake this paste — two
+                // channels, no cross-channel ordering. Accepted by the
+                // addendum's design: pastes are not keystroke-latency-sensitive.
+                Task { [weak appState] in
+                    try? await appState?.daemonClient.panePaste(
+                        worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: Data(data))
+                }
+            }
         }
 
         func handleOutgoingInput(_ data: ArraySlice<UInt8>) {

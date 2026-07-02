@@ -101,4 +101,36 @@ extension RPCRouter {
         }
         return .ok()
     }
+
+    /// Handle `pane.paste`: deliver a bulk paste to a control-mode pane over the
+    /// `-CC` stream via `PasteExecutor`. Mirrors `handlePaneDetach`'s gating,
+    /// but a paste is a request the app awaits, so failures are surfaced as
+    /// error responses rather than swallowed.
+    func handlePanePaste(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(PanePasteParams.self, from: paramsData)
+        // Sanity cap before touching the filesystem or tmux.
+        guard params.bytes.count <= PanePasteParams.maxBytes else {
+            return RPCResponse(error: "paste too large: \(params.bytes.count) bytes")
+        }
+        guard let bridge = controlMode else {
+            return RPCResponse(error: "control mode not configured")
+        }
+        guard let worktree = try? await db.worktrees.get(id: params.worktreeID) else {
+            return RPCResponse(error: "Worktree not found")
+        }
+        let server = worktree.tmuxServer
+        guard let client = await bridge.supervisor.command(server: server) else {
+            return RPCResponse(error: "control-mode connection not up")
+        }
+        do {
+            try await PasteExecutor.paste(client: client, paneID: params.paneID, bytes: params.bytes)
+            return .ok()
+        } catch {
+            logger.error("""
+                pane.paste failed for \(server, privacy: .public)/\(params.paneID, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            return RPCResponse(error: "paste failed: \(error.localizedDescription)")
+        }
+    }
 }

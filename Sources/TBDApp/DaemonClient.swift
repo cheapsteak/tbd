@@ -860,6 +860,18 @@ actor DaemonClient {
         )
     }
 
+    /// Deliver a bulk paste for a control-mode pane. The daemon writes the
+    /// bytes into a tmux buffer and `paste-buffer`s them into the pane (no
+    /// `-p`: `bytes` already carries the app's bracketed-paste markers when the
+    /// pane enabled them). Larger than the keystroke threshold; not
+    /// latency-sensitive, so it rides the ordinary RPC socket.
+    func panePaste(worktreeID: UUID, paneID: String, bytes: Data) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.panePaste,
+            params: PanePasteParams(worktreeID: worktreeID, paneID: paneID, bytes: bytes)
+        )
+    }
+
     /// Fetch daemon feature flags (e.g. whether the tmux control-mode gate is
     /// on). The app cannot read the daemon's env itself — it is launched via
     /// `open`, which drops shell env.
