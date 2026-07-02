@@ -7,6 +7,9 @@ import os
 actor TmuxControlSupervisor {
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
     private var connections: [String: TmuxControlConnection] = [:]
+    /// One FIFO command correlator per connection, keyed by server. Fed the
+    /// connection's `.commandSucceeded`/`.commandFailed` events by `drain`.
+    private var commandClients: [String: TmuxControlCommandClient] = [:]
     /// Shared per-daemon fanout. Reader threads call `route` directly; the
     /// actor only mediates attach/ready/detach.
     private let fanout = PaneFanout()
@@ -27,6 +30,15 @@ actor TmuxControlSupervisor {
             return
         }
         connections[serverName] = connection
+        // Commands for this connection are correlated FIFO through the client.
+        // `writeLine` funnels to the connection's stdin writer (which appends
+        // the newline); `onFatalError` tears the connection down on a protocol
+        // violation — hopped onto this actor because `stop()` must run here.
+        commandClients[serverName] = TmuxControlCommandClient(
+            writeLine: { [connection] line in connection.sendCommand(line) },
+            onFatalError: { [weak self] in
+                Task { await self?.teardownConnection(serverName: serverName, connection: connection) }
+            })
         Task { [weak self] in
             await self?.drain(serverName: serverName, connection: connection)
         }
@@ -36,7 +48,27 @@ actor TmuxControlSupervisor {
     func stopAll() {
         for connection in connections.values { connection.stop() }
         connections.removeAll()
+        let clients = commandClients
+        commandClients.removeAll()
+        for client in clients.values {
+            Task { await client.connectionClosed() }  // fail any pending sends
+        }
         fanout.closeAll()
+    }
+
+    /// The FIFO command correlator for `server`, if a connection is up. Used by
+    /// the RPC layer / attach orchestrator to issue commands over the stream.
+    func command(server: String) -> TmuxControlCommandClient? {
+        commandClients[server]
+    }
+
+    /// Tear a connection down after a fatal correlator violation. Guarded on
+    /// identity so a stale callback from a superseded connection is a no-op.
+    /// `stop()` ends the event stream, so `drain` performs the client cleanup.
+    private func teardownConnection(serverName: String, connection: TmuxControlConnection) {
+        guard connections[serverName] === connection else { return }
+        logger.error("tearing down tmux -CC connection for \(serverName, privacy: .public) after correlator fault")
+        connection.stop()
     }
 
     /// Allocate a per-pane pipe in the fanout and return the read end for the
@@ -66,10 +98,21 @@ actor TmuxControlSupervisor {
     }
 
     private func drain(serverName: String, connection: TmuxControlConnection) async {
+        let client = commandClients[serverName]
         for await event in connection.events {
+            // Command reply blocks stop at the correlator; keep the one-line
+            // summary log for diagnostics. Everything else logs as before.
             log(event, serverName: serverName)
+            switch event {
+            case .commandSucceeded, .commandFailed:
+                await client?.handle(event)
+            default:
+                break
+            }
         }
         connections[serverName] = nil
+        commandClients[serverName] = nil
+        await client?.connectionClosed()  // fail any pending sends
         logger.info("tmux -CC event stream ended for \(serverName, privacy: .public)")
     }
 
