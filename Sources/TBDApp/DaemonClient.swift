@@ -18,6 +18,7 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
     case receiveFailed(String)
     case invalidResponse
     case rpcError(String)
+    case attachUnavailable(String)
 
     var description: String {
         switch self {
@@ -33,6 +34,8 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
             return "Invalid response from daemon"
         case .rpcError(let msg):
             return "RPC error: \(msg)"
+        case .attachUnavailable(let status):
+            return "Control-mode attach unavailable (status: \(status))"
         }
     }
 
@@ -740,6 +743,29 @@ actor DaemonClient {
             params: AttachRequestParams(worktreeID: worktreeID, paneID: paneID, windowID: windowID),
             resultType: AttachRequestResult.self
         )
+    }
+
+    /// Request an attach and receive the vended fd via the sidecar. Returns
+    /// the read fd (ownership passes to the caller's reader). Does NOT send
+    /// `attach.ready` — the caller does that after wiring the reader.
+    ///
+    /// Ordering: the sidecar expectation is registered BEFORE the RPC is
+    /// issued, so the vended fd can never race past its waiter; the header
+    /// demux (`FDSidecarClient`) is what keeps concurrent attaches for
+    /// different panes from cross-delivering fds.
+    func openAttach(worktreeID: UUID, paneID: String, windowID: String) async throws -> Int32 {
+        let promise = fdSidecar.expectFD(worktreeID: worktreeID, paneID: paneID)
+        do {
+            let result = try await attachRequest(worktreeID: worktreeID, paneID: paneID, windowID: windowID)
+            guard result.status == "pending" else {
+                promise.cancel()
+                throw DaemonClientError.attachUnavailable(result.status)
+            }
+        } catch {
+            promise.cancel()
+            throw error
+        }
+        return try await promise.value(timeout: .seconds(5))
     }
 
     /// Ack that the app's reader is draining the vended fd — opens the
