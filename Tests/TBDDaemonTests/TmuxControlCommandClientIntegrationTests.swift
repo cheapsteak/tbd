@@ -114,6 +114,39 @@ struct TmuxControlCommandClientIntegrationTests {
 
         await supervisor.stopAll()
     }
+
+    @Test("a connection re-established immediately after stopAll survives the old drain's cleanup")
+    func reconnectSurvivesStaleDrainCleanup() async throws {
+        guard let version = await TmuxVersion.detect(),
+              version >= TmuxVersion.controlModeMinimum else {
+            return
+        }
+
+        let server = "tbd-cmd-\(UUID().uuidString.prefix(8))"
+        defer { tmux(["-L", server, "kill-server"]) }
+        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main", "-x", "80", "-y", "24"]),
+                     "failed to bootstrap test tmux server")
+
+        let supervisor = TmuxControlSupervisor()
+        await supervisor.ensureConnection(serverName: server)
+        _ = try await awaitClient(supervisor, server: server)
+
+        // stopAll only kills the -CC client; the tmux server itself stays alive.
+        // Re-establishing immediately installs a fresh connection whose entries
+        // the OLD connection's drain task must not evict when its stream ends.
+        await supervisor.stopAll()
+        await supervisor.ensureConnection(serverName: server)
+
+        // Let the superseded drain task run its end-of-stream cleanup.
+        try await Task.sleep(for: .milliseconds(500))
+
+        let client = try #require(await supervisor.command(server: server),
+                                  "reconnected command client was evicted by the stale drain")
+        let lines = try await client.send("display-message -p survived")
+        #expect(lines == ["survived"])
+
+        await supervisor.stopAll()
+    }
 }
 
 private enum CommandClientTestError: Error { case clientNeverReady }

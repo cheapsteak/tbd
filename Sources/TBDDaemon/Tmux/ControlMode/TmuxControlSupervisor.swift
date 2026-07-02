@@ -34,13 +34,17 @@ actor TmuxControlSupervisor {
         // `writeLine` funnels to the connection's stdin writer (which appends
         // the newline); `onFatalError` tears the connection down on a protocol
         // violation — hopped onto this actor because `stop()` must run here.
-        commandClients[serverName] = TmuxControlCommandClient(
+        let client = TmuxControlCommandClient(
             writeLine: { [connection] line in connection.sendCommand(line) },
             onFatalError: { [weak self] in
                 Task { await self?.teardownConnection(serverName: serverName, connection: connection) }
             })
+        commandClients[serverName] = client
+        // Bind the client to THIS connection so its drain closes its own client,
+        // not whatever a later `ensureConnection` installed in the map. A map
+        // re-lookup inside `drain` would race the successor's install.
         Task { [weak self] in
-            await self?.drain(serverName: serverName, connection: connection)
+            await self?.drain(serverName: serverName, connection: connection, client: client)
         }
     }
 
@@ -97,22 +101,26 @@ actor TmuxControlSupervisor {
         fanout.detachIfNotReady(key: PaneKey(server: server, paneID: paneID), generation: generation)
     }
 
-    private func drain(serverName: String, connection: TmuxControlConnection) async {
-        let client = commandClients[serverName]
+    private func drain(serverName: String, connection: TmuxControlConnection,
+                       client: TmuxControlCommandClient) async {
         for await event in connection.events {
             // Command reply blocks stop at the correlator; keep the one-line
             // summary log for diagnostics. Everything else logs as before.
             log(event, serverName: serverName)
             switch event {
             case .commandSucceeded, .commandFailed:
-                await client?.handle(event)
+                await client.handle(event)
             default:
                 break
             }
         }
-        connections[serverName] = nil
-        commandClients[serverName] = nil
-        await client?.connectionClosed()  // fail any pending sends
+        // A stale drain from a superseded connection must not evict its
+        // successor's entries — only clear the maps if we still own them.
+        if connections[serverName] === connection {
+            connections[serverName] = nil
+            commandClients[serverName] = nil
+        }
+        await client.connectionClosed()  // fail any pending sends (this drain's client regardless of map ownership)
         logger.info("tmux -CC event stream ended for \(serverName, privacy: .public)")
     }
 

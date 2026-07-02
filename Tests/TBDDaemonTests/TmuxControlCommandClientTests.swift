@@ -144,6 +144,55 @@ struct TmuxControlCommandClientTests {
         #expect(recorder.writes.isEmpty)
         #expect(recorder.fatalCount == 0)
     }
+
+    @Test("an empty command is rejected and never written")
+    func emptyRejected() async throws {
+        let (client, recorder) = makeClient()
+        await #expect(throws: TmuxCommandError.invalidCommand) {
+            _ = try await client.send("")
+        }
+        #expect(recorder.writes.isEmpty)
+        #expect(recorder.fatalCount == 0)
+    }
+
+    @Test("a whitespace-only command is rejected and never written")
+    func whitespaceOnlyRejected() async throws {
+        let (client, recorder) = makeClient()
+        await #expect(throws: TmuxCommandError.invalidCommand) {
+            _ = try await client.send("   ")
+        }
+        #expect(recorder.writes.isEmpty)
+        #expect(recorder.fatalCount == 0)
+    }
+
+    @Test("a command with an embedded carriage return is rejected and never written")
+    func carriageReturnRejected() async throws {
+        let (client, recorder) = makeClient()
+        await #expect(throws: TmuxCommandError.invalidCommand) {
+            _ = try await client.send("cmd\rtail")
+        }
+        #expect(recorder.writes.isEmpty)
+        #expect(recorder.fatalCount == 0)
+    }
+
+    @Test("sendList rejects the whole batch when one entry is blank")
+    func sendListRejectsBlankEntry() async throws {
+        let (client, recorder) = makeClient()
+        let box = CompletionBox()
+        await client.sendList([
+            TmuxCommand(text: "valid-a") { box.record($0) },
+            TmuxCommand(text: "") { box.record($0) },
+            TmuxCommand(text: "valid-b") { box.record($0) }
+        ])
+
+        let results = box.results
+        #expect(results.count == 3)
+        for result in results {
+            #expect(throws: TmuxCommandError.invalidCommand) { try result.get() }
+        }
+        #expect(recorder.writes.isEmpty)
+        #expect(recorder.fatalCount == 0)
+    }
 }
 
 /// Thread-safe, synchronous recorder for `writeLine` / `onFatalError` side

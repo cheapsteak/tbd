@@ -5,7 +5,7 @@ import os
 enum TmuxCommandError: Error, Equatable {
     case commandFailed(lines: [String])   // %error block
     case connectionClosed                  // stream ended / client torn down with commands pending
-    case invalidCommand                    // command text contained a newline (would desync the FIFO)
+    case invalidCommand                    // command text was blank or contained a newline (would desync the FIFO)
 }
 
 /// A single command queued on the control stream.
@@ -55,7 +55,7 @@ actor TmuxControlCommandClient {
     /// Send one command and await its response lines. Throws `.commandFailed`
     /// on a `%error` reply (unless `tolerateErrors`), `.connectionClosed` if the
     /// connection is or becomes closed, or `.invalidCommand` if `command`
-    /// contains a newline.
+    /// is blank or contains a newline.
     func send(_ command: String, tolerateErrors: Bool = false) async throws -> [String] {
         try await withCheckedThrowingContinuation { continuation in
             enqueue(TmuxCommand(text: command, tolerateErrors: tolerateErrors) { result in
@@ -73,10 +73,10 @@ actor TmuxControlCommandClient {
             for command in commands { command.completion(.failure(.connectionClosed)) }
             return
         }
-        // Reject the whole batch if any text contains a newline — one entry
-        // producing multiple blocks would desync every later entry's matching.
-        if let bad = commands.first(where: { $0.text.contains("\n") }) {
-            logger.fault("rejecting command list: entry contains a newline: \(bad.text, privacy: .public)")
+        // Reject the whole batch if any entry is invalid — one blank or
+        // newline-bearing entry desyncs every later entry's order-based matching.
+        if let bad = commands.first(where: { isInvalid($0.text) }) {
+            logger.fault("rejecting command list: invalid entry (blank or embedded newline): \(bad.text, privacy: .public)")
             for command in commands { command.completion(.failure(.invalidCommand)) }
             return
         }
@@ -109,14 +109,25 @@ actor TmuxControlCommandClient {
 
     // MARK: - Internals
 
+    /// Whether `text` would desync the order-based FIFO if written to the stream.
+    /// Verified against live tmux, three distinct desync modes, all rejected here:
+    ///   - a newline splits one queue entry into multiple reply blocks;
+    ///   - an empty line detaches the control client (`%exit`);
+    ///   - a whitespace-only line produces NO reply block at all.
+    /// Any of these leaves the queue head mismatched with the next reply block.
+    private func isInvalid(_ text: String) -> Bool {
+        text.rangeOfCharacter(from: .newlines) != nil
+            || text.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     private func enqueue(_ command: TmuxCommand) {
         guard !closed else {
             command.completion(.failure(.connectionClosed))
             return
         }
-        // A newline would split into multiple reply blocks and desync the FIFO.
-        if command.text.contains("\n") {
-            logger.fault("rejecting command with embedded newline: \(command.text, privacy: .public)")
+        // Reject blank or newline-bearing text before it reaches the stream.
+        if isInvalid(command.text) {
+            logger.fault("rejecting invalid command (blank or embedded newline): \(command.text, privacy: .public)")
             command.completion(.failure(.invalidCommand))
             return
         }
