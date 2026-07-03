@@ -204,6 +204,19 @@ public final class Daemon: Sendable {
         await healthValidator.validateAll(db: database)
     }
 
+    /// Recreate the base scratch directory if it's missing. Safe to call every startup.
+    static func ensureScratchDir() {
+        let fm = FileManager.default
+        let dir = TBDConstants.scratchDir.path
+        if !fm.fileExists(atPath: dir) {
+            do {
+                try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            } catch {
+                daemonLogger.warning("Failed to recreate scratch dir at \(dir, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
     /// Start the daemon: create config directory, clean up stale state,
     /// initialize database and all managers, start servers, reconcile worktrees.
     public func start() async throws {
@@ -221,6 +234,7 @@ public final class Daemon: Sendable {
         if !fm.fileExists(atPath: configDir) {
             try fm.createDirectory(atPath: configDir, withIntermediateDirectories: true)
         }
+        Self.ensureScratchDir()
 
         // 2. Clean up stale PID/socket files
         pidFile.cleanupIfStale()
