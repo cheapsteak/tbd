@@ -1486,6 +1486,16 @@ final class AppState: ObservableObject {
         setting && !spaces.isEmpty
     }
 
+    /// Pure, testable mirror of `WorktreeRowView`'s scratch-row dimming rule:
+    /// a scratch row dims only when its directory is missing AND it was
+    /// never promoted. `tbd scratch promote` MOVES the folder to its
+    /// destination repo, so a promoted row's directory never exists again —
+    /// dimming it as "missing" would contradict the "→ promoted to <repo>"
+    /// caption shown alongside it. Non-scratch worktrees never dim here.
+    nonisolated static func scratchRowIsDimmed(_ worktree: Worktree, directoryExists: Bool) -> Bool {
+        worktree.isScratch && worktree.promotedToRepoID == nil && !directoryExists
+    }
+
     /// Whether the WIP main-area resize broadcast is enabled. Default false.
     private var terminalAutoResizeEnabled: Bool {
         userDefaults.bool(forKey: Self.terminalAutoResizeKey)

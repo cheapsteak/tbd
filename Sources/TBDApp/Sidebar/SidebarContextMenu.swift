@@ -10,6 +10,25 @@ struct SidebarContextMenu: View {
     var body: some View {
         Group {
             if worktree.isScratch {
+                Button("New Claude Terminal") {
+                    let wtID = worktree.id
+                    Task {
+                        await appState.createClaudeTerminal(worktreeID: wtID)
+                    }
+                }
+                Button("New Codex Terminal") {
+                    let wtID = worktree.id
+                    Task {
+                        await appState.createCodexTerminal(worktreeID: wtID)
+                    }
+                }
+                Button("New Shell Terminal") {
+                    let wtID = worktree.id
+                    Task {
+                        await appState.createTerminal(worktreeID: wtID)
+                    }
+                }
+                Divider()
                 Button("Rename...") {
                     onRename()
                 }

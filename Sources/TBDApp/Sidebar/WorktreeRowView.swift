@@ -191,8 +191,12 @@ struct WorktreeRowView: View {
         .frame(height: 28)
         // Scratch spaces have no repo-level `.missing` status to inherit, so a
         // missing directory is surfaced client-side with a cheap per-row FS stat
-        // (mirrors RepoSectionView dimming a `.missing` repo).
-        .opacity(worktree.isScratch && !FileManager.default.fileExists(atPath: worktree.path) ? 0.5 : 1.0)
+        // (mirrors RepoSectionView dimming a `.missing` repo). Promoted rows are
+        // excluded — promotion MOVES the folder, so their directory is expected
+        // to be gone; see AppState.scratchRowIsDimmed.
+        .opacity(AppState.scratchRowIsDimmed(
+            worktree, directoryExists: FileManager.default.fileExists(atPath: worktree.path)
+        ) ? 0.5 : 1.0)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
