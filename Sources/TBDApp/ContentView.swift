@@ -367,20 +367,22 @@ private struct PRButtonLabel: View {
                     .scaledToFit()
                     .frame(width: 12, height: 12)
             }
-            Text(verbatim: "#\(prStatus.number)")
-                .font(.caption)
-                .fontWeight(.medium)
+            // AppKit flattens a toolbar split-button (Menu) label to ONE image
+            // + ONE text, so a separate trailing Image would be dropped. The
+            // auto-archive-armed badge must therefore live INSIDE the Text as
+            // an inline image (Text interpolation) to survive that flattening.
             if isAutoArchiveArmed {
-                // At-a-glance indicator that auto-archive-on-merge is armed for
-                // this worktree. A toolbar Menu label renders SF Symbols
-                // monochrome (AppKit tints them) — that's fine and desirable
-                // here, so a plain template Image needs no baked color.
-                Image(systemName: "archivebox")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 11, height: 11)
-                    .help("Auto-archive on PR merge is on")
-                    .accessibilityLabel("Auto-archive on PR merge is on")
+                (
+                    Text(verbatim: "#\(prStatus.number) ")
+                        .fontWeight(.medium)
+                    + Text(Image(systemName: "archivebox"))
+                )
+                .font(.caption)
+                .accessibilityLabel("PR #\(prStatus.number), auto-archive on merge is on")
+            } else {
+                Text(verbatim: "#\(prStatus.number)")
+                    .font(.caption)
+                    .fontWeight(.medium)
             }
         }
     }
