@@ -188,11 +188,14 @@ struct ContentView: View {
                             // Toggle checkmark and armed badge never reach the
                             // already-built NSMenuToolbarItem. Changing the id
                             // forces the item to be recreated, so the key must
-                            // include EVERYTHING the label/menu render: worktree,
-                            // armed + blocked (menu), PR state + number (icon
-                            // color/text), and colorScheme (baked icon colors).
+                            // include EVERYTHING the label/menu render: worktree
+                            // + whether its row has loaded (gates the menu's only
+                            // item), armed + blocked (menu), the full PRStatus
+                            // (icon color/text, url captured by primaryAction),
+                            // and colorScheme (baked icon colors).
                             .id(PRButtonLabel.prSplitButtonID(
                                 worktreeID: worktreeID,
+                                worktreeFound: worktree != nil,
                                 armed: armed,
                                 blocked: blocked,
                                 prStatus: prStatus,
@@ -372,8 +375,9 @@ private func overlayFrameIsWindowRoot(
 struct PRButtonLabel: View {
     let prStatus: PRStatus
     let isAutoArchiveArmed: Bool
-    // Re-bake the colored icon when the appearance flips (the baked image is
-    // non-template, so it can't auto-adapt the way a tinted template would).
+    // Feeds the baked-icon cache key (and, at the ContentView level, the
+    // toolbar item's .id key) so light/dark changes re-bake the non-template
+    // icon, which can't auto-adapt the way a tinted template would.
     @Environment(\.colorScheme) private var colorScheme
 
     /// Baked image geometry: 12×12 status icon, plus (when armed) a 3pt gap
@@ -389,14 +393,36 @@ struct PRButtonLabel: View {
     /// the split button's NSMenu and label ONCE, so the key must include
     /// EVERYTHING the label/menu render — anything omitted here can change in
     /// SwiftUI state without ever reaching the materialized AppKit item.
+    /// `worktreeFound` matters because the menu's only item (the auto-archive
+    /// Toggle) is gated on the worktree row having loaded: a menu materialized
+    /// before the row appears would otherwise stay permanently empty. Keying
+    /// the whole `PRStatus` (not hand-picked fields) covers `url` — captured
+    /// by `primaryAction` — and any future rendered field.
+    struct PRSplitButtonKey: Hashable {
+        let worktreeID: UUID
+        let worktreeFound: Bool
+        let armed: Bool
+        let blocked: Bool
+        let prStatus: PRStatus
+        let colorScheme: ColorScheme
+    }
+
     static func prSplitButtonID(
         worktreeID: UUID,
+        worktreeFound: Bool,
         armed: Bool,
         blocked: Bool,
         prStatus: PRStatus,
         colorScheme: ColorScheme
-    ) -> String {
-        "pr-split-\(worktreeID)-\(armed)-\(blocked)-\(prStatus.state.rawValue)-\(prStatus.number)-\(colorScheme)"
+    ) -> PRSplitButtonKey {
+        PRSplitButtonKey(
+            worktreeID: worktreeID,
+            worktreeFound: worktreeFound,
+            armed: armed,
+            blocked: blocked,
+            prStatus: prStatus,
+            colorScheme: colorScheme
+        )
     }
 
     /// Aspect-fits `size` into `slot`, centered. Used to draw the archivebox
@@ -417,7 +443,7 @@ struct PRButtonLabel: View {
     var body: some View {
         HStack(spacing: 3) {
             if let presentation = PRStatusPresentation.make(for: prStatus),
-               let nsImage = coloredIcon(presentation.iconName, nsColor: presentation.nsColor) {
+               let nsImage = coloredIcon(presentation, colorScheme: colorScheme) {
                 Image(nsImage: nsImage)
                     .renderingMode(.original)
                     .resizable()
@@ -440,6 +466,17 @@ struct PRButtonLabel: View {
         )
     }
 
+    /// Cache for baked icons, keyed by (iconName, colorSemantic, armed,
+    /// colorScheme). The bake does disk I/O (`Bundle.module.url` +
+    /// `NSImage(contentsOf:)`) plus symbol creation on every body evaluation,
+    /// and — per the materialize-once behavior documented at the `.id` call
+    /// site — those re-evaluations never reach AppKit anyway. MainActor
+    /// confinement (SwiftUI body runs on main) makes this safe without locks.
+    /// colorSemantic must be part of the key: several PR states share the
+    /// same icon name but bake different colors.
+    @MainActor
+    private static var bakedIconCache: [String: NSImage] = [:]
+
     /// Bakes the status color into a NON-template image. Toolbar `Menu` /
     /// split-button labels render template images monochrome (AppKit tints
     /// them with the control color and ignores `.foregroundStyle`), so the
@@ -448,8 +485,12 @@ struct PRButtonLabel: View {
     /// `secondaryLabelColor`) is composited to the right of the status icon —
     /// the flattened toolbar label keeps only this one image, so the badge
     /// must live inside it.
-    func coloredIcon(_ name: String, nsColor: NSColor) -> NSImage? {
-        _ = colorScheme  // establish a dependency so we re-bake on light/dark change
+    @MainActor
+    func coloredIcon(_ presentation: PRStatusPresentation, colorScheme: ColorScheme) -> NSImage? {
+        let cacheKey = "\(presentation.iconName)-\(presentation.colorSemantic)-\(isAutoArchiveArmed)-\(colorScheme)"
+        if let cached = Self.bakedIconCache[cacheKey] { return cached }
+        let name = presentation.iconName
+        let nsColor = presentation.nsColor
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
               let base = NSImage(contentsOf: url) else { return nil }
         base.isTemplate = true
@@ -477,6 +518,7 @@ struct PRButtonLabel: View {
             return true
         }
         img.isTemplate = false
+        Self.bakedIconCache[cacheKey] = img
         return img
     }
 }

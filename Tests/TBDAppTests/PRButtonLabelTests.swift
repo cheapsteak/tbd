@@ -9,9 +9,28 @@ import Testing
 struct PRButtonLabelTests {
     private static func makeStatus(
         number: Int = 42,
+        url: String? = nil,
         state: PRMergeableState = .mergeable
     ) -> PRStatus {
-        PRStatus(number: number, url: "https://example.com/\(number)", state: state)
+        PRStatus(number: number, url: url ?? "https://example.com/\(number)", state: state)
+    }
+
+    private static func makeKey(
+        worktreeID: UUID,
+        worktreeFound: Bool = true,
+        armed: Bool = false,
+        blocked: Bool = false,
+        prStatus: PRStatus,
+        colorScheme: ColorScheme = .light
+    ) -> PRButtonLabel.PRSplitButtonKey {
+        PRButtonLabel.prSplitButtonID(
+            worktreeID: worktreeID,
+            worktreeFound: worktreeFound,
+            armed: armed,
+            blocked: blocked,
+            prStatus: prStatus,
+            colorScheme: colorScheme
+        )
     }
 
     // MARK: - bakedWidth (armed gate, both branches)
@@ -34,19 +53,13 @@ struct PRButtonLabelTests {
 
     @MainActor
     @Test("coloredIcon bakes a square image when not armed and a wide badge composite when armed")
-    func coloredIconSizeMatchesArmedState() {
+    func coloredIconSizeMatchesArmedState() throws {
         let unarmed = PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: false)
         let armed = PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: true)
+        let presentation = PRStatusPresentation(iconName: "git-merge", colorSemantic: .merged)
 
-        // Bundle.module SVG resources should resolve under `swift test`; if
-        // they ever don't in some environment, skip the size assertions
-        // rather than fail on missing resources (per repo test guidance).
-        guard let unarmedIcon = unarmed.coloredIcon("git-merge", nsColor: .systemPurple),
-              let armedIcon = armed.coloredIcon("git-merge", nsColor: .systemPurple) else {
-            // Icon SVG resources unavailable in this test environment — skip
-            // the size checks rather than fail on missing bundle resources.
-            return
-        }
+        let unarmedIcon = try #require(unarmed.coloredIcon(presentation, colorScheme: .light))
+        let armedIcon = try #require(armed.coloredIcon(presentation, colorScheme: .light))
 
         #expect(unarmedIcon.size == NSSize(width: PRButtonLabel.iconSide, height: PRButtonLabel.iconSide))
         #expect(armedIcon.size == NSSize(
@@ -89,58 +102,68 @@ struct PRButtonLabelTests {
     func idKeyDiffersByArmed() {
         let worktreeID = UUID()
         let status = Self.makeStatus()
-        let armed = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: true, blocked: false, prStatus: status, colorScheme: .light)
-        let unarmed = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: false, blocked: false, prStatus: status, colorScheme: .light)
+        let armed = Self.makeKey(worktreeID: worktreeID, armed: true, prStatus: status)
+        let unarmed = Self.makeKey(worktreeID: worktreeID, armed: false, prStatus: status)
         #expect(armed != unarmed)
     }
 
-    @Test("id key differs between PR states and PR numbers")
+    @Test("id key differs between PR states, PR numbers, and PR urls")
     func idKeyDiffersByPRStatus() {
         let worktreeID = UUID()
-        let open = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: false, blocked: false,
-            prStatus: Self.makeStatus(state: .mergeable), colorScheme: .light)
-        let merged = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: false, blocked: false,
-            prStatus: Self.makeStatus(state: .merged), colorScheme: .light)
+        let open = Self.makeKey(worktreeID: worktreeID, prStatus: Self.makeStatus(state: .mergeable))
+        let merged = Self.makeKey(worktreeID: worktreeID, prStatus: Self.makeStatus(state: .merged))
         #expect(open != merged)
 
-        let otherNumber = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: false, blocked: false,
-            prStatus: Self.makeStatus(number: 43), colorScheme: .light)
+        let otherNumber = Self.makeKey(worktreeID: worktreeID, prStatus: Self.makeStatus(number: 43))
         #expect(open != otherNumber)
+
+        // url is captured by the split button's primaryAction, so a re-pointed
+        // PR (same number, new url) must recreate the toolbar item too.
+        let otherURL = Self.makeKey(
+            worktreeID: worktreeID,
+            prStatus: Self.makeStatus(url: "https://example.com/elsewhere/42")
+        )
+        #expect(open != otherURL)
     }
 
     @Test("id key differs between blocked states, color schemes, and worktrees")
     func idKeyDiffersByBlockedSchemeAndWorktree() {
         let worktreeID = UUID()
         let status = Self.makeStatus()
-        let base = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: false, blocked: false, prStatus: status, colorScheme: .light)
+        let base = Self.makeKey(worktreeID: worktreeID, prStatus: status)
 
-        let blocked = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: false, blocked: true, prStatus: status, colorScheme: .light)
+        let blocked = Self.makeKey(worktreeID: worktreeID, blocked: true, prStatus: status)
         #expect(base != blocked)
 
-        let dark = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: false, blocked: false, prStatus: status, colorScheme: .dark)
+        let dark = Self.makeKey(worktreeID: worktreeID, prStatus: status, colorScheme: .dark)
         #expect(base != dark)
 
-        let otherWorktree = PRButtonLabel.prSplitButtonID(
-            worktreeID: UUID(), armed: false, blocked: false, prStatus: status, colorScheme: .light)
+        let otherWorktree = Self.makeKey(worktreeID: UUID(), prStatus: status)
         #expect(base != otherWorktree)
+    }
+
+    @Test("id key differs when the worktree row appears")
+    func idKeyDiffersByWorktreeFound() {
+        let worktreeID = UUID()
+        let status = Self.makeStatus()
+        // The menu's only item (the auto-archive Toggle) is gated on the
+        // worktree row having loaded; a menu materialized before it appears
+        // must be recreated once it does, or it stays permanently empty.
+        let beforeRowLoads = Self.makeKey(worktreeID: worktreeID, worktreeFound: false, prStatus: status)
+        let afterRowLoads = Self.makeKey(worktreeID: worktreeID, worktreeFound: true, prStatus: status)
+        #expect(beforeRowLoads != afterRowLoads)
     }
 
     @Test("id key is stable for identical inputs")
     func idKeyStable() {
         let worktreeID = UUID()
         let status = Self.makeStatus()
-        let first = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: true, blocked: true, prStatus: status, colorScheme: .dark)
-        let second = PRButtonLabel.prSplitButtonID(
-            worktreeID: worktreeID, armed: true, blocked: true, prStatus: status, colorScheme: .dark)
+        let first = Self.makeKey(
+            worktreeID: worktreeID, worktreeFound: true, armed: true, blocked: true,
+            prStatus: status, colorScheme: .dark)
+        let second = Self.makeKey(
+            worktreeID: worktreeID, worktreeFound: true, armed: true, blocked: true,
+            prStatus: status, colorScheme: .dark)
         #expect(first == second)
     }
 }

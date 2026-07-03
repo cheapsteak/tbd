@@ -579,7 +579,7 @@ public enum PRMergeableState: String, Codable, Sendable {
     }
 }
 
-public struct PRStatus: Codable, Sendable, Equatable {
+public struct PRStatus: Codable, Sendable, Hashable {
     public let number: Int
     public let url: String
     public let state: PRMergeableState
