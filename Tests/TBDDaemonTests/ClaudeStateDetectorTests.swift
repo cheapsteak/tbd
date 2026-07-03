@@ -6,6 +6,21 @@ import Testing
     #expect(ClaudeStateDetector.checkIdle(output: lines) == true)
 }
 
+@Test func idleWithTrailingBlankRows() {
+    // Regression for the "unparkable idle session" bug: when the tmux pane is taller
+    // than Claude's drawn UI, the prompt/status-bar lines sit above a block of trailing
+    // blank rows. Without trimming, suffix(5) would capture only blanks and read as busy.
+    let lines = "some output above\n\n─────────\n❯\u{00a0}\n─────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n\n   \n\n\n"
+    #expect(ClaudeStateDetector.checkIdle(output: lines) == true)
+}
+
+@Test func busyWithTrailingBlankRowsStillNotIdle() {
+    // Trimming trailing blanks must NOT flip a genuinely busy pane to idle: the
+    // "esc to interrupt" busy indicator sits above trailing blank rows.
+    let lines = "✻ Thinking… (3s)\n─────────\n❯\u{00a0}\n─────────\n  ⏵⏵ bypass permissions on · esc to interrupt · ↓ to manage\n\n   \n\n"
+    #expect(ClaudeStateDetector.checkIdle(output: lines) == false)
+}
+
 @Test func notIdleWithUserInput() {
     let lines = "─────────\n❯ fix the bug\n─────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"
     #expect(ClaudeStateDetector.checkIdle(output: lines) == false)

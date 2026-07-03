@@ -17,7 +17,15 @@ public struct ClaudeStateDetector: Sendable {
     }
 
     public static func checkIdle(output: String) -> Bool {
-        let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        var lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        // Trim trailing empty/whitespace-only rows. When the tmux pane is taller than
+        // Claude's drawn UI, the prompt and status-bar lines sit above a block of blank
+        // rows; without trimming, suffix(5) captures only blanks and an idle session
+        // reads as busy, so terminal.suspend refuses to park it.
+        while let last = lines.last,
+              last.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.removeLast()
+        }
         let lastLines = lines.suffix(5).map(String.init)
         let text = lastLines.joined(separator: "\n")
         // Must NOT have busy indicators (thinking/working)
