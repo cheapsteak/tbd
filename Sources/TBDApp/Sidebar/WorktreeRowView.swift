@@ -167,6 +167,11 @@ struct WorktreeRowView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if let promotedID = worktree.promotedToRepoID,
+                       let name = appState.repoName(for: promotedID) {
+                        Text("→ promoted to \(name)")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
             }
             suffixIcon()

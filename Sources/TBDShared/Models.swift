@@ -144,6 +144,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
 
+    /// True when `displayName` has never been customized away from the
+    /// auto-generated `name`. Single source of truth for "still default"
+    /// shared by the `stop-rename-check` hook (skip firing when already
+    /// customized) and `scratch promote` (display-name fallback priority).
+    public var hasDefaultDisplayName: Bool { displayName == name }
+
     public init(id: UUID = UUID(), repoID: UUID?, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
                 hasConflicts: Bool = false,

@@ -130,6 +130,11 @@ public struct GitManager: Sendable {
         return trimmed
     }
 
+    /// Returns `true` if the repo at `path` has at least one commit (HEAD resolves).
+    public func hasCommits(path: String) async -> Bool {
+        (try? await run(arguments: ["rev-parse", "--verify", "HEAD"], at: path)) != nil
+    }
+
     /// Returns `true` if there are uncommitted changes (staged or unstaged).
     public func hasUncommittedChanges(repoPath: String) async throws -> Bool {
         let output = try await run(arguments: ["status", "--porcelain"], at: repoPath)

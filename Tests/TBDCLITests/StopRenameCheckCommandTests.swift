@@ -43,7 +43,8 @@ struct StopRenameCheckCommandTests {
         worktree: StopRenameCheckCore.WorktreeSummary? = .init(
             name: "20260515-surprised-giraffe",
             displayName: "20260515-surprised-giraffe",
-            status: .active
+            status: .active,
+            hasDefaultDisplayName: true
         ),
         branch: String? = "tbd/20260515-surprised-giraffe",
         folder: String? = "20260515-surprised-giraffe",
@@ -104,7 +105,7 @@ struct StopRenameCheckCommandTests {
         let out = StopRenameCheckCore.decide(
             stdinData: Self.payload(),
             dependencies: Self.deps(
-                worktree: .init(name: "main", displayName: "main", status: .main),
+                worktree: .init(name: "main", displayName: "main", status: .main, hasDefaultDisplayName: true),
                 counterDirectory: dir
             )
         )
@@ -117,7 +118,7 @@ struct StopRenameCheckCommandTests {
         let out = StopRenameCheckCore.decide(
             stdinData: Self.payload(),
             dependencies: Self.deps(
-                worktree: .init(name: "raw-folder", displayName: "🦒 My Cool Feature", status: .active),
+                worktree: .init(name: "raw-folder", displayName: "🦒 My Cool Feature", status: .active, hasDefaultDisplayName: false),
                 counterDirectory: dir
             )
         )
