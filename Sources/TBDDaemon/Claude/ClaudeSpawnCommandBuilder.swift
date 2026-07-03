@@ -97,11 +97,15 @@ enum ClaudeSpawnCommandBuilder {
         }
 
         var env: [String: String] = [:]
+        // Profile routing env assigned below is ALSO re-exported inline in
+        // the returned command (see `inlineExports`); track its keys here.
+        var routingKeys: Set<String> = []
         if profileKind == .bedrock {
             env["CLAUDE_CODE_USE_BEDROCK"] = "1"
             if let r = profileAwsRegion { env["AWS_REGION"] = r }
             if let p = profileAwsProfile { env["AWS_PROFILE"] = p }
             if let m = profileModel { env["ANTHROPIC_MODEL"] = m }
+            routingKeys.formUnion(["CLAUDE_CODE_USE_BEDROCK", "AWS_REGION", "AWS_PROFILE", "ANTHROPIC_MODEL"])
             // Intentionally no ANTHROPIC_API_KEY / CLAUDE_CONFIG_DIR /
             // ANTHROPIC_BASE_URL for bedrock.
         } else {
@@ -111,6 +115,8 @@ enum ClaudeSpawnCommandBuilder {
                 // parsing), so we don't need shell-escape allowlists here.
                 // Storage-time validation rejects newlines / NULL bytes that would
                 // break tmux's single-line arg parsing.
+                // NEVER a routing key — secrets must not be inlined into the
+                // command string (visible in `ps` for the pane's lifetime).
                 env["ANTHROPIC_API_KEY"] = secret
             }
             // For oauth profiles, no auth token — they use the isolated
@@ -123,6 +129,7 @@ enum ClaudeSpawnCommandBuilder {
             if let configDir = profileConfigDir {
                 env["CLAUDE_CONFIG_DIR"] = configDir
             }
+            routingKeys.formUnion(["ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "CLAUDE_CONFIG_DIR"])
         }
         // Registry-driven Claude spawn-env settings. This block only runs in
         // the Claude branches — the `cmd` / `shellFallback` branches return
@@ -133,6 +140,28 @@ enum ClaudeSpawnCommandBuilder {
                 env[setting.envVar] = envValue
             }
         }
-        return Result(command: base, sensitiveEnv: env)
+
+        // Re-export the profile ROUTING env inline, ahead of the claude
+        // invocation. tmux's `-e KEY=VALUE` seeds the pane's initial process
+        // environment, but the window runs `$SHELL -ic <command>` and an
+        // interactive shell sources rc files (~/.zshenv, ~/.zshrc) BEFORE the
+        // -c command — any `export CLAUDE_CONFIG_DIR=...` in those files
+        // silently clobbers the -e value. That is exactly what broke profile
+        // login sessions for users running a shell-based Claude account
+        // switcher: every "isolated" session inherited the rc file's config
+        // dir instead of the profile's. Inline exports execute AFTER rc files,
+        // so they deterministically win.
+        //
+        // Scope: only the profile routing keys (config dir, base URL, model,
+        // bedrock/AWS vars) — they are non-secret and are what account
+        // switchers clobber. ANTHROPIC_API_KEY stays -e-only: inlining it
+        // would leak the secret into the long-running shell's `ps` argv.
+        let inlineExports = env
+            .filter { routingKeys.contains($0.key) }
+            .sorted(by: { $0.key < $1.key })
+            .map { "export \($0.key)=\(SystemPromptBuilder.shellEscape($0.value));" }
+            .joined(separator: " ")
+        let command = inlineExports.isEmpty ? base : "\(inlineExports) \(base)"
+        return Result(command: command, sensitiveEnv: env)
     }
 }

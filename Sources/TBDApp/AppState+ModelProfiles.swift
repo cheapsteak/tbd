@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import TBDShared
 import os
@@ -286,23 +287,59 @@ extension AppState {
         }
     }
 
-    /// Open a Claude session pinned to `profileID` in the currently selected
-    /// worktree so the user can run `/login` there (the profile's isolated
-    /// config dir captures the credentials). Returns false and shows a
-    /// non-error alert when no worktree is selected — callers normally disable
-    /// the affordance in that case, so this is a fallback.
+    /// Open (or focus) a Claude *login session* pinned to `profileID` so the
+    /// user can complete `/login` there — the daemon labels the terminal as a
+    /// login session, auto-types `/login` once Claude is up, and pushes a
+    /// `modelProfilesChanged` delta when the profile's isolated config dir
+    /// gains an account, flipping the Settings badge live.
     ///
-    /// Refreshes the profile list afterwards; the completed login itself is
-    /// picked up later via the daemon's `modelProfilesChanged` delta.
+    /// Duplicate-safe: if a live login session for this profile already
+    /// exists, it is focused instead of spawning another; while a spawn RPC
+    /// is in flight, repeat clicks are dropped. Returns true when a session
+    /// was opened or focused (callers dismiss the Settings surface on true).
     @discardableResult
     func openLoginSession(profileID: UUID) async -> Bool {
+        // Focus an existing live login session for this profile, if any —
+        // five clicks should mean one session.
+        if let existing = Self.existingLoginSessionTerminal(profileID: profileID, terminals: terminals) {
+            navigateToActiveWorktree(existing.worktreeID, terminalID: existing.id)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            return true
+        }
+
         guard let worktree = selectedWorktree else {
             showAlert("Select a worktree first, then open a login session.", isError: false)
             return false
         }
-        await createClaudeTerminal(worktreeID: worktree.id, profileID: profileID)
+        guard !loginSessionSpawnsInFlight.contains(profileID) else { return false }
+        loginSessionSpawnsInFlight.insert(profileID)
+        defer { loginSessionSpawnsInFlight.remove(profileID) }
+
+        guard let terminal = await createClaudeTerminal(
+            worktreeID: worktree.id, profileID: profileID, loginSession: true
+        ) else {
+            // createClaudeTerminal already surfaced the error as an alert.
+            return false
+        }
+        navigateToActiveWorktree(worktree.id, terminalID: terminal.id)
+        NSApplication.shared.activate(ignoringOtherApps: true)
         await loadModelProfiles()
         return true
+    }
+
+    /// First live (non-suspended) login-session terminal pinned to
+    /// `profileID`, across all worktrees. Static + pure for unit testing.
+    nonisolated static func existingLoginSessionTerminal(
+        profileID: UUID,
+        terminals: [UUID: [Terminal]]
+    ) -> Terminal? {
+        terminals.values
+            .flatMap { $0 }
+            .first {
+                $0.profileID == profileID
+                    && $0.label == TerminalLabel.login
+                    && $0.suspendedAt == nil
+            }
     }
 
     /// Fetch fresh usage for a single profile and merge it into local state.

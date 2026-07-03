@@ -219,6 +219,12 @@ final class AppState: ObservableObject {
     /// outside the AppState extension that consumes it.
     var pendingDeepLinkTerminalID: UUID?
 
+    /// Profile IDs with an "Open login session" spawn currently in flight.
+    /// Guards rapid repeat clicks: the first click spawns, subsequent clicks
+    /// during the RPC are dropped, and once the terminal lands in state the
+    /// dedupe path in `openLoginSession` focuses it instead of spawning again.
+    var loginSessionSpawnsInFlight: Set<UUID> = []
+
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
         guard let id = selectedWorktreeIDs.first else { return nil }

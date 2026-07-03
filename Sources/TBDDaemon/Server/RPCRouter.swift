@@ -31,6 +31,9 @@ public final class RPCRouter: Sendable {
     /// keychain on profile delete. Injected so tests can record the requested
     /// service name instead of touching the real keychain.
     public let claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting
+    /// Auto-`/login` typing + login-completion watching for profile login
+    /// sessions. Injected so tests can zero out the trigger delays.
+    public let loginSessions: LoginSessionCoordinator
 
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
@@ -62,7 +65,8 @@ public final class RPCRouter: Sendable {
         pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
-        claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain()
+        claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
+        loginSessions: LoginSessionCoordinator = LoginSessionCoordinator()
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -86,6 +90,7 @@ public final class RPCRouter: Sendable {
         self.configDirManager = configDirManager
         self.controlMode = nil
         self.claudeCredentialsKeychain = claudeCredentialsKeychain
+        self.loginSessions = loginSessions
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.

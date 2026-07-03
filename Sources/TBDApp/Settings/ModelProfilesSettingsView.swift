@@ -1,5 +1,22 @@
+import AppKit
 import SwiftUI
 import TBDShared
+
+/// Closes the SwiftUI `Settings` scene window so "Open login session" lands
+/// the user directly on the newly focused terminal tab in the main window
+/// instead of leaving Settings floating over it.
+@MainActor
+enum SettingsWindowCloser {
+    static func close() {
+        // The SwiftUI Settings scene window carries the stable identifier
+        // "com_apple_SwiftUI_Settings_window"; match on the substring so a
+        // future macOS rename of the prefix doesn't silently break this.
+        for window in NSApplication.shared.windows
+        where window.identifier?.rawValue.contains("Settings") == true {
+            window.performClose(nil)
+        }
+    }
+}
 
 struct ModelProfilesSettingsView: View {
     @EnvironmentObject var appState: AppState
@@ -105,14 +122,18 @@ struct ModelProfileRow: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Button("Open login session") {
-                            Task { await appState.openLoginSession(profileID: profile.id) }
+                            Task {
+                                if await appState.openLoginSession(profileID: profile.id) {
+                                    SettingsWindowCloser.close()
+                                }
+                            }
                         }
                         .buttonStyle(.link)
                         .font(.caption)
                         .disabled(appState.selectedWorktree == nil)
                         .help(appState.selectedWorktree == nil
                               ? "Select a worktree in the main window first"
-                              : "Open a Claude session with this profile so you can run /login")
+                              : "Open a Claude session with this profile — /login is typed for you")
                     }
                 } else {
                     Text(caption)
@@ -196,7 +217,11 @@ struct ModelProfileRow: View {
             }
             if needsLogin {
                 Button("Open login session") {
-                    Task { await appState.openLoginSession(profileID: profile.id) }
+                    Task {
+                        if await appState.openLoginSession(profileID: profile.id) {
+                            SettingsWindowCloser.close()
+                        }
+                    }
                 }
                 .disabled(appState.selectedWorktree == nil)
             }
@@ -539,8 +564,11 @@ struct AddModelProfileSheet: View {
                 Button("Open login session") {
                     let profileID = entry.profile.id
                     Task {
-                        await appState.openLoginSession(profileID: profileID)
+                        let opened = await appState.openLoginSession(profileID: profileID)
                         dismiss()
+                        if opened {
+                            SettingsWindowCloser.close()
+                        }
                     }
                 }
                 .keyboardShortcut(.defaultAction)

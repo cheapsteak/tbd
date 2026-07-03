@@ -327,8 +327,11 @@ public struct TmuxManager: Sendable {
     }
 
     public func sendKeys(server: String, paneID: String, text: String) async throws {
-        if dryRun { return }
         let args = Self.sendKeysCommand(server: server, paneID: paneID, text: text)
+        if dryRun {
+            dryRunRecorder?(args)
+            return
+        }
         try await runTmux(args)
     }
 

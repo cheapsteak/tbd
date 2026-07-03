@@ -567,5 +567,217 @@ struct ModelProfileSpawnTests {
         ))
         #expect(!swapResp.success)
     }
+
+    // MARK: - Login sessions (Settings → "Open login session")
+
+    /// Fixture whose LoginSessionCoordinator delays are test-tuned: the
+    /// session-start trigger is immediate, the spawn fallback is far enough
+    /// out that it never races test assertions, and the identity watcher
+    /// expires quickly so tests don't leave 30-minute poll tasks behind.
+    private func makeLoginFixture(
+        spawnFallback: Duration = .seconds(60)
+    ) -> (RPCRouter, TBDDatabase, TmuxRecorder) {
+        let recorder = TmuxRecorder()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let db = try! TBDDatabase(inMemory: true)
+        let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        let router = RPCRouter(
+            db: db,
+            lifecycle: lifecycle,
+            tmux: tmux,
+            startTime: Date(),
+            usageFetcher: StubClaudeUsageFetcher(),
+            loginSessions: LoginSessionCoordinator(delays: .init(
+                afterSessionStart: .zero,
+                spawnFallback: spawnFallback,
+                identityPollInterval: .milliseconds(5),
+                identityPollTimeout: .milliseconds(50)
+            ))
+        )
+        return (router, db, recorder)
+    }
+
+    /// Poll until `condition` is true or `timeout` elapses.
+    private func waitFor(
+        _ condition: @Sendable () -> Bool,
+        timeout: Duration = .seconds(5)
+    ) async -> Bool {
+        var elapsed: Duration = .zero
+        let step: Duration = .milliseconds(10)
+        while elapsed < timeout {
+            if condition() { return true }
+            try? await Task.sleep(for: step)
+            elapsed += step
+        }
+        return condition()
+    }
+
+    /// REGRESSION (profile env clobbered by shell rc files): the profile's
+    /// CLAUDE_CONFIG_DIR must ride in the shell command as an inline `export`
+    /// (post-rc, can't be clobbered by ~/.zshenv account switchers), not only
+    /// as tmux `-e` env. Also pins the login-session shape: label=login,
+    /// profileID persisted on the DB row.
+    @Test("login session: label=login, profileID persisted, config dir inline-exported")
+    func loginSessionSpawn() async throws {
+        let (router, db, recorder) = makeLoginFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let profile = try await seedOAuthProfile(db, name: "Login")
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .claude,
+                overrideProfileID: profile.id, loginSession: true
+            )
+        ))
+        #expect(resp.success)
+        let term = try resp.decodeResult(Terminal.self)
+        #expect(term.label == TerminalLabel.login)
+        #expect(term.profileID == profile.id)
+
+        // The DB row is persisted with the profile id (no ghost terminals).
+        let row = try #require(try await db.terminals.get(id: term.id))
+        #expect(row.profileID == profile.id)
+        #expect(row.label == TerminalLabel.login)
+
+        // Inline export survives rc files; -e env still present too.
+        #expect(recorder.shellBodies.contains("export CLAUDE_CONFIG_DIR="))
+        #expect(recorder.joinedAll.contains("CLAUDE_CONFIG_DIR="))
+    }
+
+    /// Branch guard: the same spawn WITHOUT the loginSession flag keeps the
+    /// normal Claude Code label and does not auto-type /login.
+    @Test("login session flag off: label stays Claude Code, no /login typed")
+    func loginSessionFlagOff() async throws {
+        let (router, db, recorder) = makeLoginFixture(spawnFallback: .zero)
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let profile = try await seedOAuthProfile(db, name: "Plain")
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .claude, overrideProfileID: profile.id
+            )
+        ))
+        #expect(resp.success)
+        let term = try resp.decodeResult(Terminal.self)
+        #expect(term.label == TerminalLabel.claudeCode)
+
+        // Give any (buggy) zero-delay fallback a chance to fire, then assert
+        // no /login was sent.
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(!recorder.joinedAll.contains("/login"))
+    }
+
+    @Test("login session: missing/unknown profile fails loud, no window spawned")
+    func loginSessionUnknownProfile() async throws {
+        let (router, db, recorder) = makeLoginFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .claude,
+                overrideProfileID: UUID(), loginSession: true
+            )
+        ))
+        #expect(!resp.success)
+        #expect(resp.error?.contains("Profile not found") == true)
+        // ensureServer may have run, but no window was created and no row inserted.
+        #expect(!recorder.joinedAll.contains("new-window"))
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+    }
+
+    @Test("login session: requires overrideProfileID")
+    func loginSessionRequiresProfile() async throws {
+        let (router, db, _) = makeLoginFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude, loginSession: true)
+        ))
+        #expect(!resp.success)
+        #expect(resp.error?.contains("require a profile") == true)
+    }
+
+    /// The SessionStart hook event is the readiness trigger for the
+    /// auto-typed /login: after `terminal.sessionEvent` arrives for a login
+    /// session, the daemon sends `/login` + Enter to the pane (consume-once).
+    @Test("login session: sessionEvent triggers /login + Enter exactly once")
+    func loginSessionAutoTypesOnSessionEvent() async throws {
+        let (router, db, recorder) = makeLoginFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let profile = try await seedOAuthProfile(db, name: "AutoLogin")
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .claude,
+                overrideProfileID: profile.id, loginSession: true
+            )
+        ))
+        let term = try createResp.decodeResult(Terminal.self)
+
+        let eventResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: term.id,
+                sessionID: UUID().uuidString,
+                transcriptPath: nil,
+                source: "startup",
+                cwd: wt.path
+            )
+        ))
+        #expect(eventResp.success)
+
+        // The send is scheduled on a Task (zero delay in this fixture) —
+        // poll the recorder for the send-keys /login + Enter pair.
+        #expect(await waitFor({ recorder.joinedAll.contains("send-keys -l -t \(term.tmuxPaneID) /login") }))
+        #expect(await waitFor({ recorder.joinedAll.contains("Enter") }))
+
+        // A second sessionEvent (e.g. /clear) must NOT re-type /login.
+        let before = recorder.calls.count
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: term.id,
+                sessionID: UUID().uuidString,
+                transcriptPath: nil,
+                source: "clear",
+                cwd: wt.path
+            )
+        ))
+        try? await Task.sleep(for: .milliseconds(100))
+        let loginSends = recorder.calls.filter { $0.contains("/login") }.count
+        #expect(loginSends == 1)
+        _ = before
+    }
+
+    /// Fallback trigger: when the SessionStart hook never arrives, the
+    /// spawn-time fallback still types /login.
+    @Test("login session: spawn fallback types /login when no sessionEvent arrives")
+    func loginSessionFallbackAutoTypes() async throws {
+        let (router, db, recorder) = makeLoginFixture(spawnFallback: .zero)
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let profile = try await seedOAuthProfile(db, name: "Fallback")
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .claude,
+                overrideProfileID: profile.id, loginSession: true
+            )
+        ))
+        let term = try createResp.decodeResult(Terminal.self)
+
+        #expect(await waitFor({ recorder.joinedAll.contains("send-keys -l -t \(term.tmuxPaneID) /login") }))
+    }
 }
 }
