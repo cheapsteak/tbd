@@ -452,19 +452,31 @@ public struct Config: Codable, Sendable, Equatable {
     /// (repo-less worktrees). `nil` means "use the built-in default"
     /// (`RepoConstants.defaultScratchInstructions`).
     public var scratchInstructions: String?
+    /// Global, user-customizable override for the scratch-space rename-nudge
+    /// system-prompt layer. `nil` means "use the built-in default"
+    /// (`RepoConstants.defaultScratchRenamePrompt`).
+    public var scratchRenamePrompt: String?
+    /// Global model-profile override applied to scratch (repo-less) terminal
+    /// spawns. `nil` means "fall back to the global default profile"
+    /// (`defaultProfileID`).
+    public var scratchProfileOverrideID: UUID?
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
                 envSettingOverrides: [String: ClaudeEnvValue] = [:],
                 envOverrides: [String: String] = [:],
                 autoArchiveOnMergeDefault: Bool = false,
-                scratchInstructions: String? = nil) {
+                scratchInstructions: String? = nil,
+                scratchRenamePrompt: String? = nil,
+                scratchProfileOverrideID: UUID? = nil) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
         self.envOverrides = envOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
         self.scratchInstructions = scratchInstructions
+        self.scratchRenamePrompt = scratchRenamePrompt
+        self.scratchProfileOverrideID = scratchProfileOverrideID
     }
 
     public init(from decoder: Decoder) throws {
@@ -481,6 +493,8 @@ public struct Config: Codable, Sendable, Equatable {
         autoArchiveOnMergeDefault = try c.decodeIfPresent(
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
         scratchInstructions = try c.decodeIfPresent(String.self, forKey: .scratchInstructions) ?? nil
+        scratchRenamePrompt = try c.decodeIfPresent(String.self, forKey: .scratchRenamePrompt) ?? nil
+        scratchProfileOverrideID = try c.decodeIfPresent(UUID.self, forKey: .scratchProfileOverrideID)
     }
 }
 

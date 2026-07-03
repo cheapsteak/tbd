@@ -18,6 +18,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var env_overrides: String?
     var auto_archive_on_merge_default: Bool?
     var scratch_instructions: String?
+    var scratch_rename_prompt: String?
+    var scratch_profile_override_id: String?
 
     func toModel() -> Config {
         Config(
@@ -27,7 +29,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings),
             envOverrides: EnvOverridesCoding.decode(env_overrides),
             autoArchiveOnMergeDefault: auto_archive_on_merge_default ?? false,
-            scratchInstructions: scratch_instructions
+            scratchInstructions: scratch_instructions,
+            scratchRenamePrompt: scratch_rename_prompt,
+            scratchProfileOverrideID: scratch_profile_override_id.flatMap(UUID.init(uuidString:))
         )
     }
 }
@@ -126,6 +130,32 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET scratch_instructions = ? WHERE id = ?",
                 arguments: [toStore, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the global scratch-space rename-nudge override. Nil or a
+    /// whitespace-only string clears the override, falling back to the
+    /// built-in default rename-nudge layer.
+    public func setScratchRenamePrompt(_ value: String?) async throws {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toStore = (trimmed?.isEmpty ?? true) ? nil : value
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET scratch_rename_prompt = ? WHERE id = ?",
+                arguments: [toStore, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the global model-profile override applied to scratch terminal
+    /// spawns. Nil clears the override, falling back to the global default
+    /// profile.
+    public func setScratchProfileOverride(_ id: UUID?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET scratch_profile_override_id = ? WHERE id = ?",
+                arguments: [id?.uuidString, Self.singletonID]
             )
         }
     }

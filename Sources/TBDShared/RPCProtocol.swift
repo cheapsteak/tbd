@@ -162,6 +162,8 @@ public enum RPCMethod {
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
     public static let configSetScratchInstructions = "config.setScratchInstructions"
+    public static let configSetScratchRenamePrompt = "config.setScratchRenamePrompt"
+    public static let configSetScratchProfileOverride = "config.setScratchProfileOverride"
     public static let scratchCreate = "scratch.create"
     public static let scratchDelete = "scratch.delete"
     public static let scratchPromote = "scratch.promote"
@@ -891,6 +893,20 @@ public struct ConfigSetAutoArchiveDefaultParams: Codable, Sendable {
 public struct ConfigSetScratchInstructionsParams: Codable, Sendable {
     public let instructions: String?
     public init(instructions: String?) { self.instructions = instructions }
+}
+
+/// Params for `config.setScratchRenamePrompt` — the global scratch-space
+/// rename-nudge override. `nil` (or blank) resets to the built-in default.
+public struct ConfigSetScratchRenamePromptParams: Codable, Sendable {
+    public let renamePrompt: String?
+    public init(renamePrompt: String?) { self.renamePrompt = renamePrompt }
+}
+
+/// Params for `config.setScratchProfileOverride` — the global model-profile
+/// override applied to scratch terminal spawns. `nil` clears the override.
+public struct ConfigSetScratchProfileOverrideParams: Codable, Sendable {
+    public let profileID: UUID?
+    public init(profileID: UUID?) { self.profileID = profileID }
 }
 
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.

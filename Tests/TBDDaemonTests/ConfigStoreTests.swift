@@ -84,4 +84,55 @@ struct ConfigStoreTests {
         let cfg = try await db.config.get()
         #expect(cfg.scratchInstructions == nil)
     }
+
+    @Test func scratchRenamePromptDefaultsToNil() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchRenamePrompt == nil)
+    }
+
+    @Test func setAndGetScratchRenamePrompt() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setScratchRenamePrompt("Rename it once it has a clear purpose.")
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchRenamePrompt == "Rename it once it has a clear purpose.")
+    }
+
+    @Test func setScratchRenamePromptWhitespaceResetsToNil() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setScratchRenamePrompt("   \n  ")
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchRenamePrompt == nil)
+    }
+
+    @Test func setScratchRenamePromptNilResetsToNil() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setScratchRenamePrompt("Rename it once it has a clear purpose.")
+        try await db.config.setScratchRenamePrompt(nil)
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchRenamePrompt == nil)
+    }
+
+    @Test func scratchProfileOverrideIDDefaultsToNil() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchProfileOverrideID == nil)
+    }
+
+    @Test func setAndGetScratchProfileOverride() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let tok = try await db.modelProfiles.create(name: "Personal", kind: .oauth)
+        try await db.config.setScratchProfileOverride(tok.id)
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchProfileOverrideID == tok.id)
+    }
+
+    @Test func clearScratchProfileOverride() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let tok = try await db.modelProfiles.create(name: "Personal", kind: .oauth)
+        try await db.config.setScratchProfileOverride(tok.id)
+        try await db.config.setScratchProfileOverride(nil)
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchProfileOverrideID == nil)
+    }
 }

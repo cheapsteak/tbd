@@ -619,6 +619,15 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "config", column: "scratch_instructions", type: .text)
         }
 
+        // Global, user-customizable rename-nudge override for scratch spaces,
+        // plus a global model-profile override applied to scratch terminal
+        // spawns. Both nullable; nil means "use the built-in default" /
+        // "fall back to the global default profile" respectively.
+        migrator.registerMigration("v37_config_scratch_rename_and_profile") { db in
+            try db.addColumnIfMissing(table: "config", column: "scratch_rename_prompt", type: .text)
+            try db.addColumnIfMissing(table: "config", column: "scratch_profile_override_id", type: .text)
+        }
+
         return migrator
     }
 }

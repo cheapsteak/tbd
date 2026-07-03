@@ -277,6 +277,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetAutoArchiveDefault(request.paramsData)
             case RPCMethod.configSetScratchInstructions:
                 return try await handleConfigSetScratchInstructions(request.paramsData)
+            case RPCMethod.configSetScratchRenamePrompt:
+                return try await handleConfigSetScratchRenamePrompt(request.paramsData)
+            case RPCMethod.configSetScratchProfileOverride:
+                return try await handleConfigSetScratchProfileOverride(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
