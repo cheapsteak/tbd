@@ -322,7 +322,13 @@ public final class Daemon: Sendable {
         let controlModeBridge = TmuxControlModeBridge(
             supervisor: controlModeSupervisor,
             tmuxVersion: tmuxVersion,
-            fdVending: fdVendingServer
+            fdVending: fdVendingServer,
+            // Live provider, not a snapshot: the gate re-reads the persisted
+            // Settings flag on every attach decision (M5), so a toggle takes
+            // effect without a daemon restart.
+            persistedFlagProvider: { [config = database.config] in
+                (try? await config.get().controlModeEnabled) ?? false
+            }
         )
 
         var lifecycle = WorktreeLifecycle(

@@ -33,6 +33,12 @@ struct TmuxControlModeBridge: Sendable {
     /// so the `pane.resize` handler and the supervisor's layout-change filter
     /// touch the same coordinator.
     let resizeCoordinator: ControlModeResizeCoordinator
+    /// Reads the persisted Settings opt-in (`config.control_mode_enabled`,
+    /// M5). A provider closure — not a snapshot bool — so every gate decision
+    /// re-reads the flag and a Settings toggle affects the NEXT attach
+    /// without a daemon restart. Existing attached panes are never torn down
+    /// or migrated on toggle: the flag applies to newly created panes only.
+    let persistedFlagProvider: @Sendable () async -> Bool
 
     init(supervisor: TmuxControlSupervisor,
          tmuxVersion: TmuxVersion?,
@@ -40,12 +46,14 @@ struct TmuxControlModeBridge: Sendable {
          fdVending: FDVendingServer,
          readyTimeout: Duration = .seconds(5),
          inputRouter: ControlModeInputRouter? = nil,
-         resizeCoordinator: ControlModeResizeCoordinator? = nil) {
+         resizeCoordinator: ControlModeResizeCoordinator? = nil,
+         persistedFlagProvider: @escaping @Sendable () async -> Bool = { false }) {
         self.supervisor = supervisor
         self.tmuxVersion = tmuxVersion
         self.environment = environment
         self.fdVending = fdVending
         self.readyTimeout = readyTimeout
+        self.persistedFlagProvider = persistedFlagProvider
         // Default-wire the router to this supervisor's correlators so callers
         // (and tests) that don't care about input get a correctly-wired router
         // for free; the daemon can still inject one it also holds a handle to.
@@ -67,10 +75,21 @@ struct TmuxControlModeBridge: Sendable {
         }
     }
 
+    /// Effective gate decision, evaluated fresh on every call:
+    /// `(env opt-in || persisted flag) && tmux >= 3.2`. The persisted flag is
+    /// read through `persistedFlagProvider`, so a Settings toggle takes
+    /// effect on the next decision without a daemon restart.
+    func gateEnabled() async -> Bool {
+        ControlModeGate.shouldEnable(
+            environment: environment,
+            persistedFlag: await persistedFlagProvider(),
+            tmuxVersion: tmuxVersion)
+    }
+
     /// Open a logging-only `tmux -CC` connection for `serverName` when the
-    /// control-mode gate passes (env opt-in AND tmux ≥ 3.2). Idempotent.
+    /// control-mode gate passes (see `gateEnabled`). Idempotent.
     func enableIfGated(serverName: String) async {
-        guard ControlModeGate.shouldEnable(environment: environment, tmuxVersion: tmuxVersion) else { return }
+        guard await gateEnabled() else { return }
         await supervisor.ensureConnection(serverName: serverName)
     }
 }

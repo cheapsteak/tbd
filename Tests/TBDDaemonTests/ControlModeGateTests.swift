@@ -30,4 +30,41 @@ struct ControlModeGateTests {
         #expect(!ControlModeGate.shouldEnable(environment: [:],
                                               tmuxVersion: TmuxVersion(major: 3, minor: 6)))
     }
+
+    @Test("persisted flag alone (env off) opens the gate")
+    func persistedFlagOpensGate() {
+        #expect(ControlModeGate.shouldEnable(
+            environment: [:], persistedFlag: true,
+            tmuxVersion: TmuxVersion(major: 3, minor: 6)))
+    }
+
+    @Test("flag off and env off keeps the gate closed")
+    func flagOffEnvOffClosed() {
+        #expect(!ControlModeGate.shouldEnable(
+            environment: [:], persistedFlag: false,
+            tmuxVersion: TmuxVersion(major: 3, minor: 6)))
+    }
+
+    @Test("truthy env forces the gate on even with the flag off (developer override)")
+    func envOverridesFlagOff() {
+        #expect(ControlModeGate.shouldEnable(
+            environment: ["TBD_TMUX_CONTROL_MODE": "1"], persistedFlag: false,
+            tmuxVersion: TmuxVersion(major: 3, minor: 6)))
+    }
+
+    @Test("gate = env || flag: falsy env does not veto a persisted flag")
+    func falsyEnvDoesNotVetoFlag() {
+        #expect(ControlModeGate.shouldEnable(
+            environment: ["TBD_TMUX_CONTROL_MODE": "0"], persistedFlag: true,
+            tmuxVersion: TmuxVersion(major: 3, minor: 6)))
+    }
+
+    @Test("persisted flag still requires tmux >= 3.2")
+    func persistedFlagStillNeedsVersion() {
+        #expect(!ControlModeGate.shouldEnable(
+            environment: [:], persistedFlag: true,
+            tmuxVersion: TmuxVersion(major: 3, minor: 1)))
+        #expect(!ControlModeGate.shouldEnable(
+            environment: [:], persistedFlag: true, tmuxVersion: nil))
+    }
 }

@@ -181,6 +181,7 @@ public enum RPCMethod {
     public static let nightwatchSetMode = "nightwatch.setMode"
     public static let nightwatchReport = "nightwatch.report"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
+    public static let configSetControlMode = "config.setControlMode"
 }
 
 // MARK: - Branch Listing
@@ -1102,6 +1103,14 @@ public struct ConfigSetAutoHibernateParams: Codable, Sendable {
     }
 }
 
+/// Params for `config.setControlMode` — persist the tmux control-mode opt-in
+/// (M5). The gate is `env || flag`; the change applies to newly created
+/// panes, existing attaches are untouched.
+public struct ConfigSetControlModeParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.
 public struct SetRepoEnvOverridesParams: Codable, Sendable, Equatable {
     public let repoID: UUID
@@ -1200,8 +1209,32 @@ public struct PaneResizeParams: Codable, Sendable {
 /// locally (it is launched via `open`, which drops shell env, so it cannot
 /// read the daemon's gate variables itself).
 public struct DaemonCapabilitiesResult: Codable, Sendable {
+    /// Effective control-mode gate: `(env || persisted flag) && tmux >= 3.2`,
+    /// re-evaluated by the daemon on every call.
     public let controlModeEnabled: Bool
-    public init(controlModeEnabled: Bool) { self.controlModeEnabled = controlModeEnabled }
+    /// tmux version the daemon detected at startup (e.g. "3.6a"); nil when
+    /// detection failed (tmux missing/unparseable).
+    public let tmuxVersion: String?
+    /// Whether the detected tmux meets the control-mode minimum (>= 3.2).
+    /// Computed daemon-side so the app never parses version strings.
+    public let controlModeSupported: Bool
+
+    public init(controlModeEnabled: Bool,
+                tmuxVersion: String? = nil,
+                controlModeSupported: Bool = false) {
+        self.controlModeEnabled = controlModeEnabled
+        self.tmuxVersion = tmuxVersion
+        self.controlModeSupported = controlModeSupported
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        controlModeEnabled = try c.decodeIfPresent(Bool.self, forKey: .controlModeEnabled) ?? false
+        // New in M5 — absent when talking to a pre-M5 daemon; default to the
+        // conservative "unsupported / unknown version".
+        tmuxVersion = try c.decodeIfPresent(String.self, forKey: .tmuxVersion)
+        controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
+    }
 }
 
 public struct TerminalResumeParams: Codable, Sendable {

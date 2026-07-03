@@ -58,4 +58,15 @@ extension RPCRouter {
         // config from the DB at spawn time.
         return .ok()
     }
+
+    /// Persist the tmux control-mode opt-in (M5). The attach gate reads the
+    /// flag per decision (`env || flag`), so this applies to newly created
+    /// panes immediately — existing attached panes are not torn down.
+    func handleConfigSetControlMode(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetControlModeParams.self, from: paramsData)
+        try await db.config.setControlModeEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
 }

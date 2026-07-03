@@ -15,9 +15,9 @@ extension RPCRouter {
     /// land in a pipe nobody reads.
     func handleAttachRequest(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(AttachRequestParams.self, from: paramsData)
-        guard let bridge = controlMode,
-              ControlModeGate.shouldEnable(
-                  environment: bridge.environment, tmuxVersion: bridge.tmuxVersion) else {
+        // Gate evaluated per attach (env || persisted flag): a Settings
+        // toggle affects the next attach without a daemon restart.
+        guard let bridge = controlMode, await bridge.gateEnabled() else {
             return try RPCResponse(result: AttachRequestResult(status: "unavailable"))
         }
         guard let worktree = try? await db.worktrees.get(id: params.worktreeID) else {
