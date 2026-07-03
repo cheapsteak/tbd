@@ -132,13 +132,15 @@ struct ContentView: View {
                    appState.selectedWorktreeIDs.count == 1,
                    let prStatus = appState.prStatuses[worktreeID],
                    let prURL = URL(string: prStatus.url) {
+                    let armed = appState.findWorktree(id: worktreeID)
+                        .map { appState.effectiveAutoArchive(for: $0) } ?? false
+                    let blocked = !appState.children(of: worktreeID).isEmpty
                     ToolbarItem(placement: .primaryAction) {
                         ControlGroup {
                             // Split button: label = primary click (open PR); the
                             // attached chevron opens the menu.
                             Menu {
                                 if appState.findWorktree(id: worktreeID) != nil {
-                                    let blocked = !appState.children(of: worktreeID).isEmpty
                                     Toggle("Auto-archive worktree on PR merge", isOn: Binding(
                                         get: {
                                             appState.findWorktree(id: worktreeID)
@@ -151,8 +153,6 @@ struct ContentView: View {
                                     .disabled(blocked)
                                 }
                             } label: {
-                                let armed = appState.findWorktree(id: worktreeID)
-                                    .map { appState.effectiveAutoArchive(for: $0) } ?? false
                                 PRButtonLabel(prStatus: prStatus, isAutoArchiveArmed: armed)
                             } primaryAction: {
                                 let existingTabs = appState.tabs[worktreeID] ?? []
@@ -175,6 +175,12 @@ struct ContentView: View {
                             // its baked status color via renderingMode(.original).
                             .tint(.primary)
                             .help("Open PR #\(prStatus.number) · more options")
+                            // AppKit materializes this split button's NSMenu and
+                            // label ONCE; later SwiftUI re-evaluations of the
+                            // Toggle checkmark and armed badge never reach the
+                            // already-built NSMenuToolbarItem. Changing the id
+                            // forces the item to be recreated so both stay in sync.
+                            .id("pr-split-\(worktreeID)-\(armed)-\(blocked)")
                         }
                     }
 
