@@ -573,6 +573,10 @@ extension WorktreeLifecycle {
             appHookPath: TBDConstants.hookPath(repoID: worktree.repoID, eventName: HookEvent.setup.rawValue)
         )
         let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
+        // Suppress the omz update prompt only when a setup hook actually
+        // resolves — a hook-less "Setup" tab is just a regular shell and must
+        // keep oh-my-zsh update checks (see `hookPaneEnv`).
+        let setupSensitiveEnv = setupHookPath != nil ? Self.hookPaneEnv : [:]
         // Full hook environment per docs/worktree-hooks.md (matches the
         // preSession and archive hooks). TBD_WORKTREE_NAME uses
         // `worktree.name` for consistency with the archive hook's env.
@@ -591,7 +595,7 @@ extension WorktreeLifecycle {
             cwd: worktreePath,
             shellCommand: setupCommand,
             env: setupEnv,
-            sensitiveEnv: Self.hookPaneEnv,
+            sensitiveEnv: setupSensitiveEnv,
             cols: resolvedCols,
             rows: resolvedRows
         )
