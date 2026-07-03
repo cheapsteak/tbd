@@ -17,6 +17,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// JSON-encoded `[String: String]` free-form env overrides (global scope).
     var env_overrides: String?
     var auto_archive_on_merge_default: Bool?
+    var scratch_instructions: String?
 
     func toModel() -> Config {
         Config(
@@ -25,7 +26,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
                 .flatMap(PrimaryAgentPreference.init(rawValue:)) ?? .defaultValue,
             envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings),
             envOverrides: EnvOverridesCoding.decode(env_overrides),
-            autoArchiveOnMergeDefault: auto_archive_on_merge_default ?? false
+            autoArchiveOnMergeDefault: auto_archive_on_merge_default ?? false,
+            scratchInstructions: scratch_instructions
         )
     }
 }
@@ -110,6 +112,20 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET auto_archive_on_merge_default = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the global scratch-space system-prompt override. Nil or a
+    /// whitespace-only string clears the override, falling back to the
+    /// built-in default scratch layer.
+    public func setScratchInstructions(_ value: String?) async throws {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toStore = (trimmed?.isEmpty ?? true) ? nil : value
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET scratch_instructions = ? WHERE id = ?",
+                arguments: [toStore, Self.singletonID]
             )
         }
     }

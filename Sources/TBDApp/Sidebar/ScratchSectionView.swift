@@ -7,6 +7,7 @@ import TBDShared
 struct ScratchSectionView: View {
     @EnvironmentObject var appState: AppState
     @State private var isHeaderHovered = false
+    @State private var showingScratchInstructions = false
 
     var body: some View {
         HStack(spacing: 4) {
@@ -22,6 +23,14 @@ struct ScratchSectionView: View {
             }
         }
         .onHover { isHeaderHovered = $0 }
+        .contextMenu {
+            Button("Edit Scratch Instructions…") {
+                showingScratchInstructions = true
+            }
+        }
+        .sheet(isPresented: $showingScratchInstructions) {
+            ScratchInstructionsView().environmentObject(appState)
+        }
         .listRowInsets(EdgeInsets(top: 0, leading: -2, bottom: 0, trailing: 0))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)

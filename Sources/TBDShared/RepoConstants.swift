@@ -19,4 +19,15 @@ public enum RepoConstants {
 
         Do this immediately, before reading files, using skills, or any other tools.
         """
+
+    /// Layer injected for repo-less scratch sessions. Explains the space and
+    /// nudges agent-driven promotion. User-overridable via the global
+    /// `Config.scratchInstructions` setting.
+    public static let defaultScratchInstructions = """
+        You are in a TBD **scratch space** — a repo-less workspace with no git repo yet.
+        Use it to bootstrap a new project or hold a general-purpose chat.
+        When the project takes shape, offer the user promotion: ask them for a \
+        destination path, then run `tbd scratch promote <dest-path>` from this \
+        session. That moves the folder and registers it as a real TBD repo.
+        """
 }

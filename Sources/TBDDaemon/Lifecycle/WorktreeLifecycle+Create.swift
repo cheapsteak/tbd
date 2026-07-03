@@ -507,7 +507,9 @@ extension WorktreeLifecycle {
             // already-existing session file would lose the transcript.
             let appendPrompt = isResume
                 ? nil
-                : SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false)
+                : SystemPromptBuilder.build(
+                    repo: repo, worktree: worktree, isResume: false,
+                    scratchInstructions: config.scratchInstructions)
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 freshSessionID: isResume ? nil : sessionUUID,

@@ -167,6 +167,27 @@ extension AppState {
         }
     }
 
+    /// Set the global scratch-space system-prompt override. Nil or blank resets to the built-in default.
+    func setScratchInstructions(_ instructions: String?) async {
+        do {
+            try await daemonClient.setScratchInstructions(instructions)
+        } catch {
+            logger.error("Failed to set scratch instructions: \(error, privacy: .public)")
+            handleConnectionError(error)
+        }
+    }
+
+    /// Fetch the current global Config (used by the scratch-instructions editor to show the effective text).
+    func fetchConfig() async -> Config? {
+        do {
+            return try await daemonClient.getConfig()
+        } catch {
+            logger.error("Failed to fetch config: \(error, privacy: .public)")
+            handleConnectionError(error)
+            return nil
+        }
+    }
+
     /// Set or clear a per-repo model profile override.
     func setRepoProfileOverride(repoID: UUID, profileID: UUID?) async {
         do {

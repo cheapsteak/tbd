@@ -736,6 +736,19 @@ actor DaemonClient {
         )
     }
 
+    /// Set the global scratch-space system-prompt override. Nil or blank resets to the built-in default.
+    func setScratchInstructions(_ instructions: String?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetScratchInstructions,
+            params: ConfigSetScratchInstructionsParams(instructions: instructions)
+        )
+    }
+
+    /// Fetch the global daemon config (used to read the current effective scratch-instructions override).
+    func getConfig() async throws -> Config {
+        try await callNoParamsAsync(method: RPCMethod.configGet, resultType: Config.self)
+    }
+
     /// Set or clear a repo's free-form env overrides.
     func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
         try await callVoidAsync(

@@ -112,6 +112,17 @@ repo, `repoID == nil` means:
   `CODEX_HOME` (per-repo isolation was removed by the 2026-05-22 codex
   global-home redesign), and scratch sessions use it the same way.
 
+**Customizable scratch layer (2026-07-03 amendment):** the scratch layer is
+user-customizable via a global-only config field, `Config.scratchInstructions`
+(nullable; `nil` or blank = built-in default, exposed as
+`RepoConstants.defaultScratchInstructions`). Set via the
+`config.setScratchInstructions` RPC (whitespace-only normalizes to `nil`) and
+edited from an "Edit Scratch Instructions…" context-menu item on the sidebar's
+Scratch section header, whose editor is seeded with the current effective
+text. Non-scratch worktrees are unaffected; the terminal-spawn handlers fetch
+the value from config and pass it through to `SystemPromptBuilder`, which
+stays pure.
+
 ## 4. Sidebar & UI
 
 - The Scratch section is **synthesized client-side** from

@@ -107,7 +107,8 @@ extension RPCRouter {
         let plannedTerminalID = UUID()
 
         // Build env vars available in all TBD terminals
-        var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
+        var env = SystemPromptBuilder.promptLayers(
+            repo: repo, worktree: worktree, scratchInstructions: createConfig?.scratchInstructions)
         env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
@@ -211,7 +212,9 @@ extension RPCRouter {
             let sessionID = UUID().uuidString
             claudeSessionID = sessionID
             freshSessionID = sessionID
-            appendSystemPrompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false)
+            appendSystemPrompt = SystemPromptBuilder.build(
+                repo: repo, worktree: worktree, isResume: false,
+                scratchInstructions: createConfig?.scratchInstructions)
             label = TerminalLabel.claudeCode
         } else if let cmd = params.cmd {
             claudeSessionID = nil
@@ -659,7 +662,9 @@ extension RPCRouter {
             repo = nil
         }
         let plannedTerminalID = UUID()
-        var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
+        let swapConfig = try? await db.config.get()
+        var env = SystemPromptBuilder.promptLayers(
+            repo: repo, worktree: worktree, scratchInstructions: swapConfig?.scratchInstructions)
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
@@ -670,7 +675,6 @@ extension RPCRouter {
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
 
-        let swapConfig = try? await db.config.get()
         let claudeEnvOverrides = swapConfig?.envSettingOverrides ?? [:]
         // Free-form env overrides for the swapped-in Claude pane (global < repo <
         // new profile), layered under the builder's auth/routing env below.
@@ -710,7 +714,9 @@ extension RPCRouter {
             scheduleRecapture = true
         case .fresh(let newSessionID):
             logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
-            let appendPrompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false)
+            let appendPrompt = SystemPromptBuilder.build(
+                repo: repo, worktree: worktree, isResume: false,
+                scratchInstructions: swapConfig?.scratchInstructions)
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,
                 freshSessionID: newSessionID,
