@@ -161,6 +161,9 @@ public enum RPCMethod {
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
+    public static let scratchCreate = "scratch.create"
+    public static let scratchDelete = "scratch.delete"
+    public static let scratchPromote = "scratch.promote"
 }
 
 // MARK: - Branch Listing
@@ -529,6 +532,36 @@ public struct PRRefreshResult: Codable, Sendable {
 public struct RepoAddParams: Codable, Sendable {
     public let path: String
     public init(path: String) { self.path = path }
+}
+
+public struct ScratchCreateParams: Codable, Sendable {
+    public let name: String?
+    public init(name: String? = nil) { self.name = name }
+}
+
+public struct ScratchDeleteParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct ScratchPromoteParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let destPath: String
+    public let displayName: String?
+    public init(worktreeID: UUID, destPath: String, displayName: String? = nil) {
+        self.worktreeID = worktreeID; self.destPath = destPath; self.displayName = displayName
+    }
+}
+
+public struct ScratchPromoteResult: Codable, Sendable {
+    public let worktreeID: UUID
+    public let repoID: UUID
+    public let repoPath: String
+    public let repoDisplayName: String
+    public init(worktreeID: UUID, repoID: UUID, repoPath: String, repoDisplayName: String) {
+        self.worktreeID = worktreeID; self.repoID = repoID
+        self.repoPath = repoPath; self.repoDisplayName = repoDisplayName
+    }
 }
 
 public struct RepoRemoveParams: Codable, Sendable {

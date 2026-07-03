@@ -103,6 +103,8 @@ public final class RPCRouter: Sendable {
                 return try await handleRepoRemove(request.paramsData)
             case RPCMethod.repoList:
                 return try await handleRepoList()
+            case RPCMethod.scratchCreate:
+                return try await handleScratchCreate(request.paramsData)
             case RPCMethod.repoUpdateInstructions:
                 return try await handleRepoUpdateInstructions(request.paramsData)
             case RPCMethod.repoRelocate:

@@ -469,6 +469,15 @@ actor DaemonClient {
         )
     }
 
+    /// Create a repo-less scratch worktree.
+    func createScratch(name: String? = nil) async throws -> Worktree {
+        return try await callAsync(
+            method: RPCMethod.scratchCreate,
+            params: ScratchCreateParams(name: name),
+            resultType: Worktree.self
+        )
+    }
+
     /// List local + `origin/*` branches for a repo. Used by the existing-
     /// branch picker on the sidebar `+` button.
     func listBranches(repoID: UUID) async throws -> [BranchInfo] {
