@@ -27,21 +27,28 @@ struct PreSessionHookTests {
         })
     }
 
-    /// Writes an executable `.worktree-hooks/preSession` into the repo and
+    /// Writes an executable `.worktree-hooks/<name>` into the repo and
     /// commits it so fresh worktree checkouts contain it.
     @discardableResult
-    private func installPreSessionHook(
-        repoDir: URL, script: String = "#!/bin/sh\nexit 0\n"
+    private func installHook(
+        named name: String, repoDir: URL, script: String = "#!/bin/sh\nexit 0\n"
     ) async throws -> String {
         let hooksDir = repoDir.appendingPathComponent(".worktree-hooks")
         try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
-        let hookPath = hooksDir.appendingPathComponent("preSession")
+        let hookPath = hooksDir.appendingPathComponent(name)
         try script.write(to: hookPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755], ofItemAtPath: hookPath.path
         )
-        try await shell("git add -A && git commit -m 'add preSession hook'", at: repoDir)
+        try await shell("git add -A && git commit -m 'add \(name) hook'", at: repoDir)
         return hookPath.path
+    }
+
+    @discardableResult
+    private func installPreSessionHook(
+        repoDir: URL, script: String = "#!/bin/sh\nexit 0\n"
+    ) async throws -> String {
+        try await installHook(named: "preSession", repoDir: repoDir, script: script)
     }
 
     private func makeLifecycle(
@@ -215,6 +222,13 @@ struct PreSessionHookTests {
                 "first window must be the primary agent")
         #expect(windowCalls[1].last?.contains("claude --session-id") == false,
                 "second window must be the setup hook/shell")
+        // omz-update suppression is scoped to windows that actually run a
+        // hook: with no setup hook configured, the "Setup" tab is a plain
+        // shell and must keep update checks, same as the primary agent.
+        #expect(!windowCalls[0].contains("DISABLE_AUTO_UPDATE=true"),
+                "primary terminal must keep oh-my-zsh update checks")
+        #expect(!windowCalls[1].contains("DISABLE_AUTO_UPDATE=true"),
+                "hook-less setup tab is a regular shell and must keep omz update checks")
         // Setup window carries the full documented hook env even with no
         // preSession hook present.
         let setupBody = windowCalls[1].last ?? ""
@@ -228,6 +242,35 @@ struct PreSessionHookTests {
         #expect(try await db.worktrees.getTabOrder(worktreeID: wt.id) == [claude.id, setup.id])
         #expect(try await db.worktrees.getActiveTabID(worktreeID: wt.id) == claude.id)
         #expect(try await db.notifications.unread(worktreeID: wt.id).isEmpty)
+    }
+
+    @Test func setupHookWindowSuppressesOmzUpdatePrompt() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = RecordedCommands()
+        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        try await installHook(named: "setup", repoDir: repoDir)
+
+        let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: false)
+        #expect(wt.status == .active)
+
+        // Windows: [claude, setup]. With a setup hook resolved, the setup
+        // window must carry `-e DISABLE_AUTO_UPDATE=true` (process env, set
+        // before .zshrc runs) so the omz updater prompt can't delay the hook;
+        // the primary agent window must not.
+        let windowCalls = recorder.snapshot().filter { $0.contains("new-window") }
+        #expect(windowCalls.count == 2)
+        #expect(!windowCalls[0].contains("DISABLE_AUTO_UPDATE=true"),
+                "primary terminal must keep oh-my-zsh update checks")
+        #expect(hasProcessEnvFlag(windowCalls[1], "DISABLE_AUTO_UPDATE=true"),
+                "setup hook window must suppress the oh-my-zsh update prompt via -e")
+        #expect(windowCalls[1].last?.contains(".worktree-hooks/setup") == true,
+                "second window must run the setup hook")
     }
 
     @Test func noHookCreateFailureStillDeletesRow() async throws {
@@ -305,6 +348,11 @@ struct PreSessionHookTests {
         #expect(body.contains("export TBD_WORKTREE_PATH='\(createdWt.path)'"))
         #expect(body.contains("export TBD_REPO_PATH='\(repo.path)'"))
         #expect(body.contains("export TBD_BRANCH='\(createdWt.branch)'"))
+        // The pre-session window must carry `-e DISABLE_AUTO_UPDATE=true` so
+        // oh-my-zsh's updater prompt (fired by .zshrc, BEFORE the -c command
+        // and its export-prefix run) can't block the hook.
+        #expect(hasProcessEnvFlag(windowCalls[0], "DISABLE_AUTO_UPDATE=true"),
+                "pre-session hook window must suppress the oh-my-zsh update prompt via -e")
 
         // Still gated while the marker is absent.
         try await Task.sleep(nanoseconds: 200_000_000)
@@ -334,6 +382,13 @@ struct PreSessionHookTests {
         // (TBD_EVENT=setup) — windows are [pre-session, claude, setup].
         let allWindowCalls = recorder.snapshot().filter { $0.contains("new-window") }
         #expect(allWindowCalls.count == 3)
+        // Only windows that actually run a hook suppress the omz updater:
+        // this fixture has no setup hook, so the "Setup" tab is a plain shell
+        // and keeps update checks, same as the primary agent.
+        #expect(!allWindowCalls[1].contains("DISABLE_AUTO_UPDATE=true"),
+                "primary terminal must keep oh-my-zsh update checks")
+        #expect(!allWindowCalls[2].contains("DISABLE_AUTO_UPDATE=true"),
+                "hook-less setup tab is a regular shell and must keep omz update checks")
         let setupBody = allWindowCalls[2].last ?? ""
         #expect(setupBody.contains("export TBD_EVENT='setup'"))
         #expect(setupBody.contains("export TBD_TERMINAL_ID='\(setup.id.uuidString)'"))
@@ -1176,6 +1231,14 @@ struct PreSessionHookTests {
 }
 
 // MARK: - Helpers
+
+/// True when `args` sets `assignment` in the spawned window's process
+/// environment via tmux's `-e KEY=VALUE` flag (adjacency required — a bare
+/// substring match could false-positive on the shell command body).
+private func hasProcessEnvFlag(_ args: [String], _ assignment: String) -> Bool {
+    guard let index = args.firstIndex(of: assignment), index > 0 else { return false }
+    return args[index - 1] == "-e"
+}
 
 /// Thread-safe collector for TmuxManager dryRun recorded args.
 private final class RecordedCommands: @unchecked Sendable {

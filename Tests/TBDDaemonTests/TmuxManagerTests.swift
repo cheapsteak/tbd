@@ -61,6 +61,35 @@ import Testing
     #expect(args.contains("claude --dangerously-skip-permissions"))
 }
 
+@Test func testNewWindowCommandSensitiveEnvUsesEFlag() {
+    // sensitiveEnv must land in the process environment via tmux's
+    // `-e KEY=VALUE` flag (visible while .zshrc runs), never as an
+    // `export` prefix inside the -c command string (which runs after).
+    let args = TmuxManager.newWindowCommand(
+        server: "tbd-a1b2c3d4",
+        session: "main",
+        cwd: "/tmp/worktree",
+        shellCommand: "echo hi",
+        sensitiveEnv: ["DISABLE_AUTO_UPDATE": "true"]
+    )
+    let index = args.firstIndex(of: "DISABLE_AUTO_UPDATE=true")
+    #expect(index != nil)
+    if let index, index > 0 {
+        #expect(args[index - 1] == "-e")
+    }
+    #expect(args.last == "echo hi",
+            "sensitiveEnv must not be exported inside the shell command")
+
+    // Without sensitiveEnv, no -e flag is emitted at all.
+    let plain = TmuxManager.newWindowCommand(
+        server: "tbd-a1b2c3d4",
+        session: "main",
+        cwd: "/tmp/worktree",
+        shellCommand: "echo hi"
+    )
+    #expect(!plain.contains("-e"))
+}
+
 @Test func testKillWindowCommand() {
     let args = TmuxManager.killWindowCommand(
         server: "tbd-a1b2c3d4",
