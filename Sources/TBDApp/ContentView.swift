@@ -357,6 +357,15 @@ private struct PRButtonLabel: View {
     // non-template, so it can't auto-adapt the way a tinted template would).
     @Environment(\.colorScheme) private var colorScheme
 
+    /// Baked image geometry: 12×12 status icon, plus (when armed) a 3pt gap
+    /// and a 12×12 archivebox badge composited into the same bitmap.
+    private static let iconSide: CGFloat = 12
+    private static let badgeGap: CGFloat = 3
+
+    private var bakedWidth: CGFloat {
+        isAutoArchiveArmed ? Self.iconSide + Self.badgeGap + Self.iconSide : Self.iconSide
+    }
+
     var body: some View {
         HStack(spacing: 3) {
             if let presentation = PRStatusPresentation.make(for: prStatus),
@@ -365,41 +374,54 @@ private struct PRButtonLabel: View {
                     .renderingMode(.original)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 12, height: 12)
+                    .frame(width: bakedWidth, height: Self.iconSide)
             }
-            // AppKit flattens a toolbar split-button (Menu) label to ONE image
-            // + ONE text, so a separate trailing Image would be dropped. The
-            // auto-archive-armed badge must therefore live INSIDE the Text as
-            // an inline image (Text interpolation) to survive that flattening.
-            if isAutoArchiveArmed {
-                (
-                    Text(verbatim: "#\(prStatus.number) ")
-                        .fontWeight(.medium)
-                    + Text(Image(systemName: "archivebox"))
-                )
+            // macOS 26 flattens a toolbar split-button (Menu) label to exactly
+            // ONE image + ONE plain text string: a separate trailing Image is
+            // dropped, and an inline Text(Image(...)) attachment is stripped
+            // entirely. Any badge (like the auto-archive-armed archivebox)
+            // must therefore be composited INTO the single baked NSImage.
+            Text(verbatim: "#\(prStatus.number)")
                 .font(.caption)
-                .accessibilityLabel("PR #\(prStatus.number), auto-archive on merge is on")
-            } else {
-                Text(verbatim: "#\(prStatus.number)")
-                    .font(.caption)
-                    .fontWeight(.medium)
-            }
+                .fontWeight(.medium)
         }
+        .accessibilityLabel(
+            isAutoArchiveArmed
+                ? "PR #\(prStatus.number), auto-archive on merge is on"
+                : "PR #\(prStatus.number)"
+        )
     }
 
     /// Bakes the status color into a NON-template image. Toolbar `Menu` /
     /// split-button labels render template images monochrome (AppKit tints
     /// them with the control color and ignores `.foregroundStyle`), so the
     /// icon must carry its own color and be drawn with `.renderingMode(.original)`.
+    /// When auto-archive is armed, an `archivebox` badge (tinted
+    /// `secondaryLabelColor`) is composited to the right of the status icon —
+    /// the flattened toolbar label keeps only this one image, so the badge
+    /// must live inside it.
     private func coloredIcon(_ name: String, nsColor: NSColor) -> NSImage? {
         _ = colorScheme  // establish a dependency so we re-bake on light/dark change
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
               let base = NSImage(contentsOf: url) else { return nil }
         base.isTemplate = true
-        let img = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
-            base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+        let badge: NSImage? = isAutoArchiveArmed
+            ? NSImage(systemSymbolName: "archivebox", accessibilityDescription: "Auto-archive on merge is on")
+            : nil
+        let side = Self.iconSide
+        let img = NSImage(size: NSSize(width: bakedWidth, height: side), flipped: false) { _ in
+            // Colors are resolved inside this draw handler, so dynamic colors
+            // (like secondaryLabelColor) pick up the current appearance.
+            let iconRect = NSRect(x: 0, y: 0, width: side, height: side)
+            base.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
             nsColor.set()
-            rect.fill(using: .sourceAtop)
+            iconRect.fill(using: .sourceAtop)
+            if let badge {
+                let badgeRect = NSRect(x: side + Self.badgeGap, y: 0, width: side, height: side)
+                badge.draw(in: badgeRect, from: .zero, operation: .sourceOver, fraction: 1)
+                NSColor.secondaryLabelColor.set()
+                badgeRect.fill(using: .sourceAtop)
+            }
             return true
         }
         img.isTemplate = false
