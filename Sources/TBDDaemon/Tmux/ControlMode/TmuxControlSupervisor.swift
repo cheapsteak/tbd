@@ -33,9 +33,11 @@ actor TmuxControlSupervisor {
     /// One FIFO command correlator per connection, keyed by server. Fed the
     /// connection's `.commandSucceeded`/`.commandFailed` events by `drain`.
     private var commandClients: [String: TmuxControlCommandClient] = [:]
-    /// Shared per-daemon fanout. Reader threads call `route` directly; the
-    /// actor only mediates attach/ready/detach.
-    private let fanout = PaneFanout()
+    /// Shared per-daemon fanout. Reader threads call `route` directly (it is
+    /// internally locked), so this is honestly `nonisolated`; the actor only
+    /// mediates attach/ready/detach. Test-visible so orchestration tests can
+    /// fabricate `%output` events against the same fanout the supervisor owns.
+    nonisolated let fanout = PaneFanout()
 
     /// Idempotently ensure a control connection exists for `serverName`.
     /// A no-op if one is already running.
@@ -114,6 +116,14 @@ actor TmuxControlSupervisor {
 
     func markReady(server: String, paneID: String) {
         fanout.markReady(key: PaneKey(server: server, paneID: paneID))
+    }
+
+    /// Record the app's `attach.ready` ack and return the attach's CURRENT
+    /// generation (M4.3) — the whole replay sequence is tagged with it. `nil`
+    /// when the pane has no live attach. Once acknowledged, the ready-timeout
+    /// no longer threatens this attach.
+    func acknowledgeAttach(server: String, paneID: String) -> UInt64? {
+        fanout.acknowledge(key: PaneKey(server: server, paneID: paneID))
     }
 
     func isReady(server: String, paneID: String) -> Bool {

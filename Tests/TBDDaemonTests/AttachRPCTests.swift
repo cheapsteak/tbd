@@ -51,8 +51,8 @@ struct AttachRPCStubTests {
         #expect(result.status == "pending" || result.status == "unavailable")
     }
 
-    @Test("attach.ready accepts the ack when the bridge is configured")
-    func readyRoundTrip() async throws {
+    @Test("attach.ready without a live attach fails (M4.3: app must fall back)")
+    func readyWithoutAttachFails() async throws {
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
         router.controlMode = TmuxControlModeBridge(
@@ -63,8 +63,11 @@ struct AttachRPCStubTests {
         let request = try RPCRequest(
             method: RPCMethod.attachReady,
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%0"))
+        // No attach.request preceded this ack, so there is no sink to replay
+        // into — the replay sequence cannot run and the RPC must error so the
+        // app's catch falls back to grouped sessions.
         let response = await router.handle(request)
-        #expect(response.success)
+        #expect(!response.success)
     }
 
     @Test("pane.detach accepts the detach")
@@ -120,14 +123,75 @@ struct AttachRPCOrchestrationTests {
         supervisor: TmuxControlSupervisor,
         vending: FDVendingServer,
         gateOn: Bool = true,
-        readyTimeout: Duration = .seconds(5)
+        readyTimeout: Duration = .seconds(5),
+        commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
             supervisor: supervisor,
             tmuxVersion: TmuxVersion(major: 3, minor: 6),
             environment: gateOn ? ["TBD_TMUX_CONTROL_MODE": "1"] : [:],
             fdVending: vending,
-            readyTimeout: readyTimeout)
+            readyTimeout: readyTimeout,
+            commandProvider: commandProvider)
+    }
+
+    /// Thread-safe, synchronous recorder of fake-client stream writes.
+    private final class Recorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _writes: [String] = []
+        func record(_ line: String) { lock.lock(); _writes.append(line); lock.unlock() }
+        var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
+    }
+
+    /// A fake-backed correlator (real FIFO, recorded writes) for the bridge's
+    /// commandProvider seam — the M4.3 attach.ready sequence rides it.
+    private func makeFakeClient() -> (TmuxControlCommandClient, Recorder) {
+        let recorder = Recorder()
+        let client = TmuxControlCommandClient(
+            writeLine: { recorder.record($0) },
+            onFatalError: {})
+        return (client, recorder)
+    }
+
+    /// A 21-field state line for `paneID` (80x24, primary screen, cursor 0,0).
+    private func stateLine(paneID: String) -> String {
+        "\(paneID) 0 0 0 4294967295 4294967295 0 23 1 0 0 0 1 0 0 0 0 0 0 80 24"
+    }
+
+    /// Feed the full happy-path reply set: pause, history, alt, state, pending.
+    private func feedCaptureReplies(
+        _ client: TmuxControlCommandClient, paneID: String, history: [String]
+    ) async {
+        for lines in [[], history, [], [stateLine(paneID: paneID)], [] as [String]] {
+            await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: lines))
+        }
+    }
+
+    private func waitFor(
+        _ what: String, deadline: Duration = .seconds(5),
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ condition: @Sendable () async -> Bool
+    ) async throws {
+        let end = ContinuousClock.now + deadline
+        while ContinuousClock.now < end {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
+    }
+
+    /// Drain everything currently readable from `fd` (made nonblocking).
+    private func drain(_ fd: Int32) -> Data {
+        let flags = fcntl(fd, F_GETFL)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        var out = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if n <= 0 { break }
+            out.append(contentsOf: buffer[0..<n])
+        }
+        return out
     }
 
     @Test("attach.request with the gate on vends an fd whose header carries the pane identity")
@@ -225,8 +289,8 @@ struct AttachRPCOrchestrationTests {
         #expect(count == 0, "un-acked attach must be torn down (EOF on the vended fd)")
     }
 
-    @Test("attach.ready opens the write gate for the resolved server")
-    func readyOpensGate() async throws {
+    @Test("attach.ready triggers the replay sequence; the gate opens only after the replay lands")
+    func readyTriggersSequenceGateOpensAfterReplay() async throws {
         let (serverSide, clientSide) = try makeSocketPair()
         defer { Darwin.close(clientSide) }
 
@@ -235,7 +299,9 @@ struct AttachRPCOrchestrationTests {
         await vending.adoptConnection(fd: serverSide)
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-gate-test")
-        router.controlMode = bridge(supervisor: supervisor, vending: vending)
+        let (client, recorder) = makeFakeClient()
+        router.controlMode = bridge(
+            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
 
         let attach = try RPCRequest(
             method: RPCMethod.attachRequest,
@@ -248,8 +314,164 @@ struct AttachRPCOrchestrationTests {
         let ready = try RPCRequest(
             method: RPCMethod.attachReady,
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%7"))
-        let response = await router.handle(ready)
+        let readyTask = Task { await router.handle(ready) }
+
+        // The ack triggers ONE atomic stream write: pause then the captures.
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        let batch = try #require(recorder.writes.first)
+        #expect(batch.hasPrefix("refresh-client -A '%7:pause'\ncapture-pane -peqJN -S -50000 -t %7\n"))
+        // The gate stays CLOSED while the capture is in flight.
+        #expect(await supervisor.isReady(server: "tbd-gate-test", paneID: "%7") == false)
+
+        await feedCaptureReplies(client, paneID: "%7", history: ["replayed-history"])
+        let response = await readyTask.value
         #expect(response.success)
         #expect(await supervisor.isReady(server: "tbd-gate-test", paneID: "%7") == true)
+
+        // Unpause is the last command, after the gate opened.
+        try await waitFor("unpause write") { recorder.writes.count >= 2 }
+        #expect(recorder.writes.last == "refresh-client -A '%7:continue'")
+
+        // The vended fd carries the replay (which ends with a CUP).
+        let text = String(decoding: drain(rxFD), as: UTF8.self)
+        #expect(text.contains("replayed-history"))
+        #expect(text.hasSuffix("H"))
+    }
+
+    @Test("an acked attach whose replay is still in flight survives the ready-timeout")
+    func ackedReplayInFlightSurvivesTimeout() async throws {
+        let (serverSide, clientSide) = try makeSocketPair()
+        defer { Darwin.close(clientSide) }
+
+        let supervisor = TmuxControlSupervisor()
+        let vending = FDVendingServer()
+        await vending.adoptConnection(fd: serverSide)
+        let (router, db) = try makeRouterAndDB()
+        let (client, recorder) = makeFakeClient()
+        let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-timeout-test")
+        router.controlMode = bridge(
+            supervisor: supervisor, vending: vending,
+            readyTimeout: .milliseconds(100), commandProvider: { _ in client })
+
+        let attach = try RPCRequest(
+            method: RPCMethod.attachRequest,
+            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%6", windowID: "@6", attachID: UUID()))
+        _ = await router.handle(attach)
+        let (rxFD, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(rxFD) }
+
+        // Ack arrives promptly, but the capture replies stall (slow tmux).
+        let ready = try RPCRequest(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: "%6"))
+        let readyTask = Task { await router.handle(ready) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+
+        // Let the 100 ms ready-timeout fire while the replay is in flight:
+        // the acked attach must NOT be torn down (no EOF on the vended fd).
+        try await Task.sleep(for: .milliseconds(400))
+        let flags = fcntl(rxFD, F_GETFL)
+        _ = fcntl(rxFD, F_SETFL, flags | O_NONBLOCK)
+        var probe = [UInt8](repeating: 0, count: 8)
+        let n = probe.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
+        #expect(n < 0 && errno == EAGAIN, "acked attach must survive the timer (no EOF, no data yet)")
+
+        // The stalled replies arrive; the sequence completes normally.
+        await feedCaptureReplies(client, paneID: "%6", history: ["late-history"])
+        let response = await readyTask.value
+        #expect(response.success)
+        #expect(await supervisor.isReady(server: "tbd-timeout-test", paneID: "%6") == true)
+        #expect(String(decoding: drain(rxFD), as: UTF8.self).contains("late-history"))
+    }
+
+    @Test("a re-attach mid-sequence supersedes: attach.ready still returns success")
+    func supersededMidSequenceReturnsSuccess() async throws {
+        let (serverSide, clientSide) = try makeSocketPair()
+        defer { Darwin.close(clientSide) }
+
+        let supervisor = TmuxControlSupervisor()
+        let vending = FDVendingServer()
+        await vending.adoptConnection(fd: serverSide)
+        let (router, db) = try makeRouterAndDB()
+        let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-supersede-test")
+        let (client, recorder) = makeFakeClient()
+        router.controlMode = bridge(
+            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
+
+        func attachRequest() throws -> RPCRequest {
+            try RPCRequest(
+                method: RPCMethod.attachRequest,
+                params: AttachRequestParams(worktreeID: worktreeID, paneID: "%8", windowID: "@8", attachID: UUID()))
+        }
+        _ = await router.handle(try attachRequest())
+        let (rxFD1, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(rxFD1) }
+
+        let ready = try RPCRequest(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: "%8"))
+        let readyTask = Task { await router.handle(ready) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+
+        // A newer attach replaces the sink mid-sequence.
+        _ = await router.handle(try attachRequest())
+        let (rxFD2, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(rxFD2) }
+
+        await feedCaptureReplies(client, paneID: "%8", history: ["stale-history"])
+        // Benign race: RPC SUCCESS, but the successor's gate stays closed
+        // (its own attach.ready opens it) and its pipe got no stale replay.
+        let response = await readyTask.value
+        #expect(response.success)
+        #expect(await supervisor.isReady(server: "tbd-supersede-test", paneID: "%8") == false)
+        // Unpause still runs after the superseded write.
+        try await waitFor("unpause write") { recorder.writes.count >= 2 }
+        #expect(recorder.writes.last == "refresh-client -A '%8:continue'")
+        #expect(drain(rxFD2).isEmpty, "successor's pipe must not receive the stale replay")
+    }
+
+    @Test("a capture failure detaches the pane and fails the RPC (app falls back)")
+    func captureFailureDetachesAndErrors() async throws {
+        let (serverSide, clientSide) = try makeSocketPair()
+        defer { Darwin.close(clientSide) }
+
+        let supervisor = TmuxControlSupervisor()
+        let vending = FDVendingServer()
+        await vending.adoptConnection(fd: serverSide)
+        let (router, db) = try makeRouterAndDB()
+        let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-capfail-test")
+        let (client, recorder) = makeFakeClient()
+        router.controlMode = bridge(
+            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
+
+        let attach = try RPCRequest(
+            method: RPCMethod.attachRequest,
+            params: AttachRequestParams(worktreeID: worktreeID, paneID: "%9", windowID: "@9", attachID: UUID()))
+        _ = await router.handle(attach)
+        let (rxFD, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(rxFD) }
+
+        let ready = try RPCRequest(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: "%9"))
+        let readyTask = Task { await router.handle(ready) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+
+        // pause OK, then the main-history capture %errors (dead pane).
+        await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
+        await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
+        for _ in 0..<3 {
+            await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
+        }
+
+        let response = await readyTask.value
+        #expect(!response.success)
+        // The daemon detached: the vended fd sees EOF (mirrors pane.detach).
+        var buffer = [UInt8](repeating: 0, count: 8)
+        let n = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
+        #expect(n == 0, "failed attach must be detached (EOF on the vended fd)")
+        // Unpause still ran despite the failure.
+        try await waitFor("unpause write") { recorder.writes.count >= 2 }
+        #expect(recorder.writes.last == "refresh-client -A '%9:continue'")
     }
 }

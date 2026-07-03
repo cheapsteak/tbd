@@ -46,9 +46,15 @@ final class PaneFanout: @unchecked Sendable {
         /// killing the fresh attach.
         let generation: UInt64
         /// The attach handshake's write gate: false between `attach` (fd
-        /// vended) and the app's `attach.ready` ack. Output routed while not
-        /// ready is dropped — Phase 2 has no replay/buffering.
+        /// vended) and the end of the attach.ready replay sequence (M4.3):
+        /// the orchestrator opens the gate only AFTER the replay bytes are in
+        /// the pipe. Output routed while not ready is dropped.
         var ready = false
+        /// The app's `attach.ready` ack arrived (M4.3). Since M4.3, `ready`
+        /// flips only after the replay lands — so the ready-timeout (whose
+        /// purpose is "app never acked") keys off THIS flag instead: a slow
+        /// capture must not let the stale timer kill a live, acked attach.
+        var acknowledged = false
         var droppedEvents = 0
         var droppedBytes = 0
         var lastDropLog = Date.distantPast
@@ -88,12 +94,30 @@ final class PaneFanout: @unchecked Sendable {
         return (readFD, generation)
     }
 
-    /// Open the write gate — called when the app's `attach.ready` ack arrives.
+    /// Open the write gate — called by the attach orchestrator AFTER the
+    /// replay bytes are in the pipe (M4.3). Also marks the sink acknowledged
+    /// (ready implies acked), so direct `markReady` callers — tests, or any
+    /// future replay-less path — are equally safe from the ready-timeout.
     func markReady(key: PaneKey) {
         lock.lock()
         sinks[key]?.ready = true
+        sinks[key]?.acknowledged = true
         lock.unlock()
         logger.info("fanout ready \(key.server, privacy: .public)/\(key.paneID, privacy: .public)")
+    }
+
+    /// Record the app's `attach.ready` ack and return the sink's CURRENT
+    /// generation — atomically, so the replay sequence the caller starts is
+    /// tagged with exactly the generation it acknowledged. `nil` when no sink
+    /// exists (detached, timed out, or never attached). Once acknowledged, the
+    /// ready-timeout (`detachIfNotReady`) no longer threatens this attach —
+    /// the replay sequence has its own deadlines.
+    func acknowledge(key: PaneKey) -> UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard sinks[key] != nil else { return nil }
+        sinks[key]?.acknowledged = true
+        return sinks[key]?.generation
     }
 
     func isReady(key: PaneKey) -> Bool {
@@ -115,10 +139,13 @@ final class PaneFanout: @unchecked Sendable {
     /// Cancel an un-acked attach — but ONLY the attach the timer was armed
     /// for. A stale timer from a superseded attach (same key, older
     /// generation) must not kill a fresh attach still inside its own ready
-    /// window.
+    /// window. Guards on `acknowledged`, not `ready`: since M4.3 the gate
+    /// opens only after the replay lands, so an acked attach whose capture is
+    /// still in flight when the timer fires must survive (the timer's purpose
+    /// is "app never acked", and the replay has its own deadlines).
     func detachIfNotReady(key: PaneKey, generation: UInt64) {
         lock.lock()
-        guard let sink = sinks[key], sink.generation == generation, !sink.ready else {
+        guard let sink = sinks[key], sink.generation == generation, !sink.acknowledged else {
             lock.unlock()
             return
         }

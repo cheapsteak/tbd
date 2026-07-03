@@ -39,6 +39,11 @@ struct TmuxControlModeBridge: Sendable {
     /// without a daemon restart. Existing attached panes are never torn down
     /// or migrated on toggle: the flag applies to newly created panes only.
     let persistedFlagProvider: @Sendable () async -> Bool
+    /// Resolves the FIFO command correlator for a server — the attach replay
+    /// orchestrator's command seam (M4.3). Defaults to the supervisor's live
+    /// clients; injectable so orchestration tests can substitute a fake-backed
+    /// client (same seam shape as the input router / resize coordinator).
+    let commandProvider: @Sendable (String) async -> TmuxControlCommandClient?
 
     init(supervisor: TmuxControlSupervisor,
          tmuxVersion: TmuxVersion?,
@@ -47,13 +52,16 @@ struct TmuxControlModeBridge: Sendable {
          readyTimeout: Duration = .seconds(5),
          inputRouter: ControlModeInputRouter? = nil,
          resizeCoordinator: ControlModeResizeCoordinator? = nil,
-         persistedFlagProvider: @escaping @Sendable () async -> Bool = { false }) {
+         persistedFlagProvider: @escaping @Sendable () async -> Bool = { false },
+         commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil) {
         self.supervisor = supervisor
         self.tmuxVersion = tmuxVersion
         self.environment = environment
         self.fdVending = fdVending
         self.readyTimeout = readyTimeout
         self.persistedFlagProvider = persistedFlagProvider
+        self.commandProvider = commandProvider
+            ?? { [supervisor] server in await supervisor.command(server: server) }
         // Default-wire the router to this supervisor's correlators so callers
         // (and tests) that don't care about input get a correctly-wired router
         // for free; the daemon can still inject one it also holds a handle to.

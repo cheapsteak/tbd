@@ -121,7 +121,18 @@ extension RPCRouter {
     }
 
     /// Handle `attach.ready`: the app's reader is draining the vended fd —
-    /// open the write gate.
+    /// run the replay sequence (M4.3, addendum §3): pause → capture → replay
+    /// → gate → unpause. The write gate opens only AFTER the replay bytes are
+    /// in the pipe, so live output lands strictly behind the replay.
+    ///
+    /// Error surface:
+    /// - `.superseded` (a newer attach owns the pane) is a benign race — RPC
+    ///   SUCCESS; the stale viewer is gone, no fallback wanted.
+    /// - Everything else (no sink, no command client, capture `%error`,
+    ///   malformed capture, replay write failure/deadline) is an attach
+    ///   failure: detach + unregister the input route (mirroring
+    ///   `handlePaneDetach`) and return an RPC ERROR, which the app's catch
+    ///   in `startControlModeClient` turns into the grouped-sessions fallback.
     func handleAttachReady(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(AttachReadyParams.self, from: paramsData)
         guard let bridge = controlMode else {
@@ -130,8 +141,25 @@ extension RPCRouter {
         guard let worktree = try? await db.worktrees.get(id: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found")
         }
-        await bridge.supervisor.markReady(server: worktree.tmuxServer, paneID: params.paneID)
-        return .ok()
+        let server = worktree.tmuxServer
+        let paneID = params.paneID
+        let orchestrator = AttachReplayOrchestrator(
+            supervisor: bridge.supervisor, commandProvider: bridge.commandProvider)
+        do {
+            // Both outcomes are RPC success: `.ready` is the happy path;
+            // `.superseded` means a newer attach owns the pane and runs its
+            // own sequence — the stale caller just goes away quietly.
+            _ = try await orchestrator.performAttachReady(server: server, paneID: paneID)
+            return .ok()
+        } catch {
+            logger.error("""
+                attach.ready replay failed for \(server, privacy: .public)/\(paneID, privacy: .public): \
+                \(String(describing: error), privacy: .public)
+                """)
+            bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: paneID)
+            await bridge.supervisor.detach(server: server, paneID: paneID)
+            return RPCResponse(error: "attach replay failed: \(error)")
+        }
     }
 
     /// Handle `pane.detach`: close the pipe write end so the app's reader

@@ -116,6 +116,53 @@ struct PaneFanoutTests {
         #expect(eof == 0, "un-acked attach with a live timer must be torn down (EOF)")
     }
 
+    @Test("an ACKED attach survives the ready-timeout even while not yet ready (replay in flight)")
+    func ackedAttachSurvivesReadyTimeout() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%20")
+        let (readFD, gen) = try fanout.attach(key: key)
+        defer { Darwin.close(readFD) }
+
+        // attach.ready arrived (M4.3 step 2) — the replay is still in flight,
+        // so the gate is NOT open yet…
+        #expect(fanout.acknowledge(key: key) == gen)
+        #expect(fanout.isReady(key: key) == false)
+
+        // …and the ready-timeout firing NOW must not tear the attach down.
+        fanout.detachIfNotReady(key: key, generation: gen)
+
+        // Still alive: no EOF (nonblocking read yields EAGAIN, not 0), and
+        // the replay path still reaches the pipe.
+        let flags = fcntl(readFD, F_GETFL)
+        _ = fcntl(readFD, F_SETFL, flags | O_NONBLOCK)
+        var buffer = [UInt8](repeating: 0, count: 8)
+        let n = buffer.withUnsafeMutableBytes { Darwin.read(readFD, $0.baseAddress, $0.count) }
+        #expect(n < 0 && errno == EAGAIN, "acked attach must survive the timer")
+        try fanout.writeReplay(key: key, generation: gen, bytes: Data("replay".utf8))
+        let m = buffer.withUnsafeMutableBytes { Darwin.read(readFD, $0.baseAddress, $0.count) }
+        #expect(Data(buffer[0..<max(m, 0)]) == Data("replay".utf8))
+    }
+
+    @Test("acknowledge returns nil for a pane with no live attach")
+    func acknowledgeUnattachedReturnsNil() {
+        let fanout = PaneFanout()
+        #expect(fanout.acknowledge(key: PaneKey(server: server, paneID: "%404")) == nil)
+    }
+
+    @Test("markReady implies acknowledged: a ready sink survives the timer too")
+    func readySinkSurvivesTimer() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%21")
+        let (readFD, gen) = try fanout.attach(key: key)
+        defer { Darwin.close(readFD) }
+        fanout.markReady(key: key)
+        fanout.detachIfNotReady(key: key, generation: gen)
+        fanout.route(server: server, event: .output(paneID: "%21", bytes: Data("alive".utf8)))
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let count = buffer.withUnsafeMutableBytes { Darwin.read(readFD, $0.baseAddress, $0.count) }
+        #expect(Data(buffer[0..<max(count, 0)]) == Data("alive".utf8))
+    }
+
     @Test("a chunk larger than the pipe buffer delivers an intact prefix and drops the rest")
     func partialWriteDropsTailNotMiddle() throws {
         let fanout = PaneFanout()
@@ -149,9 +196,11 @@ struct TmuxControlSupervisorAttachTests {
     @Test("supervisor wrappers delegate to the fanout")
     func wrappersDelegate() async throws {
         let supervisor = TmuxControlSupervisor()
-        let (readFD, _) = try await supervisor.attach(server: "srv", paneID: "%1")
+        let (readFD, generation) = try await supervisor.attach(server: "srv", paneID: "%1")
         defer { Darwin.close(readFD) }
         #expect(await supervisor.isReady(server: "srv", paneID: "%1") == false)
+        // acknowledgeAttach returns the attach's current generation (M4.3).
+        #expect(await supervisor.acknowledgeAttach(server: "srv", paneID: "%1") == generation)
         await supervisor.markReady(server: "srv", paneID: "%1")
         #expect(await supervisor.isReady(server: "srv", paneID: "%1") == true)
         await supervisor.detach(server: "srv", paneID: "%1")
