@@ -8,6 +8,10 @@ struct ContentView: View {
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
     @State private var contentAreaHeight: CGFloat = 600
+    // Part of the PR split button's .id key: the baked (non-template) icon
+    // colors depend on the appearance, and the materialized-once toolbar item
+    // only picks up a re-bake when the id changes.
+    @Environment(\.colorScheme) private var colorScheme
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
@@ -132,20 +136,20 @@ struct ContentView: View {
                    appState.selectedWorktreeIDs.count == 1,
                    let prStatus = appState.prStatuses[worktreeID],
                    let prURL = URL(string: prStatus.url) {
-                    let armed = appState.findWorktree(id: worktreeID)
-                        .map { appState.effectiveAutoArchive(for: $0) } ?? false
+                    let worktree = appState.findWorktree(id: worktreeID)
+                    let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
                     let blocked = !appState.children(of: worktreeID).isEmpty
                     ToolbarItem(placement: .primaryAction) {
                         ControlGroup {
                             // Split button: label = primary click (open PR); the
                             // attached chevron opens the menu.
                             Menu {
-                                if appState.findWorktree(id: worktreeID) != nil {
+                                if worktree != nil {
+                                    // `armed` is captured at materialization time; the .id
+                                    // rebuild below is what refreshes the checkmark (getter
+                                    // re-evaluations never reach the materialized NSMenu).
                                     Toggle("Auto-archive worktree on PR merge", isOn: Binding(
-                                        get: {
-                                            appState.findWorktree(id: worktreeID)
-                                                .map { appState.effectiveAutoArchive(for: $0) } ?? false
-                                        },
+                                        get: { armed },
                                         set: { newValue in
                                             Task { await appState.setAutoArchive(worktreeID: worktreeID, enabled: newValue) }
                                         }
@@ -174,13 +178,26 @@ struct ContentView: View {
                             // split button otherwise accent-tints it); the icon keeps
                             // its baked status color via renderingMode(.original).
                             .tint(.primary)
-                            .help("Open PR #\(prStatus.number) · more options")
+                            .help(
+                                armed
+                                    ? "Open PR #\(prStatus.number) · auto-archives on merge · more options"
+                                    : "Open PR #\(prStatus.number) · more options"
+                            )
                             // AppKit materializes this split button's NSMenu and
                             // label ONCE; later SwiftUI re-evaluations of the
                             // Toggle checkmark and armed badge never reach the
                             // already-built NSMenuToolbarItem. Changing the id
-                            // forces the item to be recreated so both stay in sync.
-                            .id("pr-split-\(worktreeID)-\(armed)-\(blocked)")
+                            // forces the item to be recreated, so the key must
+                            // include EVERYTHING the label/menu render: worktree,
+                            // armed + blocked (menu), PR state + number (icon
+                            // color/text), and colorScheme (baked icon colors).
+                            .id(PRButtonLabel.prSplitButtonID(
+                                worktreeID: worktreeID,
+                                armed: armed,
+                                blocked: blocked,
+                                prStatus: prStatus,
+                                colorScheme: colorScheme
+                            ))
                         }
                     }
 
@@ -350,7 +367,9 @@ private func overlayFrameIsWindowRoot(
 
 // MARK: - PRButtonLabel
 
-private struct PRButtonLabel: View {
+// Internal (not private) so TBDAppTests can exercise the baked-image geometry
+// and the .id key computation.
+struct PRButtonLabel: View {
     let prStatus: PRStatus
     let isAutoArchiveArmed: Bool
     // Re-bake the colored icon when the appearance flips (the baked image is
@@ -359,11 +378,40 @@ private struct PRButtonLabel: View {
 
     /// Baked image geometry: 12×12 status icon, plus (when armed) a 3pt gap
     /// and a 12×12 archivebox badge composited into the same bitmap.
-    private static let iconSide: CGFloat = 12
-    private static let badgeGap: CGFloat = 3
+    static let iconSide: CGFloat = 12
+    static let badgeGap: CGFloat = 3
 
-    private var bakedWidth: CGFloat {
+    var bakedWidth: CGFloat {
         isAutoArchiveArmed ? Self.iconSide + Self.badgeGap + Self.iconSide : Self.iconSide
+    }
+
+    /// The `.id` key for the PR split-button toolbar item. AppKit materializes
+    /// the split button's NSMenu and label ONCE, so the key must include
+    /// EVERYTHING the label/menu render — anything omitted here can change in
+    /// SwiftUI state without ever reaching the materialized AppKit item.
+    static func prSplitButtonID(
+        worktreeID: UUID,
+        armed: Bool,
+        blocked: Bool,
+        prStatus: PRStatus,
+        colorScheme: ColorScheme
+    ) -> String {
+        "pr-split-\(worktreeID)-\(armed)-\(blocked)-\(prStatus.state.rawValue)-\(prStatus.number)-\(colorScheme)"
+    }
+
+    /// Aspect-fits `size` into `slot`, centered. Used to draw the archivebox
+    /// badge (non-square intrinsic size, ~16×14) into its square badge slot
+    /// without stretching it.
+    static func aspectFitRect(for size: NSSize, in slot: NSRect) -> NSRect {
+        guard size.width > 0, size.height > 0 else { return slot }
+        let scale = min(slot.width / size.width, slot.height / size.height)
+        let fitted = NSSize(width: size.width * scale, height: size.height * scale)
+        return NSRect(
+            x: slot.midX - fitted.width / 2,
+            y: slot.midY - fitted.height / 2,
+            width: fitted.width,
+            height: fitted.height
+        )
     }
 
     var body: some View {
@@ -400,7 +448,7 @@ private struct PRButtonLabel: View {
     /// `secondaryLabelColor`) is composited to the right of the status icon —
     /// the flattened toolbar label keeps only this one image, so the badge
     /// must live inside it.
-    private func coloredIcon(_ name: String, nsColor: NSColor) -> NSImage? {
+    func coloredIcon(_ name: String, nsColor: NSColor) -> NSImage? {
         _ = colorScheme  // establish a dependency so we re-bake on light/dark change
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
               let base = NSImage(contentsOf: url) else { return nil }
@@ -417,7 +465,11 @@ private struct PRButtonLabel: View {
             nsColor.set()
             iconRect.fill(using: .sourceAtop)
             if let badge {
-                let badgeRect = NSRect(x: side + Self.badgeGap, y: 0, width: side, height: side)
+                // Aspect-fit: the archivebox symbol's intrinsic size is
+                // non-square (~16×14); drawing it straight into the square
+                // slot would stretch it ~12% vertically.
+                let slot = NSRect(x: side + Self.badgeGap, y: 0, width: side, height: side)
+                let badgeRect = Self.aspectFitRect(for: badge.size, in: slot)
                 badge.draw(in: badgeRect, from: .zero, operation: .sourceOver, fraction: 1)
                 NSColor.secondaryLabelColor.set()
                 badgeRect.fill(using: .sourceAtop)
