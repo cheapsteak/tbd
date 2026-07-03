@@ -310,7 +310,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// FD vending). `cleanup()` uses these to pair the teardown correctly:
         /// `pane.detach` RPC first (daemon EOFs the pipe), then flag the
         /// reader stopped — the reader closes its own fd when the EOF lands.
-        private var controlModeAttach: (worktreeID: UUID, paneID: String, routingKey: String)?
+        /// `windowID` is carried for `pane.resize` (M3.2): the daemon sizes per
+        /// WINDOW, so resize RPCs need it.
+        private var controlModeAttach: (worktreeID: UUID, paneID: String, windowID: String, routingKey: String)?
+        /// Debounces control-mode `pane.resize` RPCs (M3.2). Cancel-and-replace
+        /// so only the tail of a window-drag flurry reaches the daemon; cancelled
+        /// in `cleanup()`.
+        private var resizeDebounceTask: Task<Void, Never>?
 
         @MainActor
         func syncTabCloseContext(_ context: TabCloseContext?, for terminalID: UUID) {
@@ -529,6 +535,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 clickMonitor = nil
             }
             tmuxBridge?.cleanupSession(panelID: panelID, server: tmuxServer)
+            resizeDebounceTask?.cancel()
+            resizeDebounceTask = nil
             (terminalView as? TBDTerminalView)?.onLargePaste = nil
             if let attach = controlModeAttach, let appState {
                 controlModeAttach = nil
@@ -567,7 +575,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             do {
                 let fd = try await appState.daemonClient.openAttach(
                     worktreeID: worktreeID, paneID: paneID, windowID: windowID)
-                controlModeAttach = (worktreeID, paneID, routingKey)
+                controlModeAttach = (worktreeID, paneID, windowID, routingKey)
                 let weakTV = WeakTerminalRef(terminalView)
                 await appState.controlModeReaders.registerReader(
                     routingKey: routingKey, fd: fd) { chunk in
@@ -577,6 +585,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         }
                     }
                 try await appState.daemonClient.attachReady(worktreeID: worktreeID, paneID: paneID)
+                // Send one initial resize at the view's real size: the window is
+                // otherwise stuck at whatever size it had until the user first
+                // drags, so fullscreen Claude would render at the wrong width.
+                // Same debounced path as live resizes.
+                scheduleControlModeResize(
+                    cols: terminalView.terminal.cols, rows: terminalView.terminal.rows)
                 // Intercept LARGE pastes at the view level and ship them as a
                 // `.paste` sidecar frame (the M2 paste ruling). Interception
                 // happens BEFORE SwiftTerm brackets the content, so the
@@ -711,11 +725,37 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            // Propagate resize to the PTY so tmux/shell gets SIGWINCH
-            guard newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 else { return }
-            var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
-            _ = ioctl(fd, TIOCSWINSZ, &size)
-            debugLog("PANEL: resize -> \(newCols)x\(newRows)")
+            // Grouped / local-PTY path (UNCHANGED): propagate resize to the PTY so
+            // tmux/shell gets SIGWINCH. In control mode `localProcess` is nil, so
+            // this is a no-op there and the daemon-authoritative path below runs.
+            if newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 {
+                var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
+                _ = ioctl(fd, TIOCSWINSZ, &size)
+                debugLog("PANEL: resize -> \(newCols)x\(newRows)")
+            }
+            // Control-mode path (M3.2): the daemon is the sole size authority
+            // (addendum §4). Debounced so only the tail of a drag flurry lands.
+            scheduleControlModeResize(cols: newCols, rows: newRows)
+        }
+
+        /// Debounced `pane.resize` for the control-mode window. No-op unless this
+        /// panel is control-mode attached. Cancel-and-replace ~100ms debounce so a
+        /// window-drag flurry collapses to one RPC. Errors are dropped: the resize
+        /// is re-sent on the next tick and self-heals (the daemon is authoritative).
+        private func scheduleControlModeResize(cols: Int, rows: Int) {
+            guard let attach = controlModeAttach,
+                  ControlModeResizeGate.shouldSend(
+                    controlModeAttached: true, cols: cols, rows: rows)
+            else { return }
+            resizeDebounceTask?.cancel()
+            let daemonClient = appState?.daemonClient
+            resizeDebounceTask = Task {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled else { return }
+                try? await daemonClient?.paneResize(
+                    worktreeID: attach.worktreeID, windowID: attach.windowID,
+                    cols: cols, rows: rows)
+            }
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {}
