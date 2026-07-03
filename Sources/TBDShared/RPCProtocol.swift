@@ -112,6 +112,7 @@ public enum RPCMethod {
     public static let attachRequest = "attach.request"
     public static let attachReady = "attach.ready"
     public static let paneDetach = "pane.detach"
+    public static let paneResize = "pane.resize"
     public static let daemonCapabilities = "daemon.capabilities"
     public static let terminalRecreateWindow = "terminal.recreateWindow"
     public static let noteCreate = "note.create"
@@ -1175,6 +1176,23 @@ public struct PaneDetachParams: Codable, Sendable {
     public init(worktreeID: UUID, paneID: String) {
         self.worktreeID = worktreeID
         self.paneID = paneID
+    }
+}
+
+/// Params for `pane.resize` — the app's debounced desired size for one
+/// control-mode window. Carries `windowID` because the daemon sizes per WINDOW
+/// (the same tmux server hosts other windows' viewers), and `worktreeID` to
+/// resolve the server (pane/window ids are only unique per server).
+public struct PaneResizeParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let windowID: String
+    public let cols: Int
+    public let rows: Int
+    public init(worktreeID: UUID, windowID: String, cols: Int, rows: Int) {
+        self.worktreeID = worktreeID
+        self.windowID = windowID
+        self.cols = cols
+        self.rows = rows
     }
 }
 

@@ -28,13 +28,19 @@ struct TmuxControlModeBridge: Sendable {
     /// of this (value) struct, so the daemon's `setOnInput` sink and the attach
     /// handlers' register/unregister all touch the same router.
     let inputRouter: ControlModeInputRouter
+    /// Arbitrates window resizes with echo suppression (M3.1, addendum §4). Like
+    /// `inputRouter`, a reference type shared across every copy of this struct,
+    /// so the `pane.resize` handler and the supervisor's layout-change filter
+    /// touch the same coordinator.
+    let resizeCoordinator: ControlModeResizeCoordinator
 
     init(supervisor: TmuxControlSupervisor,
          tmuxVersion: TmuxVersion?,
          environment: [String: String] = ProcessInfo.processInfo.environment,
          fdVending: FDVendingServer,
          readyTimeout: Duration = .seconds(5),
-         inputRouter: ControlModeInputRouter? = nil) {
+         inputRouter: ControlModeInputRouter? = nil,
+         resizeCoordinator: ControlModeResizeCoordinator? = nil) {
         self.supervisor = supervisor
         self.tmuxVersion = tmuxVersion
         self.environment = environment
@@ -47,6 +53,18 @@ struct TmuxControlModeBridge: Sendable {
             ?? ControlModeInputRouter(commandProvider: { [supervisor] server in
                 await supervisor.command(server: server)
             })
+        self.resizeCoordinator = resizeCoordinator
+            ?? ControlModeResizeCoordinator(commandProvider: { [supervisor] server in
+                await supervisor.command(server: server)
+            })
+        // Install the echo-suppression filter on the supervisor BEFORE any
+        // `ensureConnection` (this init runs at daemon startup, well before the
+        // first attach) so the drain loop consults it from the first event. The
+        // setter is nonisolated, so this synchronous init can call it directly.
+        let coordinator = self.resizeCoordinator
+        supervisor.setLayoutChangeFilter { server, windowID in
+            coordinator.shouldApplyLayoutChange(server: server, windowID: windowID)
+        }
     }
 
     /// Open a logging-only `tmux -CC` connection for `serverName` when the

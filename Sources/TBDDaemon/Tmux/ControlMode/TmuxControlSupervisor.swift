@@ -1,12 +1,35 @@
 import Foundation
 import os
 
+/// Lock-protected box for the layout-change echo filter. Lets the bridge's
+/// synchronous `struct` init install the filter BEFORE any connection starts,
+/// without hopping onto the actor (which the sync init cannot `await`). The
+/// drain task (actor-isolated) reads it via the nonisolated getter.
+private final class LayoutChangeFilterBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var filter: (@Sendable (String, String) -> Bool)?
+    func set(_ filter: @escaping @Sendable (String, String) -> Bool) {
+        lock.lock(); self.filter = filter; lock.unlock()
+    }
+    func get() -> (@Sendable (String, String) -> Bool)? {
+        lock.lock(); defer { lock.unlock() }; return filter
+    }
+}
+
 /// Tracks at most one `TmuxControlConnection` per tmux server and drains its
 /// events into the log. Phase 1's control-mode path is observation-only:
 /// nothing is rendered and no FDs are vended.
 actor TmuxControlSupervisor {
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
     private var connections: [String: TmuxControlConnection] = [:]
+    /// Echo-suppression predicate `(server, windowID) -> shouldApply`, wired to
+    /// `ControlModeResizeCoordinator.shouldApplyLayoutChange` by the bridge. A
+    /// `%layout-change` for which this returns `false` is one of our own resize
+    /// echoes and is suppressed in `drain`. MUST be installed (via
+    /// `setLayoutChangeFilter`) before `ensureConnection` so the drain loop
+    /// consults it from the first event; nil (default) applies every change,
+    /// which is the correct pre-resize-feature behavior.
+    private let layoutFilterBox = LayoutChangeFilterBox()
     /// One FIFO command correlator per connection, keyed by server. Fed the
     /// connection's `.commandSucceeded`/`.commandFailed` events by `drain`.
     private var commandClients: [String: TmuxControlCommandClient] = [:]
@@ -66,6 +89,12 @@ actor TmuxControlSupervisor {
         commandClients[server]
     }
 
+    /// Install the layout-change echo filter (see `layoutFilterBox`). Nonisolated
+    /// so the bridge's synchronous init can call it before `ensureConnection`.
+    nonisolated func setLayoutChangeFilter(_ filter: @escaping @Sendable (String, String) -> Bool) {
+        layoutFilterBox.set(filter)
+    }
+
     /// Tear a connection down after a fatal correlator violation. Guarded on
     /// identity so a stale callback from a superseded connection is a no-op.
     /// `stop()` ends the event stream, so `drain` performs the client cleanup.
@@ -105,8 +134,18 @@ actor TmuxControlSupervisor {
                        client: TmuxControlCommandClient) async {
         for await event in connection.events {
             // Command reply blocks stop at the correlator; keep the one-line
-            // summary log for diagnostics. Everything else logs as before.
-            log(event, serverName: serverName)
+            // summary log for diagnostics. A `%layout-change` that the filter
+            // rejects is one of our own resize echoes (addendum §4) — suppress
+            // the info log so external changes stay legible; everything else
+            // logs as before. (No functional layout consumer exists in Phase A;
+            // suppression is observable via logs and the unit tests.)
+            if case .layoutChange(let windowID, _) = event,
+               let filter = layoutFilterBox.get(),
+               !filter(serverName, windowID) {
+                logger.debug("[\(serverName, privacy: .public)] suppressed resize echo \(windowID, privacy: .public)")
+            } else {
+                log(event, serverName: serverName)
+            }
             switch event {
             case .commandSucceeded, .commandFailed:
                 await client.handle(event)

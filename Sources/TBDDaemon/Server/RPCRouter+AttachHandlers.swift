@@ -33,6 +33,29 @@ extension RPCRouter {
             // existed before the daemon started would otherwise get a sink
             // with no producer: a permanently blank pane. Idempotent.
             await bridge.supervisor.ensureConnection(serverName: server)
+            // Establish this WINDOW as daemon-sized before the pane renders:
+            // `window-size manual` hands sizing authority to our `resize-window`
+            // commands (addendum §4). Set per-window, NEVER server-wide — the
+            // same server hosts grouped-session viewers for other windows.
+            // `params.windowID` (#317 put it on the wire) becomes load-bearing
+            // here. A failed option set degrades to Phase-2 behavior and never
+            // blocks the attach, so it's tolerated + `try?` + logged-and-continued.
+            // Deferred (addendum §4 open question): whether detach restores
+            // `window-size latest` so a grouped viewer regains sizing control —
+            // decide when the fallback interplay (§5) is testable; not done here.
+            if let client = await bridge.supervisor.command(server: server) {
+                do {
+                    _ = try await client.send(
+                        "set-window-option -t \(params.windowID) window-size manual",
+                        tolerateErrors: true)
+                } catch {
+                    logger.debug("""
+                        window-size manual set failed for \(server, privacy: .public)/\
+                        \(params.windowID, privacy: .public): \
+                        \(String(describing: error), privacy: .public)
+                        """)
+                }
+            }
             // Encode the vend header BEFORE the attach: it needs only `params`,
             // and hoisting it out keeps every throw AFTER `attach` succeeds
             // inside the inner do/catch that owns the undo (close readFD,
@@ -104,6 +127,24 @@ extension RPCRouter {
            let worktree = try? await db.worktrees.get(id: params.worktreeID) {
             bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: params.paneID)
             await bridge.supervisor.detach(server: worktree.tmuxServer, paneID: params.paneID)
+        }
+        return .ok()
+    }
+
+    /// Handle `pane.resize`: the app's debounced desired size for one window.
+    /// Best-effort and tolerant like `handlePaneDetach` — this fires on every
+    /// window-drag tail, so an unknown worktree or unconfigured bridge is an
+    /// ok-noop, not an error. The coordinator arbitrates the actual
+    /// `resize-window` + echo fence (addendum §4).
+    func handlePaneResize(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(PaneResizeParams.self, from: paramsData)
+        if let bridge = controlMode,
+           let worktree = try? await db.worktrees.get(id: params.worktreeID) {
+            await bridge.resizeCoordinator.resize(
+                server: worktree.tmuxServer,
+                windowID: params.windowID,
+                cols: params.cols,
+                rows: params.rows)
         }
         return .ok()
     }

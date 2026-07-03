@@ -860,6 +860,19 @@ actor DaemonClient {
         )
     }
 
+    /// Tell the daemon the desired size for one control-mode window. Debounced
+    /// by the caller; the daemon arbitrates the `resize-window` with echo
+    /// suppression (addendum §4). Fire-and-forget from the app's view: errors
+    /// are dropped because the resize is re-fired repeatedly and the next tick
+    /// self-heals.
+    func paneResize(worktreeID: UUID, windowID: String, cols: Int, rows: Int) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.paneResize,
+            params: PaneResizeParams(
+                worktreeID: worktreeID, windowID: windowID, cols: cols, rows: rows)
+        )
+    }
+
     /// Fetch daemon feature flags (e.g. whether the tmux control-mode gate is
     /// on). The app cannot read the daemon's env itself — it is launched via
     /// `open`, which drops shell env.
