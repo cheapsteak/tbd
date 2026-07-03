@@ -35,3 +35,22 @@ struct MacNotificationBannerTitleTests {
         #expect(body.hasSuffix("…"))
     }
 }
+
+@Suite("MacNotificationManager.shouldPost")
+struct MacNotificationShouldPostTests {
+    @Test func mockModeSuppressesEvenWhenEnabledAndAvailable() {
+        #expect(MacNotificationManager.shouldPost(enabled: true, isAvailable: true, mockActive: true) == false)
+    }
+
+    @Test func normalModeEnabledAndAvailablePosts() {
+        #expect(MacNotificationManager.shouldPost(enabled: true, isAvailable: true, mockActive: false) == true)
+    }
+
+    @Test func disabledDoesNotPost() {
+        #expect(MacNotificationManager.shouldPost(enabled: false, isAvailable: true, mockActive: false) == false)
+    }
+
+    @Test func unavailableDoesNotPost() {
+        #expect(MacNotificationManager.shouldPost(enabled: true, isAvailable: false, mockActive: false) == false)
+    }
+}
