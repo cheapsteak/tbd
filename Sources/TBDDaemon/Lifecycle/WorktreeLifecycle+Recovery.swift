@@ -86,8 +86,8 @@ extension WorktreeLifecycle {
                 continue
             }
 
-            guard let repo = (try? await db.repos.get(id: worktree.repoID)) ?? nil else {
-                logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — repo \(worktree.repoID, privacy: .public) row is missing, so the pre-session wait can never be resumed")
+            guard let rid = worktree.repoID, let repo = (try? await db.repos.get(id: rid)) ?? nil else {
+                logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — repo \(String(describing: worktree.repoID), privacy: .public) row is missing, so the pre-session wait can never be resumed")
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
@@ -111,7 +111,7 @@ extension WorktreeLifecycle {
                     event: .preSession,
                     repoPath: worktree.path,
                     appHookPath: TBDConstants.hookPath(
-                        repoID: worktree.repoID,
+                        repoID: rid,
                         eventName: HookEvent.preSession.rawValue
                     )
                 ) ?? ""

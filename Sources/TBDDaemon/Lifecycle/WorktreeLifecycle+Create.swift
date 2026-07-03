@@ -179,9 +179,9 @@ extension WorktreeLifecycle {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
-        guard let repo = try await db.repos.get(id: worktree.repoID) else {
+        guard let rid = worktree.repoID, let repo = try await db.repos.get(id: rid) else {
             try? await db.worktrees.delete(id: worktreeID)
-            throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
+            throw WorktreeLifecycleError.repoNotFound(worktree.repoID ?? worktreeID)
         }
 
         do {
@@ -570,7 +570,9 @@ extension WorktreeLifecycle {
         let setupHookPath = hooks.resolve(
             event: .setup,
             repoPath: worktreePath,
-            appHookPath: TBDConstants.hookPath(repoID: worktree.repoID, eventName: HookEvent.setup.rawValue)
+            appHookPath: worktree.repoID.map {
+                TBDConstants.hookPath(repoID: $0, eventName: HookEvent.setup.rawValue)
+            }
         )
         let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
         // Suppress the omz update prompt only when a setup hook actually

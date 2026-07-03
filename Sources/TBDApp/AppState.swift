@@ -1074,9 +1074,9 @@ final class AppState: ObservableObject {
             for id in selectedWorktreeIDs {
                 if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
                    let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
+                   let repoID = worktree.repoID,
                    !repos[repoIdx].expanded {
                     repos[repoIdx].expanded = true
-                    let repoID = worktree.repoID
                     Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
                 }
             }
@@ -1246,7 +1246,10 @@ final class AppState: ObservableObject {
             } else {
                 var grouped: [UUID: [Worktree]] = [:]
                 for wt in fetched {
-                    grouped[wt.repoID, default: []].append(wt)
+                    // Scratch spaces (repoID == nil) don't belong to any repo group;
+                    // they're surfaced separately (see the Scratch sidebar section).
+                    guard let rid = wt.repoID else { continue }
+                    grouped[rid, default: []].append(wt)
                 }
                 // Preserve optimistic placeholders the daemon doesn't know about yet
                 for (rid, wts) in worktrees {

@@ -102,9 +102,9 @@ extension WorktreeLifecycle {
         guard let hookPath = hooks.resolve(
             event: .preSession,
             repoPath: worktreePath,
-            appHookPath: TBDConstants.hookPath(
-                repoID: worktree.repoID, eventName: HookEvent.preSession.rawValue
-            )
+            appHookPath: worktree.repoID.map {
+                TBDConstants.hookPath(repoID: $0, eventName: HookEvent.preSession.rawValue)
+            }
         ) else {
             return nil
         }

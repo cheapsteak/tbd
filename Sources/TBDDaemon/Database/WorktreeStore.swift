@@ -7,7 +7,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "worktree"
 
     var id: String
-    var repoID: String
+    var repoID: String?
     var name: String
     var displayName: String
     var branch: String
@@ -25,10 +25,11 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var parentWorktreeID: String?
     var autoArchiveOnMerge: Bool?
     var prStatus: String?  // JSON-encoded PRStatus, nil when never observed
+    var promotedToRepoID: String?  // set only on promoted scratch rows
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
-        self.repoID = wt.repoID.uuidString
+        self.repoID = wt.repoID?.uuidString
         self.name = wt.name
         self.displayName = wt.displayName
         self.branch = wt.branch
@@ -49,6 +50,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.parentWorktreeID = wt.parentWorktreeID?.uuidString
         self.autoArchiveOnMerge = wt.autoArchiveOnMerge
         self.prStatus = wt.prStatus.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
+        self.promotedToRepoID = wt.promotedToRepoID?.uuidString
     }
 
     func toModel() -> Worktree {
@@ -63,7 +65,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         }
         return Worktree(
             id: UUID(uuidString: id)!,
-            repoID: UUID(uuidString: repoID)!,
+            repoID: repoID.flatMap { UUID(uuidString: $0) },
             name: name,
             displayName: displayName,
             branch: branch,
@@ -78,6 +80,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             archivedHeadSHA: archivedHeadSHA,
             parentWorktreeID: parentWorktreeID.flatMap { UUID(uuidString: $0) },
             autoArchiveOnMerge: autoArchiveOnMerge,
+            promotedToRepoID: promotedToRepoID.flatMap { UUID(uuidString: $0) },
             prStatus: pr
         )
     }
@@ -169,6 +172,40 @@ public struct WorktreeStore: Sendable {
             let record = WorktreeRecord(from: wt)
             try record.insert(db)
             return wt
+        }
+    }
+
+    /// Create a repo-less "scratch" worktree row (repoID == nil). branch is "".
+    public func createScratch(
+        name: String, displayName: String, path: String, tmuxServer: String
+    ) async throws -> Worktree {
+        try await writer.write { db in
+            let maxOrder = try Int.fetchOne(
+                db, sql: "SELECT MAX(sortOrder) FROM worktree WHERE repoID IS NULL"
+            ) ?? 0
+            let wt = Worktree(
+                repoID: nil, name: name, displayName: displayName, branch: "",
+                path: path, status: .active, tmuxServer: tmuxServer, sortOrder: maxOrder + 1)
+            try WorktreeRecord(from: wt).insert(db)
+            return wt
+        }
+    }
+
+    /// Set (or clear) the promotion pointer for a scratch row.
+    public func setPromotedToRepoID(id: UUID, repoID: UUID?) async throws {
+        try await writer.write { db in
+            try db.execute(sql: "UPDATE worktree SET promotedToRepoID = ? WHERE id = ?",
+                           arguments: [repoID?.uuidString, id.uuidString])
+        }
+    }
+
+    /// All repo-less scratch worktree rows.
+    public func listScratch() async throws -> [Worktree] {
+        try await writer.read { db in
+            try WorktreeRecord
+                .filter(Column("repoID") == nil)
+                .order(Column("sortOrder").asc)
+                .fetchAll(db).map { $0.toModel() }
         }
     }
 

@@ -56,11 +56,11 @@ public struct TerminalActivityDelta: Codable, Sendable {
 /// Delta payload for worktree creation/revival.
 public struct WorktreeDelta: Codable, Sendable {
     public let worktreeID: UUID
-    public let repoID: UUID
+    public let repoID: UUID?
     public let name: String
     public let path: String
     public let status: WorktreeStatus?
-    public init(worktreeID: UUID, repoID: UUID, name: String, path: String, status: WorktreeStatus? = nil) {
+    public init(worktreeID: UUID, repoID: UUID?, name: String, path: String, status: WorktreeStatus? = nil) {
         self.worktreeID = worktreeID; self.repoID = repoID
         self.name = name; self.path = path; self.status = status
     }

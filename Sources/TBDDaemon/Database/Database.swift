@@ -559,6 +559,59 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "worktree", column: "prStatus", type: .text)
         }
 
+        // Make worktree.repoID nullable (scratch spaces are repo-less rows) and
+        // add the promotedToRepoID pointer. SQLite cannot drop a NOT NULL
+        // constraint via ALTER, so rebuild the table. Idempotency-guarded:
+        // re-running after the column already went nullable is a no-op.
+        migrator.registerMigration("v35_worktree_nullable_repo") { db in
+            let info = try Row.fetchAll(db, sql: "PRAGMA table_info(worktree)")
+            let repoIDNotNull = (info.first { ($0["name"] as String?) == "repoID" }?["notnull"] as Int?) ?? 1
+            let hasPromoted = info.contains { ($0["name"] as String?) == "promotedToRepoID" }
+            if repoIDNotNull == 0 && hasPromoted { return }  // already applied
+
+            try db.execute(sql: """
+                CREATE TABLE worktree_new (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    repoID TEXT REFERENCES repo(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    displayName TEXT NOT NULL,
+                    branch TEXT NOT NULL,
+                    path TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    createdAt DATETIME NOT NULL,
+                    archivedAt DATETIME,
+                    tmuxServer TEXT NOT NULL,
+                    gitStatus TEXT NOT NULL DEFAULT 'current',
+                    hasConflicts BOOLEAN NOT NULL DEFAULT 0,
+                    pinnedAt DATETIME,
+                    archivedClaudeSessions TEXT,
+                    sortOrder INTEGER NOT NULL DEFAULT 0,
+                    archivedHeadSHA TEXT,
+                    tabOrder TEXT NOT NULL DEFAULT '[]',
+                    activeTabID TEXT,
+                    parentWorktreeID TEXT REFERENCES worktree(id) ON DELETE SET NULL,
+                    autoArchiveOnMerge BOOLEAN,
+                    prStatus TEXT,
+                    promotedToRepoID TEXT
+                )
+                """)
+            try db.execute(sql: """
+                INSERT INTO worktree_new
+                    (id, repoID, name, displayName, branch, path, status, createdAt,
+                     archivedAt, tmuxServer, gitStatus, hasConflicts, pinnedAt,
+                     archivedClaudeSessions, sortOrder, archivedHeadSHA, tabOrder,
+                     activeTabID, parentWorktreeID, autoArchiveOnMerge, prStatus)
+                SELECT
+                     id, repoID, name, displayName, branch, path, status, createdAt,
+                     archivedAt, tmuxServer, gitStatus, hasConflicts, pinnedAt,
+                     archivedClaudeSessions, sortOrder, archivedHeadSHA, tabOrder,
+                     activeTabID, parentWorktreeID, autoArchiveOnMerge, prStatus
+                FROM worktree
+                """)
+            try db.drop(table: "worktree")
+            try db.rename(table: "worktree_new", to: "worktree")
+        }
+
         return migrator
     }
 }

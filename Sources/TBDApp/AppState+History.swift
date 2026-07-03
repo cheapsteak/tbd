@@ -178,7 +178,9 @@ extension AppState {
             )
             settleReviveState(id: worktreeID, snapshot: snapshot, revived: revived)
             await refreshWorktrees()
-            await refreshArchivedWorktrees(repoID: snapshot.repoID)
+            if let repoID = snapshot.repoID {
+                await refreshArchivedWorktrees(repoID: repoID)
+            }
         } catch {
             revivingArchived.removeValue(forKey: worktreeID)
             logger.error("reviveWithSession failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")

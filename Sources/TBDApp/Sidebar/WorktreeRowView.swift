@@ -168,7 +168,8 @@ struct WorktreeRowView: View {
             }
             suffixIcon()
             if let sectionRepoID, sectionRepoID != worktree.repoID,
-               let homeRepo = appState.repoName(for: worktree.repoID) {
+               let rid = worktree.repoID,
+               let homeRepo = appState.repoName(for: rid) {
                 let short = homeRepo.count > 5 ? String(homeRepo.prefix(5)) + "…" : homeRepo
                 Text("(\(short))")
                     .font(.caption)
@@ -205,7 +206,9 @@ struct WorktreeRowView: View {
             if isRowHovered && !isMain {
                 Button(action: {
                     let parentID = worktree.id
-                    let repoID = worktree.repoID
+                    // Scratch spaces have no repo, so nested-worktree creation
+                    // isn't offered for them — this affordance is repo-only.
+                    guard let repoID = worktree.repoID else { return }
                     appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
                 }) {
                     Image(systemName: "plus")

@@ -223,7 +223,12 @@ public actor SuspendResumeCoordinator {
         let claudeEnvOverrides = resumeConfig?.envSettingOverrides ?? [:]
         // Free-form env overrides (global < repo < profile), layered under the
         // builder's auth/routing env below so resumed sessions keep them too.
-        let resumeRepo = try? await db.repos.get(id: worktree.repoID)
+        let resumeRepo: Repo?
+        if let rid = worktree.repoID {
+            resumeRepo = try? await db.repos.get(id: rid)
+        } else {
+            resumeRepo = nil
+        }
         let mergedEnvOverrides = EnvOverrideResolver.merge(
             global: resumeConfig?.envOverrides,
             repo: resumeRepo?.envOverrides,

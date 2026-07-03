@@ -37,7 +37,10 @@ extension RPCRouter {
         // Pass the raw branch ref (possibly `origin/...`) to phase 2 so it
         // can dispatch to the right git command.
         let existingBranchRef = useExistingBranch ? params.branch : nil
-        await repoSerializer.submit(repoID: pending.repoID) {
+        // handleWorktreeCreate is always repo-scoped (scratch creation uses a
+        // separate RPC), so params.repoID is the reliable non-optional source
+        // — pending.repoID mirrors it but is now UUID? on the shared model.
+        await repoSerializer.submit(repoID: params.repoID) {
             do {
                 let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef)
                 switch completion {

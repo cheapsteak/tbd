@@ -60,8 +60,8 @@ extension WorktreeLifecycle {
             try await db.worktrees.assertArchivable(id: worktreeID)
         }
 
-        guard let repo = try await db.repos.get(id: worktree.repoID) else {
-            throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
+        guard let rid = worktree.repoID, let repo = try await db.repos.get(id: rid) else {
+            throw WorktreeLifecycleError.repoNotFound(worktree.repoID ?? worktreeID)
         }
 
         // Collect Claude session IDs before archiving so they survive terminal deletion
@@ -140,7 +140,9 @@ extension WorktreeLifecycle {
             let archiveHookPath = hooks.resolve(
                 event: .archive,
                 repoPath: worktree.path,
-                appHookPath: TBDConstants.hookPath(repoID: worktree.repoID, eventName: HookEvent.archive.rawValue)
+                appHookPath: worktree.repoID.map {
+                    TBDConstants.hookPath(repoID: $0, eventName: HookEvent.archive.rawValue)
+                }
             )
             if let hookPath = archiveHookPath {
                 _ = try? await hooks.execute(
@@ -225,8 +227,8 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.worktreeAlreadyActive(worktreeID)
         }
 
-        guard let repo = try await db.repos.get(id: worktree.repoID) else {
-            throw WorktreeLifecycleError.repoNotFound(worktree.repoID)
+        guard let rid = worktree.repoID, let repo = try await db.repos.get(id: rid) else {
+            throw WorktreeLifecycleError.repoNotFound(worktree.repoID ?? worktreeID)
         }
 
         // Create parent directory if needed

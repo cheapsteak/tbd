@@ -88,7 +88,12 @@ extension RPCRouter {
         await controlMode?.enableIfGated(serverName: worktree.tmuxServer)
 
         // Look up repo once for system prompt env vars and Claude session setup
-        let repo = try await db.repos.get(id: worktree.repoID)
+        let repo: Repo?
+        if let rid = worktree.repoID {
+            repo = try await db.repos.get(id: rid)
+        } else {
+            repo = nil
+        }
 
         // Fetch config once for both the typed Claude env overrides and the
         // free-form env overrides (global < repo < profile). The profile scope
@@ -405,7 +410,12 @@ extension RPCRouter {
             // recreated Codex pane keeps them. No profile is resolved here, so the
             // profile scope is nil.
             let recreateConfig = try? await db.config.get()
-            let recreateRepo = try? await db.repos.get(id: worktree.repoID)
+            let recreateRepo: Repo?
+            if let rid = worktree.repoID {
+                recreateRepo = try? await db.repos.get(id: rid)
+            } else {
+                recreateRepo = nil
+            }
             let codexEnvOverrides = EnvOverrideResolver.merge(
                 global: recreateConfig?.envOverrides,
                 repo: recreateRepo?.envOverrides,
@@ -647,7 +657,12 @@ extension RPCRouter {
         // blank — JSONL never written or no real entries — resuming it would
         // produce "no conversation found" and chaotic behavior, so we instead
         // spawn a brand-new session and skip the recapture.
-        let repo = try await db.repos.get(id: worktree.repoID)
+        let repo: Repo?
+        if let rid = worktree.repoID {
+            repo = try await db.repos.get(id: rid)
+        } else {
+            repo = nil
+        }
         let plannedTerminalID = UUID()
         var env = SystemPromptBuilder.promptLayers(repo: repo, worktree: worktree)
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString

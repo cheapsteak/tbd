@@ -123,7 +123,9 @@ extension AppState {
             // No refreshWorktrees() here: the sidebar refresh arrives via the
             // `.worktreeRevived` delta handler (AppState.swift handleDelta),
             // same as createWorktree relies on its delta.
-            await refreshArchivedWorktrees(repoID: snapshot.repoID)
+            if let repoID = snapshot.repoID {
+                await refreshArchivedWorktrees(repoID: repoID)
+            }
         } catch {
             revivingArchived.removeValue(forKey: id)
             logger.error("Failed to revive worktree: \(error)")
@@ -197,9 +199,9 @@ extension AppState {
         // synchronously (List rerender + scroll), persist via RPC fire-and-forget.
         if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
            let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
+           let repoID = worktree.repoID,
            !repos[repoIdx].expanded {
             repos[repoIdx].expanded = true
-            let repoID = worktree.repoID
             Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
         }
         pendingScrollToWorktreeID = id
@@ -250,11 +252,13 @@ extension AppState {
             logger.warning("Deep link references unknown worktree \(id.uuidString, privacy: .public)")
             return
         }
+        // Archived flows are repo-only — a scratch space has no archived view to deep-link into.
+        guard let rid = wt.repoID else { return }
 
         selectedWorktreeIDs = []
-        selectedRepoID = wt.repoID
-        archivedWorktrees[wt.repoID] = archived.filter { $0.repoID == wt.repoID }
-        archivedWorktreesHasMore[wt.repoID] = false
+        selectedRepoID = rid
+        archivedWorktrees[rid] = archived.filter { $0.repoID == rid }
+        archivedWorktreesHasMore[rid] = false
         highlightedArchivedWorktreeID = id
         if NSApplication.shared.isRunning {
             NSApplication.shared.activate(ignoringOtherApps: true)

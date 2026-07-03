@@ -105,7 +105,8 @@ public enum PrimaryAgentPreference: String, Codable, Sendable, Equatable, CaseIt
 
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
-    public var repoID: UUID
+    /// nil for scratch spaces (repo-less worktrees).
+    public var repoID: UUID?
     public var name: String
     public var displayName: String
     public var branch: String
@@ -137,7 +138,13 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// PR poll; the app seeds from this only when it has no fresher live value.
     public var prStatus: PRStatus?
 
-    public init(id: UUID = UUID(), repoID: UUID, name: String, displayName: String,
+    /// Set only on promoted scratch rows: the repo created by `tbd scratch promote`.
+    public var promotedToRepoID: UUID?
+
+    /// A scratch space is a repo-less worktree. Derived — no separate column.
+    public var isScratch: Bool { repoID == nil }
+
+    public init(id: UUID = UUID(), repoID: UUID?, name: String, displayName: String,
                 branch: String, path: String, status: WorktreeStatus = .active,
                 hasConflicts: Bool = false,
                 createdAt: Date = Date(), archivedAt: Date? = nil, tmuxServer: String,
@@ -146,6 +153,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 liveClaudeSessionCount: Int? = nil,
                 parentWorktreeID: UUID? = nil,
                 autoArchiveOnMerge: Bool? = nil,
+                promotedToRepoID: UUID? = nil,
                 prStatus: PRStatus? = nil) {
         self.id = id
         self.repoID = repoID
@@ -164,6 +172,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.liveClaudeSessionCount = liveClaudeSessionCount
         self.parentWorktreeID = parentWorktreeID
         self.autoArchiveOnMerge = autoArchiveOnMerge
+        self.promotedToRepoID = promotedToRepoID
         self.prStatus = prStatus
     }
 
@@ -171,13 +180,14 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case id, repoID, name, displayName, branch, path, status
         case hasConflicts, createdAt, archivedAt, tmuxServer
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
-        case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge, prStatus
+        case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
+        case promotedToRepoID, prStatus
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
-        repoID = try c.decode(UUID.self, forKey: .repoID)
+        repoID = try c.decodeIfPresent(UUID.self, forKey: .repoID)
         name = try c.decode(String.self, forKey: .name)
         displayName = try c.decode(String.self, forKey: .displayName)
         branch = try c.decode(String.self, forKey: .branch)
@@ -193,6 +203,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
         parentWorktreeID = try c.decodeIfPresent(UUID.self, forKey: .parentWorktreeID)
         autoArchiveOnMerge = try c.decodeIfPresent(Bool.self, forKey: .autoArchiveOnMerge)
+        promotedToRepoID = try c.decodeIfPresent(UUID.self, forKey: .promotedToRepoID)
         prStatus = try c.decodeIfPresent(PRStatus.self, forKey: .prStatus)
     }
 }

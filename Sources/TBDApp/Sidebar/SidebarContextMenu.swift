@@ -81,10 +81,11 @@ struct SidebarContextMenu: View {
                     }
                 }
 
-                Button("Create Nested Worktree") {
-                    let parentID = worktree.id
-                    let repoID = worktree.repoID
-                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
+                // Scratch spaces have no repo, so nesting isn't offered for them.
+                if let repoID = worktree.repoID {
+                    Button("Create Nested Worktree") {
+                        appState.createWorktree(repoID: repoID, parentWorktreeID: worktree.id)
+                    }
                 }
 
                 Button("Archive", role: .destructive) {

@@ -47,7 +47,7 @@ extension WorktreeLifecycle {
         // Warn (best-effort) when the path is under a TBD-managed prefix, since
         // reconcile would re-adopt it. Repo lookup is best-effort — a missing
         // repo row doesn't block forget (we still want the row gone).
-        if let repo = try? await db.repos.get(id: worktree.repoID) {
+        if let rid = worktree.repoID, let repo = try? await db.repos.get(id: rid) {
             let acceptablePrefixes = WorktreeLayout().legacyAndCanonicalPrefixes(for: repo)
                 .map { $0.hasSuffix("/") ? $0 : $0 + "/" }
             if acceptablePrefixes.contains(where: { worktree.path.hasPrefix($0) }) {
