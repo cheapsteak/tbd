@@ -384,6 +384,15 @@ final class AppState: ObservableObject {
     /// Terminals where the user has dismissed the proxy-unreachable banner.
     /// Cleared on app relaunch (in-memory only — banners are advisory).
     @Published var dismissedProxyWarnings: Set<UUID> = []
+    /// Non-nil when the connected daemon reports an executable path that
+    /// doesn't belong to this app's build (another worktree's restart.sh won
+    /// the shared daemon). Rendered as a persistent, non-blocking banner in
+    /// ContentView. Set by `checkDaemonBuildIdentity()` on every connect, so
+    /// it self-clears once a matching daemon is connected.
+    @Published var daemonBuildMismatchMessage: String?
+    /// User dismissed the build-mismatch banner. In-memory only (advisory);
+    /// reset whenever the mismatch message changes.
+    @Published var daemonBuildMismatchDismissed = false
     @Published var historyActiveWorktrees: Set<UUID> = []
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
@@ -1039,7 +1048,18 @@ final class AppState: ObservableObject {
                     } else {
                         let didConnect = await self.daemonClient.connect()
                         self.isConnected = didConnect
-                        if didConnect { self.pushClaudeSpawnPreferences() }
+                        if didConnect {
+                            self.pushClaudeSpawnPreferences()
+                        } else if !AppState.pidFilePointsAtLiveDaemon() {
+                            // The socket file exists but nothing accepted the
+                            // connection, and the pid file doesn't name a live
+                            // TBDDaemon — stale leftovers (e.g. after a
+                            // reboot). Let startDaemonAndConnect clean them up
+                            // and respawn. A live daemon is never touched:
+                            // transient connect failures with a healthy pid
+                            // stay on the plain retry path above.
+                            await self.startDaemonAndConnect()
+                        }
                     }
                     if !self.isConnected { return }
                 }
@@ -1111,6 +1131,10 @@ final class AppState: ObservableObject {
         if didConnect {
             Task { [weak self] in
                 guard let self else { return }
+                await self.checkDaemonBuildIdentity()
+            }
+            Task { [weak self] in
+                guard let self else { return }
                 await self.cliInstallerCoordinator.checkOnLaunch()
             }
             Task { [weak self] in
@@ -1133,14 +1157,28 @@ final class AppState: ObservableObject {
 
     /// Launch the daemon process and connect.
     func startDaemonAndConnect() async {
-        // Check if daemon is already running (PID file + process alive)
+        // Check if daemon is already running. The pid file alone can't be
+        // trusted: it survives reboots and the recorded pid can be recycled
+        // by an unrelated process, which made the app skip spawning and fail
+        // to connect to a dead socket forever. Validate that the pid is a
+        // live TBDDaemon before skipping the spawn.
         let pidPath = TBDConstants.pidFilePath
         if let pidStr = try? String(contentsOfFile: pidPath, encoding: .utf8),
-           let pid = pid_t(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)),
-           kill(pid, 0) == 0 {
-            // Daemon is running, just connect
-            await connectAndLoadInitialState()
-            return
+           let pid = DaemonLiveness.pid(fromPidFileContents: pidStr) {
+            if DaemonLiveness.isLiveTBDDaemon(pid: pid) {
+                // Daemon is running, just connect
+                await connectAndLoadInitialState()
+                return
+            }
+            // Stale artifacts — dead pid, or pid recycled by another process
+            // (e.g. after a reboot). Remove them so the spawn below starts
+            // from a clean slate instead of tripping over a dead socket.
+            logger.warning("""
+            Stale daemon pid file: pid \(pid, privacy: .public) is not a live \
+            TBDDaemon — removing pid file and socket before spawning
+            """)
+            try? FileManager.default.removeItem(atPath: pidPath)
+            try? FileManager.default.removeItem(atPath: TBDConstants.socketPath)
         }
 
         // Find TBDDaemon binary next to this executable
@@ -1187,6 +1225,19 @@ final class AppState: ObservableObject {
         }
 
         await connectAndLoadInitialState()
+    }
+
+    /// True when the daemon pid file exists and names a live TBDDaemon
+    /// process. Used by the reconnect poll to distinguish "daemon busy /
+    /// transient connect failure" (retry) from "stale socket + pid file left
+    /// behind by a reboot or crash" (clean up and respawn).
+    nonisolated static func pidFilePointsAtLiveDaemon(
+        pidFilePath: String = TBDConstants.pidFilePath
+    ) -> Bool {
+        guard let contents = try? String(contentsOfFile: pidFilePath, encoding: .utf8),
+              let pid = DaemonLiveness.pid(fromPidFileContents: contents)
+        else { return false }
+        return DaemonLiveness.isLiveTBDDaemon(pid: pid)
     }
 
     // MARK: - Refresh

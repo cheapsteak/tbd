@@ -46,6 +46,33 @@ extension AppState {
         }
     }
 
+    /// Compare the daemon's reported executable path against the daemon
+    /// builds this app could legitimately be paired with, and publish a
+    /// banner message on mismatch (see `DaemonBuildSkew`). Called on every
+    /// successful connect. Visibility only — never restarts the daemon.
+    func checkDaemonBuildIdentity() async {
+        guard let status = try? await daemonClient.daemonStatus() else { return }
+        let siblingDaemonPath = Bundle.main.executableURL?
+            .deletingLastPathComponent()
+            .appendingPathComponent("TBDDaemon").path
+        let sourceWorktreePath = StatusBarView.resolveSourceWorktreePath(
+            bundleURL: Bundle.main.bundleURL,
+            executablePath: Bundle.main.executablePath
+        )
+        let message = DaemonBuildSkew.warningMessage(
+            daemonExecutablePath: status.executablePath,
+            appSiblingDaemonPath: siblingDaemonPath,
+            sourceWorktreePath: sourceWorktreePath
+        )
+        guard message != daemonBuildMismatchMessage else { return }
+        daemonBuildMismatchMessage = message
+        // A new (or cleared) verdict invalidates a previous dismissal.
+        daemonBuildMismatchDismissed = false
+        if let message {
+            logger.warning("Daemon build skew detected: \(message, privacy: .public)")
+        }
+    }
+
     // MARK: - Helpers
 
     func handleConnectionError(_ error: Error) {
