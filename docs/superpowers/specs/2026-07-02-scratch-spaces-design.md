@@ -108,8 +108,9 @@ repo, `repoID == nil` means:
 - **Env overrides:** scopes collapse to `global < profile` (no repo scope).
 - **Claude instrumentation unchanged:** plugin dir (`tbd` skill), settings
   overlay hooks, session-event relay all apply to scratch sessions.
-- **Codex:** `CodexHomeManager` provides one scratch `CODEX_HOME` keyed off
-  the scratch base dir (same role a repo plays today).
+- **Codex:** no change — Codex sessions already share one global
+  `CODEX_HOME` (per-repo isolation was removed by the 2026-05-22 codex
+  global-home redesign), and scratch sessions use it the same way.
 
 ## 4. Sidebar & UI
 
