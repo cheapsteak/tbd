@@ -23,26 +23,23 @@ enum SystemPromptBuilder {
     }
 
     /// Layer injected for repo-less scratch sessions. Explains the space and
-    /// nudges agent-driven promotion.
-    static var scratchContext: String {
-        """
-        You are in a TBD **scratch space** — a repo-less workspace with no git repo yet.
-        Use it to bootstrap a new project or hold a general-purpose chat.
-        When the project takes shape, offer the user promotion: ask them for a \
-        destination path, then run `tbd scratch promote <dest-path>` from this \
-        session. That moves the folder and registers it as a real TBD repo.
-        """
-    }
+    /// nudges agent-driven promotion. This is the built-in default; callers
+    /// may override it per-session via `promptLayers(scratchInstructions:)`.
+    static var scratchContext: String { RepoConstants.defaultScratchInstructions }
 
     /// Returns the individual prompt layers as env-var-name → value pairs.
     /// Used both to set env vars in terminals and to build the combined `--append-system-prompt`.
-    static func promptLayers(repo: Repo?, worktree: Worktree) -> [String: String] {
+    /// `scratchInstructions` is the global user-customizable override for the
+    /// scratch layer (`Config.scratchInstructions`); `nil` or blank falls
+    /// back to the built-in default.
+    static func promptLayers(repo: Repo?, worktree: Worktree, scratchInstructions: String? = nil) -> [String: String] {
         var layers: [String: String] = [:]
 
         layers["TBD_PROMPT_CONTEXT"] = builtInTBDContext
 
         if worktree.isScratch {
-            layers["TBD_PROMPT_SCRATCH"] = scratchContext
+            let trimmedCustom = scratchInstructions?.trimmingCharacters(in: .whitespacesAndNewlines)
+            layers["TBD_PROMPT_SCRATCH"] = (trimmedCustom?.isEmpty == false) ? scratchInstructions! : scratchContext
         }
 
         if !worktree.isScratch && worktree.status != .main && worktree.displayName == worktree.name {
@@ -62,10 +59,10 @@ enum SystemPromptBuilder {
 
     /// Build the combined system prompt for a Claude session.
     /// Returns nil if there's nothing to append (e.g., resume session).
-    static func build(repo: Repo?, worktree: Worktree, isResume: Bool) -> String? {
+    static func build(repo: Repo?, worktree: Worktree, isResume: Bool, scratchInstructions: String? = nil) -> String? {
         if isResume { return nil }
 
-        let layers = promptLayers(repo: repo, worktree: worktree)
+        let layers = promptLayers(repo: repo, worktree: worktree, scratchInstructions: scratchInstructions)
         var parts: [String] = []
 
         // Order: scratch layer, rename prompt, TBD context, custom instructions

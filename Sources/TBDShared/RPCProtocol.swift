@@ -161,6 +161,7 @@ public enum RPCMethod {
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
+    public static let configSetScratchInstructions = "config.setScratchInstructions"
     public static let scratchCreate = "scratch.create"
     public static let scratchDelete = "scratch.delete"
     public static let scratchPromote = "scratch.promote"
@@ -883,6 +884,13 @@ public struct WorktreeSetAutoArchiveParams: Codable, Sendable {
 public struct ConfigSetAutoArchiveDefaultParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setScratchInstructions` — the global scratch-space
+/// system-prompt override. `nil` (or blank) resets to the built-in default.
+public struct ConfigSetScratchInstructionsParams: Codable, Sendable {
+    public let instructions: String?
+    public init(instructions: String?) { self.instructions = instructions }
 }
 
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.

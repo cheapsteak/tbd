@@ -208,4 +208,48 @@ struct SystemPromptBuilderTests {
         #expect(result != nil)
         #expect(!result!.contains("tbd scratch promote"))
     }
+
+    @Test("build uses custom scratchInstructions for a scratch worktree")
+    func buildUsesCustomScratchInstructions() {
+        let wt = Worktree(repoID: nil, name: "20260702-worrying-pike", displayName: "20260702-worrying-pike",
+                          branch: "", path: "/tmp/scratch/x", tmuxServer: "tbd-scratch")
+        let result = SystemPromptBuilder.build(
+            repo: nil, worktree: wt, isResume: false,
+            scratchInstructions: "Always use uv for scratch spaces.")
+        #expect(result != nil)
+        #expect(result!.contains("Always use uv for scratch spaces."))
+        #expect(!result!.contains("tbd scratch promote"))
+    }
+
+    @Test("build falls back to built-in default when scratchInstructions is nil")
+    func buildFallsBackToDefaultScratchInstructionsWhenNil() {
+        let wt = Worktree(repoID: nil, name: "20260702-worrying-pike", displayName: "20260702-worrying-pike",
+                          branch: "", path: "/tmp/scratch/x", tmuxServer: "tbd-scratch")
+        let result = SystemPromptBuilder.build(repo: nil, worktree: wt, isResume: false, scratchInstructions: nil)
+        #expect(result != nil)
+        #expect(result!.contains("scratch space"))
+        #expect(result!.contains("tbd scratch promote"))
+    }
+
+    @Test("build falls back to built-in default when scratchInstructions is whitespace-only")
+    func buildFallsBackToDefaultScratchInstructionsWhenWhitespace() {
+        let wt = Worktree(repoID: nil, name: "20260702-worrying-pike", displayName: "20260702-worrying-pike",
+                          branch: "", path: "/tmp/scratch/x", tmuxServer: "tbd-scratch")
+        let result = SystemPromptBuilder.build(repo: nil, worktree: wt, isResume: false, scratchInstructions: "   ")
+        #expect(result != nil)
+        #expect(result!.contains("scratch space"))
+        #expect(result!.contains("tbd scratch promote"))
+    }
+
+    @Test("scratchInstructions param is ignored for a non-scratch worktree")
+    func buildIgnoresScratchInstructionsForRepoWorktree() {
+        let repo = Repo(path: "/test", displayName: "test", defaultBranch: "main")
+        let wt = Worktree(repoID: repo.id, name: "gorgeous-panda", displayName: "gorgeous-panda",
+                          branch: "tbd/gorgeous-panda", path: "/test/.tbd/worktrees/gorgeous-panda", tmuxServer: "tbd-test")
+        let result = SystemPromptBuilder.build(
+            repo: repo, worktree: wt, isResume: false,
+            scratchInstructions: "Always use uv for scratch spaces.")
+        #expect(result != nil)
+        #expect(!result!.contains("Always use uv for scratch spaces."))
+    }
 }

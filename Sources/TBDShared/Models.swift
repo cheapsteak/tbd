@@ -448,17 +448,23 @@ public struct Config: Codable, Sendable, Equatable {
     /// Global default for auto-archive-on-PR-merge, applied to worktrees whose
     /// per-worktree override is `nil`.
     public var autoArchiveOnMergeDefault: Bool
+    /// Global, user-customizable system-prompt layer for scratch spaces
+    /// (repo-less worktrees). `nil` means "use the built-in default"
+    /// (`RepoConstants.defaultScratchInstructions`).
+    public var scratchInstructions: String?
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
                 envSettingOverrides: [String: ClaudeEnvValue] = [:],
                 envOverrides: [String: String] = [:],
-                autoArchiveOnMergeDefault: Bool = false) {
+                autoArchiveOnMergeDefault: Bool = false,
+                scratchInstructions: String? = nil) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
         self.envOverrides = envOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
+        self.scratchInstructions = scratchInstructions
     }
 
     public init(from decoder: Decoder) throws {
@@ -474,6 +480,7 @@ public struct Config: Codable, Sendable, Equatable {
             [String: String].self, forKey: .envOverrides) ?? [:]
         autoArchiveOnMergeDefault = try c.decodeIfPresent(
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
+        scratchInstructions = try c.decodeIfPresent(String.self, forKey: .scratchInstructions) ?? nil
     }
 }
 

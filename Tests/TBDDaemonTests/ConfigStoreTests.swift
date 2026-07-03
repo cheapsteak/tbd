@@ -56,4 +56,32 @@ struct ConfigStoreTests {
         let cfg = try await db.config.get()
         #expect(cfg.primaryAgentPreference == .codex)
     }
+
+    @Test func scratchInstructionsDefaultsToNil() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchInstructions == nil)
+    }
+
+    @Test func setAndGetScratchInstructions() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setScratchInstructions("Always use uv, never pip.")
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchInstructions == "Always use uv, never pip.")
+    }
+
+    @Test func setScratchInstructionsWhitespaceResetsToNil() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setScratchInstructions("   \n  ")
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchInstructions == nil)
+    }
+
+    @Test func setScratchInstructionsNilResetsToNil() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setScratchInstructions("Always use uv, never pip.")
+        try await db.config.setScratchInstructions(nil)
+        let cfg = try await db.config.get()
+        #expect(cfg.scratchInstructions == nil)
+    }
 }

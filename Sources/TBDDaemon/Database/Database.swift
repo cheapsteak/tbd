@@ -612,6 +612,13 @@ public final class TBDDatabase: Sendable {
             try db.rename(table: "worktree_new", to: "worktree")
         }
 
+        // Global, user-customizable system-prompt override for scratch spaces
+        // (repo-less worktrees). Nullable text; nil means "use the built-in
+        // default" (RepoConstants.defaultScratchInstructions).
+        migrator.registerMigration("v36_config_scratch_instructions") { db in
+            try db.addColumnIfMissing(table: "config", column: "scratch_instructions", type: .text)
+        }
+
         return migrator
     }
 }
