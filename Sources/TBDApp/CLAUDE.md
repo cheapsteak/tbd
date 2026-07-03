@@ -26,3 +26,10 @@ A toolbar `Menu` label renders **template** images monochrome (AppKit tints them
 2. Render it with `Image(nsImage:).renderingMode(.original)`.
 3. Re-bake on light/dark changes by reading `@Environment(\.colorScheme)` in the view body.
 4. Use `.tint(.primary)` on the `Menu` to keep adjacent label text neutral (the split button otherwise accent-tints it); `.renderingMode(.original)` images ignore the tint, so the baked color survives.
+
+### Split-button label flattening & stale menu state
+
+Two more empirically verified constraints (verified live in this app, July 2026, macOS 26):
+
+- **AppKit flattens the split-button label to exactly ONE image + ONE plain text string.** A second/conditional `Image` in the label `HStack` is silently dropped (its only visible effect is width truncation of the text), and inline `Text(Image(...))` attachments are stripped entirely. Any badge or indicator must be **composited into the single baked `NSImage`** — see `PRButtonLabel.coloredIcon` in `ContentView.swift`, which draws the `archivebox` badge into the same bitmap as the status icon.
+- **AppKit materializes the split button's NSMenu and label ONCE.** Later SwiftUI state changes — a `Toggle` checkmark inside the menu, or structural changes to the label — do NOT propagate to the already-materialized item, even though SwiftUI re-evaluates the `content`/`label` closures with the correct values. The fix is to force recreation with `.id(...)` keyed on that state — see the PR split button's `.id("pr-split-...")`.
