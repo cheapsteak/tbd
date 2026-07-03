@@ -8,6 +8,10 @@ struct ContentView: View {
     @AppStorage("filePanel.isVisible") private var showFilePanel = true
     @AppStorage("filePanel.width") private var filePanelWidth: Double = 280
     @State private var contentAreaHeight: CGFloat = 600
+    // Part of the PR split button's .id key: the baked (non-template) icon
+    // colors depend on the appearance, and the materialized-once toolbar item
+    // only picks up a re-bake when the id changes.
+    @Environment(\.colorScheme) private var colorScheme
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
@@ -132,18 +136,20 @@ struct ContentView: View {
                    appState.selectedWorktreeIDs.count == 1,
                    let prStatus = appState.prStatuses[worktreeID],
                    let prURL = URL(string: prStatus.url) {
+                    let worktree = appState.findWorktree(id: worktreeID)
+                    let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
+                    let blocked = !appState.children(of: worktreeID).isEmpty
                     ToolbarItem(placement: .primaryAction) {
                         ControlGroup {
                             // Split button: label = primary click (open PR); the
                             // attached chevron opens the menu.
                             Menu {
-                                if appState.findWorktree(id: worktreeID) != nil {
-                                    let blocked = !appState.children(of: worktreeID).isEmpty
+                                if worktree != nil {
+                                    // `armed` is captured at materialization time; the .id
+                                    // rebuild below is what refreshes the checkmark (getter
+                                    // re-evaluations never reach the materialized NSMenu).
                                     Toggle("Auto-archive worktree on PR merge", isOn: Binding(
-                                        get: {
-                                            appState.findWorktree(id: worktreeID)
-                                                .map { appState.effectiveAutoArchive(for: $0) } ?? false
-                                        },
+                                        get: { armed },
                                         set: { newValue in
                                             Task { await appState.setAutoArchive(worktreeID: worktreeID, enabled: newValue) }
                                         }
@@ -151,8 +157,6 @@ struct ContentView: View {
                                     .disabled(blocked)
                                 }
                             } label: {
-                                let armed = appState.findWorktree(id: worktreeID)
-                                    .map { appState.effectiveAutoArchive(for: $0) } ?? false
                                 PRButtonLabel(prStatus: prStatus, isAutoArchiveArmed: armed)
                             } primaryAction: {
                                 let existingTabs = appState.tabs[worktreeID] ?? []
@@ -174,7 +178,36 @@ struct ContentView: View {
                             // split button otherwise accent-tints it); the icon keeps
                             // its baked status color via renderingMode(.original).
                             .tint(.primary)
-                            .help("Open PR #\(prStatus.number) · more options")
+                            // Three-way: while child worktrees exist the daemon's
+                            // AutoArchiveOnMergeCoordinator skips archiving (it
+                            // re-checks at merge time), so an armed-but-blocked
+                            // worktree must not promise "auto-archives on merge".
+                            .help(
+                                armed && blocked
+                                    ? "Open PR #\(prStatus.number) · auto-archive armed (paused while child worktrees exist) · more options"
+                                    : armed
+                                        ? "Open PR #\(prStatus.number) · auto-archives on merge · more options"
+                                        : "Open PR #\(prStatus.number) · more options"
+                            )
+                            // AppKit materializes this split button's NSMenu and
+                            // label ONCE; later SwiftUI re-evaluations of the
+                            // Toggle checkmark and armed badge never reach the
+                            // already-built NSMenuToolbarItem. Changing the id
+                            // forces the item to be recreated, so the key must
+                            // include EVERYTHING the label/menu render: worktree
+                            // + whether its row has loaded (gates the menu's only
+                            // item), armed + blocked (menu + help), the rendered
+                            // PRStatus fields (number, state, url — not reason,
+                            // which presentation ignores), and colorScheme
+                            // (baked icon colors).
+                            .id(PRButtonLabel.prSplitButtonID(
+                                worktreeID: worktreeID,
+                                worktreeFound: worktree != nil,
+                                armed: armed,
+                                blocked: blocked,
+                                prStatus: prStatus,
+                                colorScheme: colorScheme
+                            ))
                         }
                     }
 
@@ -344,57 +377,151 @@ private func overlayFrameIsWindowRoot(
 
 // MARK: - PRButtonLabel
 
-private struct PRButtonLabel: View {
+// Internal (not private) so TBDAppTests can exercise the baked-image geometry
+// and the .id key computation.
+struct PRButtonLabel: View {
     let prStatus: PRStatus
     let isAutoArchiveArmed: Bool
-    // Re-bake the colored icon when the appearance flips (the baked image is
-    // non-template, so it can't auto-adapt the way a tinted template would).
+    // Feeds the baked-icon cache key (and, at the ContentView level, the
+    // toolbar item's .id key) so light/dark changes re-bake the non-template
+    // icon, which can't auto-adapt the way a tinted template would.
     @Environment(\.colorScheme) private var colorScheme
+
+    /// Baked image geometry: 12×12 status icon, plus (when armed) a 3pt gap
+    /// and a 12×12 archivebox badge composited into the same bitmap.
+    static let iconSide: CGFloat = 12
+    static let badgeGap: CGFloat = 3
+
+    var bakedWidth: CGFloat {
+        isAutoArchiveArmed ? Self.iconSide + Self.badgeGap + Self.iconSide : Self.iconSide
+    }
+
+    /// The `.id` key for the PR split-button toolbar item. AppKit materializes
+    /// the split button's NSMenu and label ONCE, so the key must include
+    /// EVERYTHING the label/menu render — anything omitted here can change in
+    /// SwiftUI state without ever reaching the materialized AppKit item.
+    /// `worktreeFound` matters because the menu's only item (the auto-archive
+    /// Toggle) is gated on the worktree row having loaded: a menu materialized
+    /// before the row appears would otherwise stay permanently empty. The key
+    /// contains exactly the `PRStatus` fields the label/menu/primaryAction
+    /// consume: `number` (label text/help), `state` (icon via
+    /// `PRStatusPresentation`), and `url` (captured by `primaryAction`, so a
+    /// re-pointed PR must recreate the item too). `reason` is deliberately
+    /// excluded — the split button's presentation ignores it, and keying on it
+    /// would force spurious toolbar-item rebuilds for zero visual change.
+    ///
+    /// This key MUST stay a String. The macOS 26 toolbar bridge only honors
+    /// `.id` identity changes for String values here — a custom Hashable
+    /// struct key was observed NOT to trigger NSMenuToolbarItem recreation
+    /// (verified live 2026-07-03: stale help text, missing badge). Do not
+    /// "clean this up" back into a struct.
+    static func prSplitButtonID(
+        worktreeID: UUID,
+        worktreeFound: Bool,
+        armed: Bool,
+        blocked: Bool,
+        prStatus: PRStatus,
+        colorScheme: ColorScheme
+    ) -> String {
+        "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(blocked)"
+            + "-\(prStatus.number)-\(prStatus.state.rawValue)-\(prStatus.url)"
+            + "-\(colorScheme)"
+    }
+
+    /// Aspect-fits `size` into `slot`, centered. Used to draw the archivebox
+    /// badge (non-square intrinsic size, ~16×14) into its square badge slot
+    /// without stretching it.
+    static func aspectFitRect(for size: NSSize, in slot: NSRect) -> NSRect {
+        guard size.width > 0, size.height > 0 else { return slot }
+        let scale = min(slot.width / size.width, slot.height / size.height)
+        let fitted = NSSize(width: size.width * scale, height: size.height * scale)
+        return NSRect(
+            x: slot.midX - fitted.width / 2,
+            y: slot.midY - fitted.height / 2,
+            width: fitted.width,
+            height: fitted.height
+        )
+    }
 
     var body: some View {
         HStack(spacing: 3) {
             if let presentation = PRStatusPresentation.make(for: prStatus),
-               let nsImage = coloredIcon(presentation.iconName, nsColor: presentation.nsColor) {
+               let nsImage = coloredIcon(presentation, colorScheme: colorScheme) {
                 Image(nsImage: nsImage)
                     .renderingMode(.original)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 12, height: 12)
+                    .frame(width: bakedWidth, height: Self.iconSide)
             }
+            // macOS 26 flattens a toolbar split-button (Menu) label to exactly
+            // ONE image + ONE plain text string: a separate trailing Image is
+            // dropped, and an inline Text(Image(...)) attachment is stripped
+            // entirely. Any badge (like the auto-archive-armed archivebox)
+            // must therefore be composited INTO the single baked NSImage.
             Text(verbatim: "#\(prStatus.number)")
                 .font(.caption)
                 .fontWeight(.medium)
-            if isAutoArchiveArmed {
-                // At-a-glance indicator that auto-archive-on-merge is armed for
-                // this worktree. A toolbar Menu label renders SF Symbols
-                // monochrome (AppKit tints them) — that's fine and desirable
-                // here, so a plain template Image needs no baked color.
-                Image(systemName: "archivebox")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 11, height: 11)
-                    .help("Auto-archive on PR merge is on")
-                    .accessibilityLabel("Auto-archive on PR merge is on")
-            }
         }
+        .accessibilityLabel(
+            isAutoArchiveArmed
+                ? "PR #\(prStatus.number), auto-archive on merge is on"
+                : "PR #\(prStatus.number)"
+        )
     }
+
+    /// Cache for baked icons, keyed by (iconName, colorSemantic, armed,
+    /// colorScheme). The bake does disk I/O (`Bundle.module.url` +
+    /// `NSImage(contentsOf:)`) plus symbol creation on every body evaluation,
+    /// and — per the materialize-once behavior documented at the `.id` call
+    /// site — those re-evaluations never reach AppKit anyway. MainActor
+    /// confinement (SwiftUI body runs on main) makes this safe without locks.
+    /// colorSemantic must be part of the key: several PR states share the
+    /// same icon name but bake different colors.
+    @MainActor
+    private static var bakedIconCache: [String: NSImage] = [:]
 
     /// Bakes the status color into a NON-template image. Toolbar `Menu` /
     /// split-button labels render template images monochrome (AppKit tints
     /// them with the control color and ignores `.foregroundStyle`), so the
     /// icon must carry its own color and be drawn with `.renderingMode(.original)`.
-    private func coloredIcon(_ name: String, nsColor: NSColor) -> NSImage? {
-        _ = colorScheme  // establish a dependency so we re-bake on light/dark change
+    /// When auto-archive is armed, an `archivebox` badge (tinted
+    /// `secondaryLabelColor`) is composited to the right of the status icon —
+    /// the flattened toolbar label keeps only this one image, so the badge
+    /// must live inside it.
+    @MainActor
+    func coloredIcon(_ presentation: PRStatusPresentation, colorScheme: ColorScheme) -> NSImage? {
+        let cacheKey = "\(presentation.iconName)-\(presentation.colorSemantic)-\(isAutoArchiveArmed)-\(colorScheme)"
+        if let cached = Self.bakedIconCache[cacheKey] { return cached }
+        let name = presentation.iconName
+        let nsColor = presentation.nsColor
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
               let base = NSImage(contentsOf: url) else { return nil }
         base.isTemplate = true
-        let img = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
-            base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+        let badge: NSImage? = isAutoArchiveArmed
+            ? NSImage(systemSymbolName: "archivebox", accessibilityDescription: "Auto-archive on merge is on")
+            : nil
+        let side = Self.iconSide
+        let img = NSImage(size: NSSize(width: bakedWidth, height: side), flipped: false) { _ in
+            // Colors are resolved inside this draw handler, so dynamic colors
+            // (like secondaryLabelColor) pick up the current appearance.
+            let iconRect = NSRect(x: 0, y: 0, width: side, height: side)
+            base.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
             nsColor.set()
-            rect.fill(using: .sourceAtop)
+            iconRect.fill(using: .sourceAtop)
+            if let badge {
+                // Aspect-fit: the archivebox symbol's intrinsic size is
+                // non-square (~16×14); drawing it straight into the square
+                // slot would stretch it ~12% vertically.
+                let slot = NSRect(x: side + Self.badgeGap, y: 0, width: side, height: side)
+                let badgeRect = Self.aspectFitRect(for: badge.size, in: slot)
+                badge.draw(in: badgeRect, from: .zero, operation: .sourceOver, fraction: 1)
+                NSColor.secondaryLabelColor.set()
+                badgeRect.fill(using: .sourceAtop)
+            }
             return true
         }
         img.isTemplate = false
+        Self.bakedIconCache[cacheKey] = img
         return img
     }
 }
