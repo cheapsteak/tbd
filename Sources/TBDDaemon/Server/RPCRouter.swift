@@ -27,6 +27,10 @@ public final class RPCRouter: Sendable {
     public let pendingQuestions: PendingQuestionStore
     public let repoSerializer: RepoSerializer
     public let configDirManager: ClaudeProfileConfigDirManager
+    /// Deletes per-profile Claude Code OAuth credential items from the login
+    /// keychain on profile delete. Injected so tests can record the requested
+    /// service name instead of touching the real keychain.
+    public let claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting
 
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
@@ -57,7 +61,8 @@ public final class RPCRouter: Sendable {
         modelProfileResolver: ModelProfileResolver? = nil,
         pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
         repoSerializer: RepoSerializer = RepoSerializer(),
-        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager()
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
+        claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain()
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -80,6 +85,7 @@ public final class RPCRouter: Sendable {
         self.repoSerializer = repoSerializer
         self.configDirManager = configDirManager
         self.controlMode = nil
+        self.claudeCredentialsKeychain = claudeCredentialsKeychain
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
