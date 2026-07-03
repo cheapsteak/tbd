@@ -211,12 +211,7 @@ extension RPCRouter {
             let sessionID = UUID().uuidString
             claudeSessionID = sessionID
             freshSessionID = sessionID
-            if let repo,
-               let prompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false) {
-                appendSystemPrompt = prompt
-            } else {
-                appendSystemPrompt = nil
-            }
+            appendSystemPrompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false)
             label = TerminalLabel.claudeCode
         } else if let cmd = params.cmd {
             claudeSessionID = nil
@@ -715,9 +710,7 @@ extension RPCRouter {
             scheduleRecapture = true
         case .fresh(let newSessionID):
             logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
-            let appendPrompt = repo.flatMap {
-                SystemPromptBuilder.build(repo: $0, worktree: worktree, isResume: false)
-            }
+            let appendPrompt = SystemPromptBuilder.build(repo: repo, worktree: worktree, isResume: false)
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,
                 freshSessionID: newSessionID,
