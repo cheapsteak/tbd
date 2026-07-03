@@ -52,7 +52,7 @@ struct WorktreeRowView: View {
         ) {
         case .prStatus:
             if let presentation = prPresentation,
-               let nsImage = loadIcon(presentation.iconName),
+               let nsImage = Self.loadIcon(presentation.iconName),
                let status = prStatus {
                 let reasonText = status.reason ?? status.state.displayReason
                 Button(action: openPR) {
@@ -260,10 +260,24 @@ struct WorktreeRowView: View {
         isEditing = true
     }
 
-    private func loadIcon(_ name: String) -> NSImage? {
+    /// Cache for sidebar PR status icons, keyed by icon name. The returned
+    /// NSImage must be identity-stable across body evaluations:
+    /// `Image(nsImage:)` diffs by object identity, so a fresh instance per
+    /// render made every row's icon layer rebuild at once whenever an
+    /// AppState-wide @Published reassignment re-evaluated all rows (visible
+    /// mass flicker). Also skips the disk I/O (`Bundle.module.url` +
+    /// `NSImage(contentsOf:)`) per evaluation. MainActor confinement
+    /// (SwiftUI body runs on main) makes this safe without locks.
+    @MainActor
+    private static var iconCache: [String: NSImage] = [:]
+
+    @MainActor
+    static func loadIcon(_ name: String) -> NSImage? {
+        if let cached = iconCache[name] { return cached }
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
               let image = NSImage(contentsOf: url) else { return nil }
         image.isTemplate = true
+        iconCache[name] = image
         return image
     }
 
