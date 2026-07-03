@@ -134,6 +134,7 @@ public enum RPCMethod {
     public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
+    public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
@@ -487,6 +488,22 @@ public struct ModelProfileHealthCheckResult: Codable, Sendable {
     public init(reachable: Bool, statusCode: Int?, detail: String?) {
         self.reachable = reachable; self.statusCode = statusCode; self.detail = detail
     }
+}
+
+/// Params for `modelProfile.prepareConfigDir` — ensure an OAuth profile's
+/// isolated `CLAUDE_CONFIG_DIR` exists and is seeded (`.claude.json` +
+/// host-mirror symlinks) so a client can hand it to a `claude` process
+/// (e.g. `tbd profile login`) without reimplementing provisioning.
+public struct ModelProfilePrepareConfigDirParams: Codable, Sendable {
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+}
+
+public struct ModelProfilePrepareConfigDirResult: Codable, Sendable {
+    /// Absolute path of the profile's isolated `CLAUDE_CONFIG_DIR`
+    /// (`~/tbd/profiles/<lowercased-uuid>/claude`).
+    public let configDirPath: String
+    public init(configDirPath: String) { self.configDirPath = configDirPath }
 }
 
 public struct NotificationsListResult: Codable, Sendable {

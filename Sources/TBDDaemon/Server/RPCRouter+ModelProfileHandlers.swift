@@ -407,4 +407,23 @@ extension RPCRouter {
         let result = await ModelProfileHealthProbe.probe(baseURL: params.baseURL)
         return try RPCResponse(result: result)
     }
+
+    // MARK: - Prepare Config Dir
+
+    /// Ensure an OAuth profile's isolated `CLAUDE_CONFIG_DIR` exists and is
+    /// seeded, and return its absolute path. Idempotent — safe to call before
+    /// every `tbd profile login`. OAuth-only: apiKey dirs need the secret for
+    /// pre-approval seeding (that provisioning stays on the spawn path), and
+    /// bedrock profiles have no config dir at all.
+    func handleModelProfilePrepareConfigDir(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfilePrepareConfigDirParams.self, from: paramsData)
+        guard let profile = try await db.modelProfiles.get(id: params.id) else {
+            return RPCResponse(error: "Profile not found")
+        }
+        guard profile.kind == .oauth else {
+            return RPCResponse(error: "Profile '\(profile.name)' is a \(profile.kind.rawValue) profile — only OAuth profiles use an isolated login config dir")
+        }
+        let dir = try configDirManager.ensureOAuthDir(forProfileID: profile.id)
+        return try RPCResponse(result: ModelProfilePrepareConfigDirResult(configDirPath: dir.path))
+    }
 }
