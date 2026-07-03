@@ -66,7 +66,9 @@ private struct ModelProfileMenuContent: View {
         }
     }
 
+    /// Profile name plus a short login-identity suffix (" — email" /
+    /// " — needs /login") for oauth profiles; bare name for other kinds.
     private static func formatRow(entry: ModelProfileWithUsage) -> String {
-        entry.profile.tabDisplayName
+        ProfileLoginPresentation.menuItemTitle(for: entry)
     }
 }

@@ -7,10 +7,15 @@ import TBDShared
 
 // MARK: - Helpers
 
-private func makeProfile(name: String) -> ModelProfileWithUsage {
+private func makeProfile(
+    name: String,
+    kind: CredentialKind = .oauth,
+    loginIdentity: String? = nil
+) -> ModelProfileWithUsage {
     ModelProfileWithUsage(
-        profile: ModelProfile(id: UUID(), name: name, kind: .oauth),
-        usage: nil
+        profile: ModelProfile(id: UUID(), name: name, kind: kind),
+        usage: nil,
+        loginIdentity: loginIdentity
     )
 }
 
@@ -85,7 +90,7 @@ private func makeExecutable(named name: String, in directory: URL) throws {
 
     #expect(menu.items.contains { $0.title == "Shell" })
     #expect(menu.items.contains { $0.title == "Claude" } == false)
-    #expect(menu.items.contains { $0.title == "Work" } == false)
+    #expect(menu.items.contains { $0.title.hasPrefix("Work") } == false)
     #expect(menu.items.contains { $0.title == "Codex" })
     #expect(menu.items.contains { $0.title == "Note" })
 }
@@ -101,14 +106,15 @@ private func makeExecutable(named name: String, in directory: URL) throws {
 
     #expect(menu.items.contains { $0.title == "Shell" })
     #expect(menu.items.contains { $0.title == "Claude" })
-    #expect(menu.items.contains { $0.title == "Work" })
+    #expect(menu.items.contains { $0.title.hasPrefix("Work") })
     #expect(menu.items.contains { $0.title == "Codex" } == false)
     #expect(menu.items.contains { $0.title == "Note" })
 }
 
 @MainActor
 @Test func addTabMenu_withProfiles_insertsIndentedItemsAfterClaude() {
-    let work = makeProfile(name: "Work")
+    // One logged-in oauth profile, one not — the titles carry the identity suffix.
+    let work = makeProfile(name: "Work", loginIdentity: "zadam@longeye.co")
     let personal = makeProfile(name: "Personal")
     let menu = AddTabMenu.build(profiles: [work, personal], coordinator: makeCoordinator())
 
@@ -116,17 +122,35 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     let first = menu.items[idx + 1]
     let second = menu.items[idx + 2]
 
-    #expect(first.title == "Work")
+    #expect(first.title == "Work — zadam@longeye.co")
     #expect(first.indentationLevel == 0)
     #expect(first.image != nil)
     #expect(first.representedObject as? UUID == work.profile.id)
 
-    #expect(second.title == "Personal")
+    #expect(second.title == "Personal — needs /login")
     #expect(second.indentationLevel == 0)
     #expect(second.image != nil)
     #expect(second.representedObject as? UUID == personal.profile.id)
 
     #expect(menu.items[idx + 3].title == "Codex")
+}
+
+@MainActor
+@Test func addTabMenu_profileItemTitles_reflectLoginIdentityPerKind() {
+    // oauth + email → suffixed with the email; oauth + nil → "needs /login";
+    // non-oauth kinds → bare name regardless of any stray identity.
+    let loggedIn = makeProfile(name: "Work", loginIdentity: "a@b.co")
+    let needsLogin = makeProfile(name: "Spare")
+    let proxy = makeProfile(name: "Router", kind: .apiKey)
+    let menu = AddTabMenu.build(
+        profiles: [loggedIn, needsLogin, proxy],
+        coordinator: makeCoordinator()
+    )
+
+    let idx = claudeIndex(menu)
+    #expect(menu.items[idx + 1].title == "Work — a@b.co")
+    #expect(menu.items[idx + 2].title == "Spare — needs /login")
+    #expect(menu.items[idx + 3].title == "Router")
 }
 
 @MainActor

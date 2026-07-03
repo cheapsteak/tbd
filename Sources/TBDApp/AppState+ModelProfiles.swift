@@ -286,6 +286,25 @@ extension AppState {
         }
     }
 
+    /// Open a Claude session pinned to `profileID` in the currently selected
+    /// worktree so the user can run `/login` there (the profile's isolated
+    /// config dir captures the credentials). Returns false and shows a
+    /// non-error alert when no worktree is selected — callers normally disable
+    /// the affordance in that case, so this is a fallback.
+    ///
+    /// Refreshes the profile list afterwards; the completed login itself is
+    /// picked up later via the daemon's `modelProfilesChanged` delta.
+    @discardableResult
+    func openLoginSession(profileID: UUID) async -> Bool {
+        guard let worktree = selectedWorktree else {
+            showAlert("Select a worktree first, then open a login session.", isError: false)
+            return false
+        }
+        await createClaudeTerminal(worktreeID: worktree.id, profileID: profileID)
+        await loadModelProfiles()
+        return true
+    }
+
     /// Fetch fresh usage for a single profile and merge it into local state.
     func fetchProfileUsage(id: UUID) async {
         do {

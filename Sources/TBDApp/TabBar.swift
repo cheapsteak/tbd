@@ -335,14 +335,16 @@ enum AddTabMenu {
             claudeItem.target = coordinator
             menu.addItem(claudeItem)
 
-            // One item per profile, titled with the profile's display name. Each
-            // gets a transparent placeholder icon the same size as the Claude
-            // asterisk so its title lines up in the same title column as "Claude"
-            // — the empty icon slot is the visual nesting cue. The profile id
-            // rides along in `representedObject` for MenuCoordinator.addClaudeProfile.
+            // One item per profile, titled with the profile's display name plus
+            // a short login-identity suffix (" — email" / " — needs /login" for
+            // oauth profiles). Each gets a transparent placeholder icon the same
+            // size as the Claude asterisk so its title lines up in the same
+            // title column as "Claude" — the empty icon slot is the visual
+            // nesting cue. The profile id rides along in `representedObject`
+            // for MenuCoordinator.addClaudeProfile.
             for entry in profiles {
                 let item = NSMenuItem(
-                    title: entry.profile.name,
+                    title: ProfileLoginPresentation.menuItemTitle(for: entry),
                     action: #selector(MenuCoordinator.addClaudeProfile(_:)),
                     keyEquivalent: ""
                 )
