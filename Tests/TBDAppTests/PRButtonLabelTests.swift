@@ -126,12 +126,25 @@ struct PRButtonLabelTests {
         )
         #expect(open != otherURL)
 
-        // reason feeds the blocked-state presentation, so it must be keyed too.
+        // reason is deliberately NOT keyed: nothing the split button renders
+        // reads it (PRStatusPresentation.make switches only on state), so a
+        // reason-only change must NOT force a spurious toolbar-item rebuild.
         let withReason = Self.makeKey(
             worktreeID: worktreeID,
             prStatus: Self.makeStatus(reason: "review required")
         )
-        #expect(open != withReason)
+        #expect(open == withReason)
+    }
+
+    @Test("PRStatus field-count tripwire for prSplitButtonID")
+    func prStatusFieldCountTripwire() {
+        // If this fails, a PRStatus field was added. prSplitButtonID
+        // hand-enumerates the fields the split button renders (number, state,
+        // url — reason deliberately excluded), so a new field is otherwise
+        // silently unkeyed: decide whether the split button renders it and
+        // update prSplitButtonID (and this count) accordingly.
+        let status = Self.makeStatus()
+        #expect(Mirror(reflecting: status).children.count == 4)
     }
 
     @Test("id key differs between blocked states, color schemes, and worktrees")

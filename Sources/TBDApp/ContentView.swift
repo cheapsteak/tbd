@@ -178,10 +178,16 @@ struct ContentView: View {
                             // split button otherwise accent-tints it); the icon keeps
                             // its baked status color via renderingMode(.original).
                             .tint(.primary)
+                            // Three-way: while child worktrees exist the daemon's
+                            // AutoArchiveOnMergeCoordinator skips archiving (it
+                            // re-checks at merge time), so an armed-but-blocked
+                            // worktree must not promise "auto-archives on merge".
                             .help(
-                                armed
-                                    ? "Open PR #\(prStatus.number) · auto-archives on merge · more options"
-                                    : "Open PR #\(prStatus.number) · more options"
+                                armed && blocked
+                                    ? "Open PR #\(prStatus.number) · auto-archive armed (paused while child worktrees exist) · more options"
+                                    : armed
+                                        ? "Open PR #\(prStatus.number) · auto-archives on merge · more options"
+                                        : "Open PR #\(prStatus.number) · more options"
                             )
                             // AppKit materializes this split button's NSMenu and
                             // label ONCE; later SwiftUI re-evaluations of the
@@ -190,9 +196,10 @@ struct ContentView: View {
                             // forces the item to be recreated, so the key must
                             // include EVERYTHING the label/menu render: worktree
                             // + whether its row has loaded (gates the menu's only
-                            // item), armed + blocked (menu), the full PRStatus
-                            // (icon color/text, url captured by primaryAction),
-                            // and colorScheme (baked icon colors).
+                            // item), armed + blocked (menu + help), the rendered
+                            // PRStatus fields (number, state, url — not reason,
+                            // which presentation ignores), and colorScheme
+                            // (baked icon colors).
                             .id(PRButtonLabel.prSplitButtonID(
                                 worktreeID: worktreeID,
                                 worktreeFound: worktree != nil,
@@ -395,9 +402,13 @@ struct PRButtonLabel: View {
     /// SwiftUI state without ever reaching the materialized AppKit item.
     /// `worktreeFound` matters because the menu's only item (the auto-archive
     /// Toggle) is gated on the worktree row having loaded: a menu materialized
-    /// before the row appears would otherwise stay permanently empty. Every
-    /// `PRStatus` field is spelled out — `url` is captured by `primaryAction`,
-    /// so a re-pointed PR must recreate the item too.
+    /// before the row appears would otherwise stay permanently empty. The key
+    /// contains exactly the `PRStatus` fields the label/menu/primaryAction
+    /// consume: `number` (label text/help), `state` (icon via
+    /// `PRStatusPresentation`), and `url` (captured by `primaryAction`, so a
+    /// re-pointed PR must recreate the item too). `reason` is deliberately
+    /// excluded — the split button's presentation ignores it, and keying on it
+    /// would force spurious toolbar-item rebuilds for zero visual change.
     ///
     /// This key MUST stay a String. The macOS 26 toolbar bridge only honors
     /// `.id` identity changes for String values here — a custom Hashable
@@ -414,7 +425,7 @@ struct PRButtonLabel: View {
     ) -> String {
         "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(blocked)"
             + "-\(prStatus.number)-\(prStatus.state.rawValue)-\(prStatus.url)"
-            + "-\(prStatus.reason ?? "")-\(colorScheme)"
+            + "-\(colorScheme)"
     }
 
     /// Aspect-fits `size` into `slot`, centered. Used to draw the archivebox
