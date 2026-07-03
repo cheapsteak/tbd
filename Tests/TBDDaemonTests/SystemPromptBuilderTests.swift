@@ -185,4 +185,27 @@ struct SystemPromptBuilderTests {
         #expect(prompt != nil)
         #expect(prompt?.contains("`tbd` skill") == true)
     }
+
+    // MARK: - Scratch layer
+
+    @Test("build injects scratch layer and no repo/rename layer for scratch worktree")
+    func buildScratchLayer() {
+        let wt = Worktree(repoID: nil, name: "20260702-worrying-pike", displayName: "20260702-worrying-pike",
+                          branch: "", path: "/tmp/scratch/x", tmuxServer: "tbd-scratch")
+        let result = SystemPromptBuilder.build(repo: nil, worktree: wt, isResume: false)
+        #expect(result != nil)
+        #expect(result!.contains("scratch space"))
+        #expect(result!.contains("tbd scratch promote"))
+        #expect(!result!.contains("Rename the git branch"))
+    }
+
+    @Test("scratch layer absent for a normal repo worktree")
+    func buildNoScratchLayerForRepoWorktree() {
+        let repo = Repo(path: "/test", displayName: "test", defaultBranch: "main")
+        let wt = Worktree(repoID: repo.id, name: "gorgeous-panda", displayName: "gorgeous-panda",
+                          branch: "tbd/gorgeous-panda", path: "/test/.tbd/worktrees/gorgeous-panda", tmuxServer: "tbd-test")
+        let result = SystemPromptBuilder.build(repo: repo, worktree: wt, isResume: false)
+        #expect(result != nil)
+        #expect(!result!.contains("tbd scratch promote"))
+    }
 }

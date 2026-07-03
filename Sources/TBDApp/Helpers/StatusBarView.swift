@@ -8,7 +8,7 @@ struct StatusBarView: View {
     /// Transient "Copied" feedback shown after the left label copies a path.
     @State private var didCopy = false
 
-    private var selectedWorktreeInfo: (path: String, repoID: UUID)? {
+    private var selectedWorktreeInfo: (path: String, repoID: UUID?)? {
         guard appState.selectedWorktreeIDs.count == 1,
               let id = appState.selectedWorktreeIDs.first,
               let worktree = appState.worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),

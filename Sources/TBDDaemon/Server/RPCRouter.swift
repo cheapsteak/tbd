@@ -103,6 +103,12 @@ public final class RPCRouter: Sendable {
                 return try await handleRepoRemove(request.paramsData)
             case RPCMethod.repoList:
                 return try await handleRepoList()
+            case RPCMethod.scratchCreate:
+                return try await handleScratchCreate(request.paramsData)
+            case RPCMethod.scratchDelete:
+                return try await handleScratchDelete(request.paramsData)
+            case RPCMethod.scratchPromote:
+                return try await handleScratchPromote(request.paramsData)
             case RPCMethod.repoUpdateInstructions:
                 return try await handleRepoUpdateInstructions(request.paramsData)
             case RPCMethod.repoRelocate:
@@ -312,7 +318,7 @@ public final class RPCRouter: Sendable {
     /// `PRListCoordinator` propagates the error to every concurrent caller.
     private func computePRList() async throws -> PRListResult {
         // Fetch fresh PR data for all active worktrees before returning the cache.
-        let worktrees = try await db.worktrees.list(status: .active)
+        let worktrees = Self.pollableWorktrees(try await db.worktrees.list(status: .active))
         var infos: [(id: UUID, branch: String, upstreamBranch: String?, worktreePath: String)] = []
         infos.reserveCapacity(worktrees.count)
         for wt in worktrees {
@@ -335,6 +341,14 @@ public final class RPCRouter: Sendable {
         // Prune at the END so we never drop an entry this pass just populated.
         await upstreamBranchCache.retain(active: infos.map { (worktreePath: $0.worktreePath, branch: $0.branch) })
         return PRListResult(statuses: await prManager.allStatuses())
+    }
+
+    /// Scratch spaces are repo-less and have no PR — exclude them so the
+    /// poller's "all worktrees share one repo" assumption holds. Pulled out
+    /// as a pure function (rather than inlined `.filter` in `computePRList`)
+    /// so it's directly unit-testable without spinning up git/gh machinery.
+    static func pollableWorktrees(_ worktrees: [Worktree]) -> [Worktree] {
+        worktrees.filter { !$0.isScratch }
     }
 
     private func handlePRRefresh(_ paramsData: Data) async throws -> RPCResponse {

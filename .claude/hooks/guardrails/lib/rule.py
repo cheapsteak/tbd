@@ -15,8 +15,11 @@ from dataclasses import dataclass
 class Decision:
     """The outcome of a rule's `check`.
 
-    action is "deny" or "allow". A "deny" carries an instructive `reason` that is
-    fed back to the model (via permissionDecisionReason) so it can self-correct.
+    action is "deny", "allow", or "info". A "deny" carries an instructive
+    `reason` that is fed back to the model (via permissionDecisionReason) so it
+    can self-correct — and blocks the call. An "info" also carries a `reason`
+    but is non-blocking: dispatch.py surfaces it via `additionalContext` while
+    still allowing the call through.
     """
 
     action: str
@@ -29,6 +32,10 @@ class Decision:
     @staticmethod
     def allow() -> "Decision":
         return Decision(action="allow", reason="")
+
+    @staticmethod
+    def info(reason: str) -> "Decision":
+        return Decision(action="info", reason=reason)
 
 
 class Rule:

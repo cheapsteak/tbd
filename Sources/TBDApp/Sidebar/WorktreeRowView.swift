@@ -131,6 +131,9 @@ struct WorktreeRowView: View {
                             appState.worktrees[repoID]?[idx].displayName = newName
                         }
                     }
+                    if let idx = appState.scratchWorktrees.firstIndex(where: { $0.id == worktree.id }) {
+                        appState.scratchWorktrees[idx].displayName = newName
+                    }
                     Task {
                         await appState.renameWorktree(id: worktree.id, displayName: newName)
                     }
@@ -164,11 +167,17 @@ struct WorktreeRowView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if let promotedID = worktree.promotedToRepoID,
+                       let name = appState.repoName(for: promotedID) {
+                        Text("→ promoted to \(name)")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
             }
             suffixIcon()
             if let sectionRepoID, sectionRepoID != worktree.repoID,
-               let homeRepo = appState.repoName(for: worktree.repoID) {
+               let rid = worktree.repoID,
+               let homeRepo = appState.repoName(for: rid) {
                 let short = homeRepo.count > 5 ? String(homeRepo.prefix(5)) + "…" : homeRepo
                 Text("(\(short))")
                     .font(.caption)
@@ -180,6 +189,14 @@ struct WorktreeRowView: View {
         .padding(.leading, CGFloat(indentLevel) * 16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: 28)
+        // Scratch spaces have no repo-level `.missing` status to inherit, so a
+        // missing directory is surfaced client-side with a cheap per-row FS stat
+        // (mirrors RepoSectionView dimming a `.missing` repo). Promoted rows are
+        // excluded — promotion MOVES the folder, so their directory is expected
+        // to be gone; see AppState.scratchRowIsDimmed.
+        .opacity(AppState.scratchRowIsDimmed(
+            worktree, directoryExists: FileManager.default.fileExists(atPath: worktree.path)
+        ) ? 0.5 : 1.0)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
@@ -205,7 +222,9 @@ struct WorktreeRowView: View {
             if isRowHovered && !isMain {
                 Button(action: {
                     let parentID = worktree.id
-                    let repoID = worktree.repoID
+                    // Scratch spaces have no repo, so nested-worktree creation
+                    // isn't offered for them — this affordance is repo-only.
+                    guard let repoID = worktree.repoID else { return }
                     appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
                 }) {
                     Image(systemName: "plus")

@@ -56,9 +56,13 @@ private func openInEditor(path: String, bundleID: String) {
     NSWorkspace.shared.open([URL(fileURLWithPath: path)], withApplicationAt: appURL, configuration: .init(), completionHandler: nil)
 }
 
-private func recentKey(repoID: UUID) -> String { "openInEditor.recent.\(repoID)" }
+// `repoID` is nil for scratch spaces (repo-less worktrees); the "scratch"
+// sentinel keys their recent-editor list separately from any real repo.
+private func recentKey(repoID: UUID?) -> String {
+    "openInEditor.recent.\(repoID?.uuidString ?? "scratch")"
+}
 
-private func loadRecentBundleIDs(repoID: UUID) -> [String] {
+private func loadRecentBundleIDs(repoID: UUID?) -> [String] {
     guard let data = UserDefaults.standard.data(forKey: recentKey(repoID: repoID)),
           let ids = try? JSONDecoder().decode([String].self, from: data) else {
         return knownEditors.map(\.bundleID)
@@ -66,7 +70,7 @@ private func loadRecentBundleIDs(repoID: UUID) -> [String] {
     return ids
 }
 
-private func recordUsed(bundleID: String, repoID: UUID) {
+private func recordUsed(bundleID: String, repoID: UUID?) {
     var ids = loadRecentBundleIDs(repoID: repoID)
     ids.removeAll { $0 == bundleID }
     ids.insert(bundleID, at: 0)
@@ -77,7 +81,7 @@ private func recordUsed(bundleID: String, repoID: UUID) {
 
 struct OpenInEditorButton: View {
     let path: String
-    let repoID: UUID
+    let repoID: UUID?
 
     @State private var recentBundleIDs: [String] = []
     @State private var hovering: String? = nil

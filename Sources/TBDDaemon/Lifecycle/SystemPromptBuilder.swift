@@ -22,6 +22,18 @@ enum SystemPromptBuilder {
         """
     }
 
+    /// Layer injected for repo-less scratch sessions. Explains the space and
+    /// nudges agent-driven promotion.
+    static var scratchContext: String {
+        """
+        You are in a TBD **scratch space** — a repo-less workspace with no git repo yet.
+        Use it to bootstrap a new project or hold a general-purpose chat.
+        When the project takes shape, offer the user promotion: ask them for a \
+        destination path, then run `tbd scratch promote <dest-path>` from this \
+        session. That moves the folder and registers it as a real TBD repo.
+        """
+    }
+
     /// Returns the individual prompt layers as env-var-name → value pairs.
     /// Used both to set env vars in terminals and to build the combined `--append-system-prompt`.
     static func promptLayers(repo: Repo?, worktree: Worktree) -> [String: String] {
@@ -29,7 +41,11 @@ enum SystemPromptBuilder {
 
         layers["TBD_PROMPT_CONTEXT"] = builtInTBDContext
 
-        if worktree.status != .main && worktree.displayName == worktree.name {
+        if worktree.isScratch {
+            layers["TBD_PROMPT_SCRATCH"] = scratchContext
+        }
+
+        if !worktree.isScratch && worktree.status != .main && worktree.displayName == worktree.name {
             let renamePrompt = repo?.renamePrompt ?? defaultRenamePrompt
             if !renamePrompt.isEmpty {
                 layers["TBD_PROMPT_RENAME"] = renamePrompt
@@ -46,13 +62,14 @@ enum SystemPromptBuilder {
 
     /// Build the combined system prompt for a Claude session.
     /// Returns nil if there's nothing to append (e.g., resume session).
-    static func build(repo: Repo, worktree: Worktree, isResume: Bool) -> String? {
+    static func build(repo: Repo?, worktree: Worktree, isResume: Bool) -> String? {
         if isResume { return nil }
 
         let layers = promptLayers(repo: repo, worktree: worktree)
         var parts: [String] = []
 
-        // Order: rename prompt, TBD context, custom instructions
+        // Order: scratch layer, rename prompt, TBD context, custom instructions
+        if let scratch = layers["TBD_PROMPT_SCRATCH"] { parts.append(scratch) }
         if let rename = layers["TBD_PROMPT_RENAME"] { parts.append(rename) }
         parts.append(builtInTBDContext)
         if let instructions = layers["TBD_PROMPT_INSTRUCTIONS"] { parts.append(instructions) }

@@ -240,7 +240,8 @@ struct WorktreeList: AsyncParsableCommand {
                     wt.displayName as NSString,
                     wt.status.rawValue as NSString,
                     wt.branch as NSString)
-                let tag = missingRepoIDs.contains(wt.repoID) ? "  [missing]" : ""
+                // Scratch spaces (repoID == nil) have no repo to be missing.
+                let tag = (wt.repoID.map(missingRepoIDs.contains) ?? false) ? "  [missing]" : ""
                 print(line + tag)
             }
         }

@@ -65,6 +65,12 @@ public enum TBDConstants {
     }
     public static var reposDir: URL { reposDir(environment: ProcessInfo.processInfo.environment) }
 
+    /// Base directory holding all scratch spaces: `~/tbd/scratch`. Honors TBD_HOME.
+    public static func scratchDir(environment: [String: String]) -> URL {
+        configDir(environment: environment).appendingPathComponent("scratch")
+    }
+    public static var scratchDir: URL { scratchDir(environment: ProcessInfo.processInfo.environment) }
+
     public static func hookPath(repoID: UUID, eventName: String, environment: [String: String]) -> String {
         reposDir(environment: environment)
             .appendingPathComponent(repoID.uuidString)

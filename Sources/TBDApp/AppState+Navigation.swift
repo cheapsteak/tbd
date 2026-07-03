@@ -53,9 +53,9 @@ extension AppState {
         // If the target is a worktree, expand its containing repo before scrolling.
         if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == target }),
            let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
+           let repoID = worktree.repoID,
            !repos[repoIdx].expanded {
             repos[repoIdx].expanded = true
-            let repoID = worktree.repoID
             Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
         }
 

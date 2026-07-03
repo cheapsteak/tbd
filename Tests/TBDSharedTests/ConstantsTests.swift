@@ -68,6 +68,16 @@ import Foundation
         // Other paths still resolve to ~/tbd.
         #expect(TBDConstants.databasePath(environment: env).hasSuffix("/tbd/state.db"))
     }
+
+    @Test func scratchDirFollowsTBDHome() {
+        let env = ["TBD_HOME": "/tmp/tbd-scratch-test"]
+        #expect(TBDConstants.scratchDir(environment: env).path == "/tmp/tbd-scratch-test/scratch")
+    }
+
+    @Test func scratchDirFallsBackToHomeTbdScratch() {
+        let path = TBDConstants.scratchDir(environment: [:]).path
+        #expect(path.hasSuffix("/tbd/scratch"))
+    }
 }
 
 /// Smoke-tests that the production computed vars are correctly wired to the

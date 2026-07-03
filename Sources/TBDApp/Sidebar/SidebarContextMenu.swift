@@ -9,7 +9,46 @@ struct SidebarContextMenu: View {
 
     var body: some View {
         Group {
-            if worktree.status == .main || worktree.status == .creating {
+            if worktree.isScratch {
+                Button("New Claude Terminal") {
+                    let wtID = worktree.id
+                    Task {
+                        await appState.createClaudeTerminal(worktreeID: wtID)
+                    }
+                }
+                Button("New Codex Terminal") {
+                    let wtID = worktree.id
+                    Task {
+                        await appState.createCodexTerminal(worktreeID: wtID)
+                    }
+                }
+                Button("New Shell Terminal") {
+                    let wtID = worktree.id
+                    Task {
+                        await appState.createTerminal(worktreeID: wtID)
+                    }
+                }
+                Divider()
+                Button("Rename...") {
+                    onRename()
+                }
+                if worktree.promotedToRepoID == nil {
+                    Text("To promote: run `tbd scratch promote <dest>` from a session here")
+                        .font(.caption)
+                }
+                Divider()
+                Button("Open in Finder") {
+                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.path)
+                }
+                Button("Copy Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(worktree.path, forType: .string)
+                }
+                Divider()
+                Button("Delete Scratch Space", role: .destructive) {
+                    appState.deleteScratch(id: worktree.id)
+                }
+            } else if worktree.status == .main || worktree.status == .creating {
                 // Main / creating worktree: only Finder and Copy Path (no rename/archive)
                 if !worktree.path.isEmpty {
                     Button("Open in Finder") {
@@ -81,10 +120,11 @@ struct SidebarContextMenu: View {
                     }
                 }
 
-                Button("Create Nested Worktree") {
-                    let parentID = worktree.id
-                    let repoID = worktree.repoID
-                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
+                // Scratch spaces have no repo, so nesting isn't offered for them.
+                if let repoID = worktree.repoID {
+                    Button("Create Nested Worktree") {
+                        appState.createWorktree(repoID: repoID, parentWorktreeID: worktree.id)
+                    }
                 }
 
                 Button("Archive", role: .destructive) {

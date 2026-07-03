@@ -56,7 +56,8 @@ struct PreSessionAppStateTests {
     @discardableResult
     private func seedWorktree(_ state: AppState, status: WorktreeStatus) -> Worktree {
         let wt = makeWorktree(status: status)
-        state.worktrees[wt.repoID] = [wt]
+        // makeWorktree() always assigns a real repoID (never a scratch space).
+        state.worktrees[wt.repoID!] = [wt]
         return wt
     }
 

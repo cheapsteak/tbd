@@ -11,6 +11,15 @@ extension RPCRouter {
         // Resolve to absolute path
         let path = (params.path as NSString).standardizingPath
 
+        // Reject paths inside TBD's scratch area — those must go through
+        // `tbd scratch promote`, which moves the folder out first.
+        // Canonicalize both paths to resolve symlinks (e.g., /tmp → /private/tmp on macOS)
+        let canonPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        let canonScratchBase = URL(fileURLWithPath: TBDConstants.scratchDir.path).resolvingSymlinksInPath().path
+        if canonPath == canonScratchBase || canonPath.hasPrefix(canonScratchBase + "/") {
+            return RPCResponse(error: "That path is inside TBD's scratch area. Use `tbd scratch promote <dest-path>` to move it out and register it as a repo.")
+        }
+
         // Validate it's a git repo
         guard await git.isGitRepo(path: path) else {
             return RPCResponse(error: "Not a git repository: \(path)")
@@ -33,44 +42,25 @@ extension RPCRouter {
             return try RPCResponse(result: existing)
         }
 
-        // Detect default branch and remote URL
-        let defaultBranch: String
-        do {
-            defaultBranch = try await git.detectDefaultBranch(repoPath: path)
-        } catch {
-            defaultBranch = "main"
-        }
+        return try RPCResponse(result: try await addRepo(path: path, displayNameOverride: nil))
+    }
 
+    /// Register `path` as a repo (default-branch detect, create row, synthetic
+    /// main worktree, reconcile, broadcast). `displayNameOverride` wins over the
+    /// folder-name default. Assumes `path` is already a git repo.
+    func addRepo(path: String, displayNameOverride: String?) async throws -> Repo {
+        let defaultBranch = (try? await git.detectDefaultBranch(repoPath: path)) ?? "main"
         let remoteURL = await git.getRemoteURL(repoPath: path)
-
-        // Derive display name from last path component
-        let displayName = (path as NSString).lastPathComponent
-
-        let repo = try await db.repos.create(
-            path: path,
-            displayName: displayName,
-            defaultBranch: defaultBranch,
-            remoteURL: remoteURL
-        )
-
-        // Create synthetic "main" worktree entry pointing at repo root
+        let displayName = displayNameOverride ?? (path as NSString).lastPathComponent
+        let repo = try await db.repos.create(path: path, displayName: displayName,
+                                             defaultBranch: defaultBranch, remoteURL: remoteURL)
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
-        _ = try await db.worktrees.createMain(
-            repoID: repo.id,
-            name: defaultBranch,
-            branch: defaultBranch,
-            path: path,
-            tmuxServer: tmuxServer
-        )
-
-        // Reconcile existing git worktrees into the DB
+        _ = try await db.worktrees.createMain(repoID: repo.id, name: defaultBranch,
+                                              branch: defaultBranch, path: path, tmuxServer: tmuxServer)
         try? await lifecycle.reconcile(repoID: repo.id)
-
         subscriptions.broadcast(delta: .repoAdded(RepoDelta(
-            repoID: repo.id, path: repo.path, displayName: repo.displayName
-        )))
-
-        return try RPCResponse(result: repo)
+            repoID: repo.id, path: repo.path, displayName: repo.displayName)))
+        return repo
     }
 
     func handleRepoRemove(_ paramsData: Data) async throws -> RPCResponse {

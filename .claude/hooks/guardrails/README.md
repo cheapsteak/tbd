@@ -41,12 +41,14 @@ Python 3, stdlib only (`json`, `re`, `os`, `importlib`, `pkgutil`, `unittest`,
 ```python
 @dataclass
 class Decision:
-    action: str          # "deny" | "allow"
+    action: str          # "deny" | "allow" | "info"
     reason: str = ""
     @staticmethod
     def deny(reason): ...
     @staticmethod
     def allow(): ...
+    @staticmethod
+    def info(reason): ...
 
 class Rule:
     id: str              # stable id, prefixed onto deny reasons, shown by --list
@@ -61,6 +63,12 @@ class Rule:
   via `permissionDecisionReason`, so make it instructive and tell the model how to
   fix the command. Prefix the reason with `[<rule-id>] ` so aggregated denies stay
   attributable.
+- `Decision.info(reason)` — **never blocks.** Surfaces `reason` to the model as
+  non-blocking `additionalContext` (`permissionDecision: "allow"`). Use this for
+  nudges/reminders where blocking would be wrong — e.g. `scratch_git_init.py`
+  reminding the model to offer `tbd scratch promote` after `git init` in a scratch
+  space. Deny always takes precedence: if any rule denies, infos from other rules
+  on the same call are dropped for that call.
 
 `ctx` carries `session_id`, `cwd`, `permission_mode`, and `tool_name`.
 
@@ -99,10 +107,16 @@ class Rule:
   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`
   to stdout and `exit 0`. This blocks the call even under
   `--dangerously-skip-permissions`. (We do NOT use legacy exit-code-2.)
+- **INFORM (non-blocking)**: print
+  `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","additionalContext":"…"}}`
+  to stdout and `exit 0`. The call proceeds; the model just sees `additionalContext`
+  as a reminder. Emitted only when no rule denied the same call.
 - Multiple hooks merge most-restrictive-wins.
 
 When several rules deny the same call, `dispatch.py` emits a single deny whose
 reason concatenates each denying rule's reason (each already prefixed with its id).
+Likewise, when there is no deny but one or more rules return `info`, `dispatch.py`
+emits a single non-blocking `additionalContext` concatenating their reasons.
 
 ## Fail-open
 

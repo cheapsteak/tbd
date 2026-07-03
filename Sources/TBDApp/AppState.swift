@@ -53,6 +53,9 @@ final class AppState: ObservableObject {
 
     @Published var repos: [Repo] = []
     @Published var worktrees: [UUID: [Worktree]] = [:]
+    /// Repo-less scratch spaces (`Worktree.isScratch`), surfaced separately
+    /// in the sidebar's Scratch section rather than under any repo group.
+    @Published var scratchWorktrees: [Worktree] = []
     @Published var terminals: [UUID: [Terminal]] = [:]
     @Published var notes: [UUID: [Note]] = [:]
     @Published var focusedTabCloseContext: TabCloseContext?
@@ -1074,9 +1077,9 @@ final class AppState: ObservableObject {
             for id in selectedWorktreeIDs {
                 if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
                    let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
+                   let repoID = worktree.repoID,
                    !repos[repoIdx].expanded {
                     repos[repoIdx].expanded = true
-                    let repoID = worktree.repoID
                     Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
                 }
             }
@@ -1245,8 +1248,15 @@ final class AppState: ObservableObject {
                 }
             } else {
                 var grouped: [UUID: [Worktree]] = [:]
+                var scratch: [Worktree] = []
                 for wt in fetched {
-                    grouped[wt.repoID, default: []].append(wt)
+                    // Scratch spaces (repoID == nil) don't belong to any repo group;
+                    // they're surfaced separately (see the Scratch sidebar section).
+                    guard let rid = wt.repoID else {
+                        scratch.append(wt)
+                        continue
+                    }
+                    grouped[rid, default: []].append(wt)
                 }
                 // Preserve optimistic placeholders the daemon doesn't know about yet
                 for (rid, wts) in worktrees {
@@ -1256,6 +1266,10 @@ final class AppState: ObservableObject {
                 }
                 if grouped != worktrees {
                     worktrees = grouped
+                }
+                let sortedScratch = scratch.sorted { $0.sortOrder < $1.sortOrder }
+                if sortedScratch != scratchWorktrees {
+                    scratchWorktrees = sortedScratch
                 }
             }
 
@@ -1461,6 +1475,26 @@ final class AppState: ObservableObject {
     /// for the two enforcement points. Settings UI toggle lives in the
     /// "Experimental" section of the General settings tab.
     static let terminalAutoResizeKey = "enableTerminalAutoResize"
+
+    /// UserDefaults key for showing the sidebar's Scratch section (repo-less
+    /// scratch spaces). Default on.
+    static let showScratchSectionKey = "showScratchSection"
+
+    /// Pure, testable mirror of the sidebar's Scratch-section gate:
+    /// shown only when the setting is on AND there's at least one scratch space.
+    nonisolated static func scratchSectionVisible(setting: Bool, spaces: [Worktree]) -> Bool {
+        setting && !spaces.isEmpty
+    }
+
+    /// Pure, testable mirror of `WorktreeRowView`'s scratch-row dimming rule:
+    /// a scratch row dims only when its directory is missing AND it was
+    /// never promoted. `tbd scratch promote` MOVES the folder to its
+    /// destination repo, so a promoted row's directory never exists again —
+    /// dimming it as "missing" would contradict the "→ promoted to <repo>"
+    /// caption shown alongside it. Non-scratch worktrees never dim here.
+    nonisolated static func scratchRowIsDimmed(_ worktree: Worktree, directoryExists: Bool) -> Bool {
+        worktree.isScratch && worktree.promotedToRepoID == nil && !directoryExists
+    }
 
     /// Whether the WIP main-area resize broadcast is enabled. Default false.
     private var terminalAutoResizeEnabled: Bool {

@@ -9,9 +9,9 @@ import TBDShared
 /// Behavior (any error path = exit 0 silent so the agent is never wedged):
 /// 1. Read the Stop hook JSON payload from stdin.
 /// 2. Resolve the worktree for `cwd` via the daemon.
-/// 3. Skip if status is .main, displayName != name (already customized),
-///    the current branch can't be resolved, or we've already fired > 2
-///    times this session.
+/// 3. Skip if status is .main, the display name is already customized
+///    (`!hasDefaultDisplayName`), the current branch can't be resolved, or
+///    we've already fired > 2 times this session.
 /// 4. Otherwise emit `{"decision":"block","reason":"<directive>"}` so
 ///    the agent stays in-turn and sees the directive. The directive shape
 ///    depends on the branch: `tbd/*` branches are auto-generated and the
@@ -84,7 +84,8 @@ enum StopRenameCheckCore {
                         return WorktreeSummary(
                             name: wt.name,
                             displayName: wt.displayName,
-                            status: wt.status
+                            status: wt.status,
+                            hasDefaultDisplayName: wt.hasDefaultDisplayName
                         )
                     } catch {
                         return nil
@@ -114,6 +115,12 @@ enum StopRenameCheckCore {
         var name: String
         var displayName: String
         var status: WorktreeStatus
+
+        /// Threaded in from `Worktree.hasDefaultDisplayName` at construction
+        /// (the production call site builds this from a real `Worktree`) —
+        /// stored, not recomputed, so `Worktree.hasDefaultDisplayName` stays
+        /// the single "still default" definition.
+        var hasDefaultDisplayName: Bool
     }
 
     /// Maximum number of times we'll fire the directive in one session
@@ -151,7 +158,7 @@ enum StopRenameCheckCore {
         }
 
         // 3b. Already customized → skip.
-        if worktree.displayName != worktree.name {
+        if !worktree.hasDefaultDisplayName {
             return nil
         }
 
