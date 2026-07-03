@@ -11,6 +11,15 @@ extension RPCRouter {
         // Resolve to absolute path
         let path = (params.path as NSString).standardizingPath
 
+        // Reject paths inside TBD's scratch area — those must go through
+        // `tbd scratch promote`, which moves the folder out first.
+        // Canonicalize both paths to resolve symlinks (e.g., /tmp → /private/tmp on macOS)
+        let canonPath = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        let canonScratchBase = URL(fileURLWithPath: TBDConstants.scratchDir.path).resolvingSymlinksInPath().path
+        if canonPath == canonScratchBase || canonPath.hasPrefix(canonScratchBase + "/") {
+            return RPCResponse(error: "That path is inside TBD's scratch area. Use `tbd scratch promote <dest-path>` to move it out and register it as a repo.")
+        }
+
         // Validate it's a git repo
         guard await git.isGitRepo(path: path) else {
             return RPCResponse(error: "Not a git repository: \(path)")
