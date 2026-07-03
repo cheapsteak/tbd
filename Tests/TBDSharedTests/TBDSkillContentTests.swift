@@ -35,3 +35,12 @@ import Foundation
     // Versioning-drift mitigation: instruct the model to use --help for current flags.
     #expect(body.contains("--help"))
 }
+
+@Test func bodyContainsScratchPromotionSection() {
+    let body = TBDSkillContent.body
+    #expect(body.contains("## Scratch spaces & promotion"))
+    #expect(body.contains("tbd scratch new"))
+    #expect(body.contains("tbd scratch list"))
+    #expect(body.contains("tbd scratch promote <dest-path>"))
+    #expect(body.contains("--display-name"))
+}

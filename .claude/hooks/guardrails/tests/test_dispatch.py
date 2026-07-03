@@ -99,6 +99,24 @@ class _DenyBRule(Rule):
         return Decision.deny("[deny-b] reason B")
 
 
+class _InfoARule(Rule):
+    id = "info-a"
+    description = "always informs A"
+    tools = {"Bash"}
+
+    def check(self, _tool_input, _ctx):
+        return Decision.info("[info-a] reason A")
+
+
+class _InfoBRule(Rule):
+    id = "info-b"
+    description = "always informs B"
+    tools = {"Bash"}
+
+    def check(self, _tool_input, _ctx):
+        return Decision.info("[info-b] reason B")
+
+
 class EvaluateUnitTests(unittest.TestCase):
     """Drive evaluate() directly with injected rule sets via monkeypatch."""
 
@@ -131,6 +149,55 @@ class EvaluateUnitTests(unittest.TestCase):
         )
         assert reason is not None
         self.assertIn("[deny-a] reason A", reason)
+
+
+class InfoEmissionTests(unittest.TestCase):
+    """Pin the non-blocking info path end to end through run_hook()."""
+
+    def setUp(self):
+        self._orig = dispatch.load_rules
+
+    def tearDown(self):
+        dispatch.load_rules = self._orig
+
+    def test_info_only_emits_additional_context_and_allows(self):
+        dispatch.load_rules = lambda: [_InfoARule()]
+        payload = {"tool_name": "Bash", "tool_input": {"command": "echo hi"}}
+        code, out = _run_hook_with_stdin(json.dumps(payload))
+        self.assertEqual(code, 0)
+        parsed = json.loads(out)
+        hso = parsed["hookSpecificOutput"]
+        self.assertEqual(hso["hookEventName"], "PreToolUse")
+        # info must never block: permissionDecision is "allow", not "deny".
+        self.assertEqual(hso["permissionDecision"], "allow")
+        self.assertIn("[info-a] reason A", hso["additionalContext"])
+
+    def test_multiple_infos_concatenate(self):
+        dispatch.load_rules = lambda: [_InfoARule(), _InfoBRule()]
+        payload = {"tool_name": "Bash", "tool_input": {"command": "echo hi"}}
+        code, out = _run_hook_with_stdin(json.dumps(payload))
+        self.assertEqual(code, 0)
+        hso = json.loads(out)["hookSpecificOutput"]
+        self.assertIn("[info-a] reason A", hso["additionalContext"])
+        self.assertIn("[info-b] reason B", hso["additionalContext"])
+
+    def test_deny_takes_precedence_over_info(self):
+        dispatch.load_rules = lambda: [_InfoARule(), _DenyARule()]
+        payload = {"tool_name": "Bash", "tool_input": {"command": "echo hi"}}
+        code, out = _run_hook_with_stdin(json.dumps(payload))
+        self.assertEqual(code, 0)
+        hso = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(hso["permissionDecision"], "deny")
+        self.assertIn("[deny-a] reason A", hso["permissionDecisionReason"])
+        # The info reason must not leak into the deny output.
+        self.assertNotIn("additionalContext", hso)
+
+    def test_no_decisions_stays_silent(self):
+        dispatch.load_rules = lambda: []
+        payload = {"tool_name": "Bash", "tool_input": {"command": "echo hi"}}
+        code, out = _run_hook_with_stdin(json.dumps(payload))
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
 
 
 if __name__ == "__main__":

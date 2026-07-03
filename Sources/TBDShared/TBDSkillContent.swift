@@ -142,6 +142,20 @@ tbd notify --type {response_complete|error|task_complete|attention_needed} --mes
 tbd link [<worktree>]   # no arg = current
 ```
 
+## Scratch spaces & promotion
+
+A **scratch space** is a repo-less TBD workspace (`~/tbd/scratch/<name>`) with no
+git repo. Use `tbd scratch new` to make one, `tbd scratch list` to list them.
+
+When a scratch project takes shape, offer the user promotion: ask for a
+destination path, then run `tbd scratch promote <dest-path>` from a session
+inside the scratch space. Promotion requires the scratch directory to be a git
+repository with at least one commit — run `git init` and make an initial commit
+before promoting. Promotion then moves the folder to the destination and
+registers it as a real TBD repo. Add `--display-name <name>` to override the
+repo name. Do not `git init` and leave it a scratch space forever — promotion
+is the graduation path.
+
 ## Briefing requirements when spawning sessions
 
 Always include:
