@@ -127,8 +127,12 @@ public final class Daemon: Sendable {
     }
 
     /// Decode the mock scenario at `fixturePath` and seed it into `database`.
-    /// Best-effort: a failure is logged and the daemon still starts (empty).
-    static func seedMockDatabase(_ database: TBDDatabase, fixturePath: String) async {
+    /// Fail-loud: any decode or seed failure is re-thrown, aborting daemon
+    /// startup. A half-seeded database (e.g. repo 2 of 2 tripped a UNIQUE
+    /// constraint) would silently serve a wrong scenario, so we refuse to
+    /// start rather than render partial state. The error is logged before
+    /// rethrowing so the failure survives in daemon.log even as the process exits.
+    static func seedMockDatabase(_ database: TBDDatabase, fixturePath: String) async throws {
         let url = URL(fileURLWithPath: fixturePath)
         do {
             let data = try Data(contentsOf: url)
@@ -139,6 +143,7 @@ public final class Daemon: Sendable {
             daemonLogger.info("Mock mode: seeded fixture \(fixturePath, privacy: .public)")
         } catch {
             daemonLogger.error("Mock seeding failed for \(fixturePath, privacy: .public): \(String(describing: error), privacy: .public)")
+            throw error
         }
     }
 
@@ -265,7 +270,7 @@ public final class Daemon: Sendable {
         // 5a. Mock seeding: populate the freshly-migrated DB before servers
         // accept traffic, so the app never sees an empty-then-populated flash.
         if case let .enabled(fixturePath) = mockMode {
-            await Self.seedMockDatabase(database, fixturePath: fixturePath)
+            try await Self.seedMockDatabase(database, fixturePath: fixturePath)
         }
 
         // 6. Initialize state subscriptions (before lifecycle/router so they can broadcast)
