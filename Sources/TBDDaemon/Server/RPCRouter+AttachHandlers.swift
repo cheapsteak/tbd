@@ -39,22 +39,38 @@ extension RPCRouter {
             // same server hosts grouped-session viewers for other windows.
             // `params.windowID` (#317 put it on the wire) becomes load-bearing
             // here. A failed option set degrades to Phase-2 behavior and never
-            // blocks the attach, so it's tolerated + `try?` + logged-and-continued.
+            // blocks the attach, so it's tolerated + logged-and-continued.
             // Deferred (addendum §4 open question): whether detach restores
             // `window-size latest` so a grouped viewer regains sizing control —
             // decide when the fallback interplay (§5) is testable; not done here.
+            //
+            // Fire-and-forget via `sendList`, NOT the awaited `send`: `send`
+            // suspends until a REPLY block arrives (or the connection closes), so
+            // a tmux that accepts the connection but stops replying (wedged-but-
+            // alive stream) would hang the whole attach RPC forever — fd never
+            // vends, the app's openAttach never returns, no fallback. `sendList`
+            // returns after the STREAM WRITE and never waits for the reply, so the
+            // attach handshake stays hang-proof against a mute-but-alive tmux.
+            // Enqueue order through the client actor still guarantees this command
+            // precedes any later `resize-window` from `pane.resize`.
             if let client = await bridge.supervisor.command(server: server) {
-                do {
-                    _ = try await client.send(
-                        "set-window-option -t \(params.windowID) window-size manual",
-                        tolerateErrors: true)
-                } catch {
-                    logger.debug("""
-                        window-size manual set failed for \(server, privacy: .public)/\
-                        \(params.windowID, privacy: .public): \
-                        \(String(describing: error), privacy: .public)
-                        """)
-                }
+                let windowID = params.windowID
+                await client.sendList([
+                    TmuxCommand(
+                        text: "set-window-option -t \(windowID) window-size manual",
+                        tolerateErrors: true
+                    ) { [logger] result in
+                        // A failed option set is tolerated: degrade to Phase-2
+                        // sizing, never block the attach.
+                        if case .failure(let error) = result {
+                            logger.debug("""
+                                window-size manual set failed for \(server, privacy: .public)/\
+                                \(windowID, privacy: .public) (window race): \
+                                \(String(describing: error), privacy: .public)
+                                """)
+                        }
+                    }
+                ])
             }
             // Encode the vend header BEFORE the attach: it needs only `params`,
             // and hoisting it out keeps every throw AFTER `attach` succeeds

@@ -76,6 +76,16 @@ final class ControlModeResizeCoordinator: @unchecked Sendable {
         // The echo fence. Its COMPLETION — success OR failure — closes the fence:
         // failure still decrements, because a dead window must not suppress its
         // key forever.
+        //
+        // Accepted residual (review F2): if the stream is wedged-but-ALIVE (the
+        // write succeeded, but no reply block ever arrives and no EOF closes the
+        // connection), the fence completion never fires, so the counter stays > 0
+        // and layout changes for this window stay suppressed until the connection
+        // tears down (`connectionClosed()` drains pending and decrements). This is
+        // tolerated by design: a mute stream means control mode is wholly dead
+        // (no `%output` either), so there is nothing to render or reconcile
+        // anyway. Detecting and rebuilding a wedged connection is Phase B crash
+        // recovery's job — do NOT add a timeout here.
         let fenceCommand = TmuxCommand(
             text: "list-windows -F '#{window_id}'",
             tolerateErrors: true
