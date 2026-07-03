@@ -786,6 +786,17 @@ actor DaemonClient {
         try await callNoParamsAsync(method: RPCMethod.configGet, resultType: Config.self)
     }
 
+    /// Persist the tmux control-mode opt-in (M5). Applies to newly created
+    /// panes; a truthy TBD_TMUX_CONTROL_MODE in the daemon's env still forces
+    /// the gate on regardless of this flag.
+    func setControlMode(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetControlMode,
+            params: ConfigSetControlModeParams(enabled: enabled)
+        )
+    }
+
+
     /// Set or clear a repo's free-form env overrides.
     func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
         try await callVoidAsync(

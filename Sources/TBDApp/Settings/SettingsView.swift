@@ -205,10 +205,36 @@ struct GeneralSettingsTab: View {
                     footer and menu bar); off hides both. You still merge PRs and \
                     make prod/access calls yourself.
                     """)
+                controlModeToggle
             }
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    /// Tmux control-mode opt-in. Reads the daemon's EFFECTIVE gate from
+    /// `daemon.capabilities` (env || persisted flag) and writes via
+    /// `config.setControlMode`. Disabled with an explanation when the
+    /// daemon's tmux is older than 3.2 (or wasn't detected).
+    @ViewBuilder
+    private var controlModeToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        let supported = capabilities?.controlModeSupported ?? false
+        Toggle("tmux control mode for terminal panes", isOn: Binding(
+            get: { capabilities?.controlModeEnabled ?? false },
+            set: { newValue in Task { await appState.setControlModeEnabled(newValue) } }
+        ))
+        .help("Applies to newly created terminal panes.")
+        .disabled(!supported)
+        if !supported {
+            Text(
+                capabilities?.tmuxVersion.map {
+                    "Requires tmux 3.2 or later (detected \($0))."
+                } ?? "Requires tmux 3.2 or later (tmux not detected)."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
     }
 
     private var primaryAgentPreferenceBinding: Binding<PrimaryAgentPreference> {

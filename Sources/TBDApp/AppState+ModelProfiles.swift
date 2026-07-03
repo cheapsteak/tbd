@@ -217,6 +217,21 @@ extension AppState {
         }
     }
 
+    /// Persist the tmux control-mode opt-in, then re-fetch capabilities so
+    /// the Settings toggle reflects the daemon's EFFECTIVE gate (env ||
+    /// flag) — e.g. with the developer env override set, switching the flag
+    /// off leaves the gate on and the toggle snaps back accordingly.
+    /// Applies to newly created panes only.
+    func setControlModeEnabled(_ enabled: Bool) async {
+        do {
+            try await daemonClient.setControlMode(enabled: enabled)
+            daemonCapabilities = try? await daemonClient.daemonCapabilities()
+        } catch {
+            logger.error("Failed to set control mode: \(error, privacy: .public)")
+            showAlert("Failed to set control mode: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Set or clear a per-repo model profile override.
     func setRepoProfileOverride(repoID: UUID, profileID: UUID?) async {
         do {

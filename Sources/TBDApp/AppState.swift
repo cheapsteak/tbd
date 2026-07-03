@@ -566,7 +566,9 @@ final class AppState: ObservableObject {
     /// Feature flags fetched from the daemon at connect time. Nil until the
     /// first successful fetch — treated as "control mode off". The app cannot
     /// derive these locally: it is launched via `open`, which drops shell env.
-    var daemonCapabilities: DaemonCapabilitiesResult?
+    /// Published so the Settings control-mode toggle re-renders after
+    /// `setControlModeEnabled` refreshes it.
+    @Published var daemonCapabilities: DaemonCapabilitiesResult?
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     private var pollTimer: Timer?
