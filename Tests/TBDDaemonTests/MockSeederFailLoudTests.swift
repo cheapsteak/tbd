@@ -55,4 +55,42 @@ struct MockSeederFailLoudTests {
             #expect(error.item == "worktree 'second' in repo 'acme'")
         }
     }
+
+    @Test("worktree with an unresolvable parentName throws with worktree context")
+    func unresolvedParentFailsLoud() async throws {
+        // `child` names a parent that is never seeded in this repo (typo /
+        // forward-reference). A silent nil would create `child` as a root row;
+        // the fail-loud contract requires an abort naming the child worktree.
+        let scenario = MockScenario(repos: [
+            .init(path: "/tmp/acme-parent", displayName: "acme", worktrees: [
+                .init(name: "child", branch: "tbd/child", parentName: "nonexistent"),
+            ]),
+        ])
+        let db = try TBDDatabase(inMemory: true)
+        let dir = FileManager.default.temporaryDirectory
+
+        do {
+            try await MockSeeder().seed(scenario: scenario, into: db, fixtureDirectory: dir)
+            Issue.record("expected seed to throw on unresolvable parentName")
+        } catch let error as MockSeedError {
+            #expect(error.item == "worktree 'child' in repo 'acme'")
+            #expect(error.description.contains("nonexistent"))
+        }
+    }
+
+    @Test("worktree with a valid backward parentName seeds without throwing")
+    func resolvedParentSeedsSuccessfully() async throws {
+        // `parent` is listed EARLIER, so `child`'s backward reference resolves
+        // and the seed completes — the positive-path guard for the fix.
+        let scenario = MockScenario(repos: [
+            .init(path: "/tmp/acme-ok", displayName: "acme", worktrees: [
+                .init(name: "parent", branch: "tbd/parent"),
+                .init(name: "child", branch: "tbd/child", parentName: "parent"),
+            ]),
+        ])
+        let db = try TBDDatabase(inMemory: true)
+        let dir = FileManager.default.temporaryDirectory
+
+        try await MockSeeder().seed(scenario: scenario, into: db, fixtureDirectory: dir)
+    }
 }

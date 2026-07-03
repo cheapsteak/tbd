@@ -15,6 +15,18 @@ public struct MockSeedError: Error, CustomStringConvertible {
     public var description: String { "Mock seeding failed for \(item): \(underlying)" }
 }
 
+/// A worktree's `parentName` referenced a name not seeded earlier in the same repo.
+///
+/// `parentName` must name a worktree listed EARLIER in the same repo's array
+/// (see `WorktreeSeed.parentName`). A typo, wrong case, or forward-reference
+/// leaves it unresolvable — surfaced here rather than silently dropped.
+private struct UnresolvedParentError: Error, CustomStringConvertible {
+    let parentName: String
+    var description: String {
+        "parentName '\(parentName)' does not match any worktree seeded earlier in this repo"
+    }
+}
+
 /// Seeds an in-memory (or isolated) `TBDDatabase` from a `MockScenario`.
 ///
 /// Called during daemon startup when `TBD_MOCK=1` is set, before the RPC
@@ -76,11 +88,22 @@ public struct MockSeeder: Sendable {
         var nameToID: [String: UUID] = [:]
 
         for (wtIdx, wtSeed) in repoSeed.worktrees.enumerated() {
-            let parentID = wtSeed.parentName.flatMap { nameToID[$0] }
             let suffix = wtSeed.pathSuffix ?? wtSeed.name
             let path = "\(repoSeed.path)/.tbd/worktrees/\(suffix)"
             let status = wtSeed.status ?? .active
             let wtItem = "worktree '\(wtSeed.name)' in repo '\(repoSeed.displayName)'"
+
+            // A `parentName` that never resolves would silently produce a root
+            // row instead of a child — a wrong scenario. Fail loud instead.
+            let parentID: UUID?
+            if let parentName = wtSeed.parentName {
+                guard let resolved = nameToID[parentName] else {
+                    throw MockSeedError(item: wtItem, underlying: UnresolvedParentError(parentName: parentName))
+                }
+                parentID = resolved
+            } else {
+                parentID = nil
+            }
 
             let wt = try await wrap(wtItem) {
                 try await db.worktrees.create(
