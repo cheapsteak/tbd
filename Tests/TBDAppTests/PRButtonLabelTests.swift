@@ -10,9 +10,10 @@ struct PRButtonLabelTests {
     private static func makeStatus(
         number: Int = 42,
         url: String? = nil,
-        state: PRMergeableState = .mergeable
+        state: PRMergeableState = .mergeable,
+        reason: String? = nil
     ) -> PRStatus {
-        PRStatus(number: number, url: url ?? "https://example.com/\(number)", state: state)
+        PRStatus(number: number, url: url ?? "https://example.com/\(number)", state: state, reason: reason)
     }
 
     private static func makeKey(
@@ -22,7 +23,7 @@ struct PRButtonLabelTests {
         blocked: Bool = false,
         prStatus: PRStatus,
         colorScheme: ColorScheme = .light
-    ) -> PRButtonLabel.PRSplitButtonKey {
+    ) -> String {
         PRButtonLabel.prSplitButtonID(
             worktreeID: worktreeID,
             worktreeFound: worktreeFound,
@@ -124,6 +125,13 @@ struct PRButtonLabelTests {
             prStatus: Self.makeStatus(url: "https://example.com/elsewhere/42")
         )
         #expect(open != otherURL)
+
+        // reason feeds the blocked-state presentation, so it must be keyed too.
+        let withReason = Self.makeKey(
+            worktreeID: worktreeID,
+            prStatus: Self.makeStatus(reason: "review required")
+        )
+        #expect(open != withReason)
     }
 
     @Test("id key differs between blocked states, color schemes, and worktrees")

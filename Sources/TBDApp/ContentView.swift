@@ -395,18 +395,15 @@ struct PRButtonLabel: View {
     /// SwiftUI state without ever reaching the materialized AppKit item.
     /// `worktreeFound` matters because the menu's only item (the auto-archive
     /// Toggle) is gated on the worktree row having loaded: a menu materialized
-    /// before the row appears would otherwise stay permanently empty. Keying
-    /// the whole `PRStatus` (not hand-picked fields) covers `url` — captured
-    /// by `primaryAction` — and any future rendered field.
-    struct PRSplitButtonKey: Hashable {
-        let worktreeID: UUID
-        let worktreeFound: Bool
-        let armed: Bool
-        let blocked: Bool
-        let prStatus: PRStatus
-        let colorScheme: ColorScheme
-    }
-
+    /// before the row appears would otherwise stay permanently empty. Every
+    /// `PRStatus` field is spelled out — `url` is captured by `primaryAction`,
+    /// so a re-pointed PR must recreate the item too.
+    ///
+    /// This key MUST stay a String. The macOS 26 toolbar bridge only honors
+    /// `.id` identity changes for String values here — a custom Hashable
+    /// struct key was observed NOT to trigger NSMenuToolbarItem recreation
+    /// (verified live 2026-07-03: stale help text, missing badge). Do not
+    /// "clean this up" back into a struct.
     static func prSplitButtonID(
         worktreeID: UUID,
         worktreeFound: Bool,
@@ -414,15 +411,10 @@ struct PRButtonLabel: View {
         blocked: Bool,
         prStatus: PRStatus,
         colorScheme: ColorScheme
-    ) -> PRSplitButtonKey {
-        PRSplitButtonKey(
-            worktreeID: worktreeID,
-            worktreeFound: worktreeFound,
-            armed: armed,
-            blocked: blocked,
-            prStatus: prStatus,
-            colorScheme: colorScheme
-        )
+    ) -> String {
+        "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(blocked)"
+            + "-\(prStatus.number)-\(prStatus.state.rawValue)-\(prStatus.url)"
+            + "-\(prStatus.reason ?? "")-\(colorScheme)"
     }
 
     /// Aspect-fits `size` into `slot`, centered. Used to draw the archivebox
