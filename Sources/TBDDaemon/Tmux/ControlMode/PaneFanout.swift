@@ -14,6 +14,23 @@ enum PaneFanoutError: Error {
     case pipeAllocationFailed(Int32)
 }
 
+/// Failures of `PaneFanout.writeReplay`. `notAttached` and `superseded` are
+/// distinct so the attach orchestrator can tell "the pane is gone" from "my
+/// attach was replaced by a newer one" (the latter is a normal race, not an
+/// error worth surfacing).
+enum PaneReplayWriteError: Error, Equatable {
+    /// No sink registered for the key (detached, timed out, or never attached).
+    case notAttached
+    /// A sink exists but belongs to a different attach generation — a
+    /// superseded attach's replay must never write into its successor's pipe.
+    case superseded
+    /// The pipe stayed full past the deadline (app reader wedged or too slow).
+    case deadlineExceeded(written: Int, total: Int)
+    /// write(2) failed with an errno other than EAGAIN/EINTR (e.g. EPIPE
+    /// after the app closed the read end).
+    case writeFailed(errno: Int32)
+}
+
 /// Routes decoded `%output`/`%extended-output` bytes into per-pane pipe write
 /// ends. `route(server:event:)` is called SYNCHRONOUSLY on each connection's
 /// reader thread — the spec's data-flow keeps the render hot path off actors
@@ -119,6 +136,87 @@ final class PaneFanout: @unchecked Sendable {
         sinks.removeAll()
         lock.unlock()
         for sink in all.values { Darwin.close(sink.writeFD) }
+    }
+
+    /// Write the attach replay into `key`'s pipe. Callable while the sink is
+    /// NOT ready — that's the point: the replay lands behind the closed gate
+    /// (live output routed meanwhile is still dropped), and the orchestrator
+    /// acks `attach.ready` only after this returns, so live bytes follow the
+    /// replay in order (addendum §3).
+    ///
+    /// Unlike `route()` (hot path — drops on EAGAIN), a replay must arrive
+    /// INTACT: a truncated escape sequence corrupts the terminal. On EAGAIN
+    /// this waits for pipe writability in short poll slices under `deadline`,
+    /// re-validating the sink between slices. It can therefore block up to
+    /// `deadline` — call it from the attach orchestrator's async task only;
+    /// NEVER from a connection reader thread, and NEVER on the supervisor
+    /// actor (it would stall every attach/detach in the daemon).
+    ///
+    /// fd-close safety: each write slice re-validates `sinks[key]` (existence
+    /// + generation) and issues the nonblocking `write` while HOLDING the
+    /// lock — the same discipline as `route()`. Every close path (`attach`
+    /// replacing a sink, `detach`, `detachIfNotReady`, `closeAll`) removes
+    /// the sink from the map under this lock BEFORE closing the fd, so a
+    /// write into a closed-and-recycled fd cannot happen. The only use of a
+    /// snapshotted fd outside the lock is `poll` — residual: if the sink is
+    /// detached mid-wait, the poll may watch a closed (or recycled) fd for
+    /// one slice, but it never writes, and the next slice's re-validation
+    /// throws `.notAttached`/`.superseded`.
+    func writeReplay(key: PaneKey, generation: UInt64, bytes: Data, deadline: TimeInterval = 5.0) throws {
+        let buf = [UInt8](bytes)
+        let total = buf.count
+        var offset = 0
+        let start = DispatchTime.now()
+
+        while offset < total {
+            lock.lock()
+            guard let sink = sinks[key] else {
+                lock.unlock()
+                throw PaneReplayWriteError.notAttached
+            }
+            guard sink.generation == generation else {
+                lock.unlock()
+                throw PaneReplayWriteError.superseded
+            }
+            let fd = sink.writeFD
+            // Nonblocking write slice under the lock (bounded by the pipe
+            // buffer, ~64 KB — the same hold route() takes per chunk).
+            var failure: Int32 = EAGAIN
+            while offset < total {
+                let written = buf[offset...].withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+                if written > 0 {
+                    offset += written
+                    continue
+                }
+                let err = errno
+                if written < 0 && err == EINTR { continue }
+                // written == 0 can't happen for count > 0 on a pipe; treat
+                // like EAGAIN (retry under the deadline) rather than spin.
+                failure = written < 0 ? err : EAGAIN
+                break
+            }
+            lock.unlock()
+            if offset >= total { break }
+            guard failure == EAGAIN else {
+                logger.error(
+                    "replay write \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation) errno=\(failure)")
+                throw PaneReplayWriteError.writeFailed(errno: failure)
+            }
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
+            let remaining = deadline - elapsed
+            if remaining <= 0 {
+                logger.error(
+                    "replay write \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation) deadline after \(offset)/\(total) bytes")
+                throw PaneReplayWriteError.deadlineExceeded(written: offset, total: total)
+            }
+            // Wait for writability OUTSIDE the lock — reader threads routing
+            // other panes must not stall behind this slice.
+            var pollFD = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let sliceMs = Int32(max(1, min(50, Int(remaining * 1000))))
+            _ = Darwin.poll(&pollFD, 1, sliceMs)
+        }
+        logger.debug(
+            "replay write \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation) \(total) bytes delivered")
     }
 
     /// Hot path — called on the reader thread for every output event.

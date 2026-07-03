@@ -124,6 +124,20 @@ actor TmuxControlSupervisor {
         fanout.detach(key: PaneKey(server: server, paneID: paneID))
     }
 
+    /// Pre-ready, generation-checked replay write (M4.2), delegated to the
+    /// fanout. `nonisolated` on purpose: `writeReplay` may block up to its
+    /// deadline waiting for the app to drain the pipe — that wait must run on
+    /// the caller's task (the attach orchestrator), never on this actor,
+    /// where it would stall every attach/detach in the daemon.
+    nonisolated func writeReplay(
+        server: String, paneID: String, generation: UInt64, bytes: Data,
+        deadline: TimeInterval = 5.0
+    ) throws {
+        try fanout.writeReplay(
+            key: PaneKey(server: server, paneID: paneID),
+            generation: generation, bytes: bytes, deadline: deadline)
+    }
+
     /// Cancel an attach the app never acked (spec: 5 s ready timeout).
     /// Generation-scoped: a stale timer from a superseded attach is a no-op.
     func detachIfNotReady(server: String, paneID: String, generation: UInt64) {

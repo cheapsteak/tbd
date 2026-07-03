@@ -135,6 +135,10 @@ let package = Package(
             name: "TBDAppTests",
             dependencies: [
                 "TBDApp",
+                // For the replay-writer round-trip test (M4.2): the daemon
+                // assembles replay bytes, the app's SwiftTerm consumes them,
+                // and only this test target links the SwiftTerm product.
+                "TBDDaemonLib",
             ],
             resources: [
                 .copy("Fixtures")
