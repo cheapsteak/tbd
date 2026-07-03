@@ -53,6 +53,7 @@ up() {
     (cd "$REPO_ROOT" && swift build) 2>&1 | tail -3
 
     down_quiet
+    rm -rf "$MOCK_HOME"          # fresh DB each `up`; re-seeding an existing state.db collides on UNIQUE (now fail-loud)
     mkdir -p "$STATE_DIR" "$MOCK_HOME"
     assemble_bundle
 
