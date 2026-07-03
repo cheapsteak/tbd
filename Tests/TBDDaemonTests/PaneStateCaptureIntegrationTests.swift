@@ -115,6 +115,10 @@ struct PaneStateCaptureIntegrationTests {
         #expect(state.mouseSGR == false)
         #expect(state.originMode == false)
         #expect(state.paneInMode == 0)
+        // pane_width/pane_height (M4.3): the lone pane spans the 120-wide
+        // window; height is window height minus any status line.
+        #expect(state.width == 120)
+        #expect((30...40).contains(state.height))
 
         await supervisor.stopAll()
     }

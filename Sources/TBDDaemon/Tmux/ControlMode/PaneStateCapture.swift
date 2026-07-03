@@ -51,6 +51,12 @@ struct PaneState: Equatable, Sendable {
     /// Number of tmux modes the pane is in (copy mode etc.); `0` = none.
     /// (Older tmux documents this as a 0/1 flag — an `Int` covers both.)
     let paneInMode: Int
+    /// Pane size in cells (`pane_width`/`pane_height`, both present at the
+    /// 3.2 floor). The replay assembler (M4.2) needs the pane's cols/rows for
+    /// cursor/region clamping — capturing them here keeps the whole replay
+    /// input inside the one atomic capture batch (M4.3).
+    let width: Int
+    let height: Int
 }
 
 /// A capture that can't be trusted must abort the replay, not degrade it —
@@ -84,7 +90,7 @@ enum PaneStateCaptureError: Error, Equatable {
 /// format, there is no tab-vs-`\t` escaping ambiguity to work around.
 enum PaneStateCapture {
     /// Number of space-separated fields in `format` (and in every valid line).
-    static let fieldCount = 19
+    static let fieldCount = 21
 
     /// Field order is load-bearing: `parse` consumes positionally.
     static let format = [
@@ -107,6 +113,8 @@ enum PaneStateCapture {
         "#{mouse_sgr_flag}",
         "#{origin_flag}",
         "#{pane_in_mode}",
+        "#{pane_width}",
+        "#{pane_height}",
     ].joined(separator: " ")
 
     /// tmux reports `alternate_saved_x`/`_y` as UINT_MAX when the pane has no
@@ -185,6 +193,8 @@ enum PaneStateCapture {
             mouseAny: try flag(15, "mouse_any_flag"),
             mouseSGR: try flag(16, "mouse_sgr_flag"),
             originMode: try flag(17, "origin_flag"),
-            paneInMode: try int(18, "pane_in_mode"))
+            paneInMode: try int(18, "pane_in_mode"),
+            width: try int(19, "pane_width"),
+            height: try int(20, "pane_height"))
     }
 }

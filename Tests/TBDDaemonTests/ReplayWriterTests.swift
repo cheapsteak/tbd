@@ -34,7 +34,8 @@ struct ReplayWriterTests {
             wraparound: wraparound,
             mouseStandard: mouseStandard, mouseButton: mouseButton,
             mouseAny: mouseAny, mouseSGR: mouseSGR,
-            originMode: originMode, paneInMode: 0)
+            originMode: originMode, paneInMode: 0,
+            width: cols, height: rows)
     }
 
     private func assembleText(

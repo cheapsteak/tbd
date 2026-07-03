@@ -110,7 +110,8 @@ private func makeState(
         wraparound: wraparound,
         mouseStandard: mouseStandard, mouseButton: mouseButton,
         mouseAny: mouseAny, mouseSGR: mouseSGR,
-        originMode: originMode, paneInMode: 0)
+        originMode: originMode, paneInMode: 0,
+        width: 80, height: 25)
 }
 
 @Suite("ReplayWriter → SwiftTerm round trip (M4.2)")
