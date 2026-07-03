@@ -105,12 +105,18 @@ public struct TmuxManager: Sendable {
             envPrefix += "export \(key)='\(escaped)'; "
         }
         let fullCommand = envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
-        // Sensitive env vars use tmux's -e KEY=VALUE flag so the secret is set in
-        // the spawned window's environment directly, NOT inlined into the shell
-        // command argv. This keeps the secret out of `ps aux` for the
-        // long-running shell/claude process. (The secret still appears briefly
-        // in the tmux invocation's own argv during fork/exec, but tmux re-execs
-        // and its server process does not retain the original argv visibly.)
+        // `sensitiveEnv` carries values that must be in the spawned window's
+        // PROCESS environment before the shell starts, via tmux's -e KEY=VALUE
+        // flag — NOT inlined into the shell command argv like `env` above.
+        // Two kinds of callers rely on this:
+        //   - secrets: keeps the value out of `ps aux` for the long-running
+        //     shell/claude process. (The secret still appears briefly in the
+        //     tmux invocation's own argv during fork/exec, but tmux re-execs
+        //     and its server process does not retain the original argv
+        //     visibly.)
+        //   - rc-affecting toggles (e.g. DISABLE_AUTO_UPDATE on hook panes):
+        //     the `env` export-prefix runs after `.zshrc` completes, so only
+        //     -e values are visible while rc files execute.
         var eFlags: [String] = []
         for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
             eFlags.append("-e")

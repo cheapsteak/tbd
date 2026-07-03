@@ -43,6 +43,8 @@ Hooks run with `cwd` set to the worktree path and receive these environment vari
 
 Hooks have a 60-second timeout (`preSession`: 600 seconds). A non-zero exit status is logged but does not block the lifecycle action.
 
+`preSession` and `setup` terminals additionally run with `DISABLE_AUTO_UPDATE=true` in their process environment, so oh-my-zsh's interactive "Would you like to update?" prompt can't block the hook. Regular shell/agent tabs are unaffected and keep omz update checks.
+
 ## Example
 
 ```bash

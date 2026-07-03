@@ -57,6 +57,20 @@ extension WorktreeLifecycle {
             .appendingPathComponent(worktreeID.uuidString)
     }
 
+    /// Environment for hook panes (preSession + setup), routed through
+    /// `createWindow(sensitiveEnv:)` so tmux injects it with `-e KEY=VALUE` —
+    /// i.e. into the PROCESS environment before zsh starts. The regular
+    /// `env:` dict is inlined as `export KEY='V'; ` statements inside the
+    /// `-c` command string, which runs AFTER `.zshrc` completes, so it cannot
+    /// affect anything the rc files do. oh-my-zsh's tools/check_for_upgrade.sh
+    /// honors the legacy `DISABLE_AUTO_UPDATE` var (mapped to
+    /// `zstyle ':omz:update' mode disabled`), so this skips its interactive
+    /// "Would you like to update?" prompt that would otherwise block the hook
+    /// command until the user answers or the preSession wait times out.
+    /// Deliberately per-window (never `setenv -g`): regular shell/claude/codex
+    /// tabs must keep omz update checks.
+    static let hookPaneEnv: [String: String] = ["DISABLE_AUTO_UPDATE": "true"]
+
     /// Wraps the hook so its exit code lands in the marker file and the pane
     /// stays alive as a usable shell afterward (same rationale as
     /// `shellWrapped`). Single-quote escaping matches `shellWrapped`.
@@ -137,6 +151,7 @@ extension WorktreeLifecycle {
             cwd: worktreePath,
             shellCommand: command,
             env: env,
+            sensitiveEnv: Self.hookPaneEnv,
             cols: resolvedCols,
             rows: resolvedRows
         )

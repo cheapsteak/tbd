@@ -591,6 +591,7 @@ extension WorktreeLifecycle {
             cwd: worktreePath,
             shellCommand: setupCommand,
             env: setupEnv,
+            sensitiveEnv: Self.hookPaneEnv,
             cols: resolvedCols,
             rows: resolvedRows
         )

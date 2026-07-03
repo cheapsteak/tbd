@@ -215,6 +215,12 @@ struct PreSessionHookTests {
                 "first window must be the primary agent")
         #expect(windowCalls[1].last?.contains("claude --session-id") == false,
                 "second window must be the setup hook/shell")
+        // omz-update suppression is scoped to HOOK panes: the setup window
+        // gets `-e DISABLE_AUTO_UPDATE=true`, the primary agent does not.
+        #expect(!windowCalls[0].contains("DISABLE_AUTO_UPDATE=true"),
+                "primary terminal must keep oh-my-zsh update checks")
+        #expect(hasProcessEnvFlag(windowCalls[1], "DISABLE_AUTO_UPDATE=true"),
+                "setup hook window must suppress the oh-my-zsh update prompt via -e")
         // Setup window carries the full documented hook env even with no
         // preSession hook present.
         let setupBody = windowCalls[1].last ?? ""
@@ -305,6 +311,11 @@ struct PreSessionHookTests {
         #expect(body.contains("export TBD_WORKTREE_PATH='\(createdWt.path)'"))
         #expect(body.contains("export TBD_REPO_PATH='\(repo.path)'"))
         #expect(body.contains("export TBD_BRANCH='\(createdWt.branch)'"))
+        // The pre-session window must carry `-e DISABLE_AUTO_UPDATE=true` so
+        // oh-my-zsh's updater prompt (fired by .zshrc, BEFORE the -c command
+        // and its export-prefix run) can't block the hook.
+        #expect(hasProcessEnvFlag(windowCalls[0], "DISABLE_AUTO_UPDATE=true"),
+                "pre-session hook window must suppress the oh-my-zsh update prompt via -e")
 
         // Still gated while the marker is absent.
         try await Task.sleep(nanoseconds: 200_000_000)
@@ -334,6 +345,11 @@ struct PreSessionHookTests {
         // (TBD_EVENT=setup) — windows are [pre-session, claude, setup].
         let allWindowCalls = recorder.snapshot().filter { $0.contains("new-window") }
         #expect(allWindowCalls.count == 3)
+        // Hook panes suppress the omz updater; the primary agent doesn't.
+        #expect(!allWindowCalls[1].contains("DISABLE_AUTO_UPDATE=true"),
+                "primary terminal must keep oh-my-zsh update checks")
+        #expect(hasProcessEnvFlag(allWindowCalls[2], "DISABLE_AUTO_UPDATE=true"),
+                "setup hook window must suppress the oh-my-zsh update prompt via -e")
         let setupBody = allWindowCalls[2].last ?? ""
         #expect(setupBody.contains("export TBD_EVENT='setup'"))
         #expect(setupBody.contains("export TBD_TERMINAL_ID='\(setup.id.uuidString)'"))
@@ -1176,6 +1192,14 @@ struct PreSessionHookTests {
 }
 
 // MARK: - Helpers
+
+/// True when `args` sets `assignment` in the spawned window's process
+/// environment via tmux's `-e KEY=VALUE` flag (adjacency required — a bare
+/// substring match could false-positive on the shell command body).
+private func hasProcessEnvFlag(_ args: [String], _ assignment: String) -> Bool {
+    guard let index = args.firstIndex(of: assignment), index > 0 else { return false }
+    return args[index - 1] == "-e"
+}
 
 /// Thread-safe collector for TmuxManager dryRun recorded args.
 private final class RecordedCommands: @unchecked Sendable {
