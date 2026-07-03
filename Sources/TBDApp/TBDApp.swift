@@ -421,9 +421,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct TBDAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var appState = AppState()
+    @StateObject private var appState = AppState(userDefaults: TBDAppMain.resolveUserDefaults())
     @StateObject private var appearance = AppearanceSettings()
     @StateObject private var overlayCoordinator = TranscriptOverlayCoordinator()
+
+    /// Choose the UserDefaults domain for this app instance. The mock harness
+    /// (`TBD_MOCK`) routes `AppState` — which persists window frame and layout
+    /// state — to an isolated suite so a mock run never writes those back into
+    /// the developer's real `TBDApp.plist`. Note this covers `AppState` only;
+    /// a few other stores (`AppearanceSettings`, emoji/editor "recents") still
+    /// read `.standard`. That is deliberate: the mock inherits the dev's theme
+    /// for realistic screenshots, and the static screenshot flow never mutates
+    /// them, so nothing leaks back.
+    static func resolveUserDefaults(env: [String: String] = ProcessInfo.processInfo.environment) -> UserDefaults {
+        if MockMode.fromEnvironment(env) != nil {
+            return UserDefaults(suiteName: MockMode.appUserDefaultsSuiteName) ?? .standard
+        }
+        return .standard
+    }
 
     init() {
         lifecycleLogger.info("TBDApp launching pid=\(getpid(), privacy: .public)")

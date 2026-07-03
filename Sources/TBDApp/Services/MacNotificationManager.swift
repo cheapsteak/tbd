@@ -27,6 +27,9 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func requestPermissionIfNeeded() {
+        // The mock harness runs a bundled second instance; a permission prompt
+        // would intrude on staged screenshots. Skip it entirely in mock mode.
+        if MockMode.isActive() { return }
         guard !hasRequestedPermission else { return }
         guard isAvailable else {
             if !hasLoggedUnavailable {
@@ -67,9 +70,17 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         return type == .focusRequest ? "Attention needed." : "Claude has finished responding."
     }
 
+    /// Whether `postIfEnabled` should proceed to post a banner. Pure seam so the
+    /// gating logic — including mock-mode suppression (the mock instance must never
+    /// post notifications, per the harness design) — is testable without a bundle,
+    /// since `postIfEnabled` itself early-returns on unbundled executables.
+    nonisolated static func shouldPost(enabled: Bool, isAvailable: Bool, mockActive: Bool) -> Bool {
+        enabled && isAvailable && !mockActive
+    }
+
     func postIfEnabled(worktreeID: UUID, message: String?, worktrees: [Worktree],
                        type: NotificationType, terminalID: UUID? = nil) {
-        guard enabled, isAvailable else { return }
+        guard Self.shouldPost(enabled: enabled, isAvailable: isAvailable, mockActive: MockMode.isActive()) else { return }
         requestPermissionIfNeeded()
 
         let worktreeName = worktrees.first(where: { $0.id == worktreeID })?.displayName

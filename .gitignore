@@ -18,3 +18,6 @@ docs/plans/
 .claude/hooks/guardrails/decisions.log
 .claude/hooks/guardrails/**/__pycache__/
 .claude/hooks/guardrails/__pycache__/
+
+# Mock harness screenshot artifacts
+artifacts/
