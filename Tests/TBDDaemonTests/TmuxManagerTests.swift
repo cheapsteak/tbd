@@ -33,6 +33,25 @@ import Testing
     #expect(args.contains("#{window_id}"))
 }
 
+@Test func testNewServerCommandSetsHistoryLimitBeforeNewSession() throws {
+    // history-limit must be chained BEFORE new-session in the same tmux
+    // command list: panes capture their history ceiling at window-creation
+    // time, so the option has to be in force before window 0 exists.
+    let args = TmuxManager.newServerCommand(
+        server: "tbd-a1b2c3d4",
+        session: "main",
+        cwd: "/tmp/repo"
+    )
+    let setIdx = try #require(args.firstIndex(of: "set-option"))
+    let sepIdx = try #require(args.firstIndex(of: ";"))
+    let newIdx = try #require(args.firstIndex(of: "new-session"))
+    #expect(Array(args[setIdx..<sepIdx]) == ["set-option", "-g", "history-limit", "50000"])
+    #expect(setIdx < sepIdx)
+    #expect(sepIdx < newIdx)
+    // -PF format spec must remain trailing so tmux positional parsing works.
+    #expect(args.last == "#{window_id}")
+}
+
 @Test func testHasSessionCommand() {
     let args = TmuxManager.hasSessionCommand(
         server: "tbd-a1b2c3d4",
