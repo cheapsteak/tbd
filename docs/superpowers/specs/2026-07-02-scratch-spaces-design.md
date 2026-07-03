@@ -130,7 +130,7 @@ repo, `repoID == nil` means:
 
 ## 5. Promotion (agent-driven, move-on-promote)
 
-### 5.1 `tbd scratch promote <dest-path>`
+### 5.1 `tbd scratch promote <dest-path> [--display-name <name>]`
 
 The single real mechanism, run by Claude from inside a scratch session:
 
@@ -141,7 +141,13 @@ The single real mechanism, run by Claude from inside a scratch session:
    cwd valid (inode-based). Cross-volume dest is allowed with a warning that
    running processes may lose their cwd.
 3. Run the existing `repo.add` path on the new location (creates the Repo
-   row + its synthetic main worktree, reconciles, broadcasts).
+   row + its synthetic main worktree, reconciles, broadcasts). The repo's
+   display name is resolved in priority order:
+   1. `--display-name <name>` if given;
+   2. the scratch space's display name, if the user renamed it from its
+      auto-generated default (reuse the same default-name detection the
+      `stop-rename-check` hook uses);
+   3. the destination folder name (`repo.add`'s existing behavior).
 4. Mark the scratch row **promoted**: store a pointer to the new repo
    (`promotedToRepoID: UUID?` on `Worktree`, nil for everything else). The
    row remains; its live terminals keep working on the scratch tmux server
@@ -187,6 +193,9 @@ Per the gated-branch rule (a test per branch of any new toggle):
 - `repo.add` rejects paths under the scratch dir.
 - `scratch promote`: happy path (move + repo.add + promoted marker), and
   no-git failure leaves everything untouched.
+- Promote display-name priority: explicit flag wins; renamed scratch space
+  inherits its display name; still-default scratch name falls back to the
+  destination folder name.
 - `showScratchSection` on/off: section renders/hides; spaces and terminals
   intact in both states.
 - All tests isolate via `TBD_HOME` / injection seams per CLAUDE.md.
