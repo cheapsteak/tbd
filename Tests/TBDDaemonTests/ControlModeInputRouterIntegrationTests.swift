@@ -82,6 +82,79 @@ struct ControlModeInputRouterIntegrationTests {
             chunkSize: chunkSize)
     }
 
+    /// Poll `path` until its bytes equal `expected`, or time out.
+    private func awaitFileBytes(path: String, expected: Data, timeout: Duration) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if let data = FileManager.default.contents(atPath: path), data == expected { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let actual = FileManager.default.contents(atPath: path)?.count ?? 0
+        throw InputIntegrationError.fileBytesMismatch(expected: expected.count, actual: actual)
+    }
+
+    /// Printable-ASCII payload of exactly `byteCount` bytes.
+    private func makePayload(byteCount: Int) -> Data {
+        let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789".utf8)
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(byteCount)
+        for i in 0..<byteCount { bytes.append(alphabet[i % alphabet.count]) }
+        return Data(bytes)
+    }
+
+    /// THE MONEY TEST for the M2 paste ruling: a bulk paste followed IMMEDIATELY
+    /// by a keystroke must arrive at the pane as paste-payload-THEN-keystroke,
+    /// proving the keystroke is FIFO-behind the paste through the real `-CC`
+    /// stream (both ride the router's single ordered consumer → same FIFO).
+    ///
+    /// The pane captures its raw stdin with `stty raw -echo; head -c N > file`
+    /// (raw mode: no ~1 KB cooked-input limit, no echo, `head` exits after
+    /// exactly N bytes). Bracketed paste is OFF (bare `head`), so `paste-buffer
+    /// -p` emits the payload bare — the file must equal payload + tag verbatim.
+    @Test("a keystroke enqueued right after a paste lands AFTER the paste payload (FIFO)")
+    func keystrokeFollowsPasteInOrder() async throws {
+        guard let version = await TmuxVersion.detect(),
+              version >= TmuxVersion.controlModeMinimum else { return }
+
+        let server = "tbd-input-\(UUID().uuidString.prefix(8))"
+        defer { tmux(["-L", server, "kill-server"]) }
+
+        let outPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-paste-order-\(UUID().uuidString).txt").path
+        defer { try? FileManager.default.removeItem(atPath: outPath) }
+
+        let payload = makePayload(byteCount: 6 * 1024)
+        let tag = Data("ZZTAIL".utf8)
+        let total = payload.count + tag.count
+
+        // rc-free /bin/sh bootstrap whose pane command IS the raw capture, so the
+        // pane reaches `head` in milliseconds (de-flake convention).
+        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main", "-x", "200", "-y", "50",
+                           "/bin/sh", "-c", "stty raw -echo; exec head -c \(total) > \(outPath)"]),
+                     "failed to bootstrap raw-capture tmux session")
+
+        let supervisor = TmuxControlSupervisor()
+        await supervisor.ensureConnection(serverName: server)
+        let client = try await awaitClient(supervisor, server: server)
+        let pane = try await firstPaneID(client)
+        try await waitForPaneCommand(client, pane: pane) { $0 == "head" }
+
+        let router = makeRouter(supervisor)
+        let worktreeID = UUID()
+        router.register(worktreeID: worktreeID, paneID: pane, server: server)
+        let header = SidecarInputHeader(worktreeID: worktreeID, paneID: pane)
+
+        // Paste, then IMMEDIATELY the keystroke — no await between: the ordering
+        // guarantee must come from the FIFO, not from the test serializing them.
+        router.enqueuePaste(header: header, bytes: payload)
+        router.enqueue(header: header, bytes: tag)
+
+        try await awaitFileBytes(path: outPath, expected: payload + tag, timeout: .seconds(15))
+
+        router.shutdown()
+        await supervisor.stopAll()
+    }
+
     @Test("typed keystrokes render in the pane (single chunk)")
     func singleChunkDelivery() async throws {
         guard let version = await TmuxVersion.detect(),
@@ -239,4 +312,5 @@ private enum InputIntegrationError: Error {
     case noPane
     case markerNeverAppeared(String)
     case paneCommandNeverSettled
+    case fileBytesMismatch(expected: Int, actual: Int)
 }

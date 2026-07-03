@@ -2,11 +2,17 @@ import Foundation
 import os
 
 /// Delivers bulk paste bytes to a control-mode pane over the `-CC` stream
-/// (addendum §2, the >4 KB paste rule). Rather than keystroke-encoding a large
-/// payload (`send-keys -H`, chunked), the app-owned bytes are written to a temp
-/// file, `load-buffer`ed into a uniquely named tmux buffer, then `paste-buffer`ed
-/// into the pane **without `-p`**: the byte stream already carries the app's
-/// bracketed-paste markers when the pane enabled them, so `-p` would double-wrap.
+/// (the M2 paste ruling). Rather than keystroke-encoding a large payload
+/// (`send-keys -H`, chunked), the app-owned bytes are written to a temp file,
+/// `load-buffer`ed into a uniquely named tmux buffer, then `paste-buffer`ed into
+/// the pane **with `-p`**.
+///
+/// The app intercepts the paste at the SwiftTerm VIEW level, BEFORE SwiftTerm
+/// would add bracketed-paste markers — so the payload that reaches here is bare.
+/// `-p` hands wrapping authority to tmux: tmux surrounds the paste with
+/// `ESC[200~`/`ESC[201~` IFF the target pane has bracketed-paste mode enabled,
+/// and emits the bare bytes otherwise. tmux is the single authority on the
+/// pane's mode, so there is no double-wrap and no missing wrap.
 enum PasteExecutor {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
 
@@ -48,7 +54,7 @@ enum PasteExecutor {
         _ = try await client.send("load-buffer -b \(bufferName) '\(path)'", tolerateErrors: true)
         do {
             _ = try await client.send(
-                "paste-buffer -d -b \(bufferName) -t \(paneID)", tolerateErrors: true)
+                "paste-buffer -d -p -b \(bufferName) -t \(paneID)", tolerateErrors: true)
         } catch {
             // load-buffer succeeded but paste-buffer threw (e.g. the pane died
             // between the two awaits). The `-d` on paste-buffer would have

@@ -23,7 +23,16 @@ final class ControlModeInputRouter: @unchecked Sendable {
         let worktreeID: UUID
         let paneID: String
     }
+    /// Whether a queued item is a keystroke batch or a bulk paste. Both ride the
+    /// SAME ordered stream so a keystroke enqueued after a paste is delivered
+    /// strictly after the paste's `paste-buffer` completes (the M2 ruling's
+    /// ordering guarantee).
+    private enum Kind {
+        case input
+        case paste
+    }
     private struct Item {
+        let kind: Kind
         let header: SidecarInputHeader
         let bytes: Data
         let receivedAt: ContinuousClock.Instant
@@ -84,7 +93,16 @@ final class ControlModeInputRouter: @unchecked Sendable {
     /// Non-blocking entry point for the sidecar receive thread. Stamps receipt
     /// time and yields into the ordered stream; the consumer does the work.
     func enqueue(header: SidecarInputHeader, bytes: Data) {
-        continuation.yield(Item(header: header, bytes: bytes, receivedAt: ContinuousClock.now))
+        continuation.yield(Item(kind: .input, header: header, bytes: bytes, receivedAt: ContinuousClock.now))
+    }
+
+    /// Non-blocking entry point for a bulk `.paste` frame (the M2 paste ruling).
+    /// Yields into the SAME ordered stream as `enqueue`, from the SAME sidecar
+    /// receive thread — so stream order == wire order == user order. A keystroke
+    /// `enqueue`d after this paste is therefore delivered strictly AFTER the
+    /// paste's `paste-buffer` completes.
+    func enqueuePaste(header: SidecarInputHeader, bytes: Data) {
+        continuation.yield(Item(kind: .paste, header: header, bytes: bytes, receivedAt: ContinuousClock.now))
     }
 
     /// Finish the stream so the consumer task exits. Wire into daemon shutdown
@@ -113,6 +131,32 @@ final class ControlModeInputRouter: @unchecked Sendable {
             logger.debug("no command client for server \(server, privacy: .public); dropping input")
             return
         }
+        switch item.kind {
+        case .input:
+            await deliverInput(item, client: client)
+        case .paste:
+            await deliverPaste(item, client: client)
+        }
+    }
+
+    /// Deliver a bulk paste through `PasteExecutor` (load-buffer + paste-buffer
+    /// -p). Awaited to completion before the consumer dequeues the next item, so
+    /// a following keystroke is FIFO-behind the paste (the ruling's ordering
+    /// guarantee). A paste failure is logged at error — the user sees it as a
+    /// missing paste — but tears NOTHING down; no latency sample (keystroke
+    /// telemetry only).
+    private func deliverPaste(_ item: Item, client: TmuxControlCommandClient) async {
+        do {
+            try await PasteExecutor.paste(client: client, paneID: item.header.paneID, bytes: item.bytes)
+        } catch {
+            logger.error("""
+                paste failed for pane \(item.header.paneID, privacy: .public): \
+                \(String(describing: error), privacy: .public)
+                """)
+        }
+    }
+
+    private func deliverInput(_ item: Item, client: TmuxControlCommandClient) async {
         let commandTexts = SendKeysEncoder.commands(
             paneID: item.header.paneID, bytes: item.bytes, maxBytesPerCommand: chunkSize)
         guard !commandTexts.isEmpty else { return }

@@ -2,11 +2,17 @@ import Foundation
 
 /// Frame discriminator for the bidirectional sidecar data channel (M2.1).
 /// daemon → app carries `.fdVend` (a JSON `FDVendHeader` alongside an
-/// `SCM_RIGHTS` fd); app → daemon carries `.input` (keystroke/paste bytes
-/// tagged with a `SidecarInputHeader`).
+/// `SCM_RIGHTS` fd); app → daemon carries `.input` (keystroke bytes) and
+/// `.paste` (bulk paste bytes), both tagged with a `SidecarInputHeader`.
+///
+/// `.input` and `.paste` share ONE payload sub-format and ride the SAME
+/// ordered channel: a paste and a following keystroke are FIFO-ordered
+/// end-to-end (the M2 paste ruling — the daemon runs the paste through the
+/// correlator so a keystroke enqueued after it lands strictly after).
 public enum SidecarFrameType: UInt8, Sendable {
     case fdVend = 1
     case input = 2
+    case paste = 3
 }
 
 /// Header prefixing every app → daemon input frame: identifies which pane the
@@ -51,8 +57,19 @@ private func appendUInt32LE(_ data: inout Data, _ value: UInt32) {
 /// Outer frame: `[UInt32 LE frameLength][UInt8 type][payload]`, where
 /// `frameLength = 1 + payload.count` (it covers the type byte).
 ///
-/// Input payload sub-format: `[UInt32 LE headerLength][JSON header][raw bytes]`.
+/// Tagged payload sub-format (shared by `.input` and `.paste`):
+/// `[UInt32 LE headerLength][JSON header][raw bytes]`.
 public enum SidecarFrameCodec {
+
+    /// Largest paste that rides a `.paste` frame. Sits under the scanner's 4 MiB
+    /// hard cap with 64 KiB of headroom for the JSON header + outer framing, so
+    /// even a max-size payload's encoded frame never trips `isDesynced`.
+    ///
+    /// Pastes LARGER than this are NOT split across frames (the M2 ruling's
+    /// rider 2): the app falls back to SwiftTerm's normal keystroke-path paste
+    /// — correct, just slower — rather than fragmenting a paste across the
+    /// ordered channel.
+    public static let maxPasteBytes = 4 * 1024 * 1024 - 64 * 1024
 
     /// Wrap `payload` in an outer frame with the given `type`.
     public static func encode(type: SidecarFrameType, payload: Data) -> Data {
@@ -63,20 +80,38 @@ public enum SidecarFrameCodec {
         return out
     }
 
-    /// Encode an input frame: JSON-encode `header`, prefix it with its length,
-    /// append `bytes`, then wrap the whole thing in a `.input` outer frame.
-    public static func encodeInput(header: SidecarInputHeader, bytes: Data) throws -> Data {
+    /// Build the shared sub-payload: JSON-encode `header`, prefix it with its
+    /// length, append `bytes`. The single sub-format implementation behind both
+    /// `.input` and `.paste`.
+    private static func encodeSubPayload(header: SidecarInputHeader, bytes: Data) throws -> Data {
         let headerJSON = try JSONEncoder().encode(header)
         var payload = Data(capacity: 4 + headerJSON.count + bytes.count)
         appendUInt32LE(&payload, UInt32(headerJSON.count))
         payload.append(headerJSON)
         payload.append(bytes)
-        return encode(type: .input, payload: payload)
+        return payload
     }
 
-    /// Decode an input frame's payload back into its header and raw bytes.
-    /// Throws `SidecarFramingError` on a truncated or undecodable payload.
-    public static func decodeInput(payload: Data) throws -> (header: SidecarInputHeader, bytes: Data) {
+    /// Encode a tagged frame (`.input` or `.paste`) around the shared sub-format.
+    public static func encodeTagged(
+        type: SidecarFrameType, header: SidecarInputHeader, bytes: Data) throws -> Data {
+        encode(type: type, payload: try encodeSubPayload(header: header, bytes: bytes))
+    }
+
+    /// Encode a keystroke `.input` frame.
+    public static func encodeInput(header: SidecarInputHeader, bytes: Data) throws -> Data {
+        try encodeTagged(type: .input, header: header, bytes: bytes)
+    }
+
+    /// Encode a bulk `.paste` frame (same sub-format as `.input`).
+    public static func encodePaste(header: SidecarInputHeader, bytes: Data) throws -> Data {
+        try encodeTagged(type: .paste, header: header, bytes: bytes)
+    }
+
+    /// Decode a tagged (`.input`/`.paste`) frame's payload back into its header
+    /// and raw bytes. Throws `SidecarFramingError` on a truncated or undecodable
+    /// payload. The sub-format is type-agnostic — one decoder serves both.
+    public static func decodeTagged(payload: Data) throws -> (header: SidecarInputHeader, bytes: Data) {
         guard payload.count >= 4 else { throw SidecarFramingError.truncatedPayload }
         let headerLength = Int(readUInt32LE(payload, at: 0))
         guard payload.count >= 4 + headerLength else { throw SidecarFramingError.truncatedPayload }
@@ -90,6 +125,11 @@ public enum SidecarFrameCodec {
         }
         let bytes = Data(payload[headerEnd..<payload.endIndex])
         return (header, bytes)
+    }
+
+    /// Decode an `.input` frame's payload (alias of `decodeTagged`).
+    public static func decodeInput(payload: Data) throws -> (header: SidecarInputHeader, bytes: Data) {
+        try decodeTagged(payload: payload)
     }
 }
 

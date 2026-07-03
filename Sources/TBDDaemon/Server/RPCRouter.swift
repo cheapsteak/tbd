@@ -212,8 +212,6 @@ public final class RPCRouter: Sendable {
                 return try await handleAttachReady(request.paramsData)
             case RPCMethod.paneDetach:
                 return try await handlePaneDetach(request.paramsData)
-            case RPCMethod.panePaste:
-                return try await handlePanePaste(request.paramsData)
             case RPCMethod.daemonCapabilities:
                 return try handleDaemonCapabilities()
             case RPCMethod.terminalSuspend:

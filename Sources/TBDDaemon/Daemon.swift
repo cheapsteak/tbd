@@ -447,6 +447,11 @@ public final class Daemon: Sendable {
         await fdVendingServer.setOnInput { [inputRouter = controlModeBridge.inputRouter] header, bytes in
             inputRouter.enqueue(header: header, bytes: bytes)
         }
+        // Bulk pastes ride the SAME router (and thus the same ordered stream) so
+        // a keystroke after a paste stays FIFO-behind it (the M2 paste ruling).
+        await fdVendingServer.setOnPaste { [inputRouter = controlModeBridge.inputRouter] header, bytes in
+            inputRouter.enqueuePaste(header: header, bytes: bytes)
+        }
 
         // 9b. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
         // app). Failure is non-fatal: control-mode attaches will fail and the

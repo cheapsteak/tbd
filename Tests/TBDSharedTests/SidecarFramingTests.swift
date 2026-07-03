@@ -147,6 +147,74 @@ struct SidecarFramingTests {
         }
     }
 
+    @Test("encodePaste/decodeTagged round-trips header and bytes over a .paste frame")
+    func pasteRoundTrip() throws {
+        let header = SidecarInputHeader(worktreeID: UUID(), paneID: "%7")
+        let bytes = Data("a large pasted blob".utf8)
+        let frameBytes = try SidecarFrameCodec.encodePaste(header: header, bytes: bytes)
+
+        let scanner = SidecarFrameScanner()
+        let frames = scanner.append(frameBytes)
+        #expect(frames.count == 1)
+        #expect(frames[0].type == SidecarFrameType.paste.rawValue)
+        let (decodedHeader, decodedBytes) = try SidecarFrameCodec.decodeTagged(payload: frames[0].payload)
+        #expect(decodedHeader == header)
+        #expect(decodedBytes == bytes)
+    }
+
+    @Test(".input and .paste share one sub-format: same sub-payload, only the outer type byte differs")
+    func sharedSubFormatEquivalence() {
+        // Wrap ONE shared sub-payload under both types via the public outer
+        // encoder — this proves "same sub-format, different tag" without
+        // depending on two independent JSONEncoder runs being byte-identical.
+        let subPayload = Data("shared-sub-format-bytes".utf8)
+        let inputFrame = SidecarFrameCodec.encode(type: .input, payload: subPayload)
+        let pasteFrame = SidecarFrameCodec.encode(type: .paste, payload: subPayload)
+
+        #expect(inputFrame.count == pasteFrame.count)
+        #expect(inputFrame[4] == SidecarFrameType.input.rawValue)
+        #expect(pasteFrame[4] == SidecarFrameType.paste.rawValue)
+        // Everything before and after the type byte is byte-identical.
+        #expect(inputFrame.prefix(4) == pasteFrame.prefix(4))
+        #expect(inputFrame.suffix(from: inputFrame.startIndex + 5)
+            == pasteFrame.suffix(from: pasteFrame.startIndex + 5))
+    }
+
+    @Test("encodeInput and encodePaste round-trip the same header+bytes through one decoder")
+    func inputPasteDecodeEquivalence() throws {
+        let header = SidecarInputHeader(worktreeID: UUID(), paneID: "%same")
+        let bytes = Data("identical payload".utf8)
+        let inputFrame = try SidecarFrameCodec.encodeInput(header: header, bytes: bytes)
+        let pasteFrame = try SidecarFrameCodec.encodePaste(header: header, bytes: bytes)
+
+        // decodeTagged decodes either frame's payload back to the same values.
+        let scanner = SidecarFrameScanner()
+        let inFrames = scanner.append(inputFrame)
+        let paFrames = scanner.append(pasteFrame)
+        let decodedIn = try SidecarFrameCodec.decodeTagged(payload: inFrames[0].payload)
+        let decodedPa = try SidecarFrameCodec.decodeTagged(payload: paFrames[0].payload)
+        #expect(decodedIn.header == header)
+        #expect(decodedPa.header == header)
+        #expect(decodedIn.bytes == bytes)
+        #expect(decodedPa.bytes == bytes)
+    }
+
+    @Test("a maxPasteBytes payload's encoded frame stays under the 4 MiB scanner cap")
+    func maxPasteBytesHeadroom() throws {
+        // Construct the frame length arithmetic cheaply — no 4 MiB allocation.
+        // Outer frameLength = 1 (type) + 4 (headerLen prefix) + headerJSON + payload.
+        let header = SidecarInputHeader(worktreeID: UUID(), paneID: "%0")
+        let headerJSONCount = try JSONEncoder().encode(header).count
+        let encodedFrameOuterLength = 1 + 4 + headerJSONCount + SidecarFrameCodec.maxPasteBytes
+        // The scanner rejects a declared frameLength > 4 MiB; our worst case must
+        // sit strictly under it (the cap carries 64 KiB of headroom for exactly
+        // this header + framing overhead).
+        let scannerCap = 4 * 1024 * 1024
+        #expect(encodedFrameOuterLength < scannerCap)
+        // And the total wire frame (4-byte length prefix + outer) is also under cap.
+        #expect(4 + encodedFrameOuterLength < scannerCap + 4)
+    }
+
     @Test("encode produces the documented [len][type][payload] layout")
     func encodeLayout() {
         let payload = Data("hi".utf8)

@@ -50,6 +50,13 @@ actor FDVendingServer {
     /// connection at adopt time. When nil, input frames are logged and dropped.
     var onInput: (@Sendable (SidecarInputHeader, Data) -> Void)?
 
+    /// Sink for app → daemon bulk `.paste` frames (the M2 paste ruling). Same
+    /// contract as `onInput`: set once by the daemon wiring BEFORE
+    /// `listen`/`adoptConnection`, captured per connection at adopt time. When
+    /// nil, paste frames are logged and dropped. Delivered from the SAME receive
+    /// thread as `onInput`, so wire order is preserved into the sinks.
+    var onPaste: (@Sendable (SidecarInputHeader, Data) -> Void)?
+
     /// Test seam: invoked from `receiveLoopExited` (on the actor) AFTER `clientFD`
     /// is cleared and the fd closed, so once it fires the stale fd is fully gone —
     /// tests can await deterministic post-cleanup state instead of sleeping.
@@ -59,6 +66,12 @@ actor FDVendingServer {
     /// — each connection captures the current sink at adopt time.
     func setOnInput(_ handler: (@Sendable (SidecarInputHeader, Data) -> Void)?) {
         onInput = handler
+    }
+
+    /// Install the paste sink. Must be called BEFORE `listen`/`adoptConnection`
+    /// — each connection captures the current sink at adopt time.
+    func setOnPaste(_ handler: (@Sendable (SidecarInputHeader, Data) -> Void)?) {
+        onPaste = handler
     }
 
     /// Install the receive-loop-exit test hook (see `onReceiveLoopExit`).
@@ -134,7 +147,7 @@ actor FDVendingServer {
         // The old reader will later call `receiveLoopExited(oldFD)`; its
         // `clientFD == fd` guard ensures that stale signal does NOT clear this
         // freshly-adopted `clientFD` (different fd number).
-        startReceiveThread(fd: fd, sink: onInput)
+        startReceiveThread(fd: fd, inputSink: onInput, pasteSink: onPaste)
         logger.info("FD vending client connected (fd \(fd, privacy: .public))")
     }
 
@@ -183,12 +196,15 @@ actor FDVendingServer {
     }
 
     /// Spawn the receive thread for one connection. The thread reads framed
-    /// bytes, decodes `.input` frames to `onInput`, and on exit (EOF, read error,
-    /// or scanner desync) signals `receiveLoopExited(fd:)` — it never closes `fd`
-    /// itself. The actor is the sole closer (see the type doc).
+    /// bytes, decodes `.input` frames to `inputSink` and `.paste` frames to
+    /// `pasteSink`, and on exit (EOF, read error, or scanner desync) signals
+    /// `receiveLoopExited(fd:)` — it never closes `fd` itself. The actor is the
+    /// sole closer (see the type doc). Both sinks are driven from THIS one
+    /// thread, so `.input`/`.paste` frames reach their sinks in wire order.
     private nonisolated func startReceiveThread(
         fd: Int32,
-        sink: (@Sendable (SidecarInputHeader, Data) -> Void)?
+        inputSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
+        pasteSink: (@Sendable (SidecarInputHeader, Data) -> Void)?
     ) {
         let logger = self.logger
         let thread = Thread { [weak self] in
@@ -210,14 +226,24 @@ actor FDVendingServer {
                     }
                     switch type {
                     case .input:
-                        guard let (header, bytes) = try? SidecarFrameCodec.decodeInput(payload: frame.payload) else {
+                        guard let (header, bytes) = try? SidecarFrameCodec.decodeTagged(payload: frame.payload) else {
                             logger.error("sidecar: undecodable input frame, dropping")
                             continue
                         }
-                        if let sink {
-                            sink(header, bytes)
+                        if let inputSink {
+                            inputSink(header, bytes)
                         } else {
                             logger.debug("sidecar: input frame with no onInput handler, dropping \(bytes.count, privacy: .public) bytes")
+                        }
+                    case .paste:
+                        guard let (header, bytes) = try? SidecarFrameCodec.decodeTagged(payload: frame.payload) else {
+                            logger.error("sidecar: undecodable paste frame, dropping")
+                            continue
+                        }
+                        if let pasteSink {
+                            pasteSink(header, bytes)
+                        } else {
+                            logger.debug("sidecar: paste frame with no onPaste handler, dropping \(bytes.count, privacy: .public) bytes")
                         }
                     case .fdVend:
                         // The app must never send fd vends — that direction is

@@ -122,6 +122,42 @@ final class FDSidecarClient: @unchecked Sendable {
         }
     }
 
+    /// Send bulk paste `bytes` for a pane to the daemon as a `.paste` frame (the
+    /// M2 paste ruling). Same serial `sendQueue` + inline-encode pattern as
+    /// `sendInput`, so a paste and a following keystroke stay FIFO-ordered on the
+    /// wire. Oversize payloads are dropped defensively — the view-level
+    /// `PasteInterception` gate already prevents them from reaching here.
+    func sendPaste(worktreeID: UUID, paneID: String, bytes: Data) {
+        guard bytes.count <= SidecarFrameCodec.maxPasteBytes else {
+            logger.fault("""
+                sidecar: sendPaste payload \(bytes.count, privacy: .public) bytes exceeds cap \
+                \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping (view gate should have prevented this)
+                """)
+            return
+        }
+        let frame: Data
+        do {
+            frame = try SidecarFrameCodec.encodePaste(
+                header: SidecarInputHeader(worktreeID: worktreeID, paneID: paneID), bytes: bytes)
+        } catch {
+            logger.error("sidecar: failed to encode paste frame, dropping \(bytes.count, privacy: .public) bytes")
+            return
+        }
+        sendQueue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
+            guard fd >= 0 else {
+                self.logger.error("sidecar: sendPaste while disconnected, dropping \(bytes.count, privacy: .public) bytes")
+                return
+            }
+            do {
+                try FDChannel.sendData(frame, over: fd)
+            } catch {
+                self.logger.error("sidecar: paste send failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
     private func receiveLoop(_ fd: Int32) {
         let scanner = SidecarFrameScanner()
         // FDs arrive in frame order (SCM_RIGHTS ancillary is delivered with the
@@ -153,10 +189,10 @@ final class FDSidecarClient: @unchecked Sendable {
                 case .fdVend:
                     let rxFD: Int32? = pendingFDs.isEmpty ? nil : pendingFDs.removeFirst()
                     handleFDVend(headerPayload: frame.payload, fd: rxFD)
-                case .input:
-                    // The daemon must never send input frames — that direction
-                    // is app → daemon only.
-                    logger.error("sidecar: received input frame from daemon (protocol violation), dropping")
+                case .input, .paste:
+                    // The daemon must never send input/paste frames — those
+                    // directions are app → daemon only.
+                    logger.error("sidecar: received \(frame.type, privacy: .public) frame from daemon (protocol violation), dropping")
                 }
             }
             if scanner.isDesynced {

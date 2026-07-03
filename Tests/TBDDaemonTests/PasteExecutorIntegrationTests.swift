@@ -159,6 +159,60 @@ struct PasteExecutorIntegrationTests {
         await supervisor.stopAll()
     }
 
+    /// Like `startRawCapture`, but the pane first enables bracketed-paste mode
+    /// (DECSET 2004) by writing `\e[?2004h` to its tty BEFORE going raw. tmux
+    /// parses that from the pane's output and marks the pane bracketed, so a
+    /// later `paste-buffer -p` wraps the payload with `\e[200~`…`\e[201~`.
+    /// `exec head` makes `head` the pane's own process (see `startRawCapture`).
+    private func startBracketedCapture(server: String, count: Int, outputPath: String) async throws -> String {
+        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main", "-x", "200", "-y", "50",
+                           "/bin/sh", "-c",
+                           "printf '\\033[?2004h' > /dev/tty; stty raw -echo; exec head -c \(count) > \(outputPath)"]),
+                     "failed to bootstrap bracketed-capture tmux session")
+        let paneID = try #require(tmuxCapture(["-L", server, "display-message", "-t", "main", "-p", "#{pane_id}"]),
+                                  "could not resolve pane id")
+        try await awaitPaneCommand(server: server, paneID: paneID, command: "head", timeout: .seconds(15))
+        return paneID
+    }
+
+    /// Proves `paste-buffer -p` ADAPTS to the pane's bracketed-paste mode: when
+    /// the pane has enabled DECSET 2004, tmux wraps the paste with the bracketed
+    /// markers. This is the counterpart to `roundTripVerbatim` (bracketed OFF →
+    /// `-p` adds nothing): together they show tmux — not the app — is the
+    /// wrapping authority (the M2 paste ruling).
+    ///
+    /// The 12 wrapper bytes are `ESC [ 2 0 0 ~` (6) + `ESC [ 2 0 1 ~` (6), so the
+    /// pane captures `payload.count + 12` bytes total.
+    @Test("paste-buffer -p wraps with bracketed markers when the pane enabled DECSET 2004")
+    func bracketedPaneGetsWrappedPaste() async throws {
+        guard let version = await TmuxVersion.detect(),
+              version >= TmuxVersion.controlModeMinimum else { return }
+
+        let server = "tbd-paste-\(UUID().uuidString.prefix(8))"
+        defer { tmux(["-L", server, "kill-server"]) }
+
+        let outPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-paste-brk-\(UUID().uuidString).txt").path
+        defer { try? FileManager.default.removeItem(atPath: outPath) }
+
+        let payload = makePayload(byteCount: 4 * 1024)
+        let start = Data([0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e])   // ESC[200~
+        let end = Data([0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e])     // ESC[201~
+        let expected = start + payload + end
+
+        let paneID = try await startBracketedCapture(
+            server: server, count: expected.count, outputPath: outPath)
+
+        let supervisor = TmuxControlSupervisor()
+        await supervisor.ensureConnection(serverName: server)
+        let client = try await awaitClient(supervisor, server: server)
+
+        try await PasteExecutor.paste(client: client, paneID: paneID, bytes: payload)
+
+        try await awaitFileBytes(path: outPath, expected: expected, timeout: .seconds(15))
+        await supervisor.stopAll()
+    }
+
     @Test("two back-to-back pastes use unique buffers and land both payloads in order")
     func uniqueBuffersInOrder() async throws {
         guard let version = await TmuxVersion.detect(),

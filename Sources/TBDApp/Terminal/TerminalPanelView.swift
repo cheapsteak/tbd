@@ -529,6 +529,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 clickMonitor = nil
             }
             tmuxBridge?.cleanupSession(panelID: panelID, server: tmuxServer)
+            (terminalView as? TBDTerminalView)?.onLargePaste = nil
             if let attach = controlModeAttach, let appState {
                 controlModeAttach = nil
                 Task {
@@ -576,6 +577,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         }
                     }
                 try await appState.daemonClient.attachReady(worktreeID: worktreeID, paneID: paneID)
+                // Intercept LARGE pastes at the view level and ship them as a
+                // `.paste` sidecar frame (the M2 paste ruling). Interception
+                // happens BEFORE SwiftTerm brackets the content, so the
+                // daemon-side `paste-buffer -p` is the wrapping authority.
+                // Returns true → the paste is handled here; false → SwiftTerm's
+                // normal keystroke-path paste runs (≤4 KiB or oversize).
+                (terminalView as? TBDTerminalView)?.onLargePaste = { [weak self] data in
+                    guard let self,
+                          PasteInterception.shouldIntercept(
+                            controlModeAttached: self.controlModeAttach != nil, byteCount: data.count)
+                    else { return false }
+                    self.appState?.daemonClient.fdSidecar.sendPaste(
+                        worktreeID: worktreeID, paneID: paneID, bytes: data)
+                    return true
+                }
                 logger.info("control-mode attach live for pane \(paneID, privacy: .public)")
             } catch {
                 logger.warning("""
@@ -583,6 +599,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     falling back to grouped sessions: \(error.localizedDescription, privacy: .public)
                     """)
                 controlModeAttach = nil
+                (terminalView as? TBDTerminalView)?.onLargePaste = nil
                 // Best-effort teardown of any half-completed attach (e.g. fd
                 // received and reader registered, but attach.ready failed):
                 // detach so the daemon EOFs the pipe, then flag the reader.
@@ -668,20 +685,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             case .localPTY:
                 localProcess?.send(data: data)
             case .sidecarInput:
+                // Keystrokes (and ≤4 KiB pastes SwiftTerm already bracketed) ride
+                // the sidecar. Large pastes never reach here — they're intercepted
+                // at the view level and shipped as a `.paste` frame BEFORE
+                // SwiftTerm brackets them (see TBDTerminalView.paste + the
+                // `onLargePaste` wiring in startControlModeClient).
                 guard let attach = controlModeAttach else { return }
                 appState?.daemonClient.fdSidecar.sendInput(
                     worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: Data(data))
-            case .pasteRPC:
-                guard let attach = controlModeAttach else { return }
-                // Bulk pastes ride the RPC socket (load-buffer + paste-buffer),
-                // not the keystroke sidecar. A keystroke typed in the same
-                // instant travels the sidecar and can overtake this paste — two
-                // channels, no cross-channel ordering. Accepted by the
-                // addendum's design: pastes are not keystroke-latency-sensitive.
-                Task { [weak appState] in
-                    try? await appState?.daemonClient.panePaste(
-                        worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: Data(data))
-                }
             }
         }
 
