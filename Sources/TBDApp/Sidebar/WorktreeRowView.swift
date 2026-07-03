@@ -131,6 +131,9 @@ struct WorktreeRowView: View {
                             appState.worktrees[repoID]?[idx].displayName = newName
                         }
                     }
+                    if let idx = appState.scratchWorktrees.firstIndex(where: { $0.id == worktree.id }) {
+                        appState.scratchWorktrees[idx].displayName = newName
+                    }
                     Task {
                         await appState.renameWorktree(id: worktree.id, displayName: newName)
                     }

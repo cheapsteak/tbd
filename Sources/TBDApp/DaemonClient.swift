@@ -478,6 +478,14 @@ actor DaemonClient {
         )
     }
 
+    /// Delete a scratch worktree: closes its terminals and moves its folder to Trash.
+    func deleteScratch(worktreeID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.scratchDelete,
+            params: ScratchDeleteParams(worktreeID: worktreeID)
+        )
+    }
+
     /// List local + `origin/*` branches for a repo. Used by the existing-
     /// branch picker on the sidebar `+` button.
     func listBranches(repoID: UUID) async throws -> [BranchInfo] {

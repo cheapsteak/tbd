@@ -5,6 +5,7 @@ import TBDShared
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
     @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
+    @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
 
     var filteredRepos: [Repo] {
         let base: [Repo]
@@ -19,6 +20,9 @@ struct SidebarView: View {
     var body: some View {
         ScrollViewReader { proxy in
             List(selection: $appState.selectedWorktreeIDs) {
+                if AppState.scratchSectionVisible(setting: showScratchSection, spaces: appState.scratchWorktrees) {
+                    ScratchSectionView()
+                }
                 ForEach(filteredRepos) { repo in
                     RepoSectionView(repo: repo)
                         .opacity(repo.hidden ? 0.55 : 1.0)

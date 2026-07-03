@@ -71,6 +71,34 @@ extension AppState {
         }
     }
 
+    /// Create a repo-less scratch space and select it once the daemon confirms.
+    func createScratch() {
+        Task {
+            do {
+                let wt = try await daemonClient.createScratch()
+                scratchWorktrees.append(wt)
+                selectedWorktreeIDs = [wt.id]
+                editingWorktreeID = wt.id
+            } catch {
+                logger.error("Failed to create scratch space: \(error)")
+                handleConnectionError(error)
+            }
+        }
+    }
+
+    /// Delete a scratch space: closes its terminals and moves its folder to Trash.
+    func deleteScratch(id: UUID) {
+        Task {
+            do {
+                try await daemonClient.deleteScratch(worktreeID: id)
+                scratchWorktrees.removeAll { $0.id == id }
+            } catch {
+                logger.error("Failed to delete scratch space: \(error)")
+                handleConnectionError(error)
+            }
+        }
+    }
+
     /// List local + remote tracking branches for a repo, for the existing-
     /// branch picker on the sidebar `+` button. Rethrows so the picker can
     /// distinguish a fetch failure from a genuinely empty branch list.

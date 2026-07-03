@@ -53,6 +53,7 @@ extension AppState {
         for repoID in worktrees.keys {
             worktrees[repoID]?.removeAll { $0.id == id }
         }
+        scratchWorktrees.removeAll { $0.id == id }
         // If the archived worktree was the *only* selection, dropping it would
         // leave an empty detail pane — instead navigate back through history
         // to the previous still-valid view. Multi-select and not-selected

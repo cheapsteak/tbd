@@ -53,4 +53,46 @@ extension RPCRouter {
         scratchLogger.info("scratch.create: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return try RPCResponse(result: wt)
     }
+
+    func handleScratchDelete(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ScratchDeleteParams.self, from: paramsData)
+        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+            return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
+        }
+        guard wt.isScratch else {
+            return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
+        }
+
+        // Close terminals: kill tmux windows, delete terminals + tabs, clear
+        // pending questions + per-session overlays (mirrors forgetWorktree).
+        let terminals = try await db.terminals.list(worktreeID: wt.id)
+        for t in terminals {
+            try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
+        }
+        try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+        try await db.tabs.deleteForWorktree(worktreeID: wt.id)
+        for t in terminals {
+            await pendingQuestions.clear(terminalID: t.id)
+            ClaudeHookOverlay.removePerSessionOverlay(sessionKey: t.id.uuidString)
+        }
+
+        // Move the folder to Trash — never rm -rf. Promoted rows already had
+        // their folder moved by promotion, so skip when promotedToRepoID != nil.
+        // (promotedToRepoID is nil for every row today — Task 8 introduces
+        // `scratch promote`, which will start setting it — so this branch is
+        // currently dead but load-bearing once promotion lands.)
+        if wt.promotedToRepoID == nil, FileManager.default.fileExists(atPath: wt.path) {
+            var resulting: NSURL?
+            do {
+                try FileManager.default.trashItem(at: URL(fileURLWithPath: wt.path), resultingItemURL: &resulting)
+            } catch {
+                scratchLogger.warning("scratch.delete: trashItem failed for \(wt.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return RPCResponse(error: "Could not move folder to Trash: \(error.localizedDescription)")
+            }
+        }
+
+        try await db.worktrees.delete(id: wt.id)
+        subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
+        return .ok()
+    }
 }

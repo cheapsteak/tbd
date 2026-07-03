@@ -9,7 +9,27 @@ struct SidebarContextMenu: View {
 
     var body: some View {
         Group {
-            if worktree.status == .main || worktree.status == .creating {
+            if worktree.isScratch {
+                Button("Rename...") {
+                    onRename()
+                }
+                if worktree.promotedToRepoID == nil {
+                    Text("To promote: run `tbd scratch promote <dest>` from a session here")
+                        .font(.caption)
+                }
+                Divider()
+                Button("Open in Finder") {
+                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: worktree.path)
+                }
+                Button("Copy Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(worktree.path, forType: .string)
+                }
+                Divider()
+                Button("Delete Scratch Space", role: .destructive) {
+                    appState.deleteScratch(id: worktree.id)
+                }
+            } else if worktree.status == .main || worktree.status == .creating {
                 // Main / creating worktree: only Finder and Copy Path (no rename/archive)
                 if !worktree.path.isEmpty {
                     Button("Open in Finder") {

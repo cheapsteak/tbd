@@ -37,6 +37,7 @@ struct GeneralSettingsTab: View {
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = false
     @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript: Bool = true
+    @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
@@ -132,6 +133,9 @@ struct GeneralSettingsTab: View {
                     set: { newValue in Task { await appState.setAutoArchiveOnMergeDefault(newValue) } }
                 ))
                 .help("Default for new worktrees. Each worktree can override this from its toolbar toggle.")
+
+                Toggle("Show Scratch section", isOn: $showScratchSection)
+                    .help("Hide the repo-less Scratch section. Existing scratch spaces and their terminals keep running.")
             }
 
             Section("Claude") {
