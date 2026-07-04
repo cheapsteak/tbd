@@ -141,6 +141,12 @@ struct GeneralSettingsTab: View {
             Section("Claude") {
                 Toggle("Launch claude with --dangerously-skip-permissions", isOn: $skipPermissions)
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
+                Toggle("Auto-resume Claude sessions when the usage limit resets",
+                       isOn: Binding(
+                    get: { appState.autoResumeOnLimitReset },
+                    set: { newValue in Task { await appState.setAutoResumeOnLimitReset(newValue) } }
+                ))
+                .help("When a session hits the usage limit, TBD schedules a resume for the reset time and types \"continue\" into the pane. Off by default; detection and notifications run regardless.")
             }
 
             Section("Session Hibernation") {
