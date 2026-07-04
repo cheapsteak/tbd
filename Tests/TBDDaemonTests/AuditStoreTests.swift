@@ -7,7 +7,7 @@ import TBDShared
 struct AuditStoreTests {
 
     @Test("Log action and retrieve")
-    async func logActionAndRetrieve() throws {
+    func logActionAndRetrieve() async throws {
         let db = try TBDDatabase(inMemory: true)
         let entry = AuditLogEntry(
             action: .wouldMerge,
@@ -24,7 +24,7 @@ struct AuditStoreTests {
     }
 
     @Test("List audit entries by time range")
-    async func listByTimeRange() throws {
+    func listByTimeRange() async throws {
         let db = try TBDDatabase(inMemory: true)
         let now = Date()
         let oneHourAgo = now.addingTimeInterval(-3600)
@@ -47,7 +47,7 @@ struct AuditStoreTests {
     }
 
     @Test("List audit entries by action")
-    async func listByAction() throws {
+    func listByAction() async throws {
         let db = try TBDDatabase(inMemory: true)
 
         try await db.audit.logAction(AuditLogEntry(action: .wouldMerge, prNumber: 1))
@@ -64,7 +64,7 @@ struct AuditStoreTests {
     }
 
     @Test("Count audit entries by action")
-    async func countByAction() throws {
+    func countByAction() async throws {
         let db = try TBDDatabase(inMemory: true)
 
         try await db.audit.logAction(AuditLogEntry(action: .wouldMerge, prNumber: 1))
@@ -81,7 +81,7 @@ struct AuditStoreTests {
     }
 
     @Test("Audit entries ordered by timestamp descending")
-    async func entriesOrderedByTimestamp() throws {
+    func entriesOrderedByTimestamp() async throws {
         let db = try TBDDatabase(inMemory: true)
         let now = Date()
 
@@ -102,7 +102,7 @@ struct AuditStoreTests {
     }
 
     @Test("Audit details captured in JSON")
-    async func detailsCapture() throws {
+    func detailsCapture() async throws {
         let db = try TBDDatabase(inMemory: true)
         let details = #"{"reason":"high_impact_domain","domain":".nightwatch"}"#
         let entry = AuditLogEntry(

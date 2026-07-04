@@ -7,7 +7,7 @@ import TBDShared
 struct ClearanceStoreTests {
 
     @Test("Insert and retrieve clearance")
-    async func insertAndRetrieve() throws {
+    func insertAndRetrieve() async throws {
         let db = try TBDDatabase(inMemory: true)
         let clearance = Clearance(
             prNumber: 42,
@@ -25,7 +25,7 @@ struct ClearanceStoreTests {
     }
 
     @Test("Void clearance by ID")
-    async func voidByID() throws {
+    func voidByID() async throws {
         let db = try TBDDatabase(inMemory: true)
         let clearance = Clearance(
             prNumber: 42,
@@ -42,7 +42,7 @@ struct ClearanceStoreTests {
     }
 
     @Test("List clearances by PR")
-    async func listByPR() throws {
+    func listByPR() async throws {
         let db = try TBDDatabase(inMemory: true)
 
         let c1 = Clearance(id: "id1", prNumber: 42, repo: "test/repo", clearedWhenSHA: "abc123", clearanceKind: .small_safe)
@@ -62,7 +62,7 @@ struct ClearanceStoreTests {
     }
 
     @Test("Audit trail excludes voided clearances")
-    async func auditTrailExcludesVoided() throws {
+    func auditTrailExcludesVoided() async throws {
         let db = try TBDDatabase(inMemory: true)
 
         let c1 = Clearance(id: "id1", prNumber: 42, repo: "test/repo", clearedWhenSHA: "abc123", clearanceKind: .small_safe)
@@ -78,7 +78,7 @@ struct ClearanceStoreTests {
     }
 
     @Test("Void by SHA affects multiple clearances")
-    async func voidBySHAMultiple() throws {
+    func voidBySHAMultiple() async throws {
         let db = try TBDDatabase(inMemory: true)
 
         let c1 = Clearance(id: "id1", prNumber: 42, repo: "test/repo", clearedWhenSHA: "abc123", clearanceKind: .small_safe)
