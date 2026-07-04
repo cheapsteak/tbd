@@ -112,17 +112,19 @@ second.
 
 At fire time, in order — every step is a mined landmine:
 
-1. **Eligibility.** Terminal alive; toggle still on; Claude is the pane's
-   foreground process — check `ps -o stat=` for the `+` flag, because tmux
-   `#{pane_current_command}` reports `zsh` on macOS. Never type into a bare
-   shell.
+1. **Terminal alive.** Terminal alive; toggle still on.
 2. **User-already-continued.** If the transcript has any record newer than
    the limit record, mark `cancelled`, send nothing.
-3. **Copy-mode.** If `#{pane_in_mode}` is set, the send would go to copy-mode,
+3. **Foreground.** Claude is the pane's foreground process — check
+   `ps -o stat=` for the `+` flag, because tmux `#{pane_current_command}`
+   reports `zsh` on macOS. Never type into a bare shell. Checked before
+   copy-mode: a dead/backgrounded shell should classify `failed` rather than
+   endlessly rescheduling on a stale copy-mode flag.
+4. **Copy-mode.** If `#{pane_in_mode}` is set, the send would go to copy-mode,
    not Claude — and cancelling copy-mode would yank the user out of scrollback.
    Reschedule +2min, up to 15 attempts (~30min), then mark `failed` with an
    attention notification — don't cancel their scroll.
-4. **Send sequence** (via `handleTerminalSend`-level API):
+5. **Send sequence** (via `handleTerminalSend`-level API):
    `Escape` → sleep 150ms → `send-keys -l "continue"` → sleep 150ms →
    `Enter` as a separate named-key call.
    - Escape first: at the limit, newer Claude Code opens the
@@ -133,10 +135,13 @@ At fire time, in order — every step is a mined landmine:
      (autoclaude shipped "ontinue"), and text+Enter in one send-keys call is
      treated as a bracketed paste — the Enter becomes a literal newline and
      nothing submits.
-5. **Verify.** Within ~20s expect the activity hook to report `working` (or
+6. **Verify.** Within ~20s expect the activity hook to report `working` (or
    the transcript to grow). Success → status `sent` + success notification.
-   No signal → one retry of steps 1–4, then status `failed` + attention
-   notification. (autoclaude never verified; a swallowed send was silently
+   No signal → one retry of steps 1–5 (eligibility is re-checked fresh on the
+   retry — a copy-mode or user-continued state entered during the first
+   attempt's verify window is caught before blindly resending), then status
+   `failed` + attention notification. (autoclaude never verified; a swallowed
+   send was silently
    lost.)
 
 ## Cancellation
