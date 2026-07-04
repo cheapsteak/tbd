@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TBDShared
 
@@ -16,11 +17,7 @@ struct ScratchSectionView: View {
                 .foregroundStyle(appState.selectedScratchSection ? .primary : .secondary)
             Spacer()
             if isHeaderHovered {
-                Button { appState.createScratch() } label: {
-                    Image(systemName: "plus")
-                }
-                .buttonStyle(HoverPressButtonStyle())
-                .help("New scratch space")
+                SectionHeaderPlusButton(help: "New scratch space", action: { appState.createScratch() })
             }
         }
         .background(Color.white.opacity(0.0001))
@@ -42,13 +39,22 @@ struct ScratchSectionView: View {
         .listRowBackground(Color.clear)
 
         if appState.scratchWorktrees.isEmpty {
-            Text("No scratch spaces — click + to create one")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .listRowInsets(EdgeInsets(top: 2, leading: 14, bottom: 4, trailing: 0))
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
+            Button {
+                appState.createScratch()
+            } label: {
+                Text("Click to create scratch space")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering in
+                if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+            .listRowInsets(EdgeInsets(top: 2, leading: 14, bottom: 4, trailing: 0))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
         }
 
         ForEach(appState.scratchWorktrees) { wt in
