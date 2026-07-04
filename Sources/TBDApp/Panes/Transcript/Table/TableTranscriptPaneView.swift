@@ -288,15 +288,21 @@ struct TableTranscriptPaneView: View {
             let result = try await appState.daemonClient.terminalTranscript(terminalID: terminalID)
             failureCount = 0
             let resolvedSID = result.sessionID ?? sid
-            await MainActor.run {
-                let prev = appState.sessionTranscripts[resolvedSID] ?? []
-                if prev != result.messages {
-                    appState.sessionTranscripts[resolvedSID] = result.messages
-                    appState.touchSessionTranscript(resolvedSID)
-                }
-                if !result.messages.isEmpty {
-                    hasShownInitialMessages = true
-                }
+            // `prev` is a cheap COW snapshot taken on the main actor; the deep
+            // equality compare then runs in a detached task so a long
+            // transcript never burns main-thread time proving "nothing
+            // changed" on an idle tick (#129 territory).
+            let prev = appState.sessionTranscripts[resolvedSID] ?? []
+            let newMessages = result.messages
+            let didChange = await Task.detached(priority: .userInitiated) {
+                TranscriptPollDiff.changed(prev: prev, new: newMessages)
+            }.value
+            if didChange {
+                appState.sessionTranscripts[resolvedSID] = newMessages
+                appState.touchSessionTranscript(resolvedSID)
+            }
+            if !newMessages.isEmpty {
+                hasShownInitialMessages = true
             }
         } catch {
             failureCount += 1
