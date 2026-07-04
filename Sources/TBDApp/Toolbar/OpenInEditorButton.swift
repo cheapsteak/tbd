@@ -19,11 +19,14 @@ private let knownEditors: [ExternalEditor] = [
     ExternalEditor(name: "Finder",          bundleID: "com.apple.finder"),
 ]
 
-private func installedEditors() -> [(editor: ExternalEditor, appURL: URL)] {
-    knownEditors.compactMap { editor in
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: editor.bundleID) else { return nil }
-        return (editor, url)
-    }
+// Resolved once per process: each lookup is a Launch Services round-trip
+// (~10 `urlForApplication` calls for the full list), and the installed-app
+// set is process-stable — paying it per body evaluation made every hover
+// toggle re-query Launch Services. An editor installed mid-session appears
+// after the next app launch.
+private let installedEditors: [(editor: ExternalEditor, appURL: URL)] = knownEditors.compactMap { editor in
+    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: editor.bundleID) else { return nil }
+    return (editor, url)
 }
 
 private let intelliJBundleIDs: Set<String> = ["com.jetbrains.intellij", "com.jetbrains.intellij.ce"]
@@ -86,7 +89,24 @@ struct OpenInEditorButton: View {
     @State private var recentBundleIDs: [String] = []
     @State private var hovering: String? = nil
 
-    private var available: [(editor: ExternalEditor, appURL: URL)] { installedEditors() }
+    private var available: [(editor: ExternalEditor, appURL: URL)] { installedEditors }
+
+    /// App icons keyed by app path. The NSImage must be identity-stable
+    /// across body evaluations — `Image(nsImage:)` diffs by object identity,
+    /// so a fresh `NSWorkspace.icon(forFile:)` per render rebuilt every
+    /// pinned editor's icon layer on each hover toggle. Same rationale as
+    /// `WorktreeRowView.iconCache`. MainActor confinement (SwiftUI body runs
+    /// on main) makes this safe without locks.
+    @MainActor
+    private static var iconCache: [String: NSImage] = [:]
+
+    @MainActor
+    private static func appIcon(forPath path: String) -> NSImage {
+        if let cached = iconCache[path] { return cached }
+        let icon = NSWorkspace.shared.icon(forFile: path)
+        iconCache[path] = icon
+        return icon
+    }
 
     private var pinnedEditors: [(editor: ExternalEditor, appURL: URL)] {
         let byID = Dictionary(uniqueKeysWithValues: available.map { ($0.editor.bundleID, $0) })
@@ -115,7 +135,7 @@ struct OpenInEditorButton: View {
     var body: some View {
         HStack(spacing: 2) {
             ForEach(pinnedEditors, id: \.editor.bundleID) { entry in
-                Image(nsImage: NSWorkspace.shared.icon(forFile: entry.appURL.path))
+                Image(nsImage: Self.appIcon(forPath: entry.appURL.path))
                     .resizable()
                     .scaledToFit()
                     .frame(width: 16, height: 16)
