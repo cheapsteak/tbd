@@ -223,9 +223,11 @@ compounding-error and runaway-spawn risks.
 
 So the tree is **allowed but capped and shallow**:
 
-- **Depth cap = 2** by default (Nightwatch → child; a child may spawn its own workers only
-  up to total depth 3, and only past a backpressure check). Configurable in policy, but the
-  daemon enforces a hard ceiling.
+- **Depth cap = 2 (decided).** Nightwatch → child, and children do **not** spawn their own
+  children. This matches what tonight actually ran (~depth-1), keeps the tree trivial to
+  reason about and cap, and sidesteps the semantic error-compounding the stress-test flagged
+  for deeper trees (§17, Claim 3). The daemon enforces the ceiling; the parent-premise token
+  below still applies to the one spawn level.
 - **Fan-out + total caps.** Max concurrent children per parent, and a **fleet-wide total
   live-agent cap**. The daemon refuses a spawn RPC past the cap (compiled backstop against
   the "40 PRs × 3 agent types = 120 agents" runaway in Counter #2).
@@ -357,7 +359,7 @@ Three properties the floor must have (plan-review, security):
 |---|---|
 | **(a) Pre-clear** (HTML pre-flight) | Clearance is **pinned to the head SHA at clear time.** If the head advances (rebase, new commit), the clearance is void until re-verified that claude-approval survived on the new head. Directly answers the #13781 "approval didn't survive the force-push" incident. |
 | **(b) Small + safe** | Non-sensitive path + SAFETY_FLOOR + **size bound** (diff/commit count) + no "large-decision" or "wanted-to-test" marker + authoring-worktree-not-live. Default posture **conservative** (because small still ships to prod, §3); the path list + size bounds live in **editable policy**, not compiled, so "safe" can evolve without a rebuild (answers Counter #3's decaying-heuristic point). |
-| **(c) In-channel grant** | The riskiest. Made safe by **capturing the grant as a structured token at utterance time, not re-derived later from scrollback.** When the human types "you can merge #14030" in an agent's channel, the agent registers a clearance via `tbd` **scoped to that exact PR number**, SHA-pinned, immediately. If an agent cannot pin a grant to a specific PR number, it **escalates instead of merging** — never a free-text "I believe I was told." Still subject to SAFETY_FLOOR + hard holds. This is the direct guard against Counter #1's "Slack message misread as a deploy signal." **Two authz additions (plan-review, security):** (1) **who may grant** — only an allowlisted human (Adam, by Slack user-id); a grant from anyone else escalates, never clears. (2) **the grant must be a fresh, timestamped ledger entry registered at utterance time** — the gate refuses any merge whose clearance was reconstructed from scrollback (no matching timestamped row → escalate). Optionally the agent **echoes back** ("I'll auto-merge #14030 when green — registered") so a misread is caught before it's load-bearing (§15, fork 2). |
+| **(c) In-channel grant** | The riskiest. Made safe by **capturing the grant as a structured token at utterance time, not re-derived later from scrollback.** When the human types "you can merge #14030" in an agent's channel, the agent registers a clearance via `tbd` **scoped to that exact PR number**, SHA-pinned, immediately. If an agent cannot pin a grant to a specific PR number, it **escalates instead of merging** — never a free-text "I believe I was told." Still subject to SAFETY_FLOOR + hard holds. This is the direct guard against Counter #1's "Slack message misread as a deploy signal." **Two authz additions (plan-review, security):** (1) **who may grant** — only an allowlisted human (Adam, by Slack user-id); a grant from anyone else escalates, never clears. (2) **the grant must be a fresh, timestamped ledger entry registered at utterance time** — the gate refuses any merge whose clearance was reconstructed from scrollback (no matching timestamped row → escalate). (3) **the agent MUST echo back** ("I'll auto-merge #14030 when green — registered") and the clearance is not load-bearing until that echo is posted — **decided**: a misread is caught by the human *before* it can merge, not surfaced after the fact in the wrap-up. This is the counter-review's most-damaging vector (Slack-message-misread-as-deploy), closed at the cost of one turn. |
 
 ### 7.3 The clearance ledger (native)
 
@@ -413,6 +415,30 @@ changed paths, size, or author — all three are required by the gate. Extend
 `PRStatusManager.refresh()` to also fetch `gh pr view --json files,commits,author` and add
 those fields to `PRStatus` (`Models.swift:560–572`). This is the one unavoidable native PR
 extension.
+
+### 7.6 Auto-merge posture is a setting the adopter tunes, not a stance the design bakes in
+
+**Decided (Adam):** the design does not hardcode "how aggressive is auto-merge." It ships an
+**auto-merge posture setting** — a global default plus a **per-repo override** — that an
+adopter sets and raises at their own pace, with prose guidance. The setting is an ordered
+ladder; each rung is a strict superset of the one below, and the compiled SAFETY_FLOOR + hard
+holds (§7.1) apply at *every* rung above `off`:
+
+| Posture | What auto-merges | Who it's for |
+|---|---|---|
+| **`off`** (default) | Nothing. Nightwatch drives PRs to *ready* and hands the merge press to the human — exactly today's behavior (`judge.py`). Pre-clears and in-channel grants still register, but only *escalate*. | Everyone on night one. The observe-only period: watch the wrap-up's "would have merged" list for weeks, build trust, *then* raise. |
+| **`small_safe`** | The auto-clear rule only (§7.2b): non-sensitive, under the compiled size ceiling, floor-clean, author-not-live. | A repo whose small/doc/test PRs are safe to ship unattended and where the adopter has watched `off` behave. |
+| **`cleared`** | small+safe **plus** SHA-pinned pre-clears (§7.2a) and echo-confirmed in-channel grants (§7.2c). | A repo where the adopter actively pre-flights and grants, and trusts the union gate. |
+
+Implementation: a `nightwatchAutoMergePosture` global on `Config` + a per-repo override on
+`Repo` (both new fields, migration + optional Codable defaults per CLAUDE.md), mirroring the
+existing per-repo `customInstructions`/override pattern. **The prose that ships with it**
+(skill docs + the setting's help text) is itself a deliverable: it must tell an adopter to
+start at `off`, read the wrap-up's would-have-merged set until they trust it, raise a single
+repo to `small_safe`, and only reach `cleared` once the pre-flight/grant flow is habitual —
+and that every rung above `off` on a prod-auto-deploying repo carries the conceded residual
+(§17, Claim 1). Posture is a *dial the human owns*, which is the honest resolution: the design
+provides the safe mechanism and the guidance; the adopter chooses the aggression.
 
 ---
 
@@ -638,14 +664,16 @@ the night's incidents). The cost/scale numbers rest on **T3** and are labelled a
 
 ## 15. Open questions / forks for Adam
 
-1. **Auto-merge default posture.** Ship with auto-merge **off** (drive-to-ready only, like
-   today) until the ledger + floor + audit are proven, then flip on per-repo? Or enable the
-   small+safe path from day one for non-sensitive PRs? (Recommendation: off first.)
-2. **In-channel grants — how much to trust.** Require the agent to *echo back* the grant for
-   confirmation ("I'll auto-merge #14030 when green — registered"), or accept silent capture?
-   The echo costs a turn but closes the misread risk further.
-3. **Tree depth.** Is depth-2 (Nightwatch → children, no grandchildren) enough, or is the
-   PR-babysitter-spawns-per-PR-workers pattern needed (depth-3)? The night ran depth-1.
+1. **Auto-merge default posture.** ✅ **Decided (Adam):** not a baked-in stance — an
+   adopter-tuned **setting** (`off` → `small_safe` → `cleared`), global default `off` with a
+   per-repo override, shipped with prose guidance to start at `off` and raise per-repo after
+   an observe-only period. See §7.6.
+2. **In-channel grants — how much to trust.** ✅ **Decided (Adam):** the agent **must
+   echo back** the grant ("I'll auto-merge #14030 when green — registered") and the clearance
+   is not load-bearing until it does — the misread is caught before it can merge, not after.
+   See §7.2c.
+3. **Tree depth.** ✅ **Decided (Adam): depth-2** — Nightwatch → children, no grandchildren.
+   See §6.1.
 4. **Spawn mechanism.** Subprocess `tbd` (Shape 1-A, zero new RPC) vs. daemon-private
    `watchtree.spawn` RPC (1-B)? Recommendation: subprocess first.
 5. **Where the knowledge tree lives** — is it the existing `docs/knowledge/INDEX.md`
