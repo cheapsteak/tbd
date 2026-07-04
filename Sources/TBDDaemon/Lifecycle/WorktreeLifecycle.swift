@@ -66,6 +66,9 @@ public struct WorktreeLifecycle: Sendable {
     /// Reaper grace knobs (kept small in tests to avoid real sleeps).
     public let reaperGraceAttempts: Int
     public let reaperPollInterval: Duration
+    /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
+    /// An actor reference, so every copy of this struct shares one cache.
+    public let conflictSweepCache = ConflictSweepCache()
 
     /// Default `preSession` hook timeout (production value).
     public static let defaultPreSessionTimeout: TimeInterval = 600

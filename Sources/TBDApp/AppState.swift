@@ -1066,6 +1066,7 @@ final class AppState: ObservableObject {
                         self.isConnected = didConnect
                         if didConnect {
                             self.pushClaudeSpawnPreferences()
+                            self.pushForegroundState()
                         } else if !AppState.pidFilePointsAtLiveDaemon() {
                             // The socket file exists but nothing accepted the
                             // connection, and the pid file doesn't name a live
@@ -1134,6 +1135,7 @@ final class AppState: ObservableObject {
             startSubscription()
             await refreshPRStatuses()
             pushClaudeSpawnPreferences()
+            pushForegroundState()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }
@@ -1723,6 +1725,17 @@ final class AppState: ObservableObject {
         Task { [daemonClient] in
             try? await daemonClient.setClaudeSpawnPreferences(
                 ClaudeSpawnPreferences(settingOverrides: overrides))
+        }
+    }
+
+    /// Push the app's current foreground state to the daemon. Called on every
+    /// (re)connect: the daemon defaults to background git-polling cadence at
+    /// startup, and only the focus notifications would otherwise correct it —
+    /// which never fire if the app was already active when the daemon started.
+    func pushForegroundState() {
+        let isForeground = NSApp?.isActive ?? false
+        Task { [daemonClient] in
+            try? await daemonClient.setAppForegroundState(isForeground: isForeground)
         }
     }
 

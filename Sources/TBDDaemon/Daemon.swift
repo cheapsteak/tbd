@@ -420,10 +420,20 @@ public final class Daemon: Sendable {
                 daemonLogger.warning("Failed to prune orphaned per-session overlays: \(error.localizedDescription, privacy: .public)")
             }
 
-            // 12. Start periodic git fetch for all repos (every 60s)
+            // Shared foreground gate: the app reports its active/inactive state
+            // via `app.setForegroundState`; the periodic git tasks below slow
+            // their cadence when no app is foreground (see GitPollCadence).
+            let appForeground = AppForegroundState()
+            rpcRouter.appForegroundState = appForeground
+
+            // 12. Start periodic git fetch for all repos (60s foreground,
+            // 5min background — GitPollCadence.fetchInterval).
             self.gitFetchTask = Task {
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(60))
+                    let interval = GitPollCadence.fetchInterval(
+                        isForeground: await appForeground.isForeground
+                    )
+                    try? await Task.sleep(for: interval)
                     guard !Task.isCancelled else { break }
                     let allRepos = (try? await database.repos.list()) ?? []
                     // Skip .missing repos so we don't spam errors against stale paths
@@ -465,9 +475,12 @@ public final class Daemon: Sendable {
             rpcRouter.oauthUsagePoller = oauthPoller
             await oauthPoller.start()
 
-            // 13. Periodic git status refresh (branch sync, conflict detection)
+            // 13. Periodic git status refresh (branch sync, conflict detection).
+            // 10s foreground, 60s background (GitPollCadence.statusInterval);
+            // per-worktree conflict checks are additionally dirty-gated inside
+            // refreshGitStatuses so an unchanged worktree costs no subprocess.
             self.gitStatusTask = Task {
-                // Run once immediately (cold recovery), then every 10s
+                // Run once immediately (cold recovery), then at the gated cadence
                 while !Task.isCancelled {
                     let allRepos = (try? await database.repos.list()) ?? []
                     // Skip .missing repos to match gitFetchTask — running git
@@ -475,7 +488,10 @@ public final class Daemon: Sendable {
                     for repo in allRepos where repo.status != .missing {
                         await lifecycle.refreshGitStatuses(repoID: repo.id)
                     }
-                    try? await Task.sleep(for: .seconds(10))
+                    let interval = GitPollCadence.statusInterval(
+                        isForeground: await appForeground.isForeground
+                    )
+                    try? await Task.sleep(for: interval)
                     guard !Task.isCancelled else { break }
                 }
             }

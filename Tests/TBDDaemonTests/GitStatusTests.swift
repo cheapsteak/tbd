@@ -192,4 +192,111 @@ struct GitStatusTests {
         let updated = try await db.worktrees.get(id: wt.id)
         #expect(updated?.hasConflicts == false)
     }
+
+    @Test func refTipsResolvesLocalAndOriginBranches() async throws {
+        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory())
+        let suffix = UUID().uuidString
+        let repoDir = tempBase.appendingPathComponent("tbd-test-\(suffix)")
+        let originDir = tempBase.appendingPathComponent("tbd-test-origin-\(suffix).git")
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: repoDir)
+            try? FileManager.default.removeItem(at: originDir)
+        }
+
+        try await runShell("git init -b main", at: repoDir)
+        try await runShell("git config commit.gpgSign false", at: repoDir)
+        try await runShell("git config user.email 'test@test.com'", at: repoDir)
+        try await runShell("git config user.name 'Test'", at: repoDir)
+        try await runShell("touch README.md && git add . && git commit -m 'initial'", at: repoDir)
+        try await runShell("git init --bare '\(originDir.path)'", at: repoDir)
+        try await runShell("git remote add origin '\(originDir.path)'", at: repoDir)
+        try await runShell("git push -u origin main", at: repoDir)
+        try await runShell("git checkout -b feature", at: repoDir)
+        try await runShell("touch feature.txt && git add . && git commit -m 'feature'", at: repoDir)
+
+        let git = GitManager()
+        let tips = try await git.refTips(repoPath: repoDir.path)
+        let mainSHA = try await git.headSHA(repoPath: repoDir.path, ref: "main")
+        let featureSHA = try await git.headSHA(repoPath: repoDir.path, ref: "feature")
+
+        #expect(tips["main"] == mainSHA)
+        #expect(tips["origin/main"] == mainSHA)
+        #expect(tips["feature"] == featureSHA)
+        #expect(featureSHA != mainSHA)
+    }
+
+    /// Dirty gate: a sweep whose (branch tip, base tip) pair is unchanged must
+    /// NOT re-run the conflict check; moving either tip must re-run it.
+    ///
+    /// Skip is observed by tampering with the DB value between sweeps: a gated
+    /// sweep leaves the tampered value in place (no check ran), while an
+    /// invalidated sweep recomputes and corrects it.
+    @Test func refreshGitStatusesDirtyGateSkipsAndInvalidates() async throws {
+        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory())
+        let suffix = UUID().uuidString
+        let repoDir = tempBase.appendingPathComponent("tbd-test-\(suffix)")
+        let originDir = tempBase.appendingPathComponent("tbd-test-origin-\(suffix).git")
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: repoDir)
+            try? FileManager.default.removeItem(at: originDir)
+        }
+
+        // Same conflict scenario as refreshGitStatusesDetectsConflicts:
+        // feature edits shared.txt, origin/main diverges with a conflicting edit.
+        try await runShell("git init -b main", at: repoDir)
+        try await runShell("git config commit.gpgSign false", at: repoDir)
+        try await runShell("git config user.email 'test@test.com'", at: repoDir)
+        try await runShell("git config user.name 'Test'", at: repoDir)
+        try await runShell("echo 'line1' > shared.txt && git add . && git commit -m 'initial'", at: repoDir)
+        try await runShell("git init --bare '\(originDir.path)'", at: repoDir)
+        try await runShell("git remote add origin '\(originDir.path)'", at: repoDir)
+        try await runShell("git push -u origin main", at: repoDir)
+        try await runShell("git checkout -b tbd/feature-wt", at: repoDir)
+        try await runShell("echo 'feature-change' > shared.txt && git add . && git commit -m 'feature change'", at: repoDir)
+        try await runShell("git checkout main", at: repoDir)
+        try await runShell("echo 'main-change' > shared.txt && git add . && git commit -m 'main change'", at: repoDir)
+        try await runShell("git push origin main", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: repoDir.path, displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "feature-wt", branch: "tbd/feature-wt",
+            path: repoDir.path + "/.tbd/worktrees/feature-wt", tmuxServer: "tbd-test"
+        )
+
+        // The cache lives on the lifecycle instance — reuse ONE instance across
+        // sweeps, like the daemon's periodic task does.
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+            hooks: HookResolver(), subscriptions: StateSubscriptionManager()
+        )
+
+        // Sweep 1: computes and stores the real answer (conflicts).
+        await lifecycle.refreshGitStatuses(repoID: repo.id)
+        #expect(try await db.worktrees.get(id: wt.id)?.hasConflicts == true)
+
+        // Tamper, then sweep with unchanged tips: the gate must skip the
+        // check, leaving the tampered value untouched.
+        try await db.worktrees.updateHasConflicts(id: wt.id, hasConflicts: false)
+        await lifecycle.refreshGitStatuses(repoID: repo.id)
+        #expect(try await db.worktrees.get(id: wt.id)?.hasConflicts == false)
+
+        // Move the branch tip: gate invalidates, the check re-runs and
+        // corrects the tampered value.
+        try await runShell("git checkout tbd/feature-wt", at: repoDir)
+        try await runShell("echo 'more' >> shared.txt && git add . && git commit -m 'feature again'", at: repoDir)
+        try await runShell("git checkout main", at: repoDir)
+        await lifecycle.refreshGitStatuses(repoID: repo.id)
+        #expect(try await db.worktrees.get(id: wt.id)?.hasConflicts == true)
+
+        // Tamper again, then move the BASE tip (push a new commit to
+        // origin/main): gate invalidates on the other half of the pair.
+        try await db.worktrees.updateHasConflicts(id: wt.id, hasConflicts: false)
+        try await runShell("echo 'base-moves' > other.txt && git add . && git commit -m 'base moves'", at: repoDir)
+        try await runShell("git push origin main", at: repoDir)
+        await lifecycle.refreshGitStatuses(repoID: repo.id)
+        #expect(try await db.worktrees.get(id: wt.id)?.hasConflicts == true)
+    }
 }

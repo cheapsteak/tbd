@@ -26,14 +26,40 @@ extension WorktreeLifecycle {
             }
         }
 
+        // Dirty gate: resolve every branch tip plus the origin/<defaultBranch>
+        // tip in ONE `for-each-ref` subprocess. The conflict answer depends
+        // only on that (branch tip, base tip) pair, so a worktree whose pair is
+        // unchanged since its last successful check is skipped — no merge-base,
+        // no merge-tree. On failure (e.g. no origin remote yet) `tips` is empty
+        // and every worktree falls through to the ungated legacy path.
+        let tips = (try? await git.refTips(repoPath: repo.path)) ?? [:]
+        let baseTip = tips["origin/\(repo.defaultBranch)"]
+        await conflictSweepCache.retain(worktreeIDs: Set(worktrees.map(\.id)))
+
         await withTaskGroup(of: Void.self) { group in
             for wt in worktrees {
                 group.addTask {
+                    // Both tips known → gate on the cached pair. Unknown refs
+                    // (deleted branch, missing origin) → check unconditionally,
+                    // matching pre-gate behavior.
+                    var key: ConflictSweepCache.Key?
+                    if let baseTip, let branchTip = tips[wt.branch] {
+                        key = ConflictSweepCache.Key(branchTip: branchTip, baseTip: baseTip)
+                    }
+                    if let key {
+                        guard await self.conflictSweepCache.shouldCheck(worktreeID: wt.id, key: key) else { return }
+                    }
                     guard let newHasConflicts = await self.checkHasConflicts(
                         repoPath: repo.path,
                         defaultBranch: repo.defaultBranch,
                         branch: wt.branch
-                    ), newHasConflicts != wt.hasConflicts else { return }
+                    ) else { return }
+                    // Record only successful checks so transient git failures
+                    // retry next sweep instead of caching a non-answer.
+                    if let key {
+                        await self.conflictSweepCache.markChecked(worktreeID: wt.id, key: key)
+                    }
+                    guard newHasConflicts != wt.hasConflicts else { return }
                     try? await self.db.worktrees.updateHasConflicts(id: wt.id, hasConflicts: newHasConflicts)
                     self.subscriptions?.broadcast(delta: .worktreeConflictsChanged(
                         WorktreeConflictDelta(worktreeID: wt.id, hasConflicts: newHasConflicts)

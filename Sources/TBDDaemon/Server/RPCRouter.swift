@@ -22,6 +22,10 @@ public final class RPCRouter: Sendable {
     /// Daemon.swift (mirrors `claudeUsagePoller`); nil in unit tests / mock
     /// mode, where usage snapshots are simply absent.
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
+    /// Shared app-foreground gate for the daemon's periodic git tasks. Wired
+    /// post-construction by Daemon.swift (mirrors `claudeUsagePoller`); `nil`
+    /// in unit tests that don't exercise the foreground RPC.
+    public nonisolated(unsafe) var appForegroundState: AppForegroundState?
     /// Live connected-client count, supplied by the SocketServer after it is
     /// constructed (the router is built first in Daemon.swift, so it cannot
     /// take the server as an init dependency). Mirrors `claudeUsagePoller`
@@ -269,6 +273,7 @@ public final class RPCRouter: Sendable {
             case RPCMethod.appSetForegroundState:
                 let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
                 await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)
+                await appForegroundState?.set(isForeground: params.isForeground)
                 return .ok()
             case RPCMethod.appearanceUpdateColorFgBg:
                 return try await handleAppearanceUpdateColorFgBg(request.paramsData)
