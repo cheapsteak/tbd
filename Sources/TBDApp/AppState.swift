@@ -1526,7 +1526,7 @@ final class AppState: ObservableObject {
 
             // Auto-mark-as-read for worktrees the user is currently looking at
             let visible = visibleWorktreeIDs
-            let toMarkRead = fetched.keys.filter { visible.contains($0) }
+            let toMarkRead = Self.worktreeIDsToAutoMarkRead(unreadSummaries: fetched, visible: visible)
             for worktreeID in toMarkRead {
                 do {
                     try await daemonClient.markNotificationsRead(worktreeID: worktreeID)
@@ -1544,6 +1544,23 @@ final class AppState: ObservableObject {
             logger.error("Failed to list notifications: \(error)")
             handleConnectionError(error)
         }
+    }
+
+    /// Pure mirror of `refreshNotifications`' auto-mark-read reconcile: a
+    /// `notifications.markRead` RPC is due only for worktrees that BOTH have
+    /// unread rows (present in the daemon's unread-only summary) AND are
+    /// currently visible. Keying off the fetched summary is load-bearing in
+    /// two directions: idle poll ticks (no unread anywhere) fire zero RPCs,
+    /// and a notification arriving while its worktree is already visible is
+    /// still marked read on the next tick. A guard on `unreadByWorktree`
+    /// would break the latter — it excludes visible worktrees by
+    /// construction, so an arrive-while-visible notification would never
+    /// qualify and would resurface as unread once the worktree left view.
+    nonisolated static func worktreeIDsToAutoMarkRead(
+        unreadSummaries: [UUID: UnreadSummary],
+        visible: Set<UUID>
+    ) -> [UUID] {
+        unreadSummaries.keys.filter { visible.contains($0) }
     }
 
     /// UserDefaults key for the WIP terminal-auto-resize feature. Off by
@@ -1575,8 +1592,17 @@ final class AppState: ObservableObject {
     /// destination repo, so a promoted row's directory never exists again —
     /// dimming it as "missing" would contradict the "→ promoted to <repo>"
     /// caption shown alongside it. Non-scratch worktrees never dim here.
-    nonisolated static func scratchRowIsDimmed(_ worktree: Worktree, directoryExists: Bool) -> Bool {
-        worktree.isScratch && worktree.promotedToRepoID == nil && !directoryExists
+    ///
+    /// `directoryExists` is an autoclosure so the caller's `stat()` is only
+    /// paid for un-promoted scratch rows: every sidebar row re-evaluates its
+    /// body on any AppState `@Published` change, and an eager argument would
+    /// charge every regular row a synchronous disk hit per render for a flag
+    /// this rule ignores.
+    nonisolated static func scratchRowIsDimmed(
+        _ worktree: Worktree,
+        directoryExists: @autoclosure () -> Bool
+    ) -> Bool {
+        worktree.isScratch && worktree.promotedToRepoID == nil && !directoryExists()
     }
 
     /// Whether the WIP main-area resize broadcast is enabled. Default false.

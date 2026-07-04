@@ -50,4 +50,24 @@ struct ScratchRowDimmingTests {
         let promotedButNonScratch = makeWorktree(repoID: UUID(), promotedToRepoID: UUID())
         #expect(!AppState.scratchRowIsDimmed(promotedButNonScratch, directoryExists: false))
     }
+
+    // `directoryExists` backs a synchronous stat() at the call site, and every
+    // sidebar row re-evaluates on any AppState @Published change — so rows the
+    // rule ignores must never evaluate it.
+    @Test("directoryExists is only evaluated for un-promoted scratch rows")
+    func directoryExistsEvaluatedLazily() {
+        var evaluated = false
+
+        let nonScratch = makeWorktree(repoID: UUID())
+        _ = AppState.scratchRowIsDimmed(nonScratch, directoryExists: { evaluated = true; return false }())
+        #expect(!evaluated)
+
+        let promotedScratch = makeWorktree(repoID: nil, promotedToRepoID: UUID())
+        _ = AppState.scratchRowIsDimmed(promotedScratch, directoryExists: { evaluated = true; return false }())
+        #expect(!evaluated)
+
+        let unpromotedScratch = makeWorktree(repoID: nil)
+        _ = AppState.scratchRowIsDimmed(unpromotedScratch, directoryExists: { evaluated = true; return false }())
+        #expect(evaluated)
+    }
 }
