@@ -9,7 +9,8 @@ import os
 ///
 /// Region names used today (see docs/superpowers/specs/2026-05-11-transcript-render-node-design.md
 /// and docs/diagnostics-strategy.md for capture recipes):
-/// - "transcript.swap"             — LiveTranscriptPaneView.pollOnce mainActor block
+/// - "transcript.swap"             — pollOnce compare+swap phase (compare runs in a
+///                                   detached task; only the publish is on-main)
 /// - "transcript.items.body"       — TranscriptItemsView.body (whole pass)
 /// - "transcript.row.body"         — TranscriptRow.body per row (issue #129 signposts)
 /// - "transcript.markdown.build"   — ChatBubbleView.bubbleBody (split + Markdown view tree)

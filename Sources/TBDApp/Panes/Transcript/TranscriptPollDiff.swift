@@ -7,8 +7,10 @@ import TBDShared
 /// array compare of a long transcript never burns main-thread time proving
 /// "nothing changed" on every 1.5s tick (#129 territory).
 enum TranscriptPollDiff {
-    /// O(1)-ish precheck: a count mismatch or a differing last item proves the
-    /// transcript changed without touching the other N-1 elements. Returns
+    /// Cheap precheck: a count mismatch or a differing last item proves the
+    /// transcript changed without touching the other N-1 elements (comparing
+    /// the last item can still recurse into its subagent thread, so this is
+    /// bounded by one item, not strictly O(1)). Returns
     /// `nil` when the cheap signals match — that does NOT prove equality,
     /// because the JSONL parser merges late tool results into earlier
     /// `toolCall` items, so a mid-array item can mutate while the tail stays

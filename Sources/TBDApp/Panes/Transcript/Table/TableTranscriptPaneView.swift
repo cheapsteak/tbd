@@ -297,6 +297,13 @@ struct TableTranscriptPaneView: View {
             let didChange = await Task.detached(priority: .userInitiated) {
                 TranscriptPollDiff.changed(prev: prev, new: newMessages)
             }.value
+            // The detached compare isn't cancellation-linked to the poll task:
+            // if the pane was torn down (tab close / session rollover) while it
+            // ran, skip the publish so a stale snapshot can't resurrect state.
+            // An interleaved same-key writer during the suspension is tolerable
+            // — the publish is a whole fresh daemon snapshot (never derived
+            // from `prev`), so the next 1.5s tick converges.
+            if Task.isCancelled { return }
             if didChange {
                 appState.sessionTranscripts[resolvedSID] = newMessages
                 appState.touchSessionTranscript(resolvedSID)
