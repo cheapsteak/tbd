@@ -44,7 +44,11 @@ extension RPCRouter {
                 fireAt: params.resetsAt.addingTimeInterval(LimitResumeScheduler.slack),
                 limitType: params.limitType, rawMessage: params.rawMessage,
                 status: .cancelled)
-            try? await db.scheduledResumes.insertAudit(audit)
+            do {
+                try await db.scheduledResumes.insertAudit(audit)
+            } catch {
+                logger.warning("handleRateLimitDetected: audit insert failed for terminal \(terminal.id.uuidString, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
             message = "Session limit hit — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
         }
 

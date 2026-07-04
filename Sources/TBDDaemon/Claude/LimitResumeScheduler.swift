@@ -15,6 +15,12 @@ public enum ResumeActuationOutcome: Equatable, Sendable {
     /// `#{pane_in_mode}` was set; typing would land in copy-mode and
     /// cancelling copy-mode would yank the user out of scrollback.
     case paneInCopyMode
+    /// The global toggle was switched off, or this row was explicitly
+    /// cancelled (`cancelPending`/`cancelAllPending`), while an actuation
+    /// was in-flight — caught by `checkEligibility`'s toggle/row-status
+    /// re-check between attempts (spec §Cancellation). Cancel silently,
+    /// same handling as `.terminalGone`.
+    case cancelledExternally
     /// Hard failure (Claude not foreground, send verify timed out, …).
     case failed(String)
 }
@@ -231,7 +237,7 @@ public actor LimitResumeScheduler {
             logger.info("fire: sent continue to terminal \(row.terminalID.uuidString, privacy: .public)")
             await onOutcome(row, .sent)
 
-        case .userAlreadyContinued, .terminalGone:
+        case .userAlreadyContinued, .terminalGone, .cancelledExternally:
             if await setStatusWithRetry(id: row.id, status: .cancelled, terminalID: row.terminalID, context: String(describing: outcome)) {
                 inFlightOrFired.remove(row.id)
             }

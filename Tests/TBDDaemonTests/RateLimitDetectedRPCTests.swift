@@ -73,6 +73,11 @@ import Testing
         #expect(unread.count == 1)
         #expect(unread[0].type == .limitReached)
         #expect(unread[0].message?.hasPrefix("Session limit hit — resets") == true)
+        // The off-branch's audit row (recorded via insertAudit) must actually
+        // land in the DB, not just be attempted.
+        let rows = try await db.scheduledResumes.all(terminalID: terminalID)
+        #expect(rows.count == 1)
+        #expect(rows[0].status == .cancelled)
     }
 
     @Test func latchSuppressesDuplicateNotification() async throws {

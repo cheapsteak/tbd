@@ -112,6 +112,21 @@ public struct ScheduledResumeStore: Sendable {
         }
     }
 
+    /// All rows for a terminal regardless of status, ordered by createdAt
+    /// ascending. Unlike `pending(terminalID:)`, this surfaces audit rows
+    /// (e.g. the `.cancelled` row inserted by the toggle-off branch of
+    /// `handleRateLimitDetected`) — useful for tests/diagnostics that need
+    /// to assert on a terminal's full history, not just its latch state.
+    public func all(terminalID: UUID) async throws -> [ScheduledResume] {
+        try await writer.read { db in
+            try ScheduledResumeRecord
+                .filter(Column("terminalID") == terminalID.uuidString)
+                .order(Column("createdAt").asc)
+                .fetchAll(db)
+                .map { $0.toModel() }
+        }
+    }
+
     public func get(id: UUID) async throws -> ScheduledResume? {
         try await writer.read { db in
             try ScheduledResumeRecord.fetchOne(db, key: id.uuidString)?.toModel()

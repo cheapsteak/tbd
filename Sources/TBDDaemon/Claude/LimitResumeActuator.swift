@@ -159,8 +159,21 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// alive → user-already-continued → Claude foreground → copy-mode.
     /// Foreground is checked before copy-mode so a dead/backgrounded shell
     /// classifies `.failed` rather than endlessly rescheduling on a stale
-    /// copy-mode flag.
+    /// copy-mode flag. Two additional checks (0a global toggle, 1b row
+    /// status) run on every pass too — they aren't in the spec's numbered
+    /// list but close the same "state changed during a prior attempt's ~20s
+    /// verify window" gap the spec's steps 1-4 already cover for the other
+    /// cancellation reasons.
     private func checkEligibility(_ resume: ScheduledResume) async -> EligibilityCheckResult {
+        // 0a. Toggle-off-mid-flight: the global gate can be switched off
+        //     while a prior attempt's ~20s verify window is running. This
+        //     check runs on EVERY call to `checkEligibility` (the initial
+        //     pass and every attempt>1 re-check in `actuate`), so attempt 2
+        //     never fires after the user turns auto-resume off mid-flight.
+        guard (try? await db.config.get())?.autoResumeOnLimitReset ?? false else {
+            return .notEligible(.cancelledExternally)
+        }
+
         // 1. Terminal alive.
         guard let terminal = ((try? await db.terminals.get(id: resume.terminalID)) ?? nil),
               terminal.suspendedAt == nil,
@@ -169,6 +182,19 @@ public struct LimitResumeActuator: LimitResumeActuating {
         let server = worktree.tmuxServer
         guard await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) else {
             return .notEligible(.terminalGone)
+        }
+
+        // 1b. Explicit-cancel-mid-flight: the row itself can be cancelled
+        //     (`cancelPending`/`cancelAllPending`) while a prior attempt's
+        //     verify window is running — e.g. the user clicked "Cancel
+        //     scheduled resume". Re-checking the row's own status here
+        //     (same every-call guarantee as 0a) closes that gap too. Placed
+        //     after the terminal-alive check (not at the very top) so a
+        //     terminal/row that was never persisted at all (defensive
+        //     callers, tests) still classifies via step 1's `.terminalGone`
+        //     rather than this row lookup.
+        guard ((try? await db.scheduledResumes.get(id: resume.id)) ?? nil)?.status == .pending else {
+            return .notEligible(.cancelledExternally)
         }
 
         // 2. User already continued? Any transcript record newer than the

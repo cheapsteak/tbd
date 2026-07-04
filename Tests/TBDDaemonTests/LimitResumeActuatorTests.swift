@@ -60,6 +60,11 @@ struct FakeInspector: PaneProcessInspecting {
 
     init() async throws {
         db = try TBDDatabase(inMemory: true)
+        // Production only ever calls `actuate` after `fire()`'s own gate
+        // check passed, so the actuator's own re-check (checkEligibility
+        // step 0a) needs the toggle on by default here too — tests that
+        // exercise the toggle-off-mid-flight path flip it explicitly.
+        try await db.config.setAutoResumeOnLimitReset(true)
         let repo = try await db.repos.create(
             path: "/tmp/act-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
         let wt = try await db.worktrees.create(
@@ -75,6 +80,11 @@ struct FakeInspector: PaneProcessInspecting {
             terminalID: terminal.id, worktreeID: wt.id, claudeSessionID: "sess",
             resetsAt: Date().addingTimeInterval(-120), fireAt: Date().addingTimeInterval(-60),
             limitType: "session", rawMessage: "m", createdAt: Date().addingTimeInterval(-3600))
+        // Persist `row` as the terminal's pending row so checkEligibility's
+        // "row still pending" re-check (step 1b) finds it — production only
+        // ever actuates rows that came from `scheduler.schedule()`, which
+        // always inserts first.
+        _ = try await db.scheduledResumes.insertPending(row)
     }
 
     private func makeActuator(
@@ -203,6 +213,63 @@ struct FakeInspector: PaneProcessInspecting {
         let outcome = await actuator.actuate(row)
         #expect(outcome == .userAlreadyContinued)
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+    }
+
+    @Test func toggleFlippedOffBetweenAttemptsCancelsAfterOneSend() async throws {
+        // Attempt 1's eligibility pass sees the toggle on and sends; attempt
+        // 1's verify window times out (idle, flat transcript, exactly like
+        // `verifyTimeoutRetriesOnceThenFails`). The injected `waiter` — the
+        // same seam `sendContinueSequence`/`verifyResumed` already await on
+        // — flips the toggle off as a side effect of its FIRST call (the
+        // interKeyPause after attempt 1's Escape), so by the time attempt
+        // 2's eligibility RE-CHECK (step 0a) runs, the gate is off and it
+        // cancels instead of sending again.
+        try await db.terminals.setActivityState(id: terminalID, activityState: .idle)
+        let counter = OSAllocatedUnfairLock(initialState: 0)
+        let flippingWaiter: @Sendable (Duration) async -> Void = { _ in
+            let n = counter.withLock { $0 += 1; return $0 }
+            if n == 1 {
+                try? await self.db.config.setAutoResumeOnLimitReset(false)
+            }
+        }
+        let actuator = LimitResumeActuator(
+            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            readTranscript: { _ in Data("{}\n".utf8) },
+            waiter: flippingWaiter)
+        let outcome = await actuator.actuate(row)
+        #expect(outcome == .cancelledExternally)
+        // Only attempt 1's 3 sends — attempt 2 never fires.
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+    }
+
+    @Test func rowCancelledBetweenAttemptsCancelsAfterOneSend() async throws {
+        // Same timeout setup as above, but instead of the global toggle,
+        // the ROW is cancelled between attempts (mirrors
+        // `LimitResumeSchedulerTests.copyModeRescheduleDropsRowNoLongerPending`'s
+        // `CancellingActuator`, except here the test body — not a fake
+        // actuator — does the cancelling, via the same waiter-side-effect
+        // seam as the toggle test above). Attempt 2's eligibility RE-CHECK
+        // (step 1b) sees the row is no longer `.pending` and cancels
+        // instead of sending again.
+        try await db.terminals.setActivityState(id: terminalID, activityState: .idle)
+        let counter = OSAllocatedUnfairLock(initialState: 0)
+        let cancellingWaiter: @Sendable (Duration) async -> Void = { _ in
+            let n = counter.withLock { $0 += 1; return $0 }
+            if n == 1 {
+                _ = try? await self.db.scheduledResumes.cancelPending(terminalID: self.terminalID)
+            }
+        }
+        let actuator = LimitResumeActuator(
+            db: db, tmux: tmux, inspector: FakeInspector(claudePID: 4242),
+            readTranscript: { _ in Data("{}\n".utf8) },
+            waiter: cancellingWaiter)
+        let outcome = await actuator.actuate(row)
+        #expect(outcome == .cancelledExternally)
+        // Only attempt 1's 3 sends — attempt 2 never fires.
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        // The row stays cancelled — not resurrected by a stray write.
+        let stored = try await db.scheduledResumes.get(id: row.id)
+        #expect(stored?.status == .cancelled)
     }
 
     // MARK: - Thrown send retries instead of instant .failed
