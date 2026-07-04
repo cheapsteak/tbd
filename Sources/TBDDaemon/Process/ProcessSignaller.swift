@@ -18,6 +18,9 @@ public protocol ProcessSignaller: Sendable {
     func children(ofServerPID serverPID: Int32) -> [Int32]
     /// Full command line of the pid (for the TBD ownership fingerprint), or nil.
     func commandLine(_ pid: Int32) -> String?
+    /// `ps -o stat=` for the pid (e.g. "S+", "Ss"), or nil when the pid is
+    /// gone. The trailing `+` marks the tty's foreground process group.
+    func stat(_ pid: Int32) -> String?
 }
 
 public struct ProductionProcessSignaller: ProcessSignaller {
@@ -60,6 +63,11 @@ public struct ProductionProcessSignaller: ProcessSignaller {
         // when stdout is a pipe, clipping the TBD fingerprint markers off the
         // tail of a long `claude`/`codex` invocation.
         Self.runPS(["-ww", "-o", "command=", "-p", String(pid)])?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public func stat(_ pid: Int32) -> String? {
+        Self.runPS(["-o", "stat=", "-p", String(pid)])?
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

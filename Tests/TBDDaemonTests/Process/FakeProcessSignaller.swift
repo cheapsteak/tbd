@@ -30,6 +30,7 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
     func forceKill(_ pid: Int32) { lock.withLock { killed.append(pid); killedSet.insert(pid) } }
     func children(ofServerPID serverPID: Int32) -> [Int32] { lock.withLock { childrenByServer[serverPID] ?? [] } }
     func commandLine(_ pid: Int32) -> String? { lock.withLock { cmdlines[pid] } }
+    func stat(_ pid: Int32) -> String? { nil }
 }
 
 final class FakeTmuxQuerier: TmuxProcessQuerying, @unchecked Sendable {
