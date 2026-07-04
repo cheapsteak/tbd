@@ -570,15 +570,38 @@ struct ModelProfileSpawnTests {
 
     // MARK: - Login sessions (Settings → "Open login session")
 
-    /// Fixture whose LoginSessionCoordinator delays are test-tuned: the
-    /// session-start trigger is immediate, the spawn fallback is far enough
-    /// out that it never races test assertions, and the identity watcher
-    /// expires quickly so tests don't leave 30-minute poll tasks behind.
-    private func makeLoginFixture(
-        spawnFallback: Duration = .seconds(60)
-    ) -> (RPCRouter, TBDDatabase, TmuxRecorder) {
+    /// Mutable pane-text holder so tests can drive what the auto-login pump
+    /// "sees" in the (dry-run) tmux pane.
+    final class PaneTextBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _text = ""
+        var text: String {
+            lock.lock(); defer { lock.unlock() }
+            return _text
+        }
+        func set(_ value: String) {
+            lock.lock(); defer { lock.unlock() }
+            _text = value
+        }
+    }
+
+    /// Pane text mimicking Claude's interactive, logged-out idle state.
+    static let readyPaneText = "Not logged in · Run /login\n❯"
+    /// Pane text mimicking the /login method picker.
+    static let loginDialogPaneText = "Login\nSelect login method:"
+
+    /// Fixture whose LoginSessionCoordinator delays are test-tuned (fast
+    /// pump, fast-expiring identity watcher so tests don't leave 30-minute
+    /// poll tasks behind) and whose dry-run tmux serves pane text from the
+    /// returned PaneTextBox.
+    private func makeLoginFixture() -> (RPCRouter, TBDDatabase, TmuxRecorder, PaneTextBox) {
         let recorder = TmuxRecorder()
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
+        let pane = PaneTextBox()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { args in recorder.record(args) },
+            dryRunCapturePane: { _, _ in pane.text }
+        )
         let db = try! TBDDatabase(inMemory: true)
         let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
         let router = RPCRouter(
@@ -588,13 +611,18 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             loginSessions: LoginSessionCoordinator(delays: .init(
-                afterSessionStart: .zero,
-                spawnFallback: spawnFallback,
+                pumpInitialDelay: .zero,
+                pumpPollInterval: .milliseconds(5),
+                // Wide enough that a test can observe a send and flip the
+                // pane to the dialog BEFORE the pump's verify re-read —
+                // otherwise the happy path races into a retry.
+                pumpPostSendDelay: .milliseconds(500),
+                pumpTimeout: .seconds(5),
                 identityPollInterval: .milliseconds(5),
                 identityPollTimeout: .milliseconds(50)
             ))
         )
-        return (router, db, recorder)
+        return (router, db, recorder, pane)
     }
 
     /// Poll until `condition` is true or `timeout` elapses.
@@ -619,7 +647,7 @@ struct ModelProfileSpawnTests {
     /// profileID persisted on the DB row.
     @Test("login session: label=login, profileID persisted, config dir inline-exported")
     func loginSessionSpawn() async throws {
-        let (router, db, recorder) = makeLoginFixture()
+        let (router, db, recorder, _) = makeLoginFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "Login")
@@ -647,13 +675,15 @@ struct ModelProfileSpawnTests {
     }
 
     /// Branch guard: the same spawn WITHOUT the loginSession flag keeps the
-    /// normal Claude Code label and does not auto-type /login.
+    /// normal Claude Code label and does not auto-type /login even when the
+    /// pane looks ready for it.
     @Test("login session flag off: label stays Claude Code, no /login typed")
     func loginSessionFlagOff() async throws {
-        let (router, db, recorder) = makeLoginFixture(spawnFallback: .zero)
+        let (router, db, recorder, pane) = makeLoginFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "Plain")
+        pane.set(Self.readyPaneText)
 
         let resp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
@@ -665,15 +695,14 @@ struct ModelProfileSpawnTests {
         let term = try resp.decodeResult(Terminal.self)
         #expect(term.label == TerminalLabel.claudeCode)
 
-        // Give any (buggy) zero-delay fallback a chance to fire, then assert
-        // no /login was sent.
+        // No pump was armed — nothing may type /login.
         try? await Task.sleep(for: .milliseconds(100))
         #expect(!recorder.joinedAll.contains("/login"))
     }
 
     @Test("login session: missing/unknown profile fails loud, no window spawned")
     func loginSessionUnknownProfile() async throws {
-        let (router, db, recorder) = makeLoginFixture()
+        let (router, db, recorder, _) = makeLoginFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
 
@@ -693,7 +722,7 @@ struct ModelProfileSpawnTests {
 
     @Test("login session: requires overrideProfileID")
     func loginSessionRequiresProfile() async throws {
-        let (router, db, _) = makeLoginFixture()
+        let (router, db, _, _) = makeLoginFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
 
@@ -705,12 +734,13 @@ struct ModelProfileSpawnTests {
         #expect(resp.error?.contains("require a profile") == true)
     }
 
-    /// The SessionStart hook event is the readiness trigger for the
-    /// auto-typed /login: after `terminal.sessionEvent` arrives for a login
-    /// session, the daemon sends `/login` + Enter to the pane (consume-once).
-    @Test("login session: sessionEvent triggers /login + Enter exactly once")
-    func loginSessionAutoTypesOnSessionEvent() async throws {
-        let (router, db, recorder) = makeLoginFixture()
+    /// End-to-end pump behavior through the handler: the spawn arms the
+    /// verified auto-login pump, which waits for the pane to become
+    /// interactive, types `/login` + Enter, and stops once the login dialog
+    /// is visible — exactly one send in the happy path.
+    @Test("login session: pump types /login + Enter once the pane is ready, exactly once")
+    func loginSessionAutoTypesWhenReady() async throws {
+        let (router, db, recorder, pane) = makeLoginFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
         let profile = try await seedOAuthProfile(db, name: "AutoLogin")
@@ -724,49 +754,33 @@ struct ModelProfileSpawnTests {
         ))
         let term = try createResp.decodeResult(Terminal.self)
 
-        let eventResp = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: term.id,
-                sessionID: UUID().uuidString,
-                transcriptPath: nil,
-                source: "startup",
-                cwd: wt.path
-            )
-        ))
-        #expect(eventResp.success)
+        // Pane still booting — no sends yet.
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(!recorder.joinedAll.contains("send-keys"))
 
-        // The send is scheduled on a Task (zero delay in this fixture) —
-        // poll the recorder for the send-keys /login + Enter pair.
+        // Claude becomes interactive → the pump types /login + Enter.
+        pane.set(Self.readyPaneText)
         #expect(await waitFor({ recorder.joinedAll.contains("send-keys -l -t \(term.tmuxPaneID) /login") }))
-        #expect(await waitFor({ recorder.joinedAll.contains("Enter") }))
+        #expect(await waitFor({ recorder.joinedAll.contains("send-keys -t \(term.tmuxPaneID) Enter") }))
 
-        // A second sessionEvent (e.g. /clear) must NOT re-type /login.
-        let before = recorder.calls.count
-        _ = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: term.id,
-                sessionID: UUID().uuidString,
-                transcriptPath: nil,
-                source: "clear",
-                cwd: wt.path
-            )
-        ))
+        // The dialog appears → verified; the pump must stop at one send.
+        pane.set(Self.loginDialogPaneText)
         try? await Task.sleep(for: .milliseconds(100))
-        let loginSends = recorder.calls.filter { $0.contains("/login") }.count
+        let loginSends = recorder.calls.filter { $0.contains("/login") && $0.contains("send-keys") }.count
         #expect(loginSends == 1)
-        _ = before
     }
 
-    /// Fallback trigger: when the SessionStart hook never arrives, the
-    /// spawn-time fallback still types /login.
-    @Test("login session: spawn fallback types /login when no sessionEvent arrives")
-    func loginSessionFallbackAutoTypes() async throws {
-        let (router, db, recorder) = makeLoginFixture(spawnFallback: .zero)
+    /// If the first /login lands before Claude's input loop consumes pty
+    /// input (send swallowed, dialog never appears), the pump verifies and
+    /// re-sends instead of giving up — the exact failure observed live with
+    /// fixed-delay sends.
+    @Test("login session: pump re-sends when the first /login is swallowed")
+    func loginSessionPumpRetries() async throws {
+        let (router, db, recorder, pane) = makeLoginFixture()
         defer { Task { await cleanup(db) } }
         let (_, wt) = try await seedRepoAndWorktree(db)
-        let profile = try await seedOAuthProfile(db, name: "Fallback")
+        let profile = try await seedOAuthProfile(db, name: "Retry")
+        pane.set(Self.readyPaneText)  // ready, but sends get "swallowed"
 
         let createResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalCreate,
@@ -776,8 +790,22 @@ struct ModelProfileSpawnTests {
             )
         ))
         let term = try createResp.decodeResult(Terminal.self)
+        let sendMarker = "send-keys -l -t \(term.tmuxPaneID) /login"
 
-        #expect(await waitFor({ recorder.joinedAll.contains("send-keys -l -t \(term.tmuxPaneID) /login") }))
+        // First send happens…
+        #expect(await waitFor({ recorder.joinedAll.contains(sendMarker) }))
+        // …dialog still absent → the pump retries.
+        #expect(await waitFor({
+            recorder.calls.filter { $0.joined(separator: " ").contains(sendMarker) }.count >= 2
+        }))
+
+        // Once the dialog shows, the pump stops retrying.
+        pane.set(Self.loginDialogPaneText)
+        try? await Task.sleep(for: .milliseconds(100))
+        let after = recorder.calls.filter { $0.joined(separator: " ").contains(sendMarker) }.count
+        try? await Task.sleep(for: .milliseconds(100))
+        let final = recorder.calls.filter { $0.joined(separator: " ").contains(sendMarker) }.count
+        #expect(final == after)
     }
 }
 }

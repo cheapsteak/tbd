@@ -16,6 +16,10 @@ public struct TmuxManager: Sendable {
     /// Without it, dryRun reports every window as alive, which makes paths
     /// like the pre-session `.paneKilled` short-circuit untestable.
     public let dryRunWindowIsDead: (@Sendable (String) -> Bool)?
+    /// Optional test hook consulted by `capturePaneOutput` in dryRun mode:
+    /// (server, paneID) → pane text. Without it, dryRun captures return "",
+    /// which reads as "pane not ready" to the auto-login pump.
+    public let dryRunCapturePane: (@Sendable (String, String) -> String)?
     /// Optional test hook consulted by `listWindows` in dryRun mode:
     /// `(server, session)` → the window/pane pairs to report. Without it,
     /// dryRun reports no windows, which makes reconcile's orphan-window
@@ -35,12 +39,13 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil) {
         self.dryRun = dryRun
         self.counter = Counter()
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
         self.dryRunListWindows = dryRunListWindows
+        self.dryRunCapturePane = dryRunCapturePane
     }
 
     // MARK: - Static Command Builders
@@ -345,7 +350,7 @@ public struct TmuxManager: Sendable {
     }
 
     public func capturePaneOutput(server: String, paneID: String) async throws -> String {
-        if dryRun { return "" }
+        if dryRun { return dryRunCapturePane?(server, paneID) ?? "" }
         let args = Self.capturePaneCommand(server: server, paneID: paneID)
         return try await runTmux(args)
     }

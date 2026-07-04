@@ -317,30 +317,47 @@ extension RPCRouter {
         )))
 
         if isLoginSession, let profile = resolvedProfile {
-            await armLoginSession(terminalID: terminal.id, profile: profile)
+            await armLoginSession(
+                terminalID: terminal.id,
+                paneID: window.paneID,
+                server: worktree.tmuxServer,
+                profile: profile
+            )
         }
 
         return try RPCResponse(result: terminal)
     }
 
     /// Post-spawn wiring for a profile login session:
-    /// 1. registers the terminal for the one-shot auto-typed `/login`
-    ///    (fired by the SessionStart hook event, with a spawn-time fallback);
+    /// 1. starts the verified auto-`/login` pump — poll the pane until
+    ///    Claude's TUI is interactive, type `/login` + Enter, then verify the
+    ///    login dialog actually appeared (retrying, capped) so a send that
+    ///    lands before the input loop is ready doesn't silently vanish;
     /// 2. starts the login-identity watcher so the Settings badge flips to
     ///    "Logged in as …" the moment the profile's isolated `.claude.json`
     ///    gains an `oauthAccount`.
-    private func armLoginSession(terminalID: UUID, profile: ResolvedModelProfile) async {
+    private func armLoginSession(
+        terminalID: UUID,
+        paneID: String,
+        server: String,
+        profile: ResolvedModelProfile
+    ) async {
+        let tmux = self.tmux
         await loginSessions.registerPendingAutoLogin(terminalID: terminalID)
-
-        // Fallback trigger: if the SessionStart hook never reaches us
-        // (missing overlay, older Claude build), still type /login after a
-        // conservative delay. Consume-once semantics in the coordinator make
-        // this race-free against the hook trigger.
-        let fallbackDelay = loginSessions.delays.spawnFallback
-        Task { [weak self] in
-            try? await Task.sleep(for: fallbackDelay)
-            await self?.performAutoLoginSend(terminalID: terminalID, trigger: "spawn-fallback")
-        }
+        await loginSessions.startAutoLoginPump(
+            terminalID: terminalID,
+            paneText: {
+                (try? await tmux.capturePaneOutput(server: server, paneID: paneID)) ?? ""
+            },
+            typeLogin: {
+                do {
+                    try await tmux.sendKeys(server: server, paneID: paneID, text: "/login")
+                    try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
+                } catch {
+                    logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(error, privacy: .public)")
+                }
+            }
+        )
 
         let configDirManager = self.configDirManager
         let subscriptions = self.subscriptions
@@ -352,26 +369,6 @@ extension RPCRouter {
             identity: { configDirManager.loginIdentity(forProfileID: profileID) },
             onLogin: { subscriptions.broadcast(delta: .modelProfilesChanged) }
         )
-    }
-
-    /// Type `/login` + Enter into a pending login-session terminal. Consume-
-    /// once: only the first caller per terminal actually sends; later
-    /// triggers (hook vs. fallback race) are no-ops, as is a terminal that
-    /// was deleted in the meantime.
-    func performAutoLoginSend(terminalID: UUID, trigger: String) async {
-        guard await loginSessions.consumePendingAutoLogin(terminalID: terminalID) else { return }
-        guard let terminal = try? await db.terminals.get(id: terminalID),
-              let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
-            logger.debug("auto-login: terminal \(terminalID, privacy: .public) vanished before send (trigger=\(trigger, privacy: .public))")
-            return
-        }
-        do {
-            try await tmux.sendKeys(server: worktree.tmuxServer, paneID: terminal.tmuxPaneID, text: "/login")
-            try await tmux.sendKey(server: worktree.tmuxServer, paneID: terminal.tmuxPaneID, key: "Enter")
-            logger.info("auto-login: typed /login into terminal \(terminalID, privacy: .public) (trigger=\(trigger, privacy: .public))")
-        } catch {
-            logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(error, privacy: .public)")
-        }
     }
 
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
@@ -1194,19 +1191,6 @@ extension RPCRouter {
 
         let source = params.source ?? "unknown"
         logger.info("sessionEvent: terminal \(terminal.id.uuidString, privacy: .public) -> session \(params.sessionID, privacy: .public) (source=\(source, privacy: .public))")
-
-        // Login-session terminals get `/login` auto-typed once Claude is up.
-        // The SessionStart hook is our readiness signal; wait a beat so the
-        // TUI's input loop is consuming pty input, then send. Consume-once in
-        // the coordinator dedupes against the spawn-time fallback trigger.
-        if terminal.label == TerminalLabel.login {
-            let terminalID = terminal.id
-            let delay = loginSessions.delays.afterSessionStart
-            Task { [weak self] in
-                try? await Task.sleep(for: delay)
-                await self?.performAutoLoginSend(terminalID: terminalID, trigger: "session-start")
-            }
-        }
 
         subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
             terminalID: terminal.id,

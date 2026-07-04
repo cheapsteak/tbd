@@ -8,17 +8,16 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "loginSession
 /// "Open login session"): a Claude pane pinned to an OAuth profile where the
 /// user completes `/login` into the profile's isolated `CLAUDE_CONFIG_DIR`.
 ///
-/// Two responsibilities, both keyed off `handleTerminalCreate`'s
+/// Two responsibilities, both armed by `handleTerminalCreate`'s
 /// `loginSession` branch:
 ///
-/// 1. **Auto-typing `/login`** — a terminal registers as "pending auto-login"
-///    at spawn. The send fires from whichever trigger comes first:
-///    - the Claude SessionStart hook event (`terminal.sessionEvent` RPC),
-///      delayed by `delays.afterSessionStart` so Claude's TUI input loop is up;
-///    - a spawn-time fallback after `delays.spawnFallback`, covering sessions
-///      whose hook never fires (missing overlay, old Claude build).
-///    `consumePendingAutoLogin` is consume-once, so double-sends are
-///    structurally impossible no matter how the triggers race.
+/// 1. **Auto-typing `/login`** via a *verified pump* (`startAutoLoginPump`):
+///    poll the pane text until Claude's TUI is interactive, type `/login` +
+///    Enter, then VERIFY the login dialog actually appeared before declaring
+///    success — re-sending (capped) if the input was swallowed. Fixed-delay
+///    sends were tried first and failed in practice: the SessionStart hook
+///    fires before the TUI's input loop reliably consumes pty input, and a
+///    send that lands in that window vanishes without a trace.
 ///
 /// 2. **Login-completion watching** — `watchLoginIdentity` polls the
 ///    profile's isolated `.claude.json` for an `oauthAccount` and invokes
@@ -36,28 +35,34 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "loginSession
 ///    user completes `/login` after the watcher expires, the badge catches up
 ///    on the next `modelProfile.list` (app relaunch or any profile mutation).
 public actor LoginSessionCoordinator {
-    /// Trigger timings. Injectable so handler-level tests can zero them out.
+    /// Pump/watcher timings. Injectable so tests can shrink them.
     public struct Delays: Sendable {
-        /// Wait after the SessionStart hook event before typing `/login` —
-        /// the hook fires early in Claude startup, slightly before the TUI
-        /// input loop reliably consumes pty input.
-        public var afterSessionStart: Duration
-        /// Fallback wait after spawn for sessions whose SessionStart hook
-        /// never reaches the daemon.
-        public var spawnFallback: Duration
+        /// Minimum wait after spawn before the pump first reads the pane.
+        public var pumpInitialDelay: Duration
+        /// Poll cadence while the pane is not ready / dialog not visible.
+        public var pumpPollInterval: Duration
+        /// Wait after typing `/login` before verifying the dialog appeared.
+        public var pumpPostSendDelay: Duration
+        /// Pump lifetime cap — after this the user types `/login` themselves
+        /// (the pane footer already hints "Not logged in · Run /login").
+        public var pumpTimeout: Duration
         /// Poll cadence for the login-identity watcher.
         public var identityPollInterval: Duration
         /// Watcher lifetime cap — after this, the badge catches up on the
         /// next `modelProfile.list` instead.
         public var identityPollTimeout: Duration
         public init(
-            afterSessionStart: Duration = .milliseconds(1500),
-            spawnFallback: Duration = .seconds(8),
+            pumpInitialDelay: Duration = .seconds(2),
+            pumpPollInterval: Duration = .seconds(1),
+            pumpPostSendDelay: Duration = .seconds(2),
+            pumpTimeout: Duration = .seconds(45),
             identityPollInterval: Duration = .seconds(2),
             identityPollTimeout: Duration = .seconds(1800)
         ) {
-            self.afterSessionStart = afterSessionStart
-            self.spawnFallback = spawnFallback
+            self.pumpInitialDelay = pumpInitialDelay
+            self.pumpPollInterval = pumpPollInterval
+            self.pumpPostSendDelay = pumpPostSendDelay
+            self.pumpTimeout = pumpTimeout
             self.identityPollInterval = identityPollInterval
             self.identityPollTimeout = identityPollTimeout
         }
@@ -65,30 +70,102 @@ public actor LoginSessionCoordinator {
 
     public let delays: Delays
     private var pendingAutoLogin: Set<UUID> = []
+    private var activePumps: Set<UUID> = []
     private var watchedProfiles: Set<UUID> = []
 
     public init(delays: Delays = Delays()) {
         self.delays = delays
     }
 
-    // MARK: - Auto-login pending set
+    // MARK: - Pane classification
 
-    /// Mark a freshly spawned login-session terminal as awaiting its one
-    /// auto-typed `/login`.
+    /// What the login-session pane currently shows, derived from its text.
+    public enum PaneLoginState: Sendable, Equatable {
+        /// Claude still booting (or pane text unavailable) — don't type yet.
+        case notReady
+        /// The TUI is interactive (input prompt / logged-out footer hint
+        /// visible) but no login dialog yet — safe to type `/login`.
+        case promptReady
+        /// The `/login` method picker is on screen — the send took; done.
+        case loginDialogVisible
+    }
+
+    /// Pure classifier for pump decisions (unit-testable without tmux).
+    public static func classifyPane(_ text: String) -> PaneLoginState {
+        // The /login picker's distinctive copy.
+        if text.contains("Select login method") { return .loginDialogVisible }
+        // Interactive markers: the input caret and/or the logged-out footer
+        // hint Claude renders once the TUI accepts input.
+        if text.contains("Run /login") || text.contains("❯") { return .promptReady }
+        return .notReady
+    }
+
+    // MARK: - Auto-login pump
+
+    /// Mark a freshly spawned login-session terminal as awaiting its
+    /// auto-typed `/login`. The pump only runs for registered terminals.
     public func registerPendingAutoLogin(terminalID: UUID) {
         pendingAutoLogin.insert(terminalID)
     }
 
-    /// Consume-once claim on the auto-login send. Returns true exactly once
-    /// per registered terminal — the SessionStart trigger and the spawn
-    /// fallback both call this, and only the winner sends.
-    public func consumePendingAutoLogin(terminalID: UUID) -> Bool {
-        pendingAutoLogin.remove(terminalID) != nil
-    }
-
-    /// Drop a pending auto-login without sending (terminal deleted).
+    /// Stop auto-login for a terminal (deleted / no longer relevant). An
+    /// active pump observes this on its next iteration and exits.
     public func cancelPendingAutoLogin(terminalID: UUID) {
         pendingAutoLogin.remove(terminalID)
+    }
+
+    /// True while the terminal still awaits its auto-typed `/login`.
+    public func isPendingAutoLogin(terminalID: UUID) -> Bool {
+        pendingAutoLogin.contains(terminalID)
+    }
+
+    /// Run the verified auto-`/login` pump for a registered terminal.
+    ///
+    /// Loop (bounded by `delays.pumpTimeout`):
+    ///  - pane `notReady` → wait `pumpPollInterval`, re-read;
+    ///  - pane `promptReady` → `typeLogin()` (at most `maxSends` times, so a
+    ///    pathological pane can't get its input stuffed), wait
+    ///    `pumpPostSendDelay`, re-read to VERIFY;
+    ///  - pane `loginDialogVisible` → success, stop.
+    ///
+    /// Single-flighted per terminal; exits early when the registration is
+    /// cancelled (terminal deleted).
+    public func startAutoLoginPump(
+        terminalID: UUID,
+        maxSends: Int = 3,
+        paneText: @escaping @Sendable () async -> String,
+        typeLogin: @escaping @Sendable () async -> Void
+    ) {
+        guard pendingAutoLogin.contains(terminalID) else { return }
+        guard !activePumps.contains(terminalID) else { return }
+        activePumps.insert(terminalID)
+        Task {
+            defer {
+                activePumps.remove(terminalID)
+                pendingAutoLogin.remove(terminalID)
+            }
+            try? await Task.sleep(for: delays.pumpInitialDelay)
+            var elapsed: Duration = .zero
+            var sends = 0
+            while elapsed < delays.pumpTimeout {
+                guard pendingAutoLogin.contains(terminalID) else { return }
+                switch Self.classifyPane(await paneText()) {
+                case .loginDialogVisible:
+                    logger.info("auto-login: login dialog visible in terminal \(terminalID, privacy: .public) after \(sends, privacy: .public) send(s)")
+                    return
+                case .promptReady where sends < maxSends:
+                    sends += 1
+                    logger.info("auto-login: typing /login into terminal \(terminalID, privacy: .public) (attempt \(sends, privacy: .public))")
+                    await typeLogin()
+                    try? await Task.sleep(for: delays.pumpPostSendDelay)
+                    elapsed += delays.pumpPostSendDelay
+                case .promptReady, .notReady:
+                    try? await Task.sleep(for: delays.pumpPollInterval)
+                    elapsed += delays.pumpPollInterval
+                }
+            }
+            logger.debug("auto-login: pump for terminal \(terminalID, privacy: .public) timed out (sends=\(sends, privacy: .public))")
+        }
     }
 
     // MARK: - Login-identity watcher
