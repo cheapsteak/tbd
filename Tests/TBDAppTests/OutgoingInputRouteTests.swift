@@ -5,11 +5,11 @@ import Testing
 /// branch (CLAUDE.md: a test per branch) is asserted directly so the Coordinator
 /// body — UI code — carries no untested conditional.
 ///
-/// Size no longer factors in here: large pastes are intercepted at the VIEW
-/// level (before SwiftTerm brackets them) and shipped as a `.paste` sidecar
-/// frame — see `PasteInterceptionTests` for that size gate. Everything that
-/// reaches SwiftTerm's `send(...)` is a keystroke, so this decision is purely
-/// attached → sidecar / not-attached → local PTY.
+/// Size no longer factors in here: while attached, EVERY paste is intercepted
+/// at the VIEW level (before SwiftTerm brackets it) and shipped as a `.paste`
+/// sidecar frame, or refused when oversize — see `PasteInterceptionTests` for
+/// that gate. Everything that reaches SwiftTerm's `send(...)` is a keystroke,
+/// so this decision is purely attached → sidecar / not-attached → local PTY.
 @Suite("OutgoingInputRoute.decide")
 struct OutgoingInputRouteTests {
     @Test("no control-mode attach → local PTY regardless of size")

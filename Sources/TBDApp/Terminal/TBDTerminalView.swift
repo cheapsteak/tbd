@@ -38,12 +38,15 @@ class TBDTerminalView: TerminalView {
     var onReady: (() -> Void)?
     private var didFireReady = false
 
-    /// Intercept a large pasteboard paste (the M2 paste ruling). Set while a
-    /// control-mode attach is live; cleared on detach/cleanup. Returns true when
-    /// the handler took ownership of `data` (shipped it as a `.paste` sidecar
-    /// frame), in which case SwiftTerm's normal paste is skipped. Returns false
-    /// to fall through to `super.paste` (≤4 KiB, oversize, or not attached).
-    var onLargePaste: ((Data) -> Bool)?
+    /// Intercept a pasteboard paste of ANY size (the paste ruling v2). Set while
+    /// a control-mode attach is live; cleared on detach/cleanup. Returns true
+    /// when the handler consumed `data` — shipped it as a `.paste` sidecar frame,
+    /// or refused an oversize payload (logged + dropped) — in which case
+    /// SwiftTerm's normal paste is skipped. Returns false ONLY when not attached:
+    /// the sole case where `super.paste` (SwiftTerm's local bracketed paste) may
+    /// run, because SwiftTerm's DECSET-2004 tracking can be stale after a
+    /// re-attach and tmux must stay the bracketing authority while attached.
+    var onControlModePaste: ((Data) -> Bool)?
 
     init(frame: CGRect, font: NSFont, appearance: AppearanceSettings) {
         self.appearanceSettings = appearance
@@ -68,15 +71,15 @@ class TBDTerminalView: TerminalView {
         fatalError("init(coder:) is not supported — TBDTerminalView requires an AppearanceSettings")
     }
 
-    /// Intercept large pastes BEFORE SwiftTerm brackets the content. Reads the
+    /// Intercept pastes BEFORE SwiftTerm brackets the content. Reads the
     /// pasteboard the same way SwiftTerm's own `paste` does (general pasteboard,
-    /// `.string`), hands the UTF-8 bytes to `onLargePaste`; if that returns true
-    /// the paste was shipped as a `.paste` sidecar frame and the daemon-side
-    /// `paste-buffer -p` owns bracketed-paste wrapping. Otherwise fall through to
-    /// SwiftTerm's normal three-call bracketed paste (the correct, ordered path
-    /// for ≤4 KiB — and for oversize, or when not attached).
+    /// `.string`), hands the UTF-8 bytes to `onControlModePaste`; if that returns
+    /// true the paste was consumed — shipped as a `.paste` sidecar frame (the
+    /// daemon-side `paste-buffer -p` owns bracketed-paste wrapping) or refused
+    /// as oversize. Fall through to SwiftTerm's normal three-call bracketed
+    /// paste ONLY when no control-mode attach is live.
     override func paste(_ sender: Any) {
-        if let handler = onLargePaste,
+        if let handler = onControlModePaste,
            let text = NSPasteboard.general.string(forType: .string),
            handler(Data(text.utf8)) {
             return

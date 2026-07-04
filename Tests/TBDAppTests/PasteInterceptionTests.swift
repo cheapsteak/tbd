@@ -3,48 +3,51 @@ import Foundation
 import TBDShared
 @testable import TBDApp
 
-/// Pins the M2 paste ruling's view-level interception decision (rider 1 + rider 2).
-/// The Coordinator's `onLargePaste` closure carries no untested conditional — the
-/// whole size/attach gate lives here, one assertion per branch.
+/// Pins the paste ruling v2's view-level decision. The Coordinator's
+/// `onControlModePaste` closure carries no untested size/attach conditional —
+/// the whole gate lives here, one test per branch.
 ///
-/// The ruling: only >4 KiB pastes are intercepted at the view level (SwiftTerm's
-/// ≤4 KiB three-call bracketed sequence is correct and ordered when it rides the
-/// keystroke path, so it is NOT intercepted). Oversize pastes (> the sidecar
-/// paste cap) fall back to SwiftTerm's normal paste rather than being split.
-@Suite("PasteInterception.shouldIntercept")
+/// The ruling: while a control-mode attach is live, NO paste bytes ever take
+/// SwiftTerm's keystroke path — every paste, any size, is intercepted before
+/// SwiftTerm brackets it and shipped as a `.paste` sidecar frame, making tmux
+/// (`paste-buffer -p`) the sole bracketed-paste authority. Oversize pastes
+/// (> the sidecar paste cap) are REFUSED (logged + dropped), not split and not
+/// keystroke-encoded. Detached panes keep SwiftTerm's local bracketed paste.
+@Suite("PasteInterception.decide")
 struct PasteInterceptionTests {
-    @Test("threshold is 4096 bytes")
-    func thresholdConstant() {
-        #expect(PasteInterception.thresholdBytes == 4096)
+    @Test("not attached → passthrough (SwiftTerm brackets locally), regardless of size")
+    func detachedPassthrough() {
+        for byteCount in [0, 1, 4096, 4097, SidecarFrameCodec.maxPasteBytes,
+                          SidecarFrameCodec.maxPasteBytes + 1] {
+            #expect(PasteInterception.decide(
+                controlModeAttached: false, byteCount: byteCount) == .passthrough)
+        }
     }
 
-    @Test("not attached → never intercept, regardless of size")
-    func notAttached() {
-        #expect(!PasteInterception.shouldIntercept(controlModeAttached: false, byteCount: 1))
-        #expect(!PasteInterception.shouldIntercept(controlModeAttached: false, byteCount: 100_000))
-        #expect(!PasteInterception.shouldIntercept(controlModeAttached: false, byteCount: 0))
+    @Test("attached + within the cap → intercept as .paste frame (no small-paste keystroke rider)")
+    func attachedInterceptsAllSizes() {
+        // 4096/4097 straddle the RETIRED M2 threshold: both must intercept now.
+        for byteCount in [1, 2, 4095, 4096, 4097, SidecarFrameCodec.maxPasteBytes] {
+            #expect(PasteInterception.decide(
+                controlModeAttached: true, byteCount: byteCount) == .interceptAsPaste)
+        }
     }
 
-    @Test("attached + at-or-below threshold → do not intercept (SwiftTerm 3-call path is ordered)")
-    func atOrBelowThreshold() {
-        #expect(!PasteInterception.shouldIntercept(controlModeAttached: true, byteCount: 1))
-        #expect(!PasteInterception.shouldIntercept(controlModeAttached: true, byteCount: 4096))
+    @Test("attached + empty → still intercepted, never the keystroke path (caller sends no frame)")
+    func attachedEmptyConsumedWithoutFrame() {
+        // Zero bytes must not fall through to SwiftTerm either — its stale
+        // 2004-bracketing could still emit a bare ESC[200~/201~ pair. The
+        // wiring skips the sidecar frame for an empty payload.
+        #expect(PasteInterception.decide(
+            controlModeAttached: true, byteCount: 0) == .interceptAsPaste)
     }
 
-    @Test("attached + just over threshold → intercept")
-    func justOverThreshold() {
-        #expect(PasteInterception.shouldIntercept(controlModeAttached: true, byteCount: 4097))
-    }
-
-    @Test("attached + within the paste cap → intercept")
-    func withinCap() {
-        #expect(PasteInterception.shouldIntercept(
-            controlModeAttached: true, byteCount: SidecarFrameCodec.maxPasteBytes))
-    }
-
-    @Test("attached but over the paste cap → do not intercept (fall back to keystroke path)")
-    func overCapFallsBack() {
-        #expect(!PasteInterception.shouldIntercept(
-            controlModeAttached: true, byteCount: SidecarFrameCodec.maxPasteBytes + 1))
+    @Test("attached + over the cap → refuse (log + drop; keystroke path is not a valid fallback)")
+    func attachedOversizeRefused() {
+        #expect(PasteInterception.decide(
+            controlModeAttached: true,
+            byteCount: SidecarFrameCodec.maxPasteBytes + 1) == .refuseOversize)
+        #expect(PasteInterception.decide(
+            controlModeAttached: true, byteCount: 100_000_000) == .refuseOversize)
     }
 }

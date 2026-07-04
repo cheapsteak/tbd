@@ -1,27 +1,38 @@
 import Foundation
 import TBDShared
 
-/// Pure decision for whether a pasteboard paste should be intercepted at the
-/// SwiftTerm view level and shipped as a `.paste` sidecar frame (the M2 paste
-/// ruling), rather than flowing through SwiftTerm's normal keystroke path.
+/// Pure decision for where a pasteboard paste goes when it hits the SwiftTerm
+/// view (the paste ruling v2, superseding the M2 rider): while a control-mode
+/// attach is live, EVERY paste — any size — is intercepted BEFORE SwiftTerm
+/// brackets it and shipped as a `.paste` sidecar frame (daemon side:
+/// `load-buffer` + `paste-buffer -d -p`). tmux is the SOLE bracketed-paste
+/// authority.
 ///
-/// Interception is deliberately NARROW:
-/// - **≤ 4 KiB pastes are NOT intercepted** (rider 1). SwiftTerm delivers a
-///   bracketed paste as three ordered `send()` calls (ESC[200~ / content /
-///   ESC[201~); riding the keystroke path keeps that sequence correct and
-///   FIFO-ordered end-to-end. Only large pastes — where keystroke-encoding the
-///   whole payload is wasteful — take the `.paste` frame.
-/// - **Oversize pastes fall back too** (rider 2): a payload past the sidecar's
-///   documented paste cap is NOT split across frames; it takes SwiftTerm's
-///   normal path (correct, just slower).
+/// Why no keystroke-path rider survives: stock tmux (our 3.2 floor) exposes no
+/// bracketed-paste format variable, so §3's attach replay cannot restore
+/// SwiftTerm's DECSET-2004 tracking after a tab-switch re-attach — SwiftTerm's
+/// own bracketing decision on the keystroke path can be stale-wrong. That
+/// retires both the old ≤4 KiB fallthrough AND the oversize keystroke fallback:
+///
+/// - `.interceptAsPaste`: ship the bytes as one `.paste` frame. Callers send
+///   NO frame for an empty payload (nothing to paste; zero-byte frames are
+///   never sent) but still consume the paste — even an empty paste must not
+///   reach SwiftTerm, whose stale bracketing could emit a bare marker pair.
+/// - `.refuseOversize`: over `SidecarFrameCodec.maxPasteBytes` — the caller
+///   logs a user-visible error and DROPS the paste. Never split across frames
+///   (each `.paste` frame is its own `paste-buffer` call, which tmux would
+///   bracket as a separate paste), never the keystroke path.
+/// - `.passthrough`: no attach — SwiftTerm's normal local bracketed paste,
+///   exactly as before control mode existed.
 enum PasteInterception {
-    /// Pastes at or below this size ride the keystroke path unchanged.
-    static let thresholdBytes = 4096
+    enum Decision: Equatable {
+        case interceptAsPaste
+        case refuseOversize
+        case passthrough
+    }
 
-    /// True only when control mode is attached and the payload is in the
-    /// intercept window `(thresholdBytes, maxPasteBytes]`.
-    static func shouldIntercept(controlModeAttached: Bool, byteCount: Int) -> Bool {
-        guard controlModeAttached else { return false }
-        return byteCount > thresholdBytes && byteCount <= SidecarFrameCodec.maxPasteBytes
+    static func decide(controlModeAttached: Bool, byteCount: Int) -> Decision {
+        guard controlModeAttached else { return .passthrough }
+        return byteCount > SidecarFrameCodec.maxPasteBytes ? .refuseOversize : .interceptAsPaste
     }
 }

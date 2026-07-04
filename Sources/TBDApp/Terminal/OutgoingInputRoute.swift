@@ -6,11 +6,11 @@
 /// - `.sidecarInput`: control mode — every keystroke chunk rides the framed
 ///   sidecar (low latency, per addendum §2).
 ///
-/// Large pastes are NOT routed here: they are intercepted at the VIEW level
-/// (before SwiftTerm brackets them) and shipped as a `.paste` sidecar frame —
-/// see `PasteInterception` for the size gate. Everything that reaches
-/// SwiftTerm's `send(...)` in control mode is a keystroke (or a ≤4 KiB paste
-/// SwiftTerm already bracketed), so there is no size branch here.
+/// Pastes are NOT routed here: while attached, EVERY paste — any size — is
+/// intercepted at the VIEW level (before SwiftTerm brackets it) and shipped as
+/// a `.paste` sidecar frame, or refused when oversize — see `PasteInterception`
+/// (the paste ruling v2). Everything that reaches SwiftTerm's `send(...)` in
+/// control mode is a keystroke, so there is no size branch here.
 enum OutgoingInputRoute: Equatable {
     case localPTY
     case sidecarInput

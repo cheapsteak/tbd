@@ -65,10 +65,13 @@ public enum SidecarFrameCodec {
     /// hard cap with 64 KiB of headroom for the JSON header + outer framing, so
     /// even a max-size payload's encoded frame never trips `isDesynced`.
     ///
-    /// Pastes LARGER than this are NOT split across frames (the M2 ruling's
-    /// rider 2): the app falls back to SwiftTerm's normal keystroke-path paste
-    /// — correct, just slower — rather than fragmenting a paste across the
-    /// ordered channel.
+    /// Pastes LARGER than this are REFUSED at the app's view level — a
+    /// user-visible error log, then the paste is dropped (the paste ruling v2).
+    /// They are NOT split across frames (each `.paste` frame is its own
+    /// `paste-buffer` call, which tmux would bracket as a separate paste), and
+    /// they NEVER fall back to the keystroke path: SwiftTerm's bracketed-paste
+    /// tracking can be stale after a re-attach, so tmux must remain the sole
+    /// bracketing authority while attached.
     public static let maxPasteBytes = 4 * 1024 * 1024 - 64 * 1024
 
     /// Wrap `payload` in an outer frame with the given `type`.

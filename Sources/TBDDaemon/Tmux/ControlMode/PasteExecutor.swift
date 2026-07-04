@@ -2,8 +2,9 @@ import Foundation
 import os
 
 /// Delivers bulk paste bytes to a control-mode pane over the `-CC` stream
-/// (the M2 paste ruling). Rather than keystroke-encoding a large payload
-/// (`send-keys -H`, chunked), the app-owned bytes are written to a temp file,
+/// (every control-mode paste, any size — the paste ruling v2). Rather than
+/// keystroke-encoding the payload (`send-keys -H`, chunked), the app-owned
+/// bytes are written to a temp file,
 /// `load-buffer`ed into a uniquely named tmux buffer, then `paste-buffer`ed into
 /// the pane **with `-p`**.
 ///

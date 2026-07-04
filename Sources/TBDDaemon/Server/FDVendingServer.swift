@@ -16,8 +16,8 @@ enum FDVendingServerError: Error, Equatable {
 /// M2.1 promotes the sidecar to a **bidirectional framed data channel**:
 /// - daemon → app: `send(fd:header:)` vends a pane read fd wrapped in a
 ///   length-prefixed `.fdVend` frame (unchanged semantics, now framed).
-/// - app → daemon: keystroke/paste `.input` frames, decoded on a dedicated
-///   receive `Thread` and delivered via `onInput`.
+/// - app → daemon: keystroke `.input` and bulk `.paste` frames, decoded on a
+///   dedicated receive `Thread` and delivered via `onInput`/`onPaste`.
 ///
 /// **fd ownership: readers signal, the actor closes.** Each adopted connection
 /// gets a receive thread, but the thread NEVER closes the connection fd. On loop

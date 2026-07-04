@@ -93,7 +93,7 @@ final class FDSidecarClient: @unchecked Sendable {
         lock.lock(); waiters[key] = nil; lock.unlock()
     }
 
-    /// Send keystroke/paste `bytes` for a pane to the daemon as an `.input`
+    /// Send keystroke `bytes` for a pane to the daemon as an `.input`
     /// frame. Never blocks the caller: encodes inline (cheap) then enqueues the
     /// write on `sendQueue`. Errors — including a disconnected socket — are
     /// logged and dropped; the receive loop's EOF path handles daemon death and
@@ -123,10 +123,11 @@ final class FDSidecarClient: @unchecked Sendable {
     }
 
     /// Send bulk paste `bytes` for a pane to the daemon as a `.paste` frame (the
-    /// M2 paste ruling). Same serial `sendQueue` + inline-encode pattern as
-    /// `sendInput`, so a paste and a following keystroke stay FIFO-ordered on the
-    /// wire. Oversize payloads are dropped defensively — the view-level
-    /// `PasteInterception` gate already prevents them from reaching here.
+    /// paste ruling v2: every control-mode paste rides this path). Same serial
+    /// `sendQueue` + inline-encode pattern as `sendInput`, so a paste and a
+    /// following keystroke stay FIFO-ordered on the wire. Oversize payloads are
+    /// dropped defensively — the view-level `PasteInterception` gate already
+    /// refuses them before they reach here.
     func sendPaste(worktreeID: UUID, paneID: String, bytes: Data) {
         guard bytes.count <= SidecarFrameCodec.maxPasteBytes else {
             logger.fault("""
