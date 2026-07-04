@@ -177,6 +177,11 @@ enum ProfileUsagePresentation {
     }
 
     // MARK: - Per-session tooltips
+    //
+    // NOTE: `sessionTooltip` / `worktreeAccountsTooltip` are the flat-string
+    // form. The UI now renders these two sites as structured `HoverCardModel`s
+    // (see `AccountHoverCards`); the string form is kept as the plain-text
+    // fallback/composition reference.
 
     /// "2026-07-03 14:05" — fixed format so tooltips are locale-stable.
     static func spawnTimeText(_ date: Date, timeZone: TimeZone = .current) -> String {

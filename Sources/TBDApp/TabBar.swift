@@ -470,13 +470,13 @@ private struct TabBarItem: View {
         terminal?.suspendedAt != nil
     }
 
-    /// Hover tooltip describing which account this session runs on: pinned
+    /// Hover card describing which account this session runs on: pinned
     /// email + profile name (or the ambient-drift note for NULL-profile legacy
-    /// sessions), current 5h/weekly usage, and spawn time. nil (no tooltip)
+    /// sessions), current 5h/weekly usage, and spawn time. nil (no card)
     /// for non-Claude tabs.
-    private var accountTooltip: String? {
+    private var accountHoverCard: HoverCardModel? {
         guard let terminal else { return nil }
-        return ProfileUsagePresentation.sessionTooltip(
+        return AccountHoverCards.claudeTabCard(
             terminal: terminal,
             profiles: appState.modelProfiles
         )
@@ -589,8 +589,8 @@ private struct TabBarItem: View {
         )
         .onPreferenceChange(TabWidthPreference.self) { measuredWidth = $0 }
         .animation(.easeInOut(duration: 0.1), value: isHovering)
-        // Empty string = no tooltip (same idiom as SidebarContextMenu).
-        .help(accountTooltip ?? "")
+        // nil = no card (non-Claude tabs).
+        .hoverCard(accountHoverCard)
         .contextMenu { contextMenuContent }
         .onHover { hovering in
             isHovering = hovering

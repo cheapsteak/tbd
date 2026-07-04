@@ -44,14 +44,14 @@ struct WorktreeRowView: View {
         return terminals.contains { $0.activityState == .working }
     }
 
-    /// Aggregate account tooltip for this worktree's Claude sessions
-    /// ("Claude accounts: a@b.co (Work), ambient (terminal login)").
-    /// Empty string = no tooltip (no Claude sessions).
-    private var accountsTooltip: String {
-        ProfileUsagePresentation.worktreeAccountsTooltip(
+    /// Structured hover card listing which account(s) this worktree's Claude
+    /// sessions run on ("Claude accounts" + one row per account).
+    /// nil = no card (no Claude sessions).
+    private var accountsHoverCard: HoverCardModel? {
+        AccountHoverCards.worktreeCard(
             terminals: appState.terminals[worktree.id] ?? [],
             profiles: appState.modelProfiles
-        ) ?? ""
+        )
     }
 
     @ViewBuilder
@@ -207,10 +207,10 @@ struct WorktreeRowView: View {
         .opacity(AppState.scratchRowIsDimmed(
             worktree, directoryExists: FileManager.default.fileExists(atPath: worktree.path)
         ) ? 0.5 : 1.0)
-        // Which account(s) this worktree's Claude sessions run on. Empty
-        // string = no tooltip (same idiom as SidebarContextMenu); the PR icon
-        // and status icons keep their own more-specific tooltips.
-        .help(accountsTooltip)
+        // Which account(s) this worktree's Claude sessions run on. nil = no
+        // card; the PR icon and status icons keep their own more-specific
+        // tooltips.
+        .hoverCard(accountsHoverCard)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
