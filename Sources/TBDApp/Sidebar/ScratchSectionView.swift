@@ -41,6 +41,16 @@ struct ScratchSectionView: View {
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
 
+        if appState.scratchWorktrees.isEmpty {
+            Text("No scratch spaces — click + to create one")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .listRowInsets(EdgeInsets(top: 2, leading: 14, bottom: 4, trailing: 0))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+        }
+
         ForEach(appState.scratchWorktrees) { wt in
             WorktreeRowView(worktree: wt)   // sectionRepoID nil → no (repo) suffix; repo affordances vanish
                 .frame(maxWidth: .infinity, alignment: .leading)

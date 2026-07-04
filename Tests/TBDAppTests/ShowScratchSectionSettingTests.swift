@@ -45,9 +45,14 @@ struct ScratchSectionVisibleTests {
         #expect(!AppState.scratchSectionVisible(setting: false, spaces: [makeSpace()]))
     }
 
-    @Test("on + no spaces hides the section")
-    func onWithNoSpacesHides() {
-        #expect(!AppState.scratchSectionVisible(setting: true, spaces: []))
+    @Test("on + no spaces still shows the section, so a new user can create the first space")
+    func onWithNoSpacesShows() {
+        #expect(AppState.scratchSectionVisible(setting: true, spaces: []))
+    }
+
+    @Test("off + no spaces hides the section")
+    func offWithNoSpacesHides() {
+        #expect(!AppState.scratchSectionVisible(setting: false, spaces: []))
     }
 
     @Test("toggling the setting never mutates the spaces array")
