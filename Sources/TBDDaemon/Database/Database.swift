@@ -23,6 +23,7 @@ public final class TBDDatabase: Sendable {
     public let forgottenWorktrees: ForgottenWorktreeStore
     public let clearance: ClearanceStore
     public let audit: AuditStore
+    public let scheduledResumes: ScheduledResumeStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -54,6 +55,7 @@ public final class TBDDatabase: Sendable {
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: pool)
         self.clearance = ClearanceStore(writer: pool)
         self.audit = AuditStore(writer: pool)
+        self.scheduledResumes = ScheduledResumeStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -85,6 +87,7 @@ public final class TBDDatabase: Sendable {
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: queue)
         self.clearance = ClearanceStore(writer: queue)
         self.audit = AuditStore(writer: queue)
+        self.scheduledResumes = ScheduledResumeStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
