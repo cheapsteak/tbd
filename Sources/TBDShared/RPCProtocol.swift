@@ -171,7 +171,6 @@ public enum RPCMethod {
     public static let scratchArchive = "scratch.archive"
     public static let scratchRevive = "scratch.revive"
     public static let nightwatchSetMode = "nightwatch.setMode"
-    public static let nightwatchGetMode = "nightwatch.getMode"
 }
 
 // MARK: - Branch Listing
@@ -266,11 +265,6 @@ public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
 // MARK: - Nightwatch RPC
 
 public struct NightwatchSetModeParams: Codable, Sendable {
-    public let mode: NightwatchMode
-    public init(mode: NightwatchMode) { self.mode = mode }
-}
-
-public struct NightwatchGetModeResult: Codable, Sendable {
     public let mode: NightwatchMode
     public init(mode: NightwatchMode) { self.mode = mode }
 }

@@ -300,8 +300,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetScratchProfileOverride(request.paramsData)
             case RPCMethod.nightwatchSetMode:
                 return try await handleSetNightwatchMode(request.paramsData)
-            case RPCMethod.nightwatchGetMode:
-                return try await handleGetNightwatchMode()
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
