@@ -61,6 +61,7 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
+    public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
     /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
     /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
@@ -450,6 +451,20 @@ public final class Daemon: Sendable {
             rpcRouter.claudeUsagePoller = poller
             await poller.start()
 
+            // 12c. Start per-profile OAuth usage poller (90s cadence,
+            // in-memory snapshots for the spawn-time account picker).
+            let configDirManager = rpcRouter.configDirManager
+            let oauthPoller = OAuthProfileUsagePoller(
+                profilesProvider: { [database] in try await database.modelProfiles.list() },
+                loginIdentity: { id in configDirManager.loginIdentity(forProfileID: id) },
+                configDirPath: { id in configDirManager.configDirectory(forProfileID: id).path },
+                fetcher: LiveProfileUsageFetcher(),
+                broadcast: { [weak subs] in subs?.broadcast(delta: .modelProfilesChanged) }
+            )
+            self.oauthUsagePoller = oauthPoller
+            rpcRouter.oauthUsagePoller = oauthPoller
+            await oauthPoller.start()
+
             // 13. Periodic git status refresh (branch sync, conflict detection)
             self.gitStatusTask = Task {
                 // Run once immediately (cold recovery), then every 10s
@@ -475,8 +490,11 @@ public final class Daemon: Sendable {
     public func stop() async {
         daemonLogger.info("Shutting down...")
 
-        // Stop Claude usage poller before other background tasks.
+        // Stop Claude usage pollers before other background tasks.
         if let poller = claudeUsagePoller {
+            await poller.stop()
+        }
+        if let poller = oauthUsagePoller {
             await poller.stop()
         }
 

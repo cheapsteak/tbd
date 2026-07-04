@@ -89,6 +89,7 @@ struct TabBar: View {
     var onAddShell: () -> Void = {}
     var onAddClaude: () -> Void = {}
     var onAddClaudeProfile: (UUID) -> Void = { _ in }
+    var onChooseAccount: () -> Void = {}
     var onAddCodex: () -> Void = {}
     var onAddNote: () -> Void = {}
     var onCloseTab: (Int) -> Void
@@ -133,6 +134,7 @@ struct TabBar: View {
                 onAddShell: onAddShell,
                 onAddClaude: onAddClaude,
                 onAddClaudeProfile: onAddClaudeProfile,
+                onChooseAccount: onChooseAccount,
                 onAddCodex: onAddCodex,
                 onAddNote: onAddNote
             )
@@ -167,6 +169,7 @@ private struct AddTabButton: View {
     let onAddShell: () -> Void
     let onAddClaude: () -> Void
     let onAddClaudeProfile: (UUID) -> Void
+    let onChooseAccount: () -> Void
     let onAddCodex: () -> Void
     let onAddNote: () -> Void
     @State private var isHovering = false
@@ -197,6 +200,7 @@ private struct AddTabButton: View {
             onShell: onAddShell,
             onClaude: onAddClaude,
             onClaudeProfile: onAddClaudeProfile,
+            onChooseAccount: onChooseAccount,
             onCodex: onAddCodex,
             onNote: onAddNote
         )
@@ -272,6 +276,7 @@ final class MenuCoordinator: NSObject {
     let onShell: () -> Void
     let onClaude: () -> Void
     let onClaudeProfile: (UUID) -> Void
+    let onChooseAccount: () -> Void
     let onCodex: () -> Void
     let onNote: () -> Void
 
@@ -279,18 +284,21 @@ final class MenuCoordinator: NSObject {
         onShell: @escaping () -> Void,
         onClaude: @escaping () -> Void,
         onClaudeProfile: @escaping (UUID) -> Void,
+        onChooseAccount: @escaping () -> Void = {},
         onCodex: @escaping () -> Void,
         onNote: @escaping () -> Void
     ) {
         self.onShell = onShell
         self.onClaude = onClaude
         self.onClaudeProfile = onClaudeProfile
+        self.onChooseAccount = onChooseAccount
         self.onCodex = onCodex
         self.onNote = onNote
     }
 
     @objc func addShell() { onShell() }
     @objc func addClaude() { onClaude() }
+    @objc func chooseAccount() { onChooseAccount() }
     @objc func addCodex() { onCodex() }
     @objc func addNote() { onNote() }
 
@@ -337,14 +345,15 @@ enum AddTabMenu {
 
             // One item per profile, titled with the profile's display name plus
             // a short login-identity suffix (" — email" / " — needs /login" for
-            // oauth profiles). Each gets a transparent placeholder icon the same
-            // size as the Claude asterisk so its title lines up in the same
-            // title column as "Claude" — the empty icon slot is the visual
-            // nesting cue. The profile id rides along in `representedObject`
-            // for MenuCoordinator.addClaudeProfile.
+            // oauth profiles) and a compact usage suffix when the daemon has a
+            // snapshot (" · 5h 0% ↺23:10 · wk 76% · F 100%"). Each gets a
+            // transparent placeholder icon the same size as the Claude asterisk
+            // so its title lines up in the same title column as "Claude" — the
+            // empty icon slot is the visual nesting cue. The profile id rides
+            // along in `representedObject` for MenuCoordinator.addClaudeProfile.
             for entry in profiles {
                 let item = NSMenuItem(
-                    title: ProfileLoginPresentation.menuItemTitle(for: entry),
+                    title: ProfileUsagePresentation.menuItemTitle(for: entry),
                     action: #selector(MenuCoordinator.addClaudeProfile(_:)),
                     keyEquivalent: ""
                 )
@@ -353,6 +362,17 @@ enum AddTabMenu {
                 item.target = coordinator
                 menu.addItem(item)
             }
+
+            // Full account picker dialog — richer data (bars, reset times,
+            // staleness) than the compact suffixes above can carry.
+            let chooseItem = NSMenuItem(
+                title: "Choose account…",
+                action: #selector(MenuCoordinator.chooseAccount),
+                keyEquivalent: ""
+            )
+            chooseItem.image = blankIcon(size: claudeIcon.size)
+            chooseItem.target = coordinator
+            menu.addItem(chooseItem)
         }
 
         if availability.codex {
@@ -448,6 +468,18 @@ private struct TabBarItem: View {
 
     private var isSuspended: Bool {
         terminal?.suspendedAt != nil
+    }
+
+    /// Hover card describing which account this session runs on: pinned
+    /// email + profile name (or the ambient-drift note for NULL-profile legacy
+    /// sessions), current 5h/weekly usage, and spawn time. nil (no card)
+    /// for non-Claude tabs.
+    private var accountHoverCard: HoverCardModel? {
+        guard let terminal else { return nil }
+        return AccountHoverCards.claudeTabCard(
+            terminal: terminal,
+            profiles: appState.modelProfiles
+        )
     }
 
     /// Bold this tab's label when its terminal fired a `.responseComplete`
@@ -557,6 +589,8 @@ private struct TabBarItem: View {
         )
         .onPreferenceChange(TabWidthPreference.self) { measuredWidth = $0 }
         .animation(.easeInOut(duration: 0.1), value: isHovering)
+        // nil = no card (non-Claude tabs).
+        .hoverCard(accountHoverCard)
         .contextMenu { contextMenuContent }
         .onHover { hovering in
             isHovering = hovering

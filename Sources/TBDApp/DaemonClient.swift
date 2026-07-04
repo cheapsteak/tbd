@@ -1179,6 +1179,17 @@ actor DaemonClient {
         return result.usage
     }
 
+    /// Force an immediate usage sweep of the daemon's in-memory OAuth usage
+    /// poller and return the post-sweep snapshots. `id == nil` sweeps every
+    /// logged-in OAuth profile (the account picker's open-time refresh).
+    func refreshProfileUsage(id: UUID? = nil) async throws -> ModelProfileUsageRefreshResult {
+        return try await callAsync(
+            method: RPCMethod.modelProfileUsageRefresh,
+            params: ModelProfileUsageRefreshParams(id: id),
+            resultType: ModelProfileUsageRefreshResult.self
+        )
+    }
+
     /// Swap the model profile associated with a running terminal.
     /// Returns the newly created Terminal (the daemon forks a new tab).
     func swapTerminalProfile(terminalID: UUID, newProfileID: UUID?, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {

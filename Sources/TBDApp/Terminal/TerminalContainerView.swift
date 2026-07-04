@@ -88,6 +88,10 @@ struct TerminalContainerView: View {
 struct SingleWorktreeView: View {
     let worktreeID: UUID
     @EnvironmentObject var appState: AppState
+    /// Spawn-time account picker (AccountPickerSheet). Opened by the plain
+    /// "Claude" action (unless "Use default without asking" is on) and by the
+    /// "+"-menu "Choose account…" item.
+    @State private var showAccountPicker = false
 
     private var activeTabIndex: Int {
         get { appState.activeTabIndices[worktreeID] ?? 0 }
@@ -135,9 +139,15 @@ struct SingleWorktreeView: View {
                         }
                     },
                     onAddClaude: {
-                        Task {
-                            await appState.createClaudeTerminal(worktreeID: worktreeID)
-                            selectLastTab()
+                        // "I get the data and I pick": plain Claude opens the
+                        // account picker unless the user opted out.
+                        if appState.skipAccountPicker {
+                            Task {
+                                await appState.createClaudeTerminal(worktreeID: worktreeID)
+                                selectLastTab()
+                            }
+                        } else {
+                            showAccountPicker = true
                         }
                     },
                     onAddClaudeProfile: { profileID in
@@ -148,6 +158,7 @@ struct SingleWorktreeView: View {
                             selectLastTab()
                         }
                     },
+                    onChooseAccount: { showAccountPicker = true },
                     onAddCodex: {
                         Task {
                             await appState.createCodexTerminal(worktreeID: worktreeID)
@@ -214,6 +225,17 @@ struct SingleWorktreeView: View {
                     .background(GeometryReader { geometry in
                         Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
                     })
+            }
+            .sheet(isPresented: $showAccountPicker) {
+                AccountPickerSheet { profileID in
+                    Task {
+                        await appState.createClaudeTerminal(
+                            worktreeID: worktreeID, profileID: profileID
+                        )
+                        selectLastTab()
+                    }
+                }
+                .environmentObject(appState)
             }
             // TmuxBridge sessions are created on-demand by TerminalPanelView
             .task(id: worktreeID) {

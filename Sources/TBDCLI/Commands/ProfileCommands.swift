@@ -31,6 +31,48 @@ func profileIdentityCell(kind: CredentialKind, loginIdentity: String?) -> String
     return "needs /login"
 }
 
+/// First bucket in the snapshot matching `kind` (and, for scoped buckets,
+/// the given model display name). nil when the snapshot is missing or the
+/// account doesn't have that bucket.
+func usageBucket(
+    in snapshot: ProfileUsageSnapshot?,
+    kind: String,
+    modelDisplayName: String? = nil
+) -> ClaudeUsageLimitBucket? {
+    snapshot?.buckets.first {
+        $0.kind == kind && (modelDisplayName == nil || $0.modelDisplayName == modelDisplayName)
+    }
+}
+
+/// Union of model display names across all profiles' `weekly_scoped` buckets,
+/// sorted for stable column order. Drives the dynamic per-model-family
+/// weekly columns in `tbd profile list` (e.g. "Fable").
+func scopedWeeklyModelNames(in profiles: [ModelProfileWithUsage]) -> [String] {
+    var names: Set<String> = []
+    for entry in profiles {
+        for bucket in entry.usageSnapshot?.buckets ?? []
+        where bucket.kind == "weekly_scoped" {
+            if let name = bucket.modelDisplayName { names.insert(name) }
+        }
+    }
+    return names.sorted()
+}
+
+/// Render a percent cell like "96%", or an em dash when the bucket is absent.
+func usagePercentCell(_ bucket: ClaudeUsageLimitBucket?) -> String {
+    guard let bucket else { return "—" }
+    return "\(Int(bucket.percent.rounded()))%"
+}
+
+/// Render a reset timestamp in compact local time: "18:10" when it lands
+/// within the next 24 h, otherwise "7/7 18:00". Em dash when absent.
+func usageResetCell(_ date: Date?, now: Date = Date()) -> String {
+    guard let date else { return "—" }
+    let formatter = DateFormatter()
+    formatter.dateFormat = date.timeIntervalSince(now) < 24 * 3600 ? "HH:mm" : "M/d HH:mm"
+    return formatter.string(from: date)
+}
+
 /// Resolve a user-supplied profile reference against the daemon's profile
 /// list. Accepts an exact name, a unique case-insensitive name, or a profile
 /// UUID (escape hatch for scripting). Throws a `CLIError` with actionable
@@ -131,8 +173,20 @@ struct ProfileList: AsyncParsableCommand {
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
+    @Flag(name: .long, help: "Force a fresh usage fetch for all logged-in OAuth profiles before listing")
+    var refresh = false
+
     mutating func run() async throws {
         let client = SocketClient()
+
+        if refresh {
+            _ = try client.call(
+                method: RPCMethod.modelProfileUsageRefresh,
+                params: ModelProfileUsageRefreshParams(id: nil),
+                resultType: ModelProfileUsageRefreshResult.self
+            )
+        }
+
         let result = try client.call(
             method: RPCMethod.modelProfileList,
             resultType: ModelProfileListResult.self
@@ -146,24 +200,54 @@ struct ProfileList: AsyncParsableCommand {
             print("No model profiles configured. Create one in TBD Settings → Model Profiles.")
             return
         }
-        print(tableRow([("NAME", 24), ("KIND", 8), ("IDENTITY", 0)]))
-        print(String(repeating: "-", count: 78))
+
+        // Dynamic per-model-family weekly columns ("WK FABLE", ...) driven by
+        // whatever scoped buckets the usage API actually returned.
+        let scopedModels = scopedWeeklyModelNames(in: result.profiles)
+
+        var header: [(String, Int)] = [
+            ("NAME", 24), ("KIND", 6), ("IDENTITY", 26),
+            ("5H", 4), ("RESET", 10), ("WK", 4),
+        ]
+        header.append(contentsOf: scopedModels.map { ("WK \($0.uppercased())", max($0.count + 3, 8)) })
+        header.append(("", 0))
+        print(tableRow(header))
+        let width = header.reduce(0) { $0 + max($1.1, $1.0.count) + 2 }
+        print(String(repeating: "-", count: max(width, 78)))
+
+        var staleNotes: [String] = []
         for entry in result.profiles {
             let identity = profileIdentityCell(
                 kind: entry.profile.kind,
                 loginIdentity: entry.loginIdentity
             )
-            let isDefault = entry.profile.id == result.defaultID
-            // The [default] marker gets its own zero-width trailing cell so
-            // non-default rows end at the identity column with no trailing
-            // padding.
-            let cells: [(String, Int)] = isDefault
-                ? [(entry.profile.name, 24), (entry.profile.kind.rawValue, 8),
-                   (identity, 32), ("[default]", 0)]
-                : [(entry.profile.name, 24), (entry.profile.kind.rawValue, 8),
-                   (identity, 0)]
+            let snapshot = entry.usageSnapshot
+            let session = usageBucket(in: snapshot, kind: "session")
+            let weeklyAll = usageBucket(in: snapshot, kind: "weekly_all")
+
+            var cells: [(String, Int)] = [
+                (entry.profile.name, 24),
+                (entry.profile.kind.rawValue, 6),
+                (identity, 26),
+                (usagePercentCell(session), 4),
+                (usageResetCell(session?.resetsAt), 10),
+                (usagePercentCell(weeklyAll), 4),
+            ]
+            for model in scopedModels {
+                let bucket = usageBucket(in: snapshot, kind: "weekly_scoped", modelDisplayName: model)
+                cells.append((usagePercentCell(bucket), max(model.count + 3, 8)))
+            }
+
+            var trailing: [String] = []
+            if entry.profile.id == result.defaultID { trailing.append("[default]") }
+            if let snapshot, !snapshot.isOK {
+                trailing.append("[stale*]")
+                staleNotes.append("  * \(entry.profile.name): \(snapshot.status)")
+            }
+            cells.append((trailing.joined(separator: " "), 0))
             print(tableRow(cells))
         }
+        for note in staleNotes { print(note) }
     }
 }
 

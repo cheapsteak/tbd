@@ -44,6 +44,25 @@ struct WorktreeRowView: View {
         return terminals.contains { $0.activityState == .working }
     }
 
+    /// Structured hover card listing which account(s) this worktree's Claude
+    /// sessions run on ("Claude accounts" + one row per account).
+    /// nil = no card (no Claude sessions).
+    private var accountsHoverCard: HoverCardModel? {
+        AccountHoverCards.worktreeCard(
+            terminals: appState.terminals[worktree.id] ?? [],
+            profiles: appState.modelProfiles
+        )
+    }
+
+    /// Hover card for the "+" affordance: what the button does, and which
+    /// worktree the new child is created under.
+    private var newNestedWorktreeHoverCard: HoverCardModel {
+        HoverCardModel(
+            title: "New nested worktree",
+            titleCaption: "Creates a child worktree under \(worktree.displayName)"
+        )
+    }
+
     @ViewBuilder
     private func leadingIcon() -> some View {
         switch RowStatusIndicator.leading(
@@ -197,6 +216,10 @@ struct WorktreeRowView: View {
         .opacity(AppState.scratchRowIsDimmed(
             worktree, directoryExists: FileManager.default.fileExists(atPath: worktree.path)
         ) ? 0.5 : 1.0)
+        // Which account(s) this worktree's Claude sessions run on. nil = no
+        // card; the PR icon and status icons keep their own more-specific
+        // tooltips.
+        .hoverCard(accountsHoverCard)
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
@@ -220,19 +243,25 @@ struct WorktreeRowView: View {
         }
         .overlay(alignment: .trailing) {
             if isRowHovered && !isMain {
-                Button(action: {
-                    let parentID = worktree.id
-                    // Scratch spaces have no repo, so nested-worktree creation
-                    // isn't offered for them — this affordance is repo-only.
-                    guard let repoID = worktree.repoID else { return }
-                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
-                }) {
-                    Image(systemName: "plus")
-                        .font(.caption)
-                        .frame(width: 20, height: 20)
+                HStack(spacing: 2) {
+                    // The action list ("…") — account section + the
+                    // shared RowActionMenu actions. Hidden until hover, calm
+                    // styling matching the "+" affordance.
+                    RowAccountMenuView(worktree: worktree, onRename: startRename)
+                    Button(action: {
+                        let parentID = worktree.id
+                        // Scratch spaces have no repo, so nested-worktree creation
+                        // isn't offered for them — this affordance is repo-only.
+                        guard let repoID = worktree.repoID else { return }
+                        appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
+                    }) {
+                        Image(systemName: "plus")
+                            .font(.caption)
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(HoverPressButtonStyle())
+                    .hoverCard(newNestedWorktreeHoverCard)
                 }
-                .buttonStyle(HoverPressButtonStyle())
-                .help("New nested worktree")
                 .padding(.trailing, 4)
             }
         }
