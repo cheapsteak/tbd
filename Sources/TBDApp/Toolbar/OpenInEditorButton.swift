@@ -100,8 +100,10 @@ struct OpenInEditorButton: View {
     @MainActor
     private static var iconCache: [String: NSImage] = [:]
 
+    // Internal (not private) so OpenInEditorIconCacheTests can assert the
+    // identity-stability invariant, mirroring WorktreeRowView.loadIcon.
     @MainActor
-    private static func appIcon(forPath path: String) -> NSImage {
+    static func appIcon(forPath path: String) -> NSImage {
         if let cached = iconCache[path] { return cached }
         let icon = NSWorkspace.shared.icon(forFile: path)
         iconCache[path] = icon
