@@ -501,18 +501,16 @@ private struct HighlightedCodeView: View {
     }
 
     private func loadAndHighlight() async {
-        // Guard against large files (>1MB) to prevent memory pressure
-        let fm = FileManager.default
-        if let attrs = try? fm.attributesOfItem(atPath: filePath),
-           let size = attrs[.size] as? UInt64, size > 1_048_576 {
-            loadError = "File too large to preview (\(size / 1024)KB)"
-            return
-        }
-        do {
-            let content = try String(contentsOfFile: filePath, encoding: .utf8)
-            let highlighted = highlightCode(content, filename: filePath)
-            attributedContent = highlighted
-        } catch {
+        let result = await CodeViewerHighlightService.shared.loadAndHighlight(path: filePath)
+        // `.task(id:)` cancelled us mid-highlight (rapid file switch / teardown):
+        // a newer task owns this view's state now, so drop the stale result.
+        guard !Task.isCancelled else { return }
+        switch result {
+        case .highlighted(let text):
+            attributedContent = text
+        case .tooLarge(let sizeKB):
+            loadError = "File too large to preview (\(sizeKB)KB)"
+        case .unreadable:
             loadError = "Could not read file"
         }
     }
@@ -520,40 +518,92 @@ private struct HighlightedCodeView: View {
 
 // MARK: - Syntax Highlighting
 
-/// Shared Highlightr instance — accessed only from @MainActor context
-/// to avoid thread-safety issues (Highlightr is not thread-safe).
-@MainActor
-private let sharedHighlightr: Highlightr? = {
-    let h = Highlightr()
-    h?.setTheme(to: "atom-one-dark")
-    return h
-}()
+/// atom-one-dark's background (#282c34), hardcoded so rendering the pane never
+/// creates the Highlightr JavaScriptCore VM on the main thread just to read a
+/// color. Must match the theme `CodeViewerHighlightService` sets.
+private let highlightrBackgroundColor = Color(
+    red: 0x28 / 255.0, green: 0x2C / 255.0, blue: 0x34 / 255.0
+)
 
-@MainActor
-private var highlightrBackgroundColor: Color {
-    if let bg = sharedHighlightr?.theme.themeBackgroundColor {
-        return Color(nsColor: bg)
-    }
-    return Color(nsColor: .textBackgroundColor)
+/// Result of an off-main file load + highlight for the code viewer.
+/// `@unchecked` because `NSAttributedString` lacks a `Sendable` conformance:
+/// the string is freshly built on the highlight queue, never mutated after,
+/// and handed across exactly once.
+private enum CodeViewerLoadResult: @unchecked Sendable {
+    case highlighted(NSAttributedString)
+    case tooLarge(sizeKB: UInt64)
+    case unreadable
 }
 
-@MainActor
-private func highlightCode(_ code: String, filename: String) -> NSAttributedString {
-    let lang = languageForFilename(filename)
-    let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+/// Off-main file read + syntax highlighter for the code viewer pane — the same
+/// JSC-VM-on-main freeze class `CodeHighlightService` fixed for the transcript
+/// (#129 / PR #308).
+///
+/// `Highlightr` wraps highlight.js inside a JavaScriptCore VM: creating the VM
+/// and running highlight.js can stall the calling thread for seconds. This
+/// service confines the lazily-created `Highlightr` — and every call into it —
+/// to a dedicated serial queue (JSContext is thread-confined), and reads the
+/// file there too, so opening a file never blocks the main thread.
+///
+/// `@unchecked Sendable`: the only mutable state (the lazy `Highlightr`) is
+/// confined to `queue`, so access is serialized at runtime rather than checked
+/// by the compiler — the same guarantee `CodeHighlightService` relies on.
+private final class CodeViewerHighlightService: @unchecked Sendable {
+    static let shared = CodeViewerHighlightService()
 
-    guard let highlightr = sharedHighlightr,
-          let highlighted = highlightr.highlight(code, as: lang) else {
-        return NSAttributedString(string: code, attributes: [.font: monoFont])
+    private let queue = DispatchQueue(label: "com.tbd.code-viewer-highlight", qos: .userInitiated)
+
+    /// Created lazily ON `queue` and only ever touched there.
+    private var highlightr: Highlightr?
+    private var didCreateHighlightr = false
+
+    private init() {}
+
+    /// Lazily create the `Highlightr` (MUST run on `queue`).
+    private func makeHighlightrIfNeeded() -> Highlightr? {
+        if !didCreateHighlightr {
+            didCreateHighlightr = true
+            let h = Highlightr()
+            h?.setTheme(to: "atom-one-dark")
+            highlightr = h
+        }
+        return highlightr
     }
 
-    let mutable = NSMutableAttributedString(attributedString: highlighted)
-    let fullRange = NSRange(location: 0, length: mutable.length)
+    /// Read `path` and syntax-highlight its contents, entirely off the
+    /// caller's thread. Callers publish the result back on the main actor.
+    func loadAndHighlight(path: String) async -> CodeViewerLoadResult {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                continuation.resume(returning: loadAndHighlightNow(path: path))
+            }
+        }
+    }
 
-    // Override font to consistent monospace
-    mutable.addAttribute(.font, value: monoFont, range: fullRange)
+    /// MUST run on `queue`.
+    private func loadAndHighlightNow(path: String) -> CodeViewerLoadResult {
+        // Guard against large files (>1MB) to prevent memory pressure
+        let fm = FileManager.default
+        if let attrs = try? fm.attributesOfItem(atPath: path),
+           let size = attrs[.size] as? UInt64, size > 1_048_576 {
+            return .tooLarge(sizeKB: size / 1024)
+        }
+        guard let code = try? String(contentsOfFile: path, encoding: .utf8) else {
+            return .unreadable
+        }
 
-    return mutable
+        let lang = languageForFilename(path)
+        let monoFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        guard let highlightr = makeHighlightrIfNeeded(),
+              let highlighted = highlightr.highlight(code, as: lang) else {
+            return .highlighted(NSAttributedString(string: code, attributes: [.font: monoFont]))
+        }
+
+        let mutable = NSMutableAttributedString(attributedString: highlighted)
+        // Override font to consistent monospace
+        mutable.addAttribute(.font, value: monoFont, range: NSRange(location: 0, length: mutable.length))
+        return .highlighted(NSAttributedString(attributedString: mutable))
+    }
 }
 
 private func languageForFilename(_ filename: String) -> String? {
@@ -687,24 +737,18 @@ struct CodeViewerSidebar: View {
     private func listDirectory(_ dir: String, depth: Int) -> [FileEntry] {
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
-        return items
+        // Stat each entry exactly once up front — the old sort comparator
+        // re-statted both sides of every comparison, O(n log n) blocking
+        // syscalls on the main thread.
+        let unsorted = items
             .filter { !$0.hasPrefix(".") }
-            .sorted { a, b in
-                let aIsDir = isDirectory(dir + "/" + a)
-                let bIsDir = isDirectory(dir + "/" + b)
-                if aIsDir != bIsDir { return aIsDir }
-                return a.localizedCaseInsensitiveCompare(b) == .orderedAscending
-            }
-            .map { name in
+            .map { name -> FileEntry in
                 let fullPath = dir + "/" + name
-                return FileEntry(path: fullPath, name: name, isDirectory: isDirectory(fullPath), depth: depth)
+                var isDir: ObjCBool = false
+                fm.fileExists(atPath: fullPath, isDirectory: &isDir)
+                return FileEntry(path: fullPath, name: name, isDirectory: isDir.boolValue, depth: depth)
             }
-    }
-
-    private func isDirectory(_ path: String) -> Bool {
-        var isDir: ObjCBool = false
-        FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
-        return isDir.boolValue
+        return FileEntry.sortedForListing(unsorted)
     }
 }
 
@@ -713,6 +757,15 @@ struct FileEntry {
     let name: String
     let isDirectory: Bool
     let depth: Int
+
+    /// Directories first, then case-insensitive name order — comparing the
+    /// precomputed `isDirectory` flags so sorting never touches the filesystem.
+    static func sortedForListing(_ entries: [FileEntry]) -> [FileEntry] {
+        entries.sorted { a, b in
+            if a.isDirectory != b.isDirectory { return a.isDirectory }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+    }
 }
 
 private struct FileEntryRow: View {
