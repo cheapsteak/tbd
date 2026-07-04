@@ -543,12 +543,17 @@ extension AppState {
             .sorted { $0.sortOrder < $1.sortOrder }
     }
 
-    /// Find a worktree by id across all repos.
+    /// Find a worktree by id across all repos, including repo-less scratch
+    /// spaces. Scratch spaces live only in `scratchWorktrees`, never in the
+    /// repo-grouped `worktrees` dict, so a lookup that consulted `worktrees`
+    /// alone returned nil for a selected scratch space — surfacing as
+    /// "Worktree not found" the instant `createScratch()` auto-selected its
+    /// freshly created row (see `SingleWorktreeView`).
     func findWorktree(id: UUID) -> Worktree? {
         for (_, rows) in worktrees {
             if let wt = rows.first(where: { $0.id == id }) { return wt }
         }
-        return nil
+        return scratchWorktrees.first(where: { $0.id == id })
     }
 
     /// Resolve the effective auto-archive-on-merge setting for a worktree.
