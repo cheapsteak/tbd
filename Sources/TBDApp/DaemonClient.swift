@@ -486,6 +486,22 @@ actor DaemonClient {
         )
     }
 
+    /// Archive a scratch worktree: closes its terminals, leaves the folder on disk.
+    func archiveScratch(worktreeID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.scratchArchive,
+            params: ScratchArchiveParams(worktreeID: worktreeID)
+        )
+    }
+
+    /// Revive an archived scratch worktree. Errors if its folder no longer exists on disk.
+    func reviveScratch(worktreeID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.scratchRevive,
+            params: ScratchReviveParams(worktreeID: worktreeID)
+        )
+    }
+
     /// List local + `origin/*` branches for a repo. Used by the existing-
     /// branch picker on the sidebar `+` button.
     func listBranches(repoID: UUID) async throws -> [BranchInfo] {
@@ -500,12 +516,16 @@ actor DaemonClient {
     /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
     /// Pass `excludeArchived: true` to skip archived rows (used by the 2 s poll so
     /// the 87 % of payload that is immediately dropped client-side never crosses the wire).
+    /// Pass `scratchOnly: true` to restrict the result to repo-less (scratch)
+    /// worktrees — otherwise `repoID: nil` means "no repo filter" (i.e. every
+    /// repo plus scratch), not "scratch only".
     func listWorktrees(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
         limit: Int? = nil,
         offset: Int? = nil,
-        excludeArchived: Bool = false
+        excludeArchived: Bool = false,
+        scratchOnly: Bool = false
     ) async throws -> [Worktree] {
         return try await callAsync(
             method: RPCMethod.worktreeList,
@@ -514,7 +534,8 @@ actor DaemonClient {
                 status: status,
                 limit: limit,
                 offset: offset,
-                excludeArchived: excludeArchived
+                excludeArchived: excludeArchived,
+                scratchOnly: scratchOnly
             ),
             resultType: [Worktree].self
         )
@@ -741,6 +762,14 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.configSetScratchInstructions,
             params: ConfigSetScratchInstructionsParams(instructions: instructions)
+        )
+    }
+
+    /// Set the global scratch-space rename-nudge override. Nil or blank resets to the built-in default.
+    func setScratchRenamePrompt(_ value: String?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetScratchRenamePrompt,
+            params: ConfigSetScratchRenamePromptParams(renamePrompt: value)
         )
     }
 
@@ -1121,6 +1150,14 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.modelProfileSetRepoOverride,
             params: ModelProfileSetRepoOverrideParams(repoID: repoID, profileID: profileID)
+        )
+    }
+
+    /// Set or clear the global model-profile override applied to scratch terminal spawns.
+    func setScratchProfileOverride(_ id: UUID?) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetScratchProfileOverride,
+            params: ConfigSetScratchProfileOverrideParams(profileID: id)
         )
     }
 

@@ -509,7 +509,8 @@ extension WorktreeLifecycle {
                 ? nil
                 : SystemPromptBuilder.build(
                     repo: repo, worktree: worktree, isResume: false,
-                    scratchInstructions: config.scratchInstructions)
+                    scratchInstructions: config.scratchInstructions,
+                    scratchRenamePrompt: config.scratchRenamePrompt)
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 freshSessionID: isResume ? nil : sessionUUID,

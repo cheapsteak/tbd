@@ -23,4 +23,22 @@ extension RPCRouter {
         // config from the DB at spawn time.
         return .ok()
     }
+
+    func handleConfigSetScratchRenamePrompt(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetScratchRenamePromptParams.self, from: paramsData)
+        try await db.config.setScratchRenamePrompt(params.renamePrompt)
+        // No broadcast: nothing in the app consumes a delta for this field —
+        // the editor sheet fetches Config fresh on open, and the daemon reads
+        // config from the DB at spawn time.
+        return .ok()
+    }
+
+    func handleConfigSetScratchProfileOverride(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetScratchProfileOverrideParams.self, from: paramsData)
+        try await db.config.setScratchProfileOverride(params.profileID)
+        // No broadcast: nothing in the app consumes a delta for this field —
+        // the picker fetches Config fresh on open, and the daemon reads
+        // config from the DB at spawn time.
+        return .ok()
+    }
 }

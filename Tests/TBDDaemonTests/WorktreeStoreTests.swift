@@ -414,4 +414,57 @@ import TBDShared
         #expect(try await db.worktrees.get(id: wt.id)?.prStatus == nil)
         #expect(try await db.worktrees.allPRStatuses()[wt.id] == nil)
     }
+
+    // MARK: - scratchOnly filter
+
+    /// `scratchOnly: true` + `status: .archived` must return exactly the
+    /// repo-less archived rows — excluding both active scratch rows and
+    /// archived repo-worktree rows. This is the filter the Scratch section's
+    /// Archived tab relies on; without it, `repoID: nil` alone would return
+    /// every repo's rows too (nil repoID means "no repo filter").
+    @Test func scratchOnlyArchivedExcludesActiveScratchAndArchivedRepoRows() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+
+        let activeScratch = try await db.worktrees.createScratch(
+            name: "active-scratch", displayName: "active-scratch",
+            path: "/tmp/scratch-active-\(UUID())", tmuxServer: "srv-scratch"
+        )
+        let archivedScratch = try await db.worktrees.createScratch(
+            name: "archived-scratch", displayName: "archived-scratch",
+            path: "/tmp/scratch-archived-\(UUID())", tmuxServer: "srv-scratch"
+        )
+        try await db.worktrees.archive(id: archivedScratch.id)
+
+        let archivedRepoWorktree = try await db.worktrees.create(
+            repoID: repo.id, name: "repo-wt", branch: "b-repo",
+            path: "/tmp/repo-wt-\(UUID())", tmuxServer: "srv-repo"
+        )
+        try await db.worktrees.archive(id: archivedRepoWorktree.id)
+
+        let result = try await db.worktrees.list(status: .archived, scratchOnly: true)
+        let ids = Set(result.map(\.id))
+
+        #expect(ids == [archivedScratch.id])
+        #expect(!ids.contains(activeScratch.id))
+        #expect(!ids.contains(archivedRepoWorktree.id))
+    }
+
+    /// `scratchOnly: true` without a status filter still excludes every
+    /// repo-scoped row, active or archived.
+    @Test func scratchOnlyWithoutStatusReturnsOnlyRepolessRows() async throws {
+        let db = try makeDB()
+        let repo = try await createRepo(db: db)
+
+        let scratch = try await db.worktrees.createScratch(
+            name: "s", displayName: "s", path: "/tmp/scratch-\(UUID())", tmuxServer: "srv-scratch"
+        )
+        _ = try await db.worktrees.create(
+            repoID: repo.id, name: "repo-wt", branch: "b-repo",
+            path: "/tmp/repo-wt-\(UUID())", tmuxServer: "srv-repo"
+        )
+
+        let result = try await db.worktrees.list(scratchOnly: true)
+        #expect(result.map(\.id) == [scratch.id])
+    }
 }

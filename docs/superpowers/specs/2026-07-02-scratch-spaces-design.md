@@ -54,8 +54,8 @@ directory TBD manages terminals in, with *optional* git parentage.
 - `Worktree.repoID: UUID?` in `Sources/TBDShared/Models.swift`. Scratch-ness
   is derived — `var isScratch: Bool { repoID == nil }` — no separate `kind`
   column that could disagree with the FK.
-- Regular statuses apply to scratch rows (`.active`, `.archived` unused for
-  now; `.main` never applies).
+- Regular statuses apply to scratch rows (`.active`, `.archived` — see §8;
+  `.main` never applies).
 - `branch` stays non-optional and holds `""` for scratch rows; the UI hides
   it. (Deliberate compromise: making `branch` optional would double call-site
   churn with no behavioral gain.)
@@ -89,8 +89,8 @@ directory TBD manages terminals in, with *optional* git parentage.
 - **CLI:** `tbd scratch new [--name <n>]`, `tbd scratch list`,
   `tbd scratch promote <dest-path>` (§5).
 - **Deletion:** closes terminals, moves the folder to Trash (never `rm -rf`),
-  deletes the row. No archive machinery — there is no branch to preserve;
-  Claude transcripts survive on disk as today.
+  deletes the row — irreversible, unlike archiving (§8). Claude transcripts
+  survive on disk as today.
 - **Reconcile/recovery:** repo reconcile never sees scratch rows (it walks
   repos). Startup recreates `~/tbd/scratch/` if missing; a space whose dir is
   missing is flagged the same way missing worktrees are today.
@@ -123,6 +123,27 @@ text. Non-scratch worktrees are unaffected; the terminal-spawn handlers fetch
 the value from config and pass it through to `SystemPromptBuilder`, which
 stays pure.
 
+**Rename-nudge layer (2026-07-03 amendment):** scratch spaces whose display
+name is still auto-generated (`Worktree.hasDefaultDisplayName`) also
+receive a `TBD_PROMPT_RENAME` layer — the scratch-flavored counterpart to
+the repo-worktree rename nudge (§3 above talks about the general prompt
+layers; this one nudges renaming the *scratch space itself* via
+`tbd worktree rename`, since there is no git branch to rename). Global,
+user-customizable via `Config.scratchRenamePrompt` (nullable; `nil`/blank
+falls back to `RepoConstants.defaultScratchRenamePrompt`), set via the
+`config.setScratchRenamePrompt` RPC, and edited from the Scratch section's
+detail-pane Instructions tab.
+
+**Model profile override (2026-07-03 amendment):** `Config.scratchProfileOverrideID`
+(nullable) lets the global default profile be overridden specifically for
+scratch (repo-less) terminal spawns. `ModelProfileResolver.resolve(repoID:)`
+consults it only when `repoID == nil` — the sole nil-repoID caller in the
+codebase is the scratch terminal-spawn path, so this cannot affect
+repo-scoped resolution. Set via `config.setScratchProfileOverride`, edited
+from the Scratch section's detail-pane Settings tab (a picker identical in
+shape to the per-repo "Model profile override" picker, with "Inherit
+global default" as the nil option).
+
 ## 4. Sidebar & UI
 
 - The Scratch section is **synthesized client-side** from
@@ -136,9 +157,13 @@ stays pure.
   icon, merge/archive menu items) disappear because the repo lookup returns
   nil — verify this falls out naturally before adding special cases.
 - Context menu: new Claude/Codex/shell terminal, rename, reveal in Finder,
-  a "Promote…" hint that explains the agent-driven flow, and delete.
+  a "Promote…" hint that explains the agent-driven flow, Archive (§8), and
+  delete.
 - Jump menu, notes, and notifications work unchanged (keyed off
   `worktreeID`).
+- **Detail pane (2026-07-03 amendment):** the Scratch section header itself
+  is selectable and opens `ScratchDetailView`, a detail pane with Archived /
+  Instructions / Settings tabs — mirroring `RepoDetailView`'s per-repo pane.
 
 ## 5. Promotion (agent-driven, move-on-promote)
 
@@ -212,9 +237,36 @@ Per the gated-branch rule (a test per branch of any new toggle):
   intact in both states.
 - All tests isolate via `TBD_HOME` / injection seams per CLAUDE.md.
 
+## 8. Archiving scratch spaces
+
+Unlike deletion (§2), archiving is recoverable and never touches the
+folder:
+
+- **`scratch.archive`:** closes the scratch space's terminals the same way
+  `scratch.delete` does (kill tmux windows, delete terminal + tab rows,
+  clear pending questions and per-session hook overlays) but leaves the
+  folder on disk untouched and flips the row's status to `.archived`
+  (`archivedAt` timestamped) instead of deleting it. Broadcasts the same
+  `.worktreeArchived` delta `scratch.delete` broadcasts, so the row
+  disappears from the sidebar's active Scratch section identically either
+  way.
+- **`scratch.revive`:** flips status back to `.active` and clears
+  `archivedAt`, provided the folder still exists on disk (errors
+  otherwise, without touching the row). Broadcasts `.worktreeRevived`.
+  No terminals are restored — archiving a scratch space, unlike archiving
+  a repo worktree, never preserves session state to resume, since there
+  is no branch/session-file bookkeeping equivalent for repo-less spaces.
+- **UI:** the Scratch section header (sidebar) is now selectable and opens
+  a detail pane (`ScratchDetailView`) with three tabs — Archived,
+  Instructions, Settings — mirroring the per-repo detail pane. The
+  Archived tab lists archived scratch spaces with Revive and Delete
+  actions (a simpler list than the repo-scoped Archived tab: no session
+  history browsing, since scratch archiving captures no session state).
+  The sidebar's context menu on a scratch row gains an "Archive" action
+  alongside the existing "Delete Scratch Space".
+
 ## Open follow-ups (explicitly out of scope)
 
-- Archiving (vs deleting) scratch spaces.
 - Converting a promoted scratch row's live terminals into terminals of the
   new repo's main worktree.
 - UI-driven promotion.

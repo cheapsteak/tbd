@@ -252,4 +252,62 @@ struct SystemPromptBuilderTests {
         #expect(result != nil)
         #expect(!result!.contains("Always use uv for scratch spaces."))
     }
+
+    // MARK: - Scratch rename-nudge layer
+
+    @Test("build includes default scratch rename prompt for a still-default scratch worktree")
+    func buildIncludesDefaultScratchRenamePromptWhenNotRenamed() {
+        let wt = Worktree(repoID: nil, name: "20260702-worrying-pike", displayName: "20260702-worrying-pike",
+                          branch: "", path: "/tmp/scratch/x", tmuxServer: "tbd-scratch")
+        let result = SystemPromptBuilder.build(repo: nil, worktree: wt, isResume: false)
+        #expect(result != nil)
+        #expect(result!.contains("tbd worktree rename"))
+        #expect(!result!.contains("Rename the git branch"))
+    }
+
+    @Test("build excludes scratch rename prompt once the scratch space has been renamed")
+    func buildExcludesScratchRenamePromptWhenRenamed() {
+        let wt = Worktree(repoID: nil, name: "20260702-worrying-pike", displayName: "🐛 Login Timeout Debug",
+                          branch: "", path: "/tmp/scratch/x", tmuxServer: "tbd-scratch")
+        let result = SystemPromptBuilder.build(repo: nil, worktree: wt, isResume: false)
+        #expect(result != nil)
+        #expect(!result!.contains("tbd worktree rename"))
+    }
+
+    @Test("build uses custom scratchRenamePrompt for a still-default scratch worktree")
+    func buildUsesCustomScratchRenamePrompt() {
+        let wt = Worktree(repoID: nil, name: "20260702-worrying-pike", displayName: "20260702-worrying-pike",
+                          branch: "", path: "/tmp/scratch/x", tmuxServer: "tbd-scratch")
+        let result = SystemPromptBuilder.build(
+            repo: nil, worktree: wt, isResume: false,
+            scratchRenamePrompt: "Name this scratch space something fun.")
+        #expect(result != nil)
+        #expect(result!.contains("Name this scratch space something fun."))
+        #expect(!result!.contains("tbd worktree rename"))
+    }
+
+    @Test("build falls back to default scratch rename prompt when scratchRenamePrompt is whitespace-only")
+    func buildFallsBackToDefaultScratchRenamePromptWhenWhitespace() {
+        let wt = Worktree(repoID: nil, name: "20260702-worrying-pike", displayName: "20260702-worrying-pike",
+                          branch: "", path: "/tmp/scratch/x", tmuxServer: "tbd-scratch")
+        let result = SystemPromptBuilder.build(
+            repo: nil, worktree: wt, isResume: false,
+            scratchRenamePrompt: "   ")
+        #expect(result != nil)
+        #expect(result!.contains("tbd worktree rename"))
+    }
+
+    @Test("scratchRenamePrompt param is ignored for a non-scratch worktree")
+    func buildIgnoresScratchRenamePromptForRepoWorktree() {
+        let repo = Repo(path: "/test", displayName: "test", defaultBranch: "main")
+        let wt = Worktree(repoID: repo.id, name: "gorgeous-panda", displayName: "gorgeous-panda",
+                          branch: "tbd/gorgeous-panda", path: "/test/.tbd/worktrees/gorgeous-panda", tmuxServer: "tbd-test")
+        let result = SystemPromptBuilder.build(
+            repo: repo, worktree: wt, isResume: false,
+            scratchRenamePrompt: "Name this scratch space something fun.")
+        #expect(result != nil)
+        #expect(!result!.contains("Name this scratch space something fun."))
+        // Non-scratch rename gating still applies (worktree not renamed yet).
+        #expect(result!.contains("Rename the git branch"))
+    }
 }

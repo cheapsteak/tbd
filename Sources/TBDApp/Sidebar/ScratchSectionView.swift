@@ -12,7 +12,8 @@ struct ScratchSectionView: View {
     var body: some View {
         HStack(spacing: 4) {
             Text("Scratch")
-                .font(.headline).foregroundStyle(.secondary)
+                .font(.headline)
+                .foregroundStyle(appState.selectedScratchSection ? .primary : .secondary)
             Spacer()
             if isHeaderHovered {
                 Button { appState.createScratch() } label: {
@@ -21,6 +22,11 @@ struct ScratchSectionView: View {
                 .buttonStyle(HoverPressButtonStyle())
                 .help("New scratch space")
             }
+        }
+        .background(Color.white.opacity(0.0001))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            appState.selectScratchSection()
         }
         .onHover { isHeaderHovered = $0 }
         .contextMenu {

@@ -148,4 +148,38 @@ extension RPCRouterTests {
         // Most recent archive (wt2) should be first
         #expect(page.map(\.id) == [wt2.id])
     }
+
+    @Test("worktree.list with scratchOnly + archived returns only repo-less archived rows")
+    func worktreeListScratchOnlyArchived() async throws {
+        let repo = try await db.repos.create(
+            path: "/tmp/test-repo-\(UUID().uuidString)",
+            displayName: "test-repo",
+            defaultBranch: "main"
+        )
+        let activeScratch = try await db.worktrees.createScratch(
+            name: "active-scratch", displayName: "active-scratch",
+            path: "/tmp/scratch-active-\(UUID())", tmuxServer: "srv-scratch"
+        )
+        let archivedScratch = try await db.worktrees.createScratch(
+            name: "archived-scratch", displayName: "archived-scratch",
+            path: "/tmp/scratch-archived-\(UUID())", tmuxServer: "srv-scratch"
+        )
+        try await db.worktrees.archive(id: archivedScratch.id)
+        let archivedRepoWorktree = try await db.worktrees.create(
+            repoID: repo.id, name: "repo-wt", branch: "b-repo",
+            path: "/tmp/repo-wt-\(UUID())", tmuxServer: "srv-repo"
+        )
+        try await db.worktrees.archive(id: archivedRepoWorktree.id)
+
+        let request = try RPCRequest(
+            method: RPCMethod.worktreeList,
+            params: WorktreeListParams(status: .archived, scratchOnly: true)
+        )
+        let response = await router.handle(request)
+        #expect(response.success)
+        let result = try response.decodeResult([Worktree].self)
+        #expect(result.map(\.id) == [archivedScratch.id])
+        #expect(!result.map(\.id).contains(activeScratch.id))
+        #expect(!result.map(\.id).contains(archivedRepoWorktree.id))
+    }
 }

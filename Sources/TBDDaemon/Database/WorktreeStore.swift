@@ -315,11 +315,16 @@ public struct WorktreeStore: Sendable {
 
     /// List worktrees, optionally filtered by repo and/or status, with optional pagination.
     /// When `excludeArchived` is true, archived rows are excluded from the result.
-    /// This composes with `status`: both filters are applied when both are given.
+    /// When `scratchOnly` is true, restricts to repo-less (scratch) worktrees —
+    /// note `repoID: nil` alone means "no repo filter" (every repo plus
+    /// scratch), not "scratch only"; `scratchOnly` is the only way to get
+    /// scratch-only rows.
+    /// This composes with `status`: all filters are applied when given together.
     public func list(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
         excludeArchived: Bool = false,
+        scratchOnly: Bool = false,
         limit: Int? = nil,
         offset: Int? = nil
     ) async throws -> [Worktree] {
@@ -327,6 +332,9 @@ public struct WorktreeStore: Sendable {
             var request = WorktreeRecord.all()
             if let repoID {
                 request = request.filter(Column("repoID") == repoID.uuidString)
+            }
+            if scratchOnly {
+                request = request.filter(Column("repoID") == nil)
             }
             if let status {
                 request = request.filter(Column("status") == status.rawValue)

@@ -84,8 +84,20 @@ public struct ModelProfileResolver: Sendable {
             logger.warning("profile override \(overrideID, privacy: .public) for repo \(repoID, privacy: .public) is missing; falling back to global default")
         }
 
+        let cfg = try await config.get()
+
+        // Step 1.5: scratch override. `repoID == nil` is the sole signal for a
+        // scratch (repo-less) spawn — see resolve(repoID:) call sites. Repo-scoped
+        // calls (repoID != nil) never consult scratchProfileOverrideID.
+        if repoID == nil, let scratchOverrideID = cfg.scratchProfileOverrideID {
+            if let resolved = try await loadResolved(id: scratchOverrideID) {
+                return resolved
+            }
+            logger.warning("scratch profile override \(scratchOverrideID, privacy: .public) is missing; falling back to global default")
+        }
+
         // Step 2: global default.
-        if let defaultID = try await config.get().defaultProfileID {
+        if let defaultID = cfg.defaultProfileID {
             if let resolved = try await loadResolved(id: defaultID) {
                 return resolved
             }

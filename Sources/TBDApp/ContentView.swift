@@ -38,6 +38,8 @@ struct ContentView: View {
             } detail: {
                 if !appState.isConnected {
                     disconnectedView
+                } else if appState.selectedScratchSection {
+                    ScratchDetailView()
                 } else if appState.repos.isEmpty {
                     emptyStateView
                 } else if let repoID = appState.selectedRepoID {

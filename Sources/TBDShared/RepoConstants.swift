@@ -30,4 +30,26 @@ public enum RepoConstants {
         destination path, then run `tbd scratch promote <dest-path>` from this \
         session. That moves the folder and registers it as a real TBD repo.
         """
+
+    /// Layer injected for repo-less scratch sessions once their default display
+    /// name hasn't been customized yet — nudges the agent to rename the SPACE
+    /// (not a git branch; there is none) once its topic becomes clear. Mirrors
+    /// `defaultRenamePrompt` but scratch-flavored. User-overridable via the
+    /// global `Config.scratchRenamePrompt` setting.
+    public static let defaultScratchRenamePrompt = """
+        Once this scratch space's topic becomes clear, rename it to reflect
+        what it's about:
+
+        tbd worktree rename "$(basename "$PWD")" "<emoji> <Title>"
+
+        This renames the TBD scratch space itself, not a git branch — there is
+        no repo here yet. Pick a relevant emoji, then a short, specific title
+        in title case.
+
+        Examples:
+          Topic: debugging a login timeout  → 🐛 Login Timeout Debug
+          Topic: exploring a CSV exporter   → 📊 CSV Export Exploration
+
+        Do this once the topic is clear — it doesn't need to block other work.
+        """
 }

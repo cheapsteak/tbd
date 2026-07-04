@@ -191,6 +191,7 @@ extension AppState {
         case .worktrees(let ids):
             if let leavingRepoID { clearRevivingArchived(repoID: leavingRepoID) }
             selectedRepoID = nil
+            selectedScratchSection = false
             selectedWorktreeIDs = Set(ids)
             selectionOrder = ids // must come after; didSet above rebuilds from unordered Set
         case .repo(let id):
@@ -199,6 +200,7 @@ extension AppState {
             }
             selectedWorktreeIDs = []
             selectedRepoID = id
+            selectedScratchSection = false
             Task { await refreshArchivedWorktrees(repoID: id) }
         }
     }

@@ -162,9 +162,13 @@ public enum RPCMethod {
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
     public static let configSetScratchInstructions = "config.setScratchInstructions"
+    public static let configSetScratchRenamePrompt = "config.setScratchRenamePrompt"
+    public static let configSetScratchProfileOverride = "config.setScratchProfileOverride"
     public static let scratchCreate = "scratch.create"
     public static let scratchDelete = "scratch.delete"
     public static let scratchPromote = "scratch.promote"
+    public static let scratchArchive = "scratch.archive"
+    public static let scratchRevive = "scratch.revive"
 }
 
 // MARK: - Branch Listing
@@ -554,6 +558,16 @@ public struct ScratchPromoteParams: Codable, Sendable {
     }
 }
 
+public struct ScratchArchiveParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct ScratchReviveParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
 public struct ScratchPromoteResult: Codable, Sendable {
     public let worktreeID: UUID
     public let repoID: UUID
@@ -667,18 +681,26 @@ public struct WorktreeListParams: Codable, Sendable {
     /// Optional (nil == false) for backward compatibility — old daemons
     /// ignore the unknown key and return everything; old clients omit it.
     public let excludeArchived: Bool?
+    /// When true, restrict the result to repo-less (scratch) worktrees.
+    /// Optional (nil == false) for backward compatibility — old daemons
+    /// ignore the unknown key and return everything; old clients omit it.
+    /// Note `repoID: nil` means "no repo filter" (every repo plus scratch),
+    /// NOT "scratch only" — this flag is the only way to get scratch-only rows.
+    public let scratchOnly: Bool?
     public init(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
         limit: Int? = nil,
         offset: Int? = nil,
-        excludeArchived: Bool? = nil
+        excludeArchived: Bool? = nil,
+        scratchOnly: Bool? = nil
     ) {
         self.repoID = repoID
         self.status = status
         self.limit = limit
         self.offset = offset
         self.excludeArchived = excludeArchived
+        self.scratchOnly = scratchOnly
     }
 }
 
@@ -891,6 +913,20 @@ public struct ConfigSetAutoArchiveDefaultParams: Codable, Sendable {
 public struct ConfigSetScratchInstructionsParams: Codable, Sendable {
     public let instructions: String?
     public init(instructions: String?) { self.instructions = instructions }
+}
+
+/// Params for `config.setScratchRenamePrompt` — the global scratch-space
+/// rename-nudge override. `nil` (or blank) resets to the built-in default.
+public struct ConfigSetScratchRenamePromptParams: Codable, Sendable {
+    public let renamePrompt: String?
+    public init(renamePrompt: String?) { self.renamePrompt = renamePrompt }
+}
+
+/// Params for `config.setScratchProfileOverride` — the global model-profile
+/// override applied to scratch terminal spawns. `nil` clears the override.
+public struct ConfigSetScratchProfileOverrideParams: Codable, Sendable {
+    public let profileID: UUID?
+    public init(profileID: UUID?) { self.profileID = profileID }
 }
 
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.

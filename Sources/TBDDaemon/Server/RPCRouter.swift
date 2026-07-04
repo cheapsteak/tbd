@@ -109,6 +109,10 @@ public final class RPCRouter: Sendable {
                 return try await handleScratchDelete(request.paramsData)
             case RPCMethod.scratchPromote:
                 return try await handleScratchPromote(request.paramsData)
+            case RPCMethod.scratchArchive:
+                return try await handleScratchArchive(request.paramsData)
+            case RPCMethod.scratchRevive:
+                return try await handleScratchRevive(request.paramsData)
             case RPCMethod.repoUpdateInstructions:
                 return try await handleRepoUpdateInstructions(request.paramsData)
             case RPCMethod.repoRelocate:
@@ -277,6 +281,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetAutoArchiveDefault(request.paramsData)
             case RPCMethod.configSetScratchInstructions:
                 return try await handleConfigSetScratchInstructions(request.paramsData)
+            case RPCMethod.configSetScratchRenamePrompt:
+                return try await handleConfigSetScratchRenamePrompt(request.paramsData)
+            case RPCMethod.configSetScratchProfileOverride:
+                return try await handleConfigSetScratchProfileOverride(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
