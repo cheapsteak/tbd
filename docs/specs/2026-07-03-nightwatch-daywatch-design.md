@@ -67,9 +67,9 @@ So the design splits cleanly:
 The daemon **executes** the mechanism policy asks for and **enforces** the safety floor as
 a compiled invariant. Concretely, the daemon will refuse — regardless of what any agent or
 policy file requests — to auto-merge a PR unless *all* of: claude-review APPROVED **on the
-current head SHA**, required checks clean, no sensitive path touched, no active test-hold,
-and a valid SHA-pinned clearance exists (§7). Policy can only ever make the gate *more*
-conservative, never less.
+current head SHA**, required checks clean, no held-impact domain or under-tested change
+(§7.1), no active test-hold, and a valid SHA-pinned clearance exists (§7). Policy can only
+ever make the gate *more* conservative, never less.
 
 This resolves the "native TBD vs. keep it a skill" tension: it is **both**, on purpose. The
 toggle, the surfaces, the resource signals, and the audit trail are native (they need to
@@ -775,8 +775,9 @@ lifecycle; §11 phasing graph). The remaining implementation-shaping notes:
 Record + optional/defaulted Codable model): `v32` = `nightwatch_mode TEXT DEFAULT 'off'` on
 `config`; `v33` = `clearance` table (new `ClearanceStore` under
 `Sources/TBDDaemon/Database/`); `v34` = `audit_log` table; new `PRStatus` fields
-(`files`, `commits`, `authorWorktreeID`) all optional so old rows decode. Sensitive-paths
-config store is its own table synced from CODEOWNERS.
+(`files`, `commits`, `authorWorktreeID`) all optional so old rows decode. (The sensitive-paths
+config store this originally proposed is **dropped** per Adam's review — §7.1; the impact map
+lives in editable policy, not a synced native table.)
 
 **Two-layer contract (arch).** The skill must *request* a merge and the daemon must
 *re-verify + execute or refuse* — a plain text file the daemon acts on is unsafe. Define an
@@ -827,7 +828,7 @@ was refuted, and none is unconditionally safe. Verdicts (basis tagged):
 | Claim | Verdict | Basis | The condition that carries it |
 |---|---|---|---|
 | **1 — the layered merge gate is acceptably safe for prod-auto-deploy while away** | SURVIVES-WITH-CONDITIONS | code-grounded | The conceded residual (a subtly-wrong PR — feature-interaction between two individually-safe PRs, or a claude-review miss on a semantic bug — ships to prod for N hours) is **acceptable-bounded, not a show-stopper**, *only* given: off-by-default + per-repo opt-in, an extremely conservative default (≤~50 lines, non-runtime paths), full audit + provenance + reversibility, wrap-up-leads-with-merges, and merge-time re-fetch that bypasses the cache. Remove any of those and it tips to show-stopper. |
-| **2 — mechanism/policy split keeps judgment out of the compiled daemon** | SURVIVES-WITH-CONDITIONS | code-grounded | Holds only if sensitive paths are **derived from CODEOWNERS** (not hardcoded) and the daemon/skill boundary is defended as a standing constraint — any new *hard hold* needs a design review/ADR, not just a code change, or judgment silently re-accretes in the daemon. |
+| **2 — mechanism/policy split keeps judgment out of the compiled daemon** | SURVIVES-WITH-CONDITIONS | code-grounded | Holds only if the daemon/skill boundary is defended as a standing constraint — any new *hard hold* needs a design review/ADR, not just a code change, or judgment silently re-accretes in the daemon. *(The judge's original "derive sensitive paths from CODEOWNERS" condition is moot post-review — §7.1 drops path-based holds entirely; the impact map is editable policy, which is even more on the right side of the boundary.)* |
 | **3 — depth caps prevent error-compounding & runaway** | SURVIVES-WITH-CONDITIONS | argument-only | Caps stop *count* runaway (code-enforceable) but **not** semantic cascade; carries only with the §6.1 parent-premise token + void-propagation. Note: argument-only, not a proven fact. |
 
 **Must-address before implementation** (ranked; folded into the sections cited — this is the
