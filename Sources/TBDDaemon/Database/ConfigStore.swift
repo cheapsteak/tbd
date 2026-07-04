@@ -130,6 +130,16 @@ public struct ConfigStore: Sendable {
         }
     }
 
+    /// Persist the session-limit auto-resume gate (default OFF).
+    public func setAutoResumeOnLimitReset(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_resume_on_limit_reset = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
     /// Persist the global scratch-space system-prompt override. Nil or a
     /// whitespace-only string clears the override, falling back to the
     /// built-in default scratch layer.

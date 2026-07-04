@@ -163,6 +163,7 @@ public enum RPCMethod {
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
+    public static let configSetAutoResumeOnLimitReset = "config.setAutoResumeOnLimitReset"
     public static let configSetScratchInstructions = "config.setScratchInstructions"
     public static let configSetScratchRenamePrompt = "config.setScratchRenamePrompt"
     public static let configSetScratchProfileOverride = "config.setScratchProfileOverride"
@@ -494,13 +495,15 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let globalEnvOverrides: [String: String]
     public let autoArchiveOnMergeDefault: Bool
     public let nightwatchMode: NightwatchMode
+    public let autoResumeOnLimitReset: Bool
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
         primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
         globalEnvOverrides: [String: String] = [:],
         autoArchiveOnMergeDefault: Bool = false,
-        nightwatchMode: NightwatchMode = .off
+        nightwatchMode: NightwatchMode = .off,
+        autoResumeOnLimitReset: Bool = false
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -508,6 +511,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.globalEnvOverrides = globalEnvOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
         self.nightwatchMode = nightwatchMode
+        self.autoResumeOnLimitReset = autoResumeOnLimitReset
     }
 
     public init(from decoder: Decoder) throws {
@@ -526,6 +530,8 @@ public struct ModelProfileListResult: Codable, Sendable {
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
         nightwatchMode = try c.decodeIfPresent(
             NightwatchMode.self, forKey: .nightwatchMode) ?? .off
+        autoResumeOnLimitReset = try c.decodeIfPresent(
+            Bool.self, forKey: .autoResumeOnLimitReset) ?? false
     }
 }
 
@@ -1014,6 +1020,13 @@ public struct WorktreeSetAutoArchiveParams: Codable, Sendable {
 }
 
 public struct ConfigSetAutoArchiveDefaultParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setAutoResumeOnLimitReset` — the session-limit
+/// auto-resume gate (default OFF). Disabling cancels all pending resumes.
+public struct ConfigSetAutoResumeOnLimitResetParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

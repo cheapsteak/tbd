@@ -308,6 +308,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigGet()
             case RPCMethod.configSetAutoArchiveOnMergeDefault:
                 return try await handleConfigSetAutoArchiveDefault(request.paramsData)
+            case RPCMethod.configSetAutoResumeOnLimitReset:
+                return try await handleConfigSetAutoResumeOnLimitReset(request.paramsData)
             case RPCMethod.configSetScratchInstructions:
                 return try await handleConfigSetScratchInstructions(request.paramsData)
             case RPCMethod.configSetScratchRenamePrompt:
