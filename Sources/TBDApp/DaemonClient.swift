@@ -920,6 +920,14 @@ actor DaemonClient {
         )
     }
 
+    /// Cancel a terminal's pending session-limit auto-resume.
+    func cancelScheduledResume(terminalID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalCancelScheduledResume,
+            params: CancelScheduledResumeParams(terminalID: terminalID)
+        )
+    }
+
     /// Suspend all Claude terminals in a worktree.
     func worktreeSuspend(worktreeID: UUID) async throws {
         try await callVoidAsync(

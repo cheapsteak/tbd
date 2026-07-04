@@ -405,4 +405,21 @@ extension AppState {
             handleConnectionError(error)
         }
     }
+
+    /// Cancel a pending session-limit auto-resume and clear the badge
+    /// optimistically (the next terminal.list poll would reconcile anyway).
+    func cancelScheduledResume(terminalID: UUID) async {
+        do {
+            try await daemonClient.cancelScheduledResume(terminalID: terminalID)
+            for (worktreeID, rows) in terminals {
+                if let idx = rows.firstIndex(where: { $0.id == terminalID }) {
+                    terminals[worktreeID]?[idx].pendingResumeAt = nil
+                    break
+                }
+            }
+        } catch {
+            showAlert("Failed to cancel scheduled resume: \(error.localizedDescription)",
+                      isError: true)
+        }
+    }
 }
