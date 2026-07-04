@@ -1492,9 +1492,14 @@ final class AppState: ObservableObject {
     static let showScratchSectionKey = "showScratchSection"
 
     /// Pure, testable mirror of the sidebar's Scratch-section gate:
-    /// shown only when the setting is on AND there's at least one scratch space.
+    /// shown whenever the setting is on, regardless of whether any scratch
+    /// spaces exist yet. This keeps the section (and its hover "+" create
+    /// button) reachable for a brand-new user with zero scratch spaces —
+    /// otherwise there'd be no UI path to create the first one.
+    /// `spaces` is currently unused for the visibility decision but is kept
+    /// in the signature for API stability with the existing call site.
     nonisolated static func scratchSectionVisible(setting: Bool, spaces: [Worktree]) -> Bool {
-        setting && !spaces.isEmpty
+        setting
     }
 
     /// Pure, testable mirror of `WorktreeRowView`'s scratch-row dimming rule:
