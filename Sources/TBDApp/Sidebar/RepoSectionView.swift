@@ -135,13 +135,10 @@ struct RepoSectionView: View {
 
             Group {
                 if isSectionHovered || showBranchPicker {
-                    Button(action: handlePlusButton) {
-                        Image(systemName: "plus")
-                            .font(.caption)
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(HoverPressButtonStyle())
-                    .help("New worktree (\u{2325}-click to pick existing branch)")
+                    SectionHeaderPlusButton(
+                        help: "New worktree (\u{2325}-click to pick existing branch)",
+                        action: handlePlusButton
+                    )
                     .disabled(repo.status == .missing)
                     .popover(isPresented: $showBranchPicker, arrowEdge: .trailing) {
                         BranchPickerView(repoID: repo.id)
