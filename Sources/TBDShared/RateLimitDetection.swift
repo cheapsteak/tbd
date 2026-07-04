@@ -45,9 +45,13 @@ public enum RateLimitDetection {
         if let info = entry.rateLimitInfo,
            (info["status"] as? String) == "rejected" {
             let epoch: Double?
-            if let d = info["resetsAt"] as? Double { epoch = d }
-            else if let i = info["resetsAt"] as? Int { epoch = Double(i) }
-            else { epoch = nil }
+            if let d = info["resetsAt"] as? Double {
+                epoch = d
+            } else if let i = info["resetsAt"] as? Int {
+                epoch = Double(i)
+            } else {
+                epoch = nil
+            }
             if let epoch {
                 return DetectedRateLimit(
                     resetsAt: Date(timeIntervalSince1970: epoch),
