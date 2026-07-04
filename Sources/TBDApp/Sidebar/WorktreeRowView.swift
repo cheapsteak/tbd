@@ -44,16 +44,6 @@ struct WorktreeRowView: View {
         return terminals.contains { $0.activityState == .working }
     }
 
-    /// Structured hover card listing which account(s) this worktree's Claude
-    /// sessions run on ("Claude accounts" + one row per account).
-    /// nil = no card (no Claude sessions).
-    private var accountsHoverCard: HoverCardModel? {
-        AccountHoverCards.worktreeCard(
-            terminals: appState.terminals[worktree.id] ?? [],
-            profiles: appState.modelProfiles
-        )
-    }
-
     /// Hover card for the "+" affordance: what the button does, and which
     /// worktree the new child is created under.
     private var newNestedWorktreeHoverCard: HoverCardModel {
@@ -218,10 +208,10 @@ struct WorktreeRowView: View {
         .opacity(AppState.scratchRowIsDimmed(
             worktree, directoryExists: FileManager.default.fileExists(atPath: worktree.path)
         ) ? 0.5 : 1.0)
-        // Which account(s) this worktree's Claude sessions run on. nil = no
-        // card; the PR icon and status icons keep their own more-specific
-        // tooltips.
-        .hoverCard(accountsHoverCard)
+        // The worktree-row hover surface is intentionally reserved: account
+        // facts moved to the "…" menu (info header + Switch account), and this
+        // hover is earmarked for the planned recency-biased work summary
+        // (see tbd-redesign-direction). No `.hoverCard` here for now.
         .background(
             RoundedRectangle(cornerRadius: 4)
                 .fill(appState.selectedWorktreeIDs.contains(worktree.id) ? Color.accentColor.opacity(0.2) : Color.clear)
