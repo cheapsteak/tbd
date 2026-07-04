@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Testing
 @testable import TBDDaemonLib
@@ -90,6 +89,7 @@ struct LimitResumeSendSequenceLiveTests {
     }
 
     @Test func sequenceArrivesVerbatim() async throws {
+        guard await TmuxVersion.detect() != nil else { return }
         let server = "tbd-test-resume-\(UUID().uuidString.prefix(8))"
         let outputPath = NSTemporaryDirectory() + "tbd-resume-capture-\(UUID().uuidString).bin"
         defer {
@@ -102,6 +102,8 @@ struct LimitResumeSendSequenceLiveTests {
     }
 
     @Test func sequenceArrivesVerbatimWithControlModeClientAttached() async throws {
+        guard let version = await TmuxVersion.detect(),
+              version >= TmuxVersion.controlModeMinimum else { return }
         let server = "tbd-test-resume-cc-\(UUID().uuidString.prefix(8))"
         let outputPath = NSTemporaryDirectory() + "tbd-resume-capture-\(UUID().uuidString).bin"
         // A live `tmux -CC` client on the same server — the "control-mode on"
@@ -113,6 +115,7 @@ struct LimitResumeSendSequenceLiveTests {
         ccClient.standardOutput = ccOut
         ccClient.standardError = FileHandle.nullDevice
         defer {
+            ccOut.fileHandleForReading.readabilityHandler = nil  // clear handler before terminate
             if ccClient.isRunning { ccClient.terminate() }
             tmux(["-L", server, "kill-server"])
             try? FileManager.default.removeItem(atPath: outputPath)
@@ -120,7 +123,19 @@ struct LimitResumeSendSequenceLiveTests {
         let paneID = try await startRawCapture(server: server, outputPath: outputPath)
         ccClient.arguments = ["tmux", "-CC", "-L", server, "attach", "-t", "main"]
         try ccClient.run()
-        try await Task.sleep(for: .milliseconds(300))   // let the client attach
+        // Drain the -CC client's stdout to prevent 64KB pipe backpressure stalling the observer
+        ccOut.fileHandleForReading.readabilityHandler = { _ in }
+
+        // Poll tmux list-clients until exactly 1 client is attached
+        let deadline = ContinuousClock.now + .seconds(15)
+        while ContinuousClock.now < deadline {
+            if let clientCount = tmuxCapture(["-L", server, "list-clients", "-F", "#{client_tty}"])?
+                .split(separator: "\n").count, clientCount == 1 {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+
         try await runSequence(server: server, paneID: paneID)
         try await awaitFileBytes(path: outputPath, expected: Self.expectedBytes)
     }
