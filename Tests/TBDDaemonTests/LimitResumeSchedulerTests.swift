@@ -171,20 +171,33 @@ final class OutcomeCollector: @unchecked Sendable {
         await scheduler.stop()
     }
 
+    /// Deterministic toggle-off race: schedule with a FUTURE resetsAt so the
+    /// loop parks sleeping on the virtual clock, write the config change
+    /// (guaranteed to complete before anything else happens), THEN advance
+    /// the clock past fireAt. No real-time dependence, no thread-scheduling
+    /// race between the config write and the fire.
     @Test func toggleOffAtFireTimeCancelsSilently() async throws {
         let actuator = FakeActuator([.sent])
         let collector = OutcomeCollector()
         let scheduler = makeScheduler(actuator: actuator) { collector.record($0, $1) }
         await scheduler.start()
-        _ = await scheduler.schedule(
+        let resetsAt = clock.now().addingTimeInterval(600)
+        let scheduled = await scheduler.schedule(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
-            resetsAt: clock.now().addingTimeInterval(-120),
-            limitType: "session", rawMessage: "m")
-        try await db.config.setAutoResumeOnLimitReset(false)
-        await scheduler.wake()
+            resetsAt: resetsAt, limitType: "session", rawMessage: "m")
+        #expect(scheduled != nil)
         await pump()
+        #expect(actuator.calls.isEmpty)   // still parked, sleeping until fireAt
+
+        // Completes fully before the clock advances below — no race.
+        try await db.config.setAutoResumeOnLimitReset(false)
+
+        await clock.advance(by: 700)      // past resetsAt + slack
+        await pump()
+
         #expect(actuator.calls.isEmpty)
-        #expect(try await db.scheduledResumes.pending().isEmpty)
+        let row = try await db.scheduledResumes.get(id: scheduled!.id)
+        #expect(row?.status == .cancelled)
         #expect(collector.events.isEmpty)
         await scheduler.stop()
     }
@@ -193,6 +206,53 @@ final class OutcomeCollector: @unchecked Sendable {
         let actuator = FakeActuator([.userAlreadyContinued])
         let collector = OutcomeCollector()
         let scheduler = makeScheduler(actuator: actuator) { collector.record($0, $1) }
+        await scheduler.start()
+        _ = await scheduler.schedule(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            resetsAt: clock.now().addingTimeInterval(-120),
+            limitType: "session", rawMessage: "m")
+        await pump()
+        #expect(try await db.scheduledResumes.pending().isEmpty)
+        #expect(collector.events.isEmpty)
+        await scheduler.stop()
+    }
+
+    @Test func terminalGoneCancelsWithoutOutcome() async throws {
+        let actuator = FakeActuator([.terminalGone])
+        let collector = OutcomeCollector()
+        let scheduler = makeScheduler(actuator: actuator) { collector.record($0, $1) }
+        await scheduler.start()
+        let scheduled = await scheduler.schedule(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            resetsAt: clock.now().addingTimeInterval(-120),
+            limitType: "session", rawMessage: "m")
+        await pump()
+        #expect(actuator.calls.count == 1)   // no retry
+        let row = try await db.scheduledResumes.get(id: scheduled!.id)
+        #expect(row?.status == .cancelled)
+        #expect(collector.events.isEmpty)
+        await scheduler.stop()
+    }
+
+    /// If a row is cancelled out from under a copy-mode retry (e.g. by a
+    /// concurrent cancel) between actuation and the reschedule write,
+    /// `store.reschedule` returns false. The scheduler must not resurrect
+    /// the row into pending — it drops it from consideration instead.
+    @Test func copyModeRescheduleDropsRowNoLongerPending() async throws {
+        final class CancellingActuator: LimitResumeActuating, @unchecked Sendable {
+            let store: ScheduledResumeStore
+            init(store: ScheduledResumeStore) { self.store = store }
+            func actuate(_ resume: ScheduledResume) async -> ResumeActuationOutcome {
+                _ = try? await store.cancelPending(terminalID: resume.terminalID)
+                return .paneInCopyMode
+            }
+        }
+        let actuator = CancellingActuator(store: db.scheduledResumes)
+        let collector = OutcomeCollector()
+        let scheduler = LimitResumeScheduler(
+            store: db.scheduledResumes, config: db.config,
+            actuator: actuator, clock: clock,
+            jitterProvider: { 0 }, onOutcome: { collector.record($0, $1) })
         await scheduler.start()
         _ = await scheduler.schedule(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,

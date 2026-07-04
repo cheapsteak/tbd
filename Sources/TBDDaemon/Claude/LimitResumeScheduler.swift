@@ -48,6 +48,13 @@ public actor LimitResumeScheduler {
     public static let copyModeRetryDelay: TimeInterval = 120
     public static let maxCopyModeAttempts = 15
 
+    /// Post-actuation store-write retry (double-fire protection).
+    private static let writeRetryAttempts = 3
+    private static let writeRetryDelay: TimeInterval = 1
+    /// Backoff before retrying a failed `store.pending()` read — keeps the
+    /// loop self-driven instead of parking in `waitIdle()` forever.
+    private static let readErrorRetryDelay: TimeInterval = 5
+
     // MARK: - Dependencies
 
     private let store: ScheduledResumeStore
@@ -62,6 +69,14 @@ public actor LimitResumeScheduler {
     private var loopTask: Task<Void, Never>?
     private var idleWakeContinuation: CheckedContinuation<Void, Never>?
     private var currentSleepTask: Task<Void, Error>?
+
+    /// Row IDs currently being actuated, or whose post-actuation store write
+    /// failed after all retries. Selection skips these IDs so a write
+    /// failure can never cause `actuator.actuate` to run twice for the same
+    /// row. IDs that exhaust write retries stay here for the rest of this
+    /// process's lifetime — a daemon restart re-evaluates from DB truth,
+    /// which is the accepted tradeoff (see `fire`).
+    private var inFlightOrFired: Set<UUID> = []
 
     public init(
         store: ScheduledResumeStore,
@@ -129,10 +144,7 @@ public actor LimitResumeScheduler {
             resetsAt: resetsAt, fireAt: fireAt,
             limitType: limitType, rawMessage: rawMessage,
             createdAt: clock.now())
-        // `try?` on a `-> ScheduledResume?` API yields a double optional:
-        // outer nil = threw, inner nil = latch rejected. Flatten with `?? nil`.
-        let insertResult: ScheduledResume?? = try? await store.insertPending(row)
-        guard let inserted = insertResult ?? nil else {
+        guard let inserted = try? await store.insertPending(row) else {
             logger.info("schedule: no pending row created for terminal \(terminalID.uuidString, privacy: .public) (latch or store error)")
             return nil
         }
@@ -145,8 +157,21 @@ public actor LimitResumeScheduler {
 
     private func runLoop() async {
         while !Task.isCancelled {
-            let rows = (try? await store.pending()) ?? []
-            guard let next = rows.first else {   // pending() is fireAt-ordered
+            let rows: [ScheduledResume]
+            do {
+                rows = try await store.pending()
+            } catch {
+                logger.error("runLoop: pending() read failed: \(String(describing: error), privacy: .public); retrying in \(Self.readErrorRetryDelay, privacy: .public)s")
+                try? await clock.sleep(until: clock.now().addingTimeInterval(Self.readErrorRetryDelay))
+                if Task.isCancelled { return }
+                continue
+            }
+
+            // Skip rows currently being actuated or whose post-actuation
+            // write permanently failed — never re-select them (double-fire
+            // guard; see `inFlightOrFired`).
+            let candidates = rows.filter { !inFlightOrFired.contains($0.id) }   // pending() is fireAt-ordered
+            guard let next = candidates.first else {
                 await waitIdle()
                 if Task.isCancelled { return }
                 continue
@@ -163,7 +188,13 @@ public actor LimitResumeScheduler {
             if Task.isCancelled { return }
 
             let now = clock.now()
-            let due = ((try? await store.pending()) ?? []).filter { $0.fireAt <= now }
+            let due: [ScheduledResume]
+            do {
+                due = try await store.pending().filter { $0.fireAt <= now && !inFlightOrFired.contains($0.id) }
+            } catch {
+                logger.error("runLoop: pending() read failed while collecting due rows: \(String(describing: error), privacy: .public)")
+                due = []
+            }
             for row in due {
                 await fire(row)
             }
@@ -179,42 +210,110 @@ public actor LimitResumeScheduler {
     // MARK: - Fire
 
     private func fire(_ row: ScheduledResume) async {
+        inFlightOrFired.insert(row.id)
+
         // Belt-and-braces gate check: toggle-off should already have
         // cancelled pending rows; if one slipped through, cancel silently.
         let enabled = (try? await config.get())?.autoResumeOnLimitReset ?? false
         guard enabled else {
-            try? await store.setStatus(id: row.id, status: .cancelled)
+            if await setStatusWithRetry(id: row.id, status: .cancelled, terminalID: row.terminalID, context: "toggle-off") {
+                inFlightOrFired.remove(row.id)
+            }
             return
         }
 
         let outcome = await actuator.actuate(row)
         switch outcome {
         case .sent:
-            try? await store.setStatus(id: row.id, status: .sent)
+            if await setStatusWithRetry(id: row.id, status: .sent, terminalID: row.terminalID, context: "sent") {
+                inFlightOrFired.remove(row.id)
+            }
             logger.info("fire: sent continue to terminal \(row.terminalID.uuidString, privacy: .public)")
             await onOutcome(row, .sent)
 
         case .userAlreadyContinued, .terminalGone:
-            try? await store.setStatus(id: row.id, status: .cancelled)
+            if await setStatusWithRetry(id: row.id, status: .cancelled, terminalID: row.terminalID, context: String(describing: outcome)) {
+                inFlightOrFired.remove(row.id)
+            }
             logger.info("fire: cancelled (\(String(describing: outcome), privacy: .public)) for terminal \(row.terminalID.uuidString, privacy: .public)")
 
         case .paneInCopyMode:
             let attempts = row.attemptCount + 1
             if attempts >= Self.maxCopyModeAttempts {
-                try? await store.setStatus(id: row.id, status: .failed)
+                if await setStatusWithRetry(id: row.id, status: .failed, terminalID: row.terminalID, context: "copy-mode cap") {
+                    inFlightOrFired.remove(row.id)
+                }
                 logger.warning("fire: copy-mode retry cap hit for terminal \(row.terminalID.uuidString, privacy: .public)")
                 await onOutcome(row, .failed("pane stayed in copy-mode/scrollback for ~30 minutes"))
             } else {
                 // Don't cancel their scroll — retry in 2 minutes (spec §Actuation 3).
                 let nextFire = clock.now().addingTimeInterval(Self.copyModeRetryDelay)
-                try? await store.reschedule(id: row.id, fireAt: nextFire, attemptCount: attempts)
-                logger.info("fire: pane in copy-mode; rescheduled attempt \(attempts, privacy: .public) for terminal \(row.terminalID.uuidString, privacy: .public)")
+                if let rescheduled = await rescheduleWithRetry(id: row.id, fireAt: nextFire, attemptCount: attempts, terminalID: row.terminalID) {
+                    if rescheduled {
+                        logger.info("fire: pane in copy-mode; rescheduled attempt \(attempts, privacy: .public) for terminal \(row.terminalID.uuidString, privacy: .public)")
+                    } else {
+                        logger.debug("fire: row no longer pending, dropping (terminal \(row.terminalID.uuidString, privacy: .public))")
+                    }
+                    // Either the row is intentionally still pending (future
+                    // fireAt — remove so the future attempt can fire) or it's
+                    // gone for good (also safe to remove). Only a write
+                    // failure (nil) should leave the ID latched.
+                    inFlightOrFired.remove(row.id)
+                }
             }
 
         case .failed(let reason):
-            try? await store.setStatus(id: row.id, status: .failed)
+            if await setStatusWithRetry(id: row.id, status: .failed, terminalID: row.terminalID, context: "failed") {
+                inFlightOrFired.remove(row.id)
+            }
             logger.warning("fire: failed for terminal \(row.terminalID.uuidString, privacy: .public): \(reason, privacy: .public)")
             await onOutcome(row, .failed(reason))
         }
+    }
+
+    /// Retry a `setStatus` write up to `writeRetryAttempts` times, sleeping
+    /// `writeRetryDelay` seconds (via the injected clock) between attempts.
+    /// Returns true once the write succeeds; logs `.error` and returns false
+    /// once retries are exhausted (double-fire protection — see
+    /// `inFlightOrFired`).
+    @discardableResult
+    private func setStatusWithRetry(
+        id: UUID, status: ScheduledResumeStatus, terminalID: UUID, context: String
+    ) async -> Bool {
+        for attempt in 1...Self.writeRetryAttempts {
+            do {
+                try await store.setStatus(id: id, status: status)
+                return true
+            } catch {
+                if attempt < Self.writeRetryAttempts {
+                    try? await clock.sleep(until: clock.now().addingTimeInterval(Self.writeRetryDelay))
+                } else {
+                    logger.error("fire: setStatus(\(status.rawValue, privacy: .public)) [\(context, privacy: .public)] failed after \(Self.writeRetryAttempts, privacy: .public) attempts for terminal \(terminalID.uuidString, privacy: .public), row \(id.uuidString, privacy: .public): \(String(describing: error), privacy: .public). Leaving row marked in-flight for this process lifetime to prevent double-fire; a daemon restart re-evaluates from DB truth.")
+                }
+            }
+        }
+        return false
+    }
+
+    /// Retry a `reschedule` write up to `writeRetryAttempts` times, sleeping
+    /// `writeRetryDelay` seconds (via the injected clock) between attempts.
+    /// Returns the store's own Bool (true = rescheduled, false = row no
+    /// longer pending) once a write succeeds, or nil once retries are
+    /// exhausted (double-fire protection — see `inFlightOrFired`).
+    private func rescheduleWithRetry(
+        id: UUID, fireAt: Date, attemptCount: Int, terminalID: UUID
+    ) async -> Bool? {
+        for attempt in 1...Self.writeRetryAttempts {
+            do {
+                return try await store.reschedule(id: id, fireAt: fireAt, attemptCount: attemptCount)
+            } catch {
+                if attempt < Self.writeRetryAttempts {
+                    try? await clock.sleep(until: clock.now().addingTimeInterval(Self.writeRetryDelay))
+                } else {
+                    logger.error("fire: reschedule failed after \(Self.writeRetryAttempts, privacy: .public) attempts for terminal \(terminalID.uuidString, privacy: .public), row \(id.uuidString, privacy: .public): \(String(describing: error), privacy: .public). Leaving row marked in-flight for this process lifetime to prevent double-fire; a daemon restart re-evaluates from DB truth.")
+                }
+            }
+        }
+        return nil
     }
 }
