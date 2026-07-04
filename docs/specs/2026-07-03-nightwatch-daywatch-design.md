@@ -171,11 +171,25 @@ daywatch}`. Add `nightwatch_mode` in a new `v32` migration
 `RPCRouter+NightwatchHandlers.swift`. Per CLAUDE.md's migration rule, the Codable model
 field must be optional/defaulted so existing rows decode.
 
+### 5.1b Two entry affordances in the TBD UI (Adam's review)
+
+The control lives in the TBD UI, and there are **two ways in**, matched to how gone Adam is:
+
+- **Quick "step out"** — a lightweight toggle, no ceremony. Enters daywatch (or a short
+  nightwatch) instantly for "I'm popping into a meeting." No pre-flight, no chat.
+- **Full "away for the night"** — opens a brief **handoff session Adam can chat with** for a
+  moment: the watchman confirms what it's watching, surfaces anything worth a 20-second
+  decision, and runs the PR pre-flight (§5.2). The nightman *needs* this handoff — it's about
+  to run unattended for hours; the quick step-out doesn't.
+
+So: quick toggle = low-stakes, instant; full away = a short conversational handoff. Both set
+the same `nightwatchMode`; they differ only in whether a handoff/pre-flight surface opens.
+
 ### 5.2 Nightwatch initiation — the interactive HTML pre-flight
 
 Adam is present when he hits Away→Nightwatch, so we get one interactive moment. The vision:
 sweep the fleet's open PRs into **clear / hold / test-hold** *fast*, without typing an
-exhaustive list. This is the pre-flight.
+exhaustive list. This is the pre-flight (part of the full-away handoff, §5.1b).
 
 - Render it in TBD's existing **webview pane** — `PaneContent.webview(id, url)`
   (`PaneContent.swift:5–21`) via `WebviewPaneView` (`WebviewPaneView.swift:40–56`), which
@@ -184,7 +198,7 @@ exhaustive list. This is the pre-flight.
   metadata (paths, size, approval, checks, authoring-worktree-live?).
 - The human triages with three buttons per PR: **Clear** (may auto-merge when green),
   **Hold** (never while away), **Test-hold** (I want to personally test first). Bulk
-  actions ("clear all non-sensitive under N lines").
+  actions ("clear all under N lines that aren't a held-impact domain").
 - Button clicks post back to the app (WKWebView `MessageEvent`, available but not yet
   wired — seam §8) which writes rows into the **clearance ledger** (§7.3), each **pinned to
   the PR's current head SHA**.
@@ -266,7 +280,7 @@ handed a PR before Phase-2 completes may reference a worktree that fails `git wo
 
 ### 6.3 Backpressure — a first-class input, not an afterthought
 
-The night held nudges on capacity and held spawns on host memory *by hand*. Make both
+The night held nudges on capacity and held spawns on host memory *by hand*. Make three
 signals native (seam §6):
 
 - **Model capacity**: reuse `ClaudeUsagePoller` (`Daemon.swift:327–337`) + the proxy's
@@ -274,6 +288,10 @@ signals native (seam §6):
 - **Host memory/swap**: genuinely new. Add a `HostResourceProbe` (macOS `host_statistics()`
   / `vm_stat`) sampling swap + physical-memory pressure. The night's 87%→94% swap climb is
   exactly the signal that should pause spawns.
+- **Token budget** (Adam's review — §10.1): cumulative model spend this away-session vs. a
+  configurable ceiling. As it approaches the cap, throttle model work / prefer cheap models /
+  pause non-urgent fixups. A burned budget is a first-class backpressure condition, not just a
+  line in the wrap-up.
 
 Backpressure policy (editable) consumes these; the daemon just exposes them. When either
 crosses threshold: **pause spawns and pause auto-nudges; keep the tick running; surface the
@@ -305,8 +323,17 @@ auto_mergeable(PR) =
  AND ( pre_cleared(PR)                       # (a) HTML pre-flight clearance, SHA-pinned
        OR small_and_safe(PR)                 # (b) auto-clear rule (editable policy)
        OR in_channel_grant(PR) )             # (c) human told an agent, in its channel
- AND NOT hard_hold(PR)                        # sensitive path OR test-hold — always wins
+ AND NOT hard_hold(PR)                        # high-impact domain OR under-tested OR test-hold
 ```
+
+> **Reframed on Adam's review (2026-07-03):** the hard-hold axis is **impact + test-adequacy,
+> not sensitive paths.** A broad path ban (`.claude/`, `scripts/`, `infrastructure/`,
+> `db/migrations`, `shared/…`) was the wrong instrument — "nothing would auto-merge." And the
+> paths that genuinely *require a human review* are already enforced **upstream by the org
+> ruleset**: such a PR is simply un-mergeable (its `mergeStateStatus`/required-review check
+> never goes clean), so the SAFETY_FLOOR blocks it *for free* — TBD needn't re-encode a
+> path list or sync CODEOWNERS at all. This deletes the CODEOWNERS-sync machinery and its
+> drift risk. TBD's own judgment layer instead holds on **what could hurt if it's wrong.**
 
 **SAFETY_FLOOR (compiled, enforced by the daemon):** claude-review APPROVED **on current
 head SHA** + all required checks clean + PR not draft. This is the prototype's existing
@@ -330,35 +357,45 @@ Three properties the floor must have (plan-review, security):
   small+safe *size bounds* live in editable policy — but a bad or over-eager policy edit that
   widens them isn't gated with a compiled change's rigor, silently expanding the merge set.
   So the daemon enforces an absolute maximum (e.g. ≤ 50 changed lines, non-runtime paths) as
-  a compiled ceiling: policy can subset it, never superset it. And the nightwatch policy
-  files themselves (`.nightwatch/policy.json`) are a **sensitive path** — widening the gate
-  requires a human-reviewed change like any other sensitive edit.
+  a compiled ceiling: policy can subset it, never superset it. And a change to the nightwatch
+  policy files themselves (`.nightwatch/policy.json`) — which can widen the gate or the impact
+  map — is **held like a high-impact change** (§7.1): widening the gate needs a human, since
+  the policy edit is more consequential than the PR it would clear.
 
 **HARD HOLDS (always win over any clearance):**
-- **Sensitive paths** — `infrastructure/`, `atlantis.yaml`, `db/migrations`,
-  `paradedb_migrations`, `functions/`, `.github/`, `.claude/`, `scripts/ci/`,
-  `backend/app/middleware/`, `shared/longeye_shared/`, anything auth. Org ruleset requires
-  a devs-team human review on head; the daemon refuses regardless of clearance. **Do not
-  hardcode this list** (plan-review, arch + security): it drifts from the org's source of
-  truth (a new sensitive dir added upstream would merge unchecked). Instead **derive** it —
-  sync the org CODEOWNERS / branch-protection rules into a native **sensitive-paths config
-  store** (a DB table the daemon enforces membership against) at Nightwatch startup, and
-  re-verify per merge. Membership edits without a rebuild; enforcement stays compiled. Use a
-  real glob/CODEOWNERS matcher, not string prefixes (guard against rename/symlink evasion).
-- **Self-modifying CI** — any PR touching `.github/workflows/`, `atlantis.yaml`, or CI
-  config is a hard hold regardless of size/safety (a PR that skips its own failing test
-  reads "clean"). This is a subset of sensitive paths, called out because it defeats the
-  check-based floor directly.
+- **High-impact / foundational domain.** A change to a foundational, high-blast-radius area —
+  *how citations work*, core data semantics, ranking/eval, auth behavior — holds for local
+  testing + a human, no matter how small, approved, or green. This is Adam's real axis:
+  "if it's an important or foundational domain and a potentially large-impact change we
+  should also hold it." Identified by an **editable "impact map"** in policy (a list of
+  foundational domains/globs) **plus a `large-decision` marker** an agent or human can stamp
+  on a PR it judges consequential. Policy-editable so the impact map evolves without a
+  rebuild; the daemon just enforces "if flagged high-impact → hold."
+- **Inadequate test coverage.** A change to runtime behavior that isn't reasonably covered by
+  tests holds ("make sure things are reasonably tested"). Signal: the PR's diff touches
+  runtime code but adds/edits no tests, or coverage/required test jobs are thin. Conservative
+  by default — when unsure whether a change is adequately tested, hold rather than merge.
 - **Test-holds** — anything Adam flagged to personally test.
-- **Authoring worktree still live + working** (§4's new guard) — don't merge out from under
-  an active author.
+- **Authoring worktree still live + working** (§4's guard) — don't merge out from under an
+  active author.
+- **Floor-integrity guard (minimal).** A PR that modifies the very checks it is judged by
+  (its own workflow/CI definition) may not use those checks as its own green light — else a
+  PR that skips its failing test reads "clean." This is *not* a path ban (paths aren't the
+  axis); it's a narrow guard that the floor can't be made self-referential. Such a PR
+  escalates.
+
+> Note what's **gone**: the broad `infrastructure/` `.claude/` `scripts/` `migrations/`
+> `shared/` sensitive-path list, and the CODEOWNERS sync. Where a path truly needs a human,
+> the org ruleset already makes the PR un-mergeable, so the floor blocks it without TBD
+> owning a list. Where a path is merely *conventionally* sensitive but harmless, it can now
+> auto-merge — which is the point.
 
 ### 7.2 The three clearance paths, each with its guardrail
 
 | Path | Guardrail (the thing that makes it safe) |
 |---|---|
 | **(a) Pre-clear** (HTML pre-flight) | Clearance is **pinned to the head SHA at clear time.** If the head advances (rebase, new commit), the clearance is void until re-verified that claude-approval survived on the new head. Directly answers the #13781 "approval didn't survive the force-push" incident. |
-| **(b) Small + safe** | Non-sensitive path + SAFETY_FLOOR + **size bound** (diff/commit count) + no "large-decision" or "wanted-to-test" marker + authoring-worktree-not-live. Default posture **conservative** (because small still ships to prod, §3); the path list + size bounds live in **editable policy**, not compiled, so "safe" can evolve without a rebuild (answers Counter #3's decaying-heuristic point). |
+| **(b) Small + safe** | SAFETY_FLOOR + **size bound** (diff/commit count) + **not a held-impact domain** (§7.1 impact map) + **adequately tested** + no `large-decision` marker + authoring-worktree-not-live. Note the axis is impact + test-adequacy, *not* path sensitivity (Adam's review). Default posture **conservative** (small still ships to prod, §3); the impact map + size bounds live in **editable policy**, not compiled, so "safe" evolves without a rebuild. |
 | **(c) In-channel grant** | The riskiest. Made safe by **capturing the grant as a structured token at utterance time, not re-derived later from scrollback.** When the human types "you can merge #14030" in an agent's channel, the agent registers a clearance via `tbd` **scoped to that exact PR number**, SHA-pinned, immediately. If an agent cannot pin a grant to a specific PR number, it **escalates instead of merging** — never a free-text "I believe I was told." Still subject to SAFETY_FLOOR + hard holds. This is the direct guard against Counter #1's "Slack message misread as a deploy signal." **Two authz additions (plan-review, security):** (1) **who may grant** — only an allowlisted human (Adam, by Slack user-id); a grant from anyone else escalates, never clears. (2) **the grant must be a fresh, timestamped ledger entry registered at utterance time** — the gate refuses any merge whose clearance was reconstructed from scrollback (no matching timestamped row → escalate). (3) **the agent MUST echo back** ("I'll auto-merge #14030 when green — registered") and the clearance is not load-bearing until that echo is posted — **decided**: a misread is caught by the human *before* it can merge, not surfaced after the fact in the wrap-up. This is the counter-review's most-damaging vector (Slack-message-misread-as-deploy), closed at the cost of one turn. |
 
 ### 7.3 The clearance ledger (native)
@@ -483,10 +520,20 @@ renderer works off an explicit content schema — roughly:
 `{ merges:[{pr, sha, clearance_kind, changed_paths, revert_link, revertable?, merged_at}],
 advanced_prs:[…], children:[{id, status, spawned_at, retired_at}], reorientation:{
 user_worktrees:[{id, before→after, whats_new_vs_known_blocker}] }, held_decisions:[…],
-backpressure_events:[…], duration }` — with a **"what's news vs. what you already knew"**
-distinction on each reorientation item (the hard part), and the held-decisions batch derived
-from the policy's escalation threshold. Read-only first; inline Clear/Revert/supersede
-buttons are a later enhancement gated on the same message-back wiring as the pre-flight (§16).
+backpressure_events:[…], spend:{used, budget}, duration }` — with a **"what's news vs. what
+you already knew"** distinction on each reorientation item (the hard part), and the
+held-decisions batch derived from the policy's escalation threshold. Read-only first; inline
+Clear/Revert/supersede buttons are a later enhancement gated on the same message-back wiring
+as the pre-flight (§16).
+
+**Note-taking + presentation is a skill the watchman is measured on (Adam's review).** The
+report isn't reconstructed at the end from logs — the watch keeps a **running narrative log**
+throughout the away period (each merge/hold/spawn/nudge appended with its *why*), so the
+wrap-up is a curation, not an archaeology. And the wrap-up is a **conversation**: Adam gives
+feedback ("too verbose," "you missed that #14040 was the same blocker"), and that feedback
+feeds back — the watchman **iterates on itself at closeout** (a self-critique pass on "was my
+reporting good? what did I over/under-surface?") so the next away-session presents better.
+Good reporting is an explicit success criterion, not a side effect.
 
 ### 9.2 Self-closeout → the knowledge tree
 
@@ -495,6 +542,14 @@ learnings into the knowledge tree *before* being considered done (§4 — closeo
 handoff that prevents losing intentions). **Never auto-closeout on the DONE heuristic
 alone** (§3: the queued "Run /closeout" task fooled Tier-0). Gate closeout on the real
 done-signal: no open authored PRs unresolved, no staged composer text, no pending question.
+
+**Closeout produces a PR that also needs babysitting (Adam's review).** A `/closeout` run
+typically opens its *own* PR (the knowledge-tree/notes changes) — so the babysitter's job is
+to shepherd **both the closeout PR and the worktree's original PR(s)** to done, not just the
+original. This is exactly the **cheap-model fixup** work from §10.1: a **little Sonnet/Haiku
+agent** rebases, resolves trivial conflicts, regenerates snapshots, drives checks green, and
+re-requests review on both — Opus is never spent on this. A worktree isn't `closedOut` until
+its closeout PR *and* its original work have landed or been explicitly parked.
 
 **Enforce it with a real field, not a principle (stress-test, pre-mortem #2 — the top
 pre-ship fix).** The §3 %69/%12 misclassification is a *recurrence* risk: a stated principle
@@ -540,6 +595,31 @@ Design consequences: (1) keep the model-free Tier-0 tick as the runtime; page a 
 for judgment. (2) Prefer **parallel fan-out over serial chains** for any model work
 (external: 10–15× cheaper). (3) The dedicated babysitter should run **lean** context and be
 recycled before it bloats past the burn threshold.
+
+### 10.1 Token conservatism is a first-class constraint (Adam's review)
+
+> "The nightwatch and daywatch should be **very conservative with token spend**. It would be
+> no fun to come back and realize your entire session token budget was eaten up."
+
+Coming back to a **burned budget is a failure mode on par with a bad merge** — the design
+treats cumulative spend as something to protect, not just a cost to note:
+
+- **Cheap model does the mechanical work.** Rebases, lint fixes, regenerating snapshots,
+  driving a PR to green, running `/closeout` — this is **little Sonnet (or Haiku) agent**
+  work, not Opus. Opus is the exception handler for genuine judgment only (the prototype's
+  tier policy, made a budget rule). A watch child spun to "rebase #14040 and fix the failing
+  stub" should be a cheap model by default.
+- **Spend is a backpressure signal (§6.3).** The watch tracks tokens burned this session/
+  window; as it approaches a budget ceiling it **throttles** — fewer/cheaper model calls,
+  pause non-urgent fixups, prefer Tier-0 — and surfaces "approaching budget" rather than
+  silently draining it. A configurable budget cap per away-session, defaulting conservative.
+- **The wrap-up reports spend.** "Merged 4, advanced 6, **spent ~X of your budget**" — so a
+  runaway burn is visible immediately, and the escalation/spawn thresholds can be tuned down
+  next time.
+
+This makes the "40 PRs × 3 agent types" runaway (Counter #2) a *budget* backstop too, not
+only a count cap: even within the depth-2/fan-out caps, spend throttling stops a swarm of
+cheap agents from quietly eating the week's quota.
 
 > Cost figure to hold loosely: external modeled ~$540/mo (cached) vs ~$5,400/mo (uncached)
 > for a 40-agent fleet. **Modeled, not measured** — treat as order-of-magnitude, not a
@@ -757,8 +837,10 @@ gate the plan-review/stress-test cycle produced):
    token; stale ⇒ escalate. *The most serious architecture gap.*
 2. **In-channel grant capture + authz** (design-gap → §7.2c) — utterance-time, PR-scoped,
    SHA-pinned, Slack-user-id allowlisted; no scrollback reconstruction.
-3. **Sensitive paths derived from CODEOWNERS** (design-gap → §7.1) — synced native store, not
-   a compiled list; glob/CODEOWNERS matcher.
+3. **Hard holds on impact + test-adequacy, not paths** (design-gap → §7.1, Adam's review) —
+   an editable impact map + `large-decision` marker + a test-adequacy signal; drop the
+   sensitive-path list and CODEOWNERS sync (the org ruleset already blocks required-review
+   paths at the floor). Keep only the minimal floor-integrity guard.
 4. **Enforced `closeoutState` archive gate** (design-gap → §9.2) — archive refuses unless
    `closedOut`/`dead`. *Highest-damage lifecycle fix; the %69/%12 recurrence.*
 5. **Wrap-up output schema + "what's news"** (design-gap → §9.1) — *highest-likelihood*
