@@ -370,29 +370,46 @@ struct STTextViewTranscriptPaneView: View {
             finalCount = result.messages.count
             let resolvedSID = result.sessionID ?? sid
             let swapInterval = TranscriptSignposts.signposter.beginInterval("transcript.swap")
-            let didChange: Bool = await MainActor.run {
-                Self.perfLog.debug("textkit.pollOnce.mainActor.start sid=\(sidShort, privacy: .public)")
-                let mainActorStart = ContinuousClock.now
-                let prev = appState.sessionTranscripts[resolvedSID] ?? []
-                let equalStart = ContinuousClock.now
-                let equal = messagesEqual(prev, result.messages)
-                let equalElapsed = ContinuousClock.now - equalStart
-                let equalMs = Int(equalElapsed.components.seconds * 1000 + equalElapsed.components.attoseconds / 1_000_000_000_000_000)
-                let swapStart = ContinuousClock.now
-                if !equal {
-                    appState.sessionTranscripts[resolvedSID] = result.messages
-                    appState.touchSessionTranscript(resolvedSID)
-                }
-                let swapElapsed = ContinuousClock.now - swapStart
-                let swapMs = Int(swapElapsed.components.seconds * 1000 + swapElapsed.components.attoseconds / 1_000_000_000_000_000)
-                if !result.messages.isEmpty {
-                    hasShownInitialMessages = true
-                }
-                let mainActorElapsed = ContinuousClock.now - mainActorStart
-                let mainActorMs = Int(mainActorElapsed.components.seconds * 1000 + mainActorElapsed.components.attoseconds / 1_000_000_000_000_000)
-                Self.perfLog.debug("textkit.pollOnce.mainActor.end sid=\(sidShort, privacy: .public) elapsed_ms=\(mainActorMs, privacy: .public) equal_ms=\(equalMs, privacy: .public) swap_ms=\(swapMs, privacy: .public)")
-                return !equal
+            Self.perfLog.debug("textkit.pollOnce.mainActor.start sid=\(sidShort, privacy: .public)")
+            let phaseStart = ContinuousClock.now
+            // `prev` is a cheap COW snapshot taken on the main actor; the deep
+            // equality compare then runs in a detached task so a long
+            // transcript never burns main-thread time proving "nothing
+            // changed" on an idle tick (#129 territory).
+            let prev = appState.sessionTranscripts[resolvedSID] ?? []
+            let newMessages = result.messages
+            let equalStart = ContinuousClock.now
+            let didChange = await Task.detached(priority: .userInitiated) {
+                TranscriptPollDiff.changed(prev: prev, new: newMessages)
+            }.value
+            // The detached compare isn't cancellation-linked to the poll task:
+            // if the pane was torn down (tab close / session rollover) while it
+            // ran, skip the publish so a stale snapshot can't resurrect state.
+            // An interleaved same-key writer during the suspension is tolerable
+            // — the publish is a whole fresh daemon snapshot (never derived
+            // from `prev`), so the next 1.5s tick converges.
+            if Task.isCancelled {
+                TranscriptSignposts.signposter.endInterval("transcript.swap", swapInterval)
+                return
             }
+            let equalElapsed = ContinuousClock.now - equalStart
+            let equalMs = Int(equalElapsed.components.seconds * 1000 + equalElapsed.components.attoseconds / 1_000_000_000_000_000)
+            let swapStart = ContinuousClock.now
+            if didChange {
+                appState.sessionTranscripts[resolvedSID] = newMessages
+                appState.touchSessionTranscript(resolvedSID)
+            }
+            let swapElapsed = ContinuousClock.now - swapStart
+            let swapMs = Int(swapElapsed.components.seconds * 1000 + swapElapsed.components.attoseconds / 1_000_000_000_000_000)
+            if !newMessages.isEmpty {
+                hasShownInitialMessages = true
+            }
+            let phaseElapsed = ContinuousClock.now - phaseStart
+            let phaseMs = Int(phaseElapsed.components.seconds * 1000 + phaseElapsed.components.attoseconds / 1_000_000_000_000_000)
+            // Log event names kept from the MainActor.run era so existing
+            // `log stream` recipes keep matching; equal_ms now measures the
+            // detached compare, swap_ms the on-main publish.
+            Self.perfLog.debug("textkit.pollOnce.mainActor.end sid=\(sidShort, privacy: .public) elapsed_ms=\(phaseMs, privacy: .public) equal_ms=\(equalMs, privacy: .public) swap_ms=\(swapMs, privacy: .public)")
             TranscriptSignposts.signposter.endInterval("transcript.swap", swapInterval)
             changed = didChange
             // Diag: log message source, thread resolution, and displayed head/tail
@@ -424,17 +441,6 @@ struct STTextViewTranscriptPaneView: View {
         let pollElapsed = ContinuousClock.now - pollStart
         let pollMs = Int(pollElapsed.components.seconds * 1000 + pollElapsed.components.attoseconds / 1_000_000_000_000_000)
         Self.perfLog.debug("textkit.pollOnce.end sid=\(sidShort, privacy: .public) elapsed_ms=\(pollMs, privacy: .public) changed=\(changed, privacy: .public) count=\(finalCount, privacy: .public)")
-    }
-
-    private func messagesEqual(_ a: [TranscriptItem], _ b: [TranscriptItem]) -> Bool {
-        let start = ContinuousClock.now
-        let result = a == b
-        let elapsed = ContinuousClock.now - start
-        if max(a.count, b.count) > 100 {
-            let ms = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
-            Self.perfLog.debug("textkit.messagesEqual elapsed_ms=\(ms, privacy: .public) count_a=\(a.count, privacy: .public) count_b=\(b.count, privacy: .public) result=\(result, privacy: .public)")
-        }
-        return result
     }
 }
 

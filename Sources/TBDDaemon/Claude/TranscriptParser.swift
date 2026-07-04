@@ -55,8 +55,9 @@ enum TranscriptParser {
         var rawLines: [[String: Any]] = []
         // Parallel to rawLines. Stable per-line identifier used as a fallback
         // when a line is missing the `uuid` field. Using a fresh UUID() here
-        // would make messagesEqual permanently false for that item (forcing a
-        // @Published write on every poll). Line index is process-stable and
+        // would make the poll loops' TranscriptPollDiff.changed permanently
+        // true for that item (forcing a @Published write on every poll). Line
+        // index is process-stable and
         // cheap; in practice every Claude JSONL line carries a `uuid` so this
         // fallback is defensive.
         var stableIDs: [String] = []

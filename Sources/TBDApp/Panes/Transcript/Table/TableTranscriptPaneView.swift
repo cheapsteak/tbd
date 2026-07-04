@@ -288,15 +288,28 @@ struct TableTranscriptPaneView: View {
             let result = try await appState.daemonClient.terminalTranscript(terminalID: terminalID)
             failureCount = 0
             let resolvedSID = result.sessionID ?? sid
-            await MainActor.run {
-                let prev = appState.sessionTranscripts[resolvedSID] ?? []
-                if prev != result.messages {
-                    appState.sessionTranscripts[resolvedSID] = result.messages
-                    appState.touchSessionTranscript(resolvedSID)
-                }
-                if !result.messages.isEmpty {
-                    hasShownInitialMessages = true
-                }
+            // `prev` is a cheap COW snapshot taken on the main actor; the deep
+            // equality compare then runs in a detached task so a long
+            // transcript never burns main-thread time proving "nothing
+            // changed" on an idle tick (#129 territory).
+            let prev = appState.sessionTranscripts[resolvedSID] ?? []
+            let newMessages = result.messages
+            let didChange = await Task.detached(priority: .userInitiated) {
+                TranscriptPollDiff.changed(prev: prev, new: newMessages)
+            }.value
+            // The detached compare isn't cancellation-linked to the poll task:
+            // if the pane was torn down (tab close / session rollover) while it
+            // ran, skip the publish so a stale snapshot can't resurrect state.
+            // An interleaved same-key writer during the suspension is tolerable
+            // — the publish is a whole fresh daemon snapshot (never derived
+            // from `prev`), so the next 1.5s tick converges.
+            if Task.isCancelled { return }
+            if didChange {
+                appState.sessionTranscripts[resolvedSID] = newMessages
+                appState.touchSessionTranscript(resolvedSID)
+            }
+            if !newMessages.isEmpty {
+                hasShownInitialMessages = true
             }
         } catch {
             failureCount += 1
