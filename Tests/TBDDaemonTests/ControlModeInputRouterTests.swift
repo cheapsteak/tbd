@@ -35,13 +35,18 @@ struct ControlModeInputRouterTests {
     }
 
     /// Poll until `recorder` has at least `count` writes, or fail on timeout.
+    /// 15 s deadline + a final post-deadline re-check: under parallel-suite
+    /// load a sleep slice can overshoot the deadline AFTER the writes landed
+    /// (observed live as `timedOut(got: N, want: N)` at loadavg ~40), and the
+    /// old 2 s budget starved outright (`got: 2, want: 4`).
     private func waitForWrites(_ recorder: Recorder, count: Int,
-                              timeout: Duration = .seconds(2)) async throws {
+                              timeout: Duration = .seconds(15)) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if recorder.writes.count >= count { return }
             try await Task.sleep(for: .milliseconds(10))
         }
+        guard recorder.writes.count < count else { return }
         throw RouterTestError.timedOut(got: recorder.writes.count, want: count)
     }
 
