@@ -253,12 +253,70 @@ final class HoverCardController {
     /// Bumped on every show/hide; an in-flight fade-out completion only
     /// orders the panel out if no newer show/hide superseded it.
     private var fadeGeneration = 0
+    /// After an interaction dismissal (a menu opened, or the row/buttons were
+    /// clicked), suppress the warm instant-reshow until this instant so the
+    /// tooltip can't pop back over an open menu.
+    private var suppressUntil: Date?
+    /// Guards `installInteractionHooks()` so the notification observer and local
+    /// event monitor register exactly once for the app lifetime.
+    private var interactionHooksInstalled = false
+    private var menuObserver: NSObjectProtocol?
+    private var mouseMonitor: Any?
+
+    /// How long a click / menu-open suppresses the tooltip's warm reshow.
+    /// Comfortably longer than the warm-grace window so a click can't be
+    /// immediately undone by a lingering warm hover.
+    private static let interactionSuppression: TimeInterval = 0.4
 
     /// Gap between the anchor's edge and the card.
     private static let anchorGap: CGFloat = 5
 
     init(timing: HoverCardTiming = .standard) {
         self.timing = timing
+        installInteractionHooks()
+    }
+
+    /// Register the global dismissal hooks once. `NSMenu.didBeginTracking`
+    /// covers every menu (right-click contextMenu, the "…" Menu, the "Switch
+    /// account" submenu). A local mouse-down monitor covers plain row-selection
+    /// and button clicks, which post no menu notification. Both hop to the main
+    /// actor and dismiss the card immediately.
+    private func installInteractionHooks() {
+        guard !interactionHooksInstalled else { return }
+        interactionHooksInstalled = true
+
+        menuObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.dismissForInteraction()
+            }
+        }
+
+        // Local monitor fires on the main thread for clicks inside the app.
+        // Only act when a card is up to avoid per-click overhead; return the
+        // event unchanged so selection/button clicks still work.
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            MainActor.assumeIsolated {
+                if let self, self.isCardVisible {
+                    self.dismissForInteraction()
+                }
+            }
+            return event
+        }
+    }
+
+    /// Immediately hide the current card and cancel any pending show, then
+    /// suppress the warm instant-reshow briefly so the tooltip does not pop back
+    /// while a menu is open. Central hook: every `.hoverCard` adopter inherits it.
+    func dismissForInteraction() {
+        cancelPendingShow()
+        suppressUntil = Date().addingTimeInterval(Self.interactionSuppression)
+        hide()
     }
 
     private var isCardVisible: Bool {
@@ -267,6 +325,9 @@ final class HoverCardController {
 
     func hoverBegan(anchor: NSView, model: HoverCardModel) {
         cancelPendingShow()
+        // Bail while an interaction dismissal is still suppressing reshow, so a
+        // lingering warm hover can't pop the tooltip back over an open menu.
+        if let suppressUntil, Date() < suppressUntil { return }
         let delay = timing.effectiveShowDelay(
             now: Date(), lastDismissedAt: lastDismissedAt, isCardVisible: isCardVisible
         )

@@ -54,6 +54,15 @@ struct WorktreeRowView: View {
         )
     }
 
+    /// Hover card for the "+" affordance: what the button does, and which
+    /// worktree the new child is created under.
+    private var newNestedWorktreeHoverCard: HoverCardModel {
+        HoverCardModel(
+            title: "New nested worktree",
+            titleCaption: "Creates a child worktree under \(worktree.displayName)"
+        )
+    }
+
     @ViewBuilder
     private func leadingIcon() -> some View {
         switch RowStatusIndicator.leading(
@@ -235,10 +244,10 @@ struct WorktreeRowView: View {
         .overlay(alignment: .trailing) {
             if isRowHovered && !isMain {
                 HStack(spacing: 2) {
-                    // Per-session account info + switch-account. Hidden until
-                    // hover, calm styling matching the "+" affordance.
-                    RowAccountMenuView(worktree: worktree)
-                        .buttonStyle(HoverPressButtonStyle())
+                    // The action list ("…") — account section + the
+                    // shared RowActionMenu actions. Hidden until hover, calm
+                    // styling matching the "+" affordance.
+                    RowAccountMenuView(worktree: worktree, onRename: startRename)
                     Button(action: {
                         let parentID = worktree.id
                         // Scratch spaces have no repo, so nested-worktree creation
@@ -251,7 +260,7 @@ struct WorktreeRowView: View {
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(HoverPressButtonStyle())
-                    .help("New nested worktree")
+                    .hoverCard(newNestedWorktreeHoverCard)
                 }
                 .padding(.trailing, 4)
             }
