@@ -15,7 +15,8 @@ struct ContentView: View {
 
     private var selectedWorktree: Worktree? {
         guard let id = appState.selectedWorktreeIDs.first else { return nil }
-        return appState.worktrees.values.flatMap { $0 }.first { $0.id == id }
+        // findWorktree also resolves scratch spaces (repo-less worktrees).
+        return appState.findWorktree(id: id)
     }
 
     /// Returns the set of terminal IDs currently rendered anywhere in the

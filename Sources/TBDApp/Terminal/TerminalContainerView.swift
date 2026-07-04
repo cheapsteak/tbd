@@ -98,12 +98,10 @@ struct SingleWorktreeView: View {
     }
 
     private var worktree: Worktree? {
-        for wts in appState.worktrees.values {
-            if let wt = wts.first(where: { $0.id == worktreeID }) {
-                return wt
-            }
-        }
-        return nil
+        // Routes through findWorktree so scratch spaces (which live in
+        // `scratchWorktrees`, not the repo-grouped `worktrees` dict) resolve
+        // too — otherwise selecting a scratch space shows "Worktree not found".
+        appState.findWorktree(id: worktreeID)
     }
 
     private var worktreeTabs: [Tab] {
@@ -387,12 +385,10 @@ private struct MultiWorktreeCell: View {
     @EnvironmentObject var appState: AppState
 
     private var worktree: Worktree? {
-        for wts in appState.worktrees.values {
-            if let wt = wts.first(where: { $0.id == worktreeID }) {
-                return wt
-            }
-        }
-        return nil
+        // Routes through findWorktree so scratch spaces (which live in
+        // `scratchWorktrees`, not the repo-grouped `worktrees` dict) resolve
+        // too — otherwise selecting a scratch space shows "Worktree not found".
+        appState.findWorktree(id: worktreeID)
     }
 
     /// The terminal shown in this cell — derived from the active tab's layout
