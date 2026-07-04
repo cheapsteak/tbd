@@ -657,6 +657,12 @@ public final class TBDDatabase: Sendable {
             )
         }
 
+        // Nightwatch mode: 'off', 'daywatch', or 'nightwatch'. Nullable so
+        // existing rows decode to the default 'off'. See Phase 0 design.
+        migrator.registerMigration("v38_nightwatch_mode") { db in
+            try db.addColumnIfMissing(table: "config", column: "nightwatch_mode", type: .text, defaults: "off")
+        }
+
         return migrator
     }
 }
