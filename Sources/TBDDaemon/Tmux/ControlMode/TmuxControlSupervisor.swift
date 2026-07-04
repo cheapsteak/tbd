@@ -134,6 +134,16 @@ actor TmuxControlSupervisor {
         fanout.detach(key: PaneKey(server: server, paneID: paneID))
     }
 
+    /// Generation-checked detach for failure cleanup: removes + closes the
+    /// pane's sink ONLY if it still belongs to `generation`, so a stale
+    /// attach's failure (or a stale `pane.detach`) can never EOF a newer
+    /// attach's healthy pipe. Returns whether a sink was actually detached.
+    @discardableResult
+    func detachIfGeneration(server: String, paneID: String, generation: UInt64) -> Bool {
+        fanout.detachIfGeneration(
+            key: PaneKey(server: server, paneID: paneID), generation: generation)
+    }
+
     /// Pre-ready, generation-checked replay write (M4.2), delegated to the
     /// fanout. `nonisolated` on purpose: `writeReplay` may block up to its
     /// deadline waiting for the app to drain the pipe — that wait must run on

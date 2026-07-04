@@ -827,18 +827,24 @@ actor DaemonClient {
     }
 
     /// Request an attach and receive the vended fd via the sidecar. Returns
-    /// the read fd (ownership passes to the caller's reader). Does NOT send
-    /// `attach.ready` — the caller does that after wiring the reader.
+    /// the read fd (ownership passes to the caller's reader) plus the attach
+    /// generation the daemon minted (echo it back in `paneDetach` so a stale
+    /// detach cannot kill a newer attach's sink; nil from older daemons).
+    /// Does NOT send `attach.ready` — the caller does that after wiring the
+    /// reader.
     ///
     /// Ordering: the sidecar expectation is registered BEFORE the RPC is
     /// issued, so the vended fd can never race past its waiter; the header
     /// demux (`FDSidecarClient`) is what keeps concurrent attaches for
     /// different panes from cross-delivering fds.
-    func openAttach(worktreeID: UUID, paneID: String, windowID: String) async throws -> Int32 {
+    func openAttach(
+        worktreeID: UUID, paneID: String, windowID: String
+    ) async throws -> (fd: Int32, generation: UInt64?) {
         // Fresh nonce per attach: the daemon echoes it in the vend header, so
         // a superseded attach's stale fd can never be delivered to this one.
         let attachID = UUID()
         let promise = fdSidecar.expectFD(worktreeID: worktreeID, paneID: paneID, attachID: attachID)
+        let generation: UInt64?
         do {
             let result = try await attachRequest(
                 worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID)
@@ -846,11 +852,12 @@ actor DaemonClient {
                 promise.cancel()
                 throw DaemonClientError.attachUnavailable(result.status)
             }
+            generation = result.generation
         } catch {
             promise.cancel()
             throw error
         }
-        return try await promise.value(timeout: .seconds(5))
+        return (try await promise.value(timeout: .seconds(5)), generation)
     }
 
     /// Ack that the app's reader is draining the vended fd — opens the
@@ -863,11 +870,14 @@ actor DaemonClient {
     }
 
     /// Tell the daemon this pane is no longer rendered; the daemon closes the
-    /// pipe write end and the app-side reader sees EOF.
-    func paneDetach(worktreeID: UUID, paneID: String) async throws {
+    /// pipe write end and the app-side reader sees EOF. Pass the `generation`
+    /// from `openAttach` so the daemon detaches generation-checked — a stale
+    /// detach from a closing view must not kill a newer attach's sink; nil
+    /// (unknown generation) detaches unconditionally, as before.
+    func paneDetach(worktreeID: UUID, paneID: String, generation: UInt64? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneDetach,
-            params: PaneDetachParams(worktreeID: worktreeID, paneID: paneID)
+            params: PaneDetachParams(worktreeID: worktreeID, paneID: paneID, generation: generation)
         )
     }
 

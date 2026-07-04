@@ -75,6 +75,29 @@ struct AttachReplayOrchestratorTests {
         }
     }
 
+    /// Await `body` expecting an `AttachReplayFailure` whose generation is
+    /// `generation`; returns its underlying error for case matching. Records
+    /// an issue (and returns nil) on success or a bare/unwrapped error.
+    private func expectFailure(
+        generation: UInt64,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        _ body: () async throws -> AttachReplayOrchestrator.Outcome
+    ) async -> (any Error)? {
+        do {
+            _ = try await body()
+            Issue.record("expected AttachReplayFailure, got success", sourceLocation: sourceLocation)
+        } catch let failure as AttachReplayFailure {
+            #expect(failure.generation == generation,
+                    "failure must carry the sequence's own generation",
+                    sourceLocation: sourceLocation)
+            return failure.underlying
+        } catch {
+            Issue.record(
+                "expected AttachReplayFailure, got \(error)", sourceLocation: sourceLocation)
+        }
+        return nil
+    }
+
     /// Drain everything currently readable from `fd` (made nonblocking).
     private func drain(_ fd: Int32) -> Data {
         let flags = fcntl(fd, F_GETFL)
@@ -173,7 +196,7 @@ struct AttachReplayOrchestratorTests {
     func captureErrorFailsAttachUnpauseStillSent() async throws {
         let (supervisor, orchestrator, recorder, client) = makeHarness()
         let paneID = "%3"
-        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
@@ -185,10 +208,9 @@ struct AttachReplayOrchestratorTests {
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
         await succeed(client, [[], [stateLine(paneID: paneID)], []])
 
-        await #expect(throws: AttachReplayError.captureFailed(
-            command: "capture-pane -peqJN -S -50000 -t %3")) {
-            try await task.value
-        }
+        let underlying = await expectFailure(generation: generation) { try await task.value }
+        #expect(underlying as? AttachReplayError == .captureFailed(
+            command: "capture-pane -peqJN -S -50000 -t %3"))
         #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
         try await waitFor("unpause write") { recorder.writes.count >= 2 }
         #expect(recorder.writes.last == "refresh-client -A '%3:continue'")
@@ -198,7 +220,7 @@ struct AttachReplayOrchestratorTests {
     func malformedPendingFailsAttach() async throws {
         let (supervisor, orchestrator, recorder, client) = makeHarness()
         let paneID = "%4"
-        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
@@ -207,15 +229,18 @@ struct AttachReplayOrchestratorTests {
         // Pending line with `\` not followed by three octal digits.
         await succeed(client, [[], ["hist"], [], [stateLine(paneID: paneID)], ["bad\\9x"]])
 
-        await #expect(throws: ReplayWriterError.self) { try await task.value }
+        let underlying = await expectFailure(generation: generation) { try await task.value }
+        #expect(underlying is ReplayWriterError)
         #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
         try await waitFor("unpause write") { recorder.writes.count >= 2 }
         #expect(recorder.writes.last == "refresh-client -A '%4:continue'")
     }
 
-    @Test("no live attach for the pane: throws notAttached before any command is sent")
+    @Test("no live attach for the pane: throws BARE notAttached before any command is sent")
     func notAttachedThrowsBeforePause() async throws {
         let (_, orchestrator, recorder, _) = makeHarness()
+        // Deliberately NOT wrapped in AttachReplayFailure: no generation
+        // exists yet, and the RPC layer must not detach anything on it.
         await #expect(throws: AttachReplayError.notAttached) {
             try await orchestrator.performAttachReady(server: server, paneID: "%5")
         }
@@ -223,16 +248,17 @@ struct AttachReplayOrchestratorTests {
         #expect(recorder.writes.isEmpty)
     }
 
-    @Test("unknown server (no command client): throws before any command is sent")
+    @Test("unknown server (no command client): generation-tagged failure before any command is sent")
     func noCommandClientThrows() async throws {
         let supervisor = TmuxControlSupervisor()
         let orchestrator = AttachReplayOrchestrator(
             supervisor: supervisor, commandProvider: { _ in nil })
-        let (readFD, _) = try await supervisor.attach(server: "other-server", paneID: "%6")
+        let (readFD, generation) = try await supervisor.attach(server: "other-server", paneID: "%6")
         defer { Darwin.close(readFD) }
-        await #expect(throws: AttachReplayError.noCommandClient) {
+        let underlying = await expectFailure(generation: generation) {
             try await orchestrator.performAttachReady(server: "other-server", paneID: "%6")
         }
+        #expect(underlying as? AttachReplayError == .noCommandClient)
     }
 
     @Test("truncation telemetry fires at >= historyDepth lines, not below")
@@ -264,7 +290,7 @@ struct AttachReplayOrchestratorTests {
     func paneStateMissingFailsAttach() async throws {
         let (supervisor, orchestrator, recorder, client) = makeHarness()
         let paneID = "%10"
-        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
@@ -272,7 +298,8 @@ struct AttachReplayOrchestratorTests {
         // The state reply describes a DIFFERENT pane.
         await succeed(client, [[], ["hist"], [], [stateLine(paneID: "%99")], []])
 
-        await #expect(throws: AttachReplayError.paneStateMissing) { try await task.value }
+        let underlying = await expectFailure(generation: generation) { try await task.value }
+        #expect(underlying as? AttachReplayError == .paneStateMissing)
         try await waitFor("unpause write") { recorder.writes.count >= 2 }
         #expect(recorder.writes.last == "refresh-client -A '%10:continue'")
     }

@@ -143,6 +143,15 @@ struct AttachRPCOrchestrationTests {
         var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
     }
 
+    /// Thread-safe monotonic counter — lets a commandProvider hand each
+    /// successive attach.ready sequence its OWN fake correlator, so a test
+    /// can complete a later sequence's replies before an earlier one's.
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func next() -> Int { lock.lock(); defer { lock.unlock() }; let c = count; count += 1; return c }
+    }
+
     /// A fake-backed correlator (real FIFO, recorded writes) for the bridge's
     /// commandProvider seam — the M4.3 attach.ready sequence rides it.
     private func makeFakeClient() -> (TmuxControlCommandClient, Recorder) {
@@ -428,6 +437,174 @@ struct AttachRPCOrchestrationTests {
         try await waitFor("unpause write") { recorder.writes.count >= 2 }
         #expect(recorder.writes.last == "refresh-client -A '%8:continue'")
         #expect(drain(rxFD2).isEmpty, "successor's pipe must not receive the stale replay")
+    }
+
+    @Test("a stale attach's late failure must not kill a healthy successor's sink")
+    func staleFailureCleanupSparesSuccessor() async throws {
+        let (serverSide, clientSide) = try makeSocketPair()
+        defer { Darwin.close(clientSide) }
+
+        let supervisor = TmuxControlSupervisor()
+        let vending = FDVendingServer()
+        await vending.adoptConnection(fd: serverSide)
+        let (router, db) = try makeRouterAndDB()
+        let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-stalefail-test")
+
+        // One fake correlator PER attach.ready sequence: the stale (gen 1)
+        // sequence rides clientA, the fresh (gen 2) one rides clientB — so
+        // the test can complete gen 2's capture batch while gen 1's replies
+        // stay delayed, reproducing the fast tab-switch race.
+        let (clientA, recorderA) = makeFakeClient()
+        let (clientB, recorderB) = makeFakeClient()
+        let calls = CallCounter()
+        router.controlMode = bridge(
+            supervisor: supervisor, vending: vending,
+            commandProvider: { _ in calls.next() == 0 ? clientA : clientB })
+
+        func attachRequest() throws -> RPCRequest {
+            try RPCRequest(
+                method: RPCMethod.attachRequest,
+                params: AttachRequestParams(
+                    worktreeID: worktreeID, paneID: "%5", windowID: "@5", attachID: UUID()))
+        }
+        let ready = try RPCRequest(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: "%5"))
+
+        // Attach #1 (gen 1); its ready sequence starts and stalls on replies.
+        _ = await router.handle(try attachRequest())
+        let (fd1, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(fd1) }
+        let ready1 = Task { await router.handle(ready) }
+        try await waitFor("gen 1 capture batch") { recorderA.writes.count >= 1 }
+
+        // Attach #2 (fast tab-switch re-attach, gen 2) replaces the sink and
+        // completes its OWN sequence: replay written, gate open. Healthy.
+        _ = await router.handle(try attachRequest())
+        let (fd2, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(fd2) }
+        let ready2 = Task { await router.handle(ready) }
+        try await waitFor("gen 2 capture batch") { recorderB.writes.count >= 1 }
+        await feedCaptureReplies(clientB, paneID: "%5", history: ["fresh-history"])
+        let response2 = await ready2.value
+        #expect(response2.success)
+        #expect(await supervisor.isReady(server: "tbd-stalefail-test", paneID: "%5") == true)
+        #expect(String(decoding: drain(fd2), as: UTF8.self).contains("fresh-history"))
+
+        // Gen 1's DELAYED capture reply is a %error → its sequence fails.
+        // (pause OK, main-history %error, remaining three OK.)
+        await clientA.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
+        await clientA.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
+        for _ in 0..<3 {
+            await clientA.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
+        }
+        let response1 = await ready1.value
+        #expect(!response1.success, "the stale caller must get an RPC error")
+
+        // THE REGRESSION: gen 1's failure cleanup must NOT detach gen 2's
+        // healthy sink — gate still open, no EOF, output still routes.
+        #expect(await supervisor.isReady(server: "tbd-stalefail-test", paneID: "%5") == true)
+        supervisor.fanout.route(
+            server: "tbd-stalefail-test",
+            event: .output(paneID: "%5", bytes: Data("still-alive".utf8)))
+        #expect(String(decoding: drain(fd2), as: UTF8.self) == "still-alive",
+                "successor's pipe must survive the stale attach's failure cleanup")
+    }
+
+    @Test("a stale pane.detach (older generation) no-ops against a newer attach's sink")
+    func stalePaneDetachSparesSuccessor() async throws {
+        let (serverSide, clientSide) = try makeSocketPair()
+        defer { Darwin.close(clientSide) }
+
+        let supervisor = TmuxControlSupervisor()
+        let vending = FDVendingServer()
+        await vending.adoptConnection(fd: serverSide)
+        let (router, db) = try makeRouterAndDB()
+        let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-staledet-test")
+        router.controlMode = bridge(supervisor: supervisor, vending: vending)
+
+        func attach() async throws -> AttachRequestResult {
+            let request = try RPCRequest(
+                method: RPCMethod.attachRequest,
+                params: AttachRequestParams(
+                    worktreeID: worktreeID, paneID: "%3", windowID: "@3", attachID: UUID()))
+            return try (await router.handle(request)).decodeResult(AttachRequestResult.self)
+        }
+        // Attach #1 (the closing view's) … superseded by attach #2.
+        let result1 = try await attach()
+        let gen1 = try #require(result1.generation, "attach.request must vend the generation")
+        let (fd1, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(fd1) }
+        let result2 = try await attach()
+        let gen2 = try #require(result2.generation)
+        #expect(gen2 > gen1)
+        let (fd2, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(fd2) }
+
+        // The closing view's pane.detach arrives AFTER the new attach: it
+        // echoes gen 1 and must NOT kill the gen-2 sink.
+        let staleDetach = try RPCRequest(
+            method: RPCMethod.paneDetach,
+            params: PaneDetachParams(worktreeID: worktreeID, paneID: "%3", generation: gen1))
+        #expect((await router.handle(staleDetach)).success)
+        let flags = fcntl(fd2, F_GETFL)
+        _ = fcntl(fd2, F_SETFL, flags | O_NONBLOCK)
+        #expect(try await eofObserved(on: fd2, within: .milliseconds(200)) == false,
+                "newer sink must survive the stale pane.detach (no EOF)")
+
+        // The CURRENT generation's detach still tears the sink down.
+        let currentDetach = try RPCRequest(
+            method: RPCMethod.paneDetach,
+            params: PaneDetachParams(worktreeID: worktreeID, paneID: "%3", generation: gen2))
+        #expect((await router.handle(currentDetach)).success)
+        #expect(try await eofObserved(on: fd2, within: .seconds(5)) == true,
+                "matching-generation pane.detach must detach (EOF)")
+    }
+
+    /// Poll a NONBLOCKING, empty fd for EOF until `deadline`. Retries on
+    /// EAGAIN/EINTR — a single-shot read probe flakes under parallel-suite
+    /// load. Callers assert `== true` (detach expected) or `== false` (sink
+    /// must survive; the short deadline is the observation window).
+    private func eofObserved(on fd: Int32, within deadline: Duration) async throws -> Bool {
+        let end = ContinuousClock.now + deadline
+        var buffer = [UInt8](repeating: 0, count: 8)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if n == 0 { return true }
+            if n > 0 { Issue.record("unexpected data on a pipe that should be empty") }
+            if ContinuousClock.now >= end { return false }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    @Test("pane.detach without a generation detaches unconditionally (back-compat)")
+    func paneDetachWithoutGenerationDetaches() async throws {
+        let (serverSide, clientSide) = try makeSocketPair()
+        defer { Darwin.close(clientSide) }
+
+        let supervisor = TmuxControlSupervisor()
+        let vending = FDVendingServer()
+        await vending.adoptConnection(fd: serverSide)
+        let (router, db) = try makeRouterAndDB()
+        let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-nogendet-test")
+        router.controlMode = bridge(supervisor: supervisor, vending: vending)
+
+        let request = try RPCRequest(
+            method: RPCMethod.attachRequest,
+            params: AttachRequestParams(
+                worktreeID: worktreeID, paneID: "%4", windowID: "@4", attachID: UUID()))
+        _ = await router.handle(request)
+        let (fd, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(fd) }
+
+        let detach = try RPCRequest(
+            method: RPCMethod.paneDetach,
+            params: PaneDetachParams(worktreeID: worktreeID, paneID: "%4"))
+        #expect((await router.handle(detach)).success)
+        let flags = fcntl(fd, F_GETFL)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        #expect(try await eofObserved(on: fd, within: .seconds(5)) == true,
+                "generation-less pane.detach must still detach (EOF)")
     }
 
     @Test("a capture failure detaches the pane and fails the RPC (app falls back)")

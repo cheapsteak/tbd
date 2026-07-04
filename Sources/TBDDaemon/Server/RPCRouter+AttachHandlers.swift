@@ -92,9 +92,16 @@ extension RPCRouter {
                 try await bridge.fdVending.send(fd: readFD, header: header)
             } catch {
                 // Vend failed — undo the attach so no orphan pipe lingers.
+                // Generation-checked: if a concurrent re-attach already
+                // replaced this sink, the undo must not EOF the successor's
+                // pipe — and must leave its input route (same key, same
+                // values) in place, so the unregister is scoped to a
+                // successful detach.
                 Darwin.close(readFD)
-                bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: paneID)
-                await bridge.supervisor.detach(server: server, paneID: paneID)
+                if await bridge.supervisor.detachIfGeneration(
+                    server: server, paneID: paneID, generation: generation) {
+                    bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: paneID)
+                }
                 throw error
             }
             // The kernel duplicated the fd into the app's table; drop ours.
@@ -110,7 +117,11 @@ extension RPCRouter {
                 try? await Task.sleep(for: timeout)
                 await supervisor.detachIfNotReady(server: server, paneID: paneID, generation: generation)
             }
-            return try RPCResponse(result: AttachRequestResult(status: "pending"))
+            // The generation rides the result so the app can echo it back in
+            // `pane.detach` — a closing view's detach can race a new view's
+            // attach for the same pane, and only a generation-checked detach
+            // keeps the stale one from killing the fresh sink.
+            return try RPCResponse(result: AttachRequestResult(status: "pending", generation: generation))
         } catch {
             logger.error("""
                 attach.request failed for \(server, privacy: .public)/\(paneID, privacy: .public): \
@@ -130,9 +141,12 @@ extension RPCRouter {
     ///   SUCCESS; the stale viewer is gone, no fallback wanted.
     /// - Everything else (no sink, no command client, capture `%error`,
     ///   malformed capture, replay write failure/deadline) is an attach
-    ///   failure: detach + unregister the input route (mirroring
-    ///   `handlePaneDetach`) and return an RPC ERROR, which the app's catch
-    ///   in `startControlModeClient` turns into the grouped-sessions fallback.
+    ///   failure: detach + unregister the input route and return an RPC
+    ///   ERROR, which the app's catch in `startControlModeClient` turns into
+    ///   the grouped-sessions fallback. The cleanup is GENERATION-CHECKED: a
+    ///   stale sequence's failure can surface after a re-attach for the same
+    ///   pane has already completed, and an unconditional detach here would
+    ///   EOF the healthy successor's pipe (and drop its input route).
     func handleAttachReady(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(AttachReadyParams.self, from: paramsData)
         guard let bridge = controlMode else {
@@ -151,13 +165,34 @@ extension RPCRouter {
             // own sequence — the stale caller just goes away quietly.
             _ = try await orchestrator.performAttachReady(server: server, paneID: paneID)
             return .ok()
+        } catch let failure as AttachReplayFailure {
+            logger.error("""
+                attach.ready replay failed for \(server, privacy: .public)/\(paneID, privacy: .public) \
+                gen=\(failure.generation): \(String(describing: failure.underlying), privacy: .public)
+                """)
+            // Detach ONLY the attach whose sequence failed. If a newer attach
+            // owns the sink by now (fast tab-switch re-attach completed while
+            // this sequence's delayed reply was in flight), the stale failure
+            // must not EOF the successor's healthy pipe — nor unregister the
+            // input route the successor relies on (same key, same values), so
+            // the unregister is scoped to a successful detach.
+            if await bridge.supervisor.detachIfGeneration(
+                server: server, paneID: paneID, generation: failure.generation) {
+                bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: paneID)
+            }
+            return RPCResponse(error: "attach replay failed: \(failure.underlying)")
         } catch {
+            // Failure BEFORE the sequence acquired a generation
+            // (`AttachReplayError.notAttached`: no sink at acknowledge time).
+            // Nothing to clean up: the sink either doesn't exist or belongs
+            // to a different attach, so detaching blindly here could kill it.
+            // The input route likewise stays — a re-attach overwrites it, and
+            // a route without a sink is harmless (same reasoning as the
+            // ready-timeout path in `handleAttachRequest`).
             logger.error("""
                 attach.ready replay failed for \(server, privacy: .public)/\(paneID, privacy: .public): \
                 \(String(describing: error), privacy: .public)
                 """)
-            bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: paneID)
-            await bridge.supervisor.detach(server: server, paneID: paneID)
             return RPCResponse(error: "attach replay failed: \(error)")
         }
     }
@@ -165,12 +200,26 @@ extension RPCRouter {
     /// Handle `pane.detach`: close the pipe write end so the app's reader
     /// sees EOF. Best-effort — an unknown worktree or unconfigured bridge is
     /// a no-op, not an error (detach is fired on every view teardown).
+    ///
+    /// When the params carry the attach `generation` (echoed from
+    /// `AttachRequestResult`), the detach is generation-checked: a closing
+    /// view's detach can arrive AFTER a new view's attach for the same pane,
+    /// and the stale detach must not kill the fresh sink (or its input
+    /// route). Absent generation (older app) → unconditional, as before.
     func handlePaneDetach(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(PaneDetachParams.self, from: paramsData)
         if let bridge = controlMode,
            let worktree = try? await db.worktrees.get(id: params.worktreeID) {
-            bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: params.paneID)
-            await bridge.supervisor.detach(server: worktree.tmuxServer, paneID: params.paneID)
+            let server = worktree.tmuxServer
+            if let generation = params.generation {
+                if await bridge.supervisor.detachIfGeneration(
+                    server: server, paneID: params.paneID, generation: generation) {
+                    bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: params.paneID)
+                }
+            } else {
+                bridge.inputRouter.unregister(worktreeID: params.worktreeID, paneID: params.paneID)
+                await bridge.supervisor.detach(server: server, paneID: params.paneID)
+            }
         }
         return .ok()
     }

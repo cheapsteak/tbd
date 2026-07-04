@@ -1163,7 +1163,15 @@ public struct AttachRequestResult: Codable, Sendable {
     /// One of "pending" (fd vended; waiting for attach.ready) or
     /// "unavailable" (control mode off / not configured).
     public let status: String
-    public init(status: String) { self.status = status }
+    /// Daemon-side fanout generation of the vended attach ("pending" only).
+    /// The app echoes it back in `pane.detach` so a stale detach — a closing
+    /// view racing a fresh attach for the same pane — cannot kill the newer
+    /// attach's sink. Optional for wire back-compat with older daemons.
+    public let generation: UInt64?
+    public init(status: String, generation: UInt64? = nil) {
+        self.status = status
+        self.generation = generation
+    }
 }
 
 /// Params for `attach.ready` — the app's ack that its reader is draining the
@@ -1182,9 +1190,15 @@ public struct AttachReadyParams: Codable, Sendable {
 public struct PaneDetachParams: Codable, Sendable {
     public let worktreeID: UUID
     public let paneID: String
-    public init(worktreeID: UUID, paneID: String) {
+    /// The attach generation this detach targets (from
+    /// `AttachRequestResult.generation`). When present the daemon detaches
+    /// generation-checked — a stale detach from a closing view no-ops against
+    /// a newer attach's sink. Absent (older app) → unconditional detach.
+    public let generation: UInt64?
+    public init(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
         self.worktreeID = worktreeID
         self.paneID = paneID
+        self.generation = generation
     }
 }
 

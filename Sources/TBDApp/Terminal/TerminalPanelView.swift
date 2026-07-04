@@ -312,7 +312,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// reader stopped — the reader closes its own fd when the EOF lands.
         /// `windowID` is carried for `pane.resize` (M3.2): the daemon sizes per
         /// WINDOW, so resize RPCs need it.
-        private var controlModeAttach: (worktreeID: UUID, paneID: String, windowID: String, routingKey: String)?
+        private var controlModeAttach:
+            (worktreeID: UUID, paneID: String, windowID: String, routingKey: String, generation: UInt64?)?
         /// Debounces control-mode `pane.resize` RPCs (M3.2). Cancel-and-replace
         /// so only the tail of a window-drag flurry reaches the daemon; cancelled
         /// in `cleanup()`.
@@ -543,9 +544,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Task {
                     // Order matters: detach first so the daemon closes the
                     // pipe's write end (EOF unblocks the reader thread), then
-                    // flag the reader — it closes its own fd on exit.
+                    // flag the reader — it closes its own fd on exit. The
+                    // generation scopes the detach to THIS attach: a closing
+                    // view's detach racing a new view's attach for the same
+                    // pane must not kill the fresh sink.
                     try? await appState.daemonClient.paneDetach(
-                        worktreeID: attach.worktreeID, paneID: attach.paneID)
+                        worktreeID: attach.worktreeID, paneID: attach.paneID,
+                        generation: attach.generation)
                     await appState.controlModeReaders.remove(routingKey: attach.routingKey)
                 }
             }
@@ -573,9 +578,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // attach nonce.
             let routingKey = "\(worktreeID.uuidString)/\(paneID)"
             do {
-                let fd = try await appState.daemonClient.openAttach(
+                let (fd, generation) = try await appState.daemonClient.openAttach(
                     worktreeID: worktreeID, paneID: paneID, windowID: windowID)
-                controlModeAttach = (worktreeID, paneID, windowID, routingKey)
+                controlModeAttach = (worktreeID, paneID, windowID, routingKey, generation)
                 let weakTV = WeakTerminalRef(terminalView)
                 await appState.controlModeReaders.registerReader(
                     routingKey: routingKey, fd: fd) { chunk in
@@ -630,13 +635,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     control-mode attach failed for pane \(paneID, privacy: .public); \
                     falling back to grouped sessions: \(error.localizedDescription, privacy: .public)
                     """)
+                // Scope the teardown detach to THIS attach when its generation
+                // is known (openAttach succeeded); nil (openAttach itself
+                // failed) falls back to the unconditional detach.
+                let failedGeneration = controlModeAttach?.generation
                 controlModeAttach = nil
                 (terminalView as? TBDTerminalView)?.onControlModePaste = nil
                 // Best-effort teardown of any half-completed attach (e.g. fd
                 // received and reader registered, but attach.ready failed):
                 // detach so the daemon EOFs the pipe, then flag the reader.
                 Task {
-                    try? await appState.daemonClient.paneDetach(worktreeID: worktreeID, paneID: paneID)
+                    try? await appState.daemonClient.paneDetach(
+                        worktreeID: worktreeID, paneID: paneID, generation: failedGeneration)
                     await appState.controlModeReaders.remove(routingKey: routingKey)
                 }
                 await startTmuxClient(

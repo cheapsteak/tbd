@@ -136,6 +136,28 @@ final class PaneFanout: @unchecked Sendable {
         logger.info("fanout detach \(key.server, privacy: .public)/\(key.paneID, privacy: .public)")
     }
 
+    /// Failure-path detach — remove + close ONLY if the sink still belongs to
+    /// `generation`. A failed attach sequence (capture %error, replay write
+    /// failure, vend failure) may surface AFTER a newer attach has replaced
+    /// the sink for the same key; its cleanup must not EOF the healthy
+    /// successor's pipe. Returns whether a sink was actually detached, so the
+    /// caller can scope companion cleanup (e.g. input-route unregistration)
+    /// the same way.
+    @discardableResult
+    func detachIfGeneration(key: PaneKey, generation: UInt64) -> Bool {
+        lock.lock()
+        guard let sink = sinks[key], sink.generation == generation else {
+            lock.unlock()
+            return false
+        }
+        sinks.removeValue(forKey: key)
+        lock.unlock()
+        Darwin.close(sink.writeFD)
+        logger.info(
+            "fanout failure detach \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
+        return true
+    }
+
     /// Cancel an un-acked attach — but ONLY the attach the timer was armed
     /// for. A stale timer from a superseded attach (same key, older
     /// generation) must not kill a fresh attach still inside its own ready

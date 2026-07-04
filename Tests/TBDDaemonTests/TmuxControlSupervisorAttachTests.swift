@@ -116,6 +116,36 @@ struct PaneFanoutTests {
         #expect(eof == 0, "un-acked attach with a live timer must be torn down (EOF)")
     }
 
+    @Test("detachIfGeneration removes on match, no-ops on mismatch or missing sink")
+    func generationCheckedDetach() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%30")
+        let (read1, gen1) = try fanout.attach(key: key)
+        defer { Darwin.close(read1) }
+        // A newer attach replaces the sink (gen2 > gen1).
+        let (read2, gen2) = try fanout.attach(key: key)
+        defer { Darwin.close(read2) }
+
+        // Mismatch (a stale attach's failure cleanup): no-op — the fresh
+        // sink survives and still routes.
+        #expect(fanout.detachIfGeneration(key: key, generation: gen1) == false)
+        fanout.markReady(key: key)
+        fanout.route(server: server, event: .output(paneID: "%30", bytes: Data("alive".utf8)))
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let count = buffer.withUnsafeMutableBytes { Darwin.read(read2, $0.baseAddress, $0.count) }
+        #expect(Data(buffer[0..<max(count, 0)]) == Data("alive".utf8),
+                "newer sink must survive a stale generation-checked detach")
+
+        // Match (the failed attach still owns the sink): removes + closes.
+        #expect(fanout.detachIfGeneration(key: key, generation: gen2) == true)
+        var eofBuffer = [UInt8](repeating: 0, count: 8)
+        let eof = eofBuffer.withUnsafeMutableBytes { Darwin.read(read2, $0.baseAddress, $0.count) }
+        #expect(eof == 0, "matching generation must detach (EOF)")
+
+        // Missing sink: no-op, false.
+        #expect(fanout.detachIfGeneration(key: key, generation: gen2) == false)
+    }
+
     @Test("an ACKED attach survives the ready-timeout even while not yet ready (replay in flight)")
     func ackedAttachSurvivesReadyTimeout() throws {
         let fanout = PaneFanout()

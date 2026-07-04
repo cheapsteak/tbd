@@ -21,6 +21,25 @@ enum AttachReplayError: Error, Equatable {
     case paneStateMissing
 }
 
+/// A replay-sequence failure tagged with the generation of the attach the
+/// sequence was running for (read atomically at acknowledge time, step 1 of
+/// `performAttachReady`). The RPC layer's failure cleanup MUST be
+/// generation-checked (`detachIfGeneration`): by the time a stale sequence's
+/// failure surfaces, a newer attach may own the pane's sink, and an
+/// unconditional detach would EOF the healthy successor's pipe.
+///
+/// `AttachReplayError.notAttached` is deliberately thrown UNWRAPPED — it
+/// occurs before any generation exists (no sink at acknowledge time), and it
+/// needs no cleanup: the sink either doesn't exist or belongs to a different
+/// attach, so the caller must not detach anything.
+struct AttachReplayFailure: Error {
+    /// Generation of the attach whose sequence failed.
+    let generation: UInt64
+    /// The actual failure (`AttachReplayError` / `PaneStateCaptureError` /
+    /// `ReplayWriterError` / `PaneReplayWriteError`).
+    let underlying: any Error
+}
+
 /// The attach orchestration v2 (M4.3, addendum §3): `attach.ready` triggers
 /// pause → capture → replay → gate → unpause, with pause as the serialization
 /// mechanism — the pane emits nothing between the pause and the unpause the
@@ -84,10 +103,15 @@ struct AttachReplayOrchestrator: Sendable {
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
 
-    /// Run the full attach.ready sequence for one pane. Throws
-    /// `AttachReplayError` / `PaneStateCaptureError` / `ReplayWriterError` /
-    /// `PaneReplayWriteError` on attach failure — the caller detaches the
-    /// pane and surfaces an RPC error (app falls back to grouped sessions).
+    /// Run the full attach.ready sequence for one pane. On attach failure the
+    /// caller detaches the pane (generation-checked) and surfaces an RPC
+    /// error (app falls back to grouped sessions). Error surface:
+    /// - `AttachReplayError.notAttached` (no sink at acknowledge time) is
+    ///   thrown bare — no generation exists yet, so there is nothing for the
+    ///   caller to clean up (see `AttachReplayFailure`).
+    /// - Every later failure is wrapped in `AttachReplayFailure`, carrying
+    ///   the generation this sequence was tagged with so the caller's detach
+    ///   cannot hit a successor attach's sink.
     func performAttachReady(server: String, paneID: String) async throws -> Outcome {
         // Steps 1+2 of the milestone, atomic in the fanout: read the CURRENT
         // generation and mark the attach acknowledged so the ready-timeout
@@ -96,7 +120,8 @@ struct AttachReplayOrchestrator: Sendable {
             throw AttachReplayError.notAttached
         }
         guard let client = await commandProvider(server) else {
-            throw AttachReplayError.noCommandClient
+            throw AttachReplayFailure(
+                generation: generation, underlying: AttachReplayError.noCommandClient)
         }
 
         // ONE atomic sendList: pause FIRST, then the capture batch — atomicity
@@ -129,7 +154,7 @@ struct AttachReplayOrchestrator: Sendable {
             return outcome
         } catch {
             await sendUnpause(client, paneID: paneID)
-            throw error
+            throw AttachReplayFailure(generation: generation, underlying: error)
         }
     }
 
