@@ -54,7 +54,7 @@ struct SidebarContextMenu: View {
                     Task { await appState.archiveScratch(id: worktree.id) }
                 }
                 Button("Delete Scratch Space", role: .destructive) {
-                    appState.deleteScratch(id: worktree.id)
+                    Task { await appState.deleteScratch(id: worktree.id) }
                 }
             } else if worktree.status == .main || worktree.status == .creating {
                 // Main / creating worktree: only Finder and Copy Path (no rename/archive)

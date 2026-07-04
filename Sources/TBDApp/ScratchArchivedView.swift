@@ -41,7 +41,7 @@ struct ScratchArchivedView: View {
         ) {
             Button("Delete", role: .destructive) {
                 if let id = pendingDeleteID {
-                    delete(id: id)
+                    Task { await appState.deleteScratch(id: id) }
                 }
                 pendingDeleteID = nil
             }
@@ -97,17 +97,6 @@ struct ScratchArchivedView: View {
             }
             Button("Delete", role: .destructive) {
                 pendingDeleteID = worktree.id
-            }
-        }
-    }
-
-    private func delete(id: UUID) {
-        Task {
-            do {
-                try await appState.daemonClient.deleteScratch(worktreeID: id)
-                appState.archivedScratchWorktrees.removeAll { $0.id == id }
-            } catch {
-                appState.showAlert("Couldn't delete scratch space: \(error.localizedDescription)", isError: true)
             }
         }
     }

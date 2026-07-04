@@ -86,16 +86,22 @@ extension AppState {
         }
     }
 
-    /// Delete a scratch space: closes its terminals and moves its folder to Trash.
-    func deleteScratch(id: UUID) {
-        Task {
-            do {
-                try await daemonClient.deleteScratch(worktreeID: id)
-                scratchWorktrees.removeAll { $0.id == id }
-            } catch {
-                logger.error("Failed to delete scratch space: \(error)")
-                handleConnectionError(error)
-            }
+    /// Delete a scratch space: closes its terminals and moves its folder to
+    /// Trash. Handles both active rows (sidebar context menu) and archived
+    /// rows (the Scratch detail pane's Archived tab) — the daemon-side
+    /// `scratch.delete` works on either, so this clears the row from both
+    /// client-side arrays. Error handling mirrors `archiveScratch`/
+    /// `reviveScratch`: `handleConnectionError` drives the reconnect UI on a
+    /// connection drop, and the alert makes non-connection failures visible.
+    func deleteScratch(id: UUID) async {
+        do {
+            try await daemonClient.deleteScratch(worktreeID: id)
+            scratchWorktrees.removeAll { $0.id == id }
+            archivedScratchWorktrees.removeAll { $0.id == id }
+        } catch {
+            logger.error("Failed to delete scratch space: \(error)")
+            handleConnectionError(error)
+            showAlert("Couldn't delete scratch space: \(error.localizedDescription)", isError: true)
         }
     }
 
@@ -112,6 +118,7 @@ extension AppState {
             await refreshArchivedScratch()
         } catch {
             logger.error("Failed to archive scratch space: \(error)")
+            handleConnectionError(error)
             showAlert("Couldn't archive scratch space: \(error.localizedDescription)", isError: true)
         }
     }
@@ -126,6 +133,7 @@ extension AppState {
             await refreshWorktrees()
         } catch {
             logger.error("Failed to revive scratch space: \(error)")
+            handleConnectionError(error)
             showAlert("Couldn't revive scratch space: \(error.localizedDescription)", isError: true)
         }
     }
