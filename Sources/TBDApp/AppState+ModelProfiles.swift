@@ -177,6 +177,16 @@ extension AppState {
         }
     }
 
+    /// Set the global scratch-space rename-nudge override. Nil or blank resets to the built-in default.
+    func setScratchRenamePrompt(_ value: String?) async {
+        do {
+            try await daemonClient.setScratchRenamePrompt(value)
+        } catch {
+            logger.error("Failed to set scratch rename prompt: \(error, privacy: .public)")
+            handleConnectionError(error)
+        }
+    }
+
     /// Fetch the current global Config (used by the scratch-instructions editor to show the effective text).
     func fetchConfig() async -> Config? {
         do {
@@ -200,6 +210,18 @@ extension AppState {
         } catch {
             logger.error("Failed to set repo profile override: \(error, privacy: .public)")
             showAlert("Failed to set repo profile: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set or clear the global model-profile override applied to scratch terminal
+    /// spawns. Unlike `setRepoProfileOverride`, there's no `Repo` array entry to
+    /// patch afterward — callers refresh their own local `@State` on success.
+    func setScratchProfileOverride(_ profileID: UUID?) async {
+        do {
+            try await daemonClient.setScratchProfileOverride(profileID)
+        } catch {
+            logger.error("Failed to set scratch profile override: \(error, privacy: .public)")
+            showAlert("Failed to set scratch profile override: \(error.localizedDescription)", isError: true)
         }
     }
 

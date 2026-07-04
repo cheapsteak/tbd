@@ -681,18 +681,26 @@ public struct WorktreeListParams: Codable, Sendable {
     /// Optional (nil == false) for backward compatibility — old daemons
     /// ignore the unknown key and return everything; old clients omit it.
     public let excludeArchived: Bool?
+    /// When true, restrict the result to repo-less (scratch) worktrees.
+    /// Optional (nil == false) for backward compatibility — old daemons
+    /// ignore the unknown key and return everything; old clients omit it.
+    /// Note `repoID: nil` means "no repo filter" (every repo plus scratch),
+    /// NOT "scratch only" — this flag is the only way to get scratch-only rows.
+    public let scratchOnly: Bool?
     public init(
         repoID: UUID? = nil,
         status: WorktreeStatus? = nil,
         limit: Int? = nil,
         offset: Int? = nil,
-        excludeArchived: Bool? = nil
+        excludeArchived: Bool? = nil,
+        scratchOnly: Bool? = nil
     ) {
         self.repoID = repoID
         self.status = status
         self.limit = limit
         self.offset = offset
         self.excludeArchived = excludeArchived
+        self.scratchOnly = scratchOnly
     }
 }
 

@@ -77,6 +77,7 @@ extension RPCRouter {
             repoID: params.repoID,
             status: params.status,
             excludeArchived: params.excludeArchived ?? false,
+            scratchOnly: params.scratchOnly ?? false,
             limit: params.limit,
             offset: params.offset
         )

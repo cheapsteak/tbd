@@ -99,6 +99,50 @@ extension AppState {
         }
     }
 
+    /// Archive a scratch space: closes its terminals (folder untouched), moves
+    /// it into the Scratch section's Archived tab. The `.worktreeArchived`
+    /// delta this broadcasts already removes the row from `scratchWorktrees`
+    /// via `removeArchivedWorktreeFromState` (see `AppState+ArchiveTombstones.swift`),
+    /// so the local removal here is belt-and-suspenders for the caller that
+    /// issued the RPC (same pattern as `archiveWorktree`).
+    func archiveScratch(id: UUID) async {
+        do {
+            try await daemonClient.archiveScratch(worktreeID: id)
+            scratchWorktrees.removeAll { $0.id == id }
+            await refreshArchivedScratch()
+        } catch {
+            logger.error("Failed to archive scratch space: \(error)")
+            showAlert("Couldn't archive scratch space: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Revive an archived scratch space. Surfaces a visible alert on failure —
+    /// the daemon returns a real error (e.g. the folder was deleted out from
+    /// under the archived row) that must not fail silently.
+    func reviveScratch(id: UUID) async {
+        do {
+            try await daemonClient.reviveScratch(worktreeID: id)
+            archivedScratchWorktrees.removeAll { $0.id == id }
+            await refreshWorktrees()
+        } catch {
+            logger.error("Failed to revive scratch space: \(error)")
+            showAlert("Couldn't revive scratch space: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Fetch archived scratch spaces (repo-less, `status == .archived`) for
+    /// `ScratchArchivedView`. No pagination for v1 — scratch archive volume is
+    /// expected to be low.
+    func refreshArchivedScratch() async {
+        do {
+            archivedScratchWorktrees = try await daemonClient.listWorktrees(
+                status: .archived, scratchOnly: true
+            )
+        } catch {
+            logger.error("Failed to list archived scratch spaces: \(error)")
+        }
+    }
+
     /// List local + remote tracking branches for a repo, for the existing-
     /// branch picker on the sidebar `+` button. Rethrows so the picker can
     /// distinguish a fetch failure from a genuinely empty branch list.
@@ -285,6 +329,7 @@ extension AppState {
 
         selectedWorktreeIDs = []
         selectedRepoID = rid
+        selectedScratchSection = false
         archivedWorktrees[rid] = archived.filter { $0.repoID == rid }
         archivedWorktreesHasMore[rid] = false
         highlightedArchivedWorktreeID = id
@@ -325,7 +370,21 @@ extension AppState {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = []
         selectedRepoID = id
+        selectedScratchSection = false
         Task { await refreshArchivedWorktrees(repoID: id) }
+    }
+
+    /// Select the "Scratch" sidebar section header to show `ScratchDetailView`
+    /// (Archived/Instructions/Settings tabs) in the content pane. Mirrors
+    /// `selectRepo(id:)`; no `NavigationEntry`/back-forward integration for v1
+    /// (documented scope cut — the Scratch section header has no natural UUID
+    /// identity for `List`'s native selection or the navigation history's
+    /// worktree/repo entries to key off).
+    func selectScratchSection() {
+        highlightedArchivedWorktreeID = nil
+        selectedWorktreeIDs = []
+        selectedRepoID = nil
+        selectedScratchSection = true
     }
 
     private static let archivedPageSize = 50

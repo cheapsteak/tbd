@@ -100,6 +100,7 @@ final class AppState: ObservableObject {
             if !selectedWorktreeIDs.isEmpty {
                 if let leaving = selectedRepoID { clearRevivingArchived(repoID: leaving) }
                 selectedRepoID = nil
+                selectedScratchSection = false
                 recordNavigation(.worktrees(selectionOrder))
                 // Feed the jump menu's Recent section. Insertion-order LRU,
                 // most-recent-first; capped at 32 to bound memory. Only the
@@ -135,6 +136,11 @@ final class AppState: ObservableObject {
             recordNavigation(.repo(id))
         }
     }
+    /// Selected — set when the "Scratch" sidebar section header is clicked,
+    /// shows `ScratchDetailView` (Archived/Instructions/Settings tabs) in the
+    /// content pane. Parallel to `selectedRepoID` but with no `NavigationEntry`
+    /// integration for v1 (documented scope cut — see `selectScratchSection()`).
+    @Published var selectedScratchSection: Bool = false
 
     // MARK: - Navigation history (back/forward)
 
@@ -167,6 +173,11 @@ final class AppState: ObservableObject {
     }
     /// Archived worktrees keyed by repo ID, fetched on demand.
     @Published var archivedWorktrees: [UUID: [Worktree]] = [:]
+
+    /// Archived scratch spaces (repo-less), fetched on demand by
+    /// `ScratchArchivedView`. Unlike `archivedWorktrees`, this is a flat list —
+    /// scratch archive volume is expected to be low, so no pagination for v1.
+    @Published var archivedScratchWorktrees: [Worktree] = []
 
     /// Whether there are more archived worktrees to load beyond what's in `archivedWorktrees`.
     @Published var archivedWorktreesHasMore: [UUID: Bool] = [:]

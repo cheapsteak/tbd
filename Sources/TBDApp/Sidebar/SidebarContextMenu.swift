@@ -45,6 +45,14 @@ struct SidebarContextMenu: View {
                     NSPasteboard.general.setString(worktree.path, forType: .string)
                 }
                 Divider()
+                // `.destructive` role for consistency with the non-scratch
+                // "Archive" button below, even though scratch archive is
+                // recoverable (revive exists) and leaves the folder untouched
+                // on disk — the repo-worktree Archive button is styled the
+                // same way despite being recoverable too.
+                Button("Archive", role: .destructive) {
+                    Task { await appState.archiveScratch(id: worktree.id) }
+                }
                 Button("Delete Scratch Space", role: .destructive) {
                     appState.deleteScratch(id: worktree.id)
                 }
