@@ -108,23 +108,17 @@ struct LimitResumeSendSequenceLiveTests {
         let outputPath = NSTemporaryDirectory() + "tbd-resume-capture-\(UUID().uuidString).bin"
         // A live `tmux -CC` client on the same server — the "control-mode on"
         // coexistence case. Daemon-initiated send-keys must land identically.
-        let ccClient = Process()
-        ccClient.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        let ccIn = Pipe(); let ccOut = Pipe()
-        ccClient.standardInput = ccIn
-        ccClient.standardOutput = ccOut
-        ccClient.standardError = FileHandle.nullDevice
+        // Uses the production TmuxControlConnection (pty-backed) rather than a
+        // Process/Pipe fake: `tmux -CC` requires a real tty on stdin/stdout and
+        // exits immediately with "tcgetattr failed" when given plain pipes.
+        let connection = TmuxControlConnection(serverName: server)
         defer {
-            ccOut.fileHandleForReading.readabilityHandler = nil  // clear handler before terminate
-            if ccClient.isRunning { ccClient.terminate() }
+            connection.stop()
             tmux(["-L", server, "kill-server"])
             try? FileManager.default.removeItem(atPath: outputPath)
         }
         let paneID = try await startRawCapture(server: server, outputPath: outputPath)
-        ccClient.arguments = ["tmux", "-CC", "-L", server, "attach", "-t", "main"]
-        try ccClient.run()
-        // Drain the -CC client's stdout to prevent 64KB pipe backpressure stalling the observer
-        ccOut.fileHandleForReading.readabilityHandler = { _ in }
+        try connection.start()
 
         // Poll tmux list-clients until exactly 1 client is attached.
         // Use #{client_pid} format so each attached client emits one non-empty
