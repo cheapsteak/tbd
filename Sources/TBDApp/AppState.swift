@@ -387,6 +387,7 @@ final class AppState: ObservableObject {
     /// Global default for auto-archive-on-PR-merge. Loaded from the daemon
     /// alongside `globalEnvOverrides` via `loadModelProfiles()`.
     @Published var autoArchiveOnMergeDefault: Bool = false
+    @Published var nightwatchMode: NightwatchMode = .off
     /// Terminals where the user has dismissed the proxy-unreachable banner.
     /// Cleared on app relaunch (in-memory only — banners are advisory).
     @Published var dismissedProxyWarnings: Set<UUID> = []

@@ -32,6 +32,9 @@ extension AppState {
             if result.autoArchiveOnMergeDefault != autoArchiveOnMergeDefault {
                 autoArchiveOnMergeDefault = result.autoArchiveOnMergeDefault
             }
+            if result.nightwatchMode != nightwatchMode {
+                nightwatchMode = result.nightwatchMode
+            }
         } catch {
             logger.error("Failed to list model profiles: \(error, privacy: .public)")
             handleConnectionError(error)
@@ -353,6 +356,19 @@ extension AppState {
         } catch {
             logger.error("Failed to fetch profile usage: \(error, privacy: .public)")
             showAlert("Failed to fetch profile usage: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - Nightwatch Mode
+
+    /// Set the nightwatch mode (off, daywatch, or nightwatch).
+    func setNightwatchMode(_ mode: NightwatchMode) async {
+        do {
+            try await daemonClient.setNightwatchMode(mode)
+            nightwatchMode = mode
+        } catch {
+            logger.error("Failed to set nightwatch mode: \(error, privacy: .public)")
+            showAlert("Failed to set nightwatch mode: \(error.localizedDescription)", isError: true)
         }
     }
 }

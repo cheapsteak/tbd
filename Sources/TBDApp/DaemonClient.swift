@@ -1161,6 +1161,14 @@ actor DaemonClient {
         )
     }
 
+    /// Set the nightwatch mode (off, daywatch, or nightwatch).
+    func setNightwatchMode(_ mode: NightwatchMode) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.nightwatchSetMode,
+            params: NightwatchSetModeParams(mode: mode)
+        )
+    }
+
     /// Fetch fresh usage for a single profile (60s server-side dedupe).
     func fetchProfileUsage(id: UUID) async throws -> ModelProfileUsage {
         let result = try await callAsync(

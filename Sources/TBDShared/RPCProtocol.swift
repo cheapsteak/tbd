@@ -448,18 +448,21 @@ public struct ModelProfileListResult: Codable, Sendable {
     /// other config-derived fields so the app loads it in one round-trip.
     public let globalEnvOverrides: [String: String]
     public let autoArchiveOnMergeDefault: Bool
+    public let nightwatchMode: NightwatchMode
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
         primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
         globalEnvOverrides: [String: String] = [:],
-        autoArchiveOnMergeDefault: Bool = false
+        autoArchiveOnMergeDefault: Bool = false,
+        nightwatchMode: NightwatchMode = .off
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
         self.primaryAgentPreference = primaryAgentPreference
         self.globalEnvOverrides = globalEnvOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
+        self.nightwatchMode = nightwatchMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -476,6 +479,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         ) ?? [:]
         autoArchiveOnMergeDefault = try c.decodeIfPresent(
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
+        nightwatchMode = try c.decodeIfPresent(
+            NightwatchMode.self, forKey: .nightwatchMode) ?? .off
     }
 }
 
