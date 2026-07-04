@@ -385,6 +385,11 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
 
+        // Terminal close cancels any pending auto-resume (spec §Cancellation).
+        if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
+            await limitResumeScheduler?.wake()
+        }
+
         // Kill the tmux window
         if let worktree = try await db.worktrees.get(id: terminal.worktreeID) {
             try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
@@ -1501,6 +1506,19 @@ extension RPCRouter {
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
             logger.debug("activityEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
+        }
+
+        // UserPromptSubmit reaches the daemon as activity=working. If a
+        // session-limit auto-resume is pending, the user just continued
+        // manually — cancel it (spec §Cancellation). Guarded on the mirror
+        // field so the common case costs nothing. Note: the actuator's own
+        // "continue" also lands here; by then verification usually already
+        // moved the row out of pending, and a cancel-vs-sent race only
+        // affects the audit status, never causes a second send.
+        if params.activityState == .working, terminal.pendingResumeAt != nil {
+            if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
+                await limitResumeScheduler?.wake()
+            }
         }
 
         guard terminal.activityState != params.activityState else {

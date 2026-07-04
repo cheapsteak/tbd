@@ -57,4 +57,12 @@ extension RPCRouter {
             terminalID: notification.terminalID)))
         return .ok()
     }
+
+    /// Explicit user cancel ("Cancel scheduled resume" context-menu item).
+    func handleCancelScheduledResume(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(CancelScheduledResumeParams.self, from: paramsData)
+        _ = try await db.scheduledResumes.cancelPending(terminalID: params.terminalID)
+        await limitResumeScheduler?.wake()
+        return .ok()
+    }
 }

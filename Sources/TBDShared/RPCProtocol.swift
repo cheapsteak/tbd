@@ -179,6 +179,7 @@ public enum RPCMethod {
     public static let scratchRevive = "scratch.revive"
     public static let nightwatchSetMode = "nightwatch.setMode"
     public static let nightwatchReport = "nightwatch.report"
+    public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
 }
 
 // MARK: - Branch Listing
@@ -1429,6 +1430,13 @@ public struct RateLimitDetectedParams: Codable, Sendable {
         self.limitType = limitType
         self.rawMessage = rawMessage
     }
+}
+
+/// Params for `terminal.cancelScheduledResume` — explicit user cancel from
+/// the tab context menu / notification.
+public struct CancelScheduledResumeParams: Codable, Sendable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
 }
 
 /// PreToolUse:AskUserQuestion hook bridge — fires when Claude is about to

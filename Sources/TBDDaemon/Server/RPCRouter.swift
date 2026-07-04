@@ -208,6 +208,8 @@ public final class RPCRouter: Sendable {
                 return try await handleSetClaudeSpawnPreferences(request.paramsData)
             case RPCMethod.claudeRateLimitDetected:
                 return try await handleRateLimitDetected(request.paramsData)
+            case RPCMethod.terminalCancelScheduledResume:
+                return try await handleCancelScheduledResume(request.paramsData)
             case RPCMethod.attachRequest:
                 return try await handleAttachRequest(request.paramsData)
             case RPCMethod.attachReady:

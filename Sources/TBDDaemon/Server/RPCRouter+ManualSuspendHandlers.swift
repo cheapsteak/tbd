@@ -5,6 +5,10 @@ extension RPCRouter {
 
     func handleTerminalSuspend(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSuspendParams.self, from: paramsData)
+        // Suspend cancels any pending auto-resume (spec §Cancellation).
+        if (try? await db.scheduledResumes.cancelPending(terminalID: params.terminalID)) == true {
+            await limitResumeScheduler?.wake()
+        }
         let result = await suspendResumeCoordinator.manualSuspend(terminalID: params.terminalID)
         switch result {
         case .ok, .alreadySuspended:
@@ -34,6 +38,12 @@ extension RPCRouter {
         guard let terminals = try? await db.terminals.list(worktreeID: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found")
         }
+
+        // Suspend cancels any pending auto-resume (spec §Cancellation).
+        for terminal in terminals where terminal.pendingResumeAt != nil {
+            _ = try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)
+        }
+        await limitResumeScheduler?.wake()
 
         let claudeTerminals = terminals.filter { $0.isClaudeResumable && $0.suspendedAt == nil }
 
