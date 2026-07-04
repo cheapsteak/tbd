@@ -108,7 +108,8 @@ extension RPCRouter {
 
         // Build env vars available in all TBD terminals
         var env = SystemPromptBuilder.promptLayers(
-            repo: repo, worktree: worktree, scratchInstructions: createConfig?.scratchInstructions)
+            repo: repo, worktree: worktree, scratchInstructions: createConfig?.scratchInstructions,
+            scratchRenamePrompt: createConfig?.scratchRenamePrompt)
         env["TBD_WORKTREE_ID"] = params.worktreeID.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
@@ -214,7 +215,8 @@ extension RPCRouter {
             freshSessionID = sessionID
             appendSystemPrompt = SystemPromptBuilder.build(
                 repo: repo, worktree: worktree, isResume: false,
-                scratchInstructions: createConfig?.scratchInstructions)
+                scratchInstructions: createConfig?.scratchInstructions,
+                scratchRenamePrompt: createConfig?.scratchRenamePrompt)
             label = TerminalLabel.claudeCode
         } else if let cmd = params.cmd {
             claudeSessionID = nil
@@ -664,7 +666,8 @@ extension RPCRouter {
         let plannedTerminalID = UUID()
         let swapConfig = try? await db.config.get()
         var env = SystemPromptBuilder.promptLayers(
-            repo: repo, worktree: worktree, scratchInstructions: swapConfig?.scratchInstructions)
+            repo: repo, worktree: worktree, scratchInstructions: swapConfig?.scratchInstructions,
+            scratchRenamePrompt: swapConfig?.scratchRenamePrompt)
         env["TBD_WORKTREE_ID"] = worktree.id.uuidString
         env["TBD_TERMINAL_ID"] = plannedTerminalID.uuidString
 
@@ -716,7 +719,8 @@ extension RPCRouter {
             logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
             let appendPrompt = SystemPromptBuilder.build(
                 repo: repo, worktree: worktree, isResume: false,
-                scratchInstructions: swapConfig?.scratchInstructions)
+                scratchInstructions: swapConfig?.scratchInstructions,
+                scratchRenamePrompt: swapConfig?.scratchRenamePrompt)
             spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: nil,
                 freshSessionID: newSessionID,

@@ -54,17 +54,12 @@ extension RPCRouter {
         return try RPCResponse(result: wt)
     }
 
-    func handleScratchDelete(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(ScratchDeleteParams.self, from: paramsData)
-        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
-            return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
-        }
-        guard wt.isScratch else {
-            return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
-        }
-
-        // Close terminals: kill tmux windows, delete terminals + tabs, clear
-        // pending questions + per-session overlays (mirrors forgetWorktree).
+    /// Close out a scratch space's terminals: kill tmux windows, delete terminals
+    /// + tabs, clear pending questions + per-session overlays (mirrors
+    /// forgetWorktree). Shared by `scratch.delete` and `scratch.archive` — both
+    /// tear down the terminal/tab state identically before mutating the row
+    /// itself (delete removes it, archive flips its status).
+    private func closeScratchTerminals(_ wt: Worktree) async throws {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
         for t in terminals {
             try? await tmux.killWindow(server: wt.tmuxServer, windowID: t.tmuxWindowID)
@@ -75,6 +70,18 @@ extension RPCRouter {
             await pendingQuestions.clear(terminalID: t.id)
             ClaudeHookOverlay.removePerSessionOverlay(sessionKey: t.id.uuidString)
         }
+    }
+
+    func handleScratchDelete(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ScratchDeleteParams.self, from: paramsData)
+        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+            return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
+        }
+        guard wt.isScratch else {
+            return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
+        }
+
+        try await closeScratchTerminals(wt)
 
         // Move the folder to Trash — never rm -rf. Promoted rows already had
         // their folder moved by promotion, so skip when promotedToRepoID != nil.
@@ -93,6 +100,56 @@ extension RPCRouter {
 
         try await db.worktrees.delete(id: wt.id)
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
+        return .ok()
+    }
+
+    /// Archive a scratch space: close its terminals (same teardown as delete)
+    /// and flip its status to `.archived`, but leave the folder on disk —
+    /// unlike delete, nothing is moved to Trash.
+    func handleScratchArchive(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ScratchArchiveParams.self, from: paramsData)
+        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+            return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
+        }
+        guard wt.isScratch else {
+            return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
+        }
+
+        try await closeScratchTerminals(wt)
+        try await db.worktrees.archive(id: wt.id)
+
+        // Same delta `scratch.delete` broadcasts — deliberate: from the
+        // client's perspective the row leaves the active section identically
+        // whether archived or deleted.
+        subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
+        scratchLogger.info("scratch.archive: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
+        return .ok()
+    }
+
+    /// Revive an archived scratch space: flip its status back to `.active`.
+    /// Requires the folder to still exist on disk — scratch spaces have no
+    /// git-worktree machinery to recreate a missing directory, unlike
+    /// repo-scoped revive.
+    func handleScratchRevive(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ScratchReviveParams.self, from: paramsData)
+        guard let wt = try await db.worktrees.get(id: params.worktreeID) else {
+            return RPCResponse(error: "Scratch space not found: \(params.worktreeID)")
+        }
+        guard wt.isScratch else {
+            return RPCResponse(error: "Not a scratch space: \(params.worktreeID)")
+        }
+        guard wt.status == .archived else {
+            return RPCResponse(error: "Scratch space is already active: \(wt.id)")
+        }
+        guard FileManager.default.fileExists(atPath: wt.path) else {
+            return RPCResponse(error: "Scratch directory missing on disk: \(wt.path)")
+        }
+
+        try await db.worktrees.revive(id: wt.id)
+
+        subscriptions.broadcast(delta: .worktreeRevived(WorktreeDelta(
+            worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path)))
+        scratchLogger.info("scratch.revive: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return .ok()
     }
 

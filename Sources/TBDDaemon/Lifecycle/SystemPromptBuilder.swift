@@ -31,8 +31,13 @@ enum SystemPromptBuilder {
     /// Used both to set env vars in terminals and to build the combined `--append-system-prompt`.
     /// `scratchInstructions` is the global user-customizable override for the
     /// scratch layer (`Config.scratchInstructions`); `nil` or blank falls
-    /// back to the built-in default.
-    static func promptLayers(repo: Repo?, worktree: Worktree, scratchInstructions: String? = nil) -> [String: String] {
+    /// back to the built-in default. `scratchRenamePrompt` is the analogous
+    /// global user-customizable override for the scratch rename-nudge layer
+    /// (`Config.scratchRenamePrompt`); `nil` or blank falls back to
+    /// `RepoConstants.defaultScratchRenamePrompt`.
+    static func promptLayers(
+        repo: Repo?, worktree: Worktree, scratchInstructions: String? = nil, scratchRenamePrompt: String? = nil
+    ) -> [String: String] {
         var layers: [String: String] = [:]
 
         layers["TBD_PROMPT_CONTEXT"] = builtInTBDContext
@@ -40,6 +45,16 @@ enum SystemPromptBuilder {
         if worktree.isScratch {
             let trimmedCustom = scratchInstructions?.trimmingCharacters(in: .whitespacesAndNewlines)
             layers["TBD_PROMPT_SCRATCH"] = (trimmedCustom?.isEmpty == false) ? scratchInstructions! : scratchContext
+
+            if worktree.hasDefaultDisplayName {
+                let trimmedRename = scratchRenamePrompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let renamePrompt = (trimmedRename?.isEmpty == false)
+                    ? scratchRenamePrompt!
+                    : RepoConstants.defaultScratchRenamePrompt
+                if !renamePrompt.isEmpty {
+                    layers["TBD_PROMPT_RENAME"] = renamePrompt
+                }
+            }
         }
 
         if !worktree.isScratch && worktree.status != .main && worktree.displayName == worktree.name {
@@ -59,10 +74,16 @@ enum SystemPromptBuilder {
 
     /// Build the combined system prompt for a Claude session.
     /// Returns nil if there's nothing to append (e.g., resume session).
-    static func build(repo: Repo?, worktree: Worktree, isResume: Bool, scratchInstructions: String? = nil) -> String? {
+    static func build(
+        repo: Repo?, worktree: Worktree, isResume: Bool, scratchInstructions: String? = nil,
+        scratchRenamePrompt: String? = nil
+    ) -> String? {
         if isResume { return nil }
 
-        let layers = promptLayers(repo: repo, worktree: worktree, scratchInstructions: scratchInstructions)
+        let layers = promptLayers(
+            repo: repo, worktree: worktree, scratchInstructions: scratchInstructions,
+            scratchRenamePrompt: scratchRenamePrompt
+        )
         var parts: [String] = []
 
         // Order: scratch layer, rename prompt, TBD context, custom instructions

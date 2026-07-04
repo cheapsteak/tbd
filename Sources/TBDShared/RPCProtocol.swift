@@ -167,6 +167,8 @@ public enum RPCMethod {
     public static let scratchCreate = "scratch.create"
     public static let scratchDelete = "scratch.delete"
     public static let scratchPromote = "scratch.promote"
+    public static let scratchArchive = "scratch.archive"
+    public static let scratchRevive = "scratch.revive"
 }
 
 // MARK: - Branch Listing
@@ -554,6 +556,16 @@ public struct ScratchPromoteParams: Codable, Sendable {
     public init(worktreeID: UUID, destPath: String, displayName: String? = nil) {
         self.worktreeID = worktreeID; self.destPath = destPath; self.displayName = displayName
     }
+}
+
+public struct ScratchArchiveParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
+}
+
+public struct ScratchReviveParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
 }
 
 public struct ScratchPromoteResult: Codable, Sendable {

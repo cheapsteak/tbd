@@ -272,4 +272,64 @@ struct ModelProfileResolverTests {
         let result = try await resolver.loadByID(apiKey.id)
         #expect(result == nil)
     }
+
+    // MARK: - Scratch profile override (Config.scratchProfileOverrideID)
+
+    @Test("scratch override set + nilRepo resolves to the override profile")
+    func resolve_nilRepo_scratchOverride_wins() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let scratch = try await db.modelProfiles.create(name: "Scratch", kind: .apiKey)
+        let global = try await db.modelProfiles.create(name: "Global", kind: .apiKey)
+        try await db.config.setDefaultProfileID(global.id)
+        try await db.config.setScratchProfileOverride(scratch.id)
+        box.map[scratch.id.uuidString] = "secret-scratch"
+        box.map[global.id.uuidString] = "secret-global"
+
+        let result = try await resolver.resolve(repoID: nil)
+        #expect(result?.profileID == scratch.id)
+        #expect(result?.secret == "secret-scratch")
+    }
+
+    @Test("scratch override set but profile row missing falls back to global default")
+    func resolve_nilRepo_scratchOverride_rowMissing_fallsBackToGlobal() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let global = try await db.modelProfiles.create(name: "Global", kind: .apiKey)
+        try await db.config.setDefaultProfileID(global.id)
+        // Point the scratch override at a profile ID that doesn't exist in the store.
+        try await db.config.setScratchProfileOverride(UUID())
+        box.map[global.id.uuidString] = "secret-global"
+
+        let result = try await resolver.resolve(repoID: nil)
+        #expect(result?.profileID == global.id)
+        #expect(result?.secret == "secret-global")
+    }
+
+    @Test("scratch override unset + nilRepo falls back to global default (existing behavior)")
+    func resolve_nilRepo_noScratchOverride_usesGlobal() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let global = try await db.modelProfiles.create(name: "Global", kind: .apiKey)
+        try await db.config.setDefaultProfileID(global.id)
+        box.map[global.id.uuidString] = "secret-global"
+
+        let result = try await resolver.resolve(repoID: nil)
+        #expect(result?.profileID == global.id)
+    }
+
+    @Test("scratchProfileOverrideID does not leak into repo-scoped resolution")
+    func resolve_repoScoped_ignoresScratchOverride() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let scratchOverride = try await db.modelProfiles.create(name: "Scratch", kind: .apiKey)
+        let global = try await db.modelProfiles.create(name: "Global", kind: .apiKey)
+        try await db.config.setDefaultProfileID(global.id)
+        try await db.config.setScratchProfileOverride(scratchOverride.id)
+        // Repo has NO per-repo override — should fall through to global default,
+        // never to the scratch override, even though one is globally configured.
+        let repo = try await makeRepo(db)
+        box.map[scratchOverride.id.uuidString] = "secret-scratch"
+        box.map[global.id.uuidString] = "secret-global"
+
+        let result = try await resolver.resolve(repoID: repo.id)
+        #expect(result?.profileID == global.id)
+        #expect(result?.secret == "secret-global")
+    }
 }
