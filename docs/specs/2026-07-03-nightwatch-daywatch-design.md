@@ -872,3 +872,13 @@ The bar this clears: nothing in the design is *refuted*, but auto-merge (Phase 1
 ship until items 1–8 are built. Phases 0–1 (toggle, metadata, ledger, audit, the evaluated-
 but-merges-nothing floor) are safe to build now and are how items 3/4/6 get exercised before
 any merge is live.
+
+**Live precedent (2026-07-03, coordinator).** Adam gave a standing grant to auto-merge
+APPROVED PRs on the *tbd* repo itself (squash-only; `gh pr merge --auto --squash`; conflicts
+resolved by rebase first) — a working instance of the in-channel-grant path. Wrinkles hit in
+practice, to encode in the gate policy: **migration-identifier collisions** (keep historical
+identifiers, append new registrations — never renumber applied ones), **upstream-precursor
+overlaps** (a commit already merged upstream under a different SHA), and **branch-protection
+checks gating the merge** (`--auto` handles the CI wait). For PR polling at scale: prefer the
+data-hub corpus for historical search + `updated:>=`-filtered `gh` for the gap (longeye
+`gh-search-policy.md`); `gh` here rides the cache proxy automatically.
