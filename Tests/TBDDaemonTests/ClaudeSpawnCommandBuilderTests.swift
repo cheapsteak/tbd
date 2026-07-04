@@ -693,4 +693,109 @@ struct ClaudeSpawnCommandBuilderEnvTests {
             envSettingOverrides: [:])
         #expect(result.sensitiveEnv["CLAUDE_CODE_NO_FLICKER"] == nil)
     }
+
+    // MARK: - Inline re-export of profile routing env (rc-clobber defense)
+
+    /// REGRESSION: tmux `-e CLAUDE_CONFIG_DIR=...` is clobbered by shell rc
+    /// files (`zsh -ic` sources ~/.zshenv BEFORE the -c command — a
+    /// `export CLAUDE_CONFIG_DIR=...` account switcher there silently
+    /// redirected every "isolated" profile session to the rc's config dir).
+    /// The builder must ALSO re-export the routing env inline in the command,
+    /// which runs after rc files and therefore wins.
+    @Test("profile config dir is re-exported inline so rc files cannot clobber it")
+    func configDirInlineExported() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            profileKind: .oauth,
+            profileBaseURL: nil,
+            profileModel: nil,
+            profileConfigDir: "/Users/me/tbd/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.command.hasPrefix("export CLAUDE_CONFIG_DIR='/Users/me/tbd/profiles/abc/claude';"))
+        #expect(r.command.contains("claude --session-id abc"))
+        // Still in -e env too (visible during rc execution).
+        #expect(r.sensitiveEnv["CLAUDE_CONFIG_DIR"] == "/Users/me/tbd/profiles/abc/claude")
+    }
+
+    @Test("proxy routing env (base URL + model) is re-exported inline")
+    func proxyRoutingInlineExported() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: "sk-proxy-key",
+            profileKind: .apiKey,
+            profileBaseURL: "http://127.0.0.1:3456",
+            profileModel: "gpt-5-codex",
+            profileConfigDir: "/Users/me/tbd/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.command.contains("export ANTHROPIC_BASE_URL='http://127.0.0.1:3456';"))
+        #expect(r.command.contains("export ANTHROPIC_MODEL='gpt-5-codex';"))
+        #expect(r.command.contains("export CLAUDE_CONFIG_DIR="))
+    }
+
+    @Test("secrets are NEVER inlined into the command string")
+    func secretNeverInlined() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: "sk-super-secret",
+            profileKind: .apiKey,
+            profileBaseURL: "http://127.0.0.1:3456",
+            profileModel: nil,
+            profileConfigDir: "/Users/me/tbd/profiles/abc/claude",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(!r.command.contains("sk-super-secret"))
+        #expect(!r.command.contains("ANTHROPIC_API_KEY"))
+        #expect(r.sensitiveEnv["ANTHROPIC_API_KEY"] == "sk-super-secret")
+    }
+
+    @Test("bedrock routing env is re-exported inline")
+    func bedrockRoutingInlineExported() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "abc",
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            profileKind: .bedrock,
+            profileBaseURL: nil,
+            profileModel: "anthropic.claude-3-7",
+            profileAwsRegion: "us-east-1",
+            profileAwsProfile: "work",
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.command.contains("export CLAUDE_CODE_USE_BEDROCK='1';"))
+        #expect(r.command.contains("export AWS_REGION='us-east-1';"))
+        #expect(r.command.contains("export AWS_PROFILE='work';"))
+        #expect(r.command.contains("export ANTHROPIC_MODEL='anthropic.claude-3-7';"))
+    }
+
+    @Test("no profile routing env → command has no inline exports (unchanged shape)")
+    func noRoutingNoInlineExports() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh"
+        )
+        #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions")
+    }
 }

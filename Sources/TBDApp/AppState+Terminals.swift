@@ -309,8 +309,15 @@ extension AppState {
     /// Create a Claude terminal in a worktree and add a new tab for it.
     /// `profileID` pins the session to a specific model profile; when nil the
     /// daemon resolves the profile normally (repo override → global default →
-    /// keychain login).
-    func createClaudeTerminal(worktreeID: UUID, profileID: UUID? = nil) async {
+    /// keychain login). `loginSession` marks the terminal as a profile login
+    /// session (daemon auto-types `/login`); it requires `profileID`.
+    ///
+    /// Returns the created terminal, or nil on failure — the daemon fails
+    /// loud for broken login sessions (e.g. deleted profile), and surfacing
+    /// that here prevents "ghost tab" states where the UI shows a session
+    /// that the daemon never fully registered.
+    @discardableResult
+    func createClaudeTerminal(worktreeID: UUID, profileID: UUID? = nil, loginSession: Bool = false) async -> Terminal? {
         do {
             let size = mainAreaTerminalSize()
             let colorFgBg = appearance?.currentColorFgBg
@@ -319,6 +326,7 @@ extension AppState {
                 cmd: nil,
                 type: .claude,
                 overrideProfileID: profileID,
+                loginSession: loginSession ? true : nil,
                 cols: size.cols,
                 rows: size.rows,
                 colorFgBg: colorFgBg
@@ -326,9 +334,14 @@ extension AppState {
             terminals[worktreeID, default: []].append(terminal)
             let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
             tabs[worktreeID, default: []].append(tab)
+            return terminal
         } catch {
             logger.error("Failed to create Claude terminal: \(error)")
+            if loginSession {
+                showAlert("Failed to open login session: \(error.localizedDescription)", isError: true)
+            }
             handleConnectionError(error)
+            return nil
         }
     }
 

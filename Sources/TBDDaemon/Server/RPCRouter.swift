@@ -27,6 +27,13 @@ public final class RPCRouter: Sendable {
     public let pendingQuestions: PendingQuestionStore
     public let repoSerializer: RepoSerializer
     public let configDirManager: ClaudeProfileConfigDirManager
+    /// Deletes per-profile Claude Code OAuth credential items from the login
+    /// keychain on profile delete. Injected so tests can record the requested
+    /// service name instead of touching the real keychain.
+    public let claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting
+    /// Auto-`/login` typing + login-completion watching for profile login
+    /// sessions. Injected so tests can zero out the trigger delays.
+    public let loginSessions: LoginSessionCoordinator
 
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
@@ -57,7 +64,9 @@ public final class RPCRouter: Sendable {
         modelProfileResolver: ModelProfileResolver? = nil,
         pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
         repoSerializer: RepoSerializer = RepoSerializer(),
-        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager()
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
+        claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
+        loginSessions: LoginSessionCoordinator = LoginSessionCoordinator()
     ) {
         self.db = db
         self.lifecycle = lifecycle
@@ -80,6 +89,8 @@ public final class RPCRouter: Sendable {
         self.repoSerializer = repoSerializer
         self.configDirManager = configDirManager
         self.controlMode = nil
+        self.claudeCredentialsKeychain = claudeCredentialsKeychain
+        self.loginSessions = loginSessions
     }
 
     /// Handle a raw JSON Data blob representing an RPCRequest.
@@ -247,6 +258,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileFetchUsage(request.paramsData)
             case RPCMethod.modelProfileHealthCheck:
                 return try await handleModelProfileHealthCheck(request.paramsData)
+            case RPCMethod.modelProfilePrepareConfigDir:
+                return try await handleModelProfilePrepareConfigDir(request.paramsData)
             case RPCMethod.appSetForegroundState:
                 let params = try decoder.decode(AppSetForegroundStateParams.self, from: request.paramsData)
                 await claudeUsagePoller?.onFocusChanged(isForeground: params.isForeground)

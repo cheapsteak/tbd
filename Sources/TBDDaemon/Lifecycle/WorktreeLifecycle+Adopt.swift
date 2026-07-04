@@ -53,6 +53,11 @@ extension WorktreeLifecycle {
             throw WorktreeAdoptError.notInGitWorktreeList(path: path)
         }
 
+        // Adopting is an explicit "track this path again" — clear any forget
+        // tombstone so reconcile resumes treating the path normally. Runs on
+        // every adopt outcome (inserted/revived/unchanged); no-op when absent.
+        try await db.forgottenWorktrees.delete(path: path)
+
         let name = (path as NSString).lastPathComponent
         let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
 

@@ -182,6 +182,10 @@ extension RPCRouter {
         }
 
         let isClaudeType = params.type == .claude || params.resumeSessionID != nil
+        // Login sessions are always fresh Claude spawns pinned to a profile:
+        // the whole point is capturing `/login` credentials into that
+        // profile's isolated config dir.
+        let isLoginSession = params.loginSession == true && params.resumeSessionID == nil
         let claudeSessionID: String?
         let label: String?
 
@@ -201,6 +205,22 @@ extension RPCRouter {
             }
         }
 
+        // A login session without its profile is meaningless — spawning a
+        // default-credential Claude here would look like it worked while the
+        // `/login` lands in the wrong config dir. Fail loud so the app can
+        // surface the error instead of leaving a ghost tab.
+        if isLoginSession {
+            guard isClaudeType else {
+                return RPCResponse(error: "Login sessions must be Claude terminals (type: claude)")
+            }
+            guard params.overrideProfileID != nil else {
+                return RPCResponse(error: "Login sessions require a profile (overrideProfileID)")
+            }
+            guard resolvedProfile != nil else {
+                return RPCResponse(error: "Profile not found or unreadable — cannot open a login session for it")
+            }
+        }
+
         // Build the spawn command via the pure helper.
         let appendSystemPrompt: String?
         let freshSessionID: String?
@@ -217,7 +237,7 @@ extension RPCRouter {
                 repo: repo, worktree: worktree, isResume: false,
                 scratchInstructions: createConfig?.scratchInstructions,
                 scratchRenamePrompt: createConfig?.scratchRenamePrompt)
-            label = TerminalLabel.claudeCode
+            label = isLoginSession ? TerminalLabel.login : TerminalLabel.claudeCode
         } else if let cmd = params.cmd {
             claudeSessionID = nil
             freshSessionID = nil
@@ -296,7 +316,59 @@ extension RPCRouter {
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
         )))
 
+        if isLoginSession, let profile = resolvedProfile {
+            await armLoginSession(
+                terminalID: terminal.id,
+                paneID: window.paneID,
+                server: worktree.tmuxServer,
+                profile: profile
+            )
+        }
+
         return try RPCResponse(result: terminal)
+    }
+
+    /// Post-spawn wiring for a profile login session:
+    /// 1. starts the verified auto-`/login` pump — poll the pane until
+    ///    Claude's TUI is interactive, type `/login` + Enter, then verify the
+    ///    login dialog actually appeared (retrying, capped) so a send that
+    ///    lands before the input loop is ready doesn't silently vanish;
+    /// 2. starts the login-identity watcher so the Settings badge flips to
+    ///    "Logged in as …" the moment the profile's isolated `.claude.json`
+    ///    gains an `oauthAccount`.
+    private func armLoginSession(
+        terminalID: UUID,
+        paneID: String,
+        server: String,
+        profile: ResolvedModelProfile
+    ) async {
+        let tmux = self.tmux
+        await loginSessions.registerPendingAutoLogin(terminalID: terminalID)
+        await loginSessions.startAutoLoginPump(
+            terminalID: terminalID,
+            paneText: {
+                (try? await tmux.capturePaneOutput(server: server, paneID: paneID)) ?? ""
+            },
+            typeLogin: {
+                do {
+                    try await tmux.sendKeys(server: server, paneID: paneID, text: "/login")
+                    try await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
+                } catch {
+                    logger.warning("auto-login: send failed for terminal \(terminalID, privacy: .public): \(error, privacy: .public)")
+                }
+            }
+        )
+
+        let configDirManager = self.configDirManager
+        let subscriptions = self.subscriptions
+        let profileID = profile.profileID
+        await loginSessions.watchLoginIdentity(
+            profileID: profileID,
+            interval: loginSessions.delays.identityPollInterval,
+            timeout: loginSessions.delays.identityPollTimeout,
+            identity: { configDirManager.loginIdentity(forProfileID: profileID) },
+            onLogin: { subscriptions.broadcast(delta: .modelProfilesChanged) }
+        )
     }
 
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
@@ -322,6 +394,7 @@ extension RPCRouter {
         try await db.terminals.delete(id: params.terminalID)
         try await db.tabs.delete(tabID: params.terminalID)
         await pendingQuestions.clear(terminalID: params.terminalID)
+        await loginSessions.cancelPendingAutoLogin(terminalID: params.terminalID)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
         // if this terminal had one. No-op when the profile had no fallback.

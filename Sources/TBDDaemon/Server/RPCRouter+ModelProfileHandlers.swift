@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import os
 import TBDShared
 
@@ -28,8 +29,24 @@ extension RPCRouter {
     func handleModelProfileList() async throws -> RPCResponse {
         let profiles = try await db.modelProfiles.list()
         let usageByID = try await db.modelProfileUsage.fetchAll()
-        let result = profiles.map { profile in
-            ModelProfileWithUsage(profile: profile, usage: usageByID[profile.id])
+        let result = profiles.map { profile -> ModelProfileWithUsage in
+            // Bedrock profiles have no isolated config dir; everything else
+            // gets one at ~/tbd/profiles/<uuid>/claude. loginIdentity is only
+            // meaningful for OAuth profiles (Claude Code writes oauthAccount
+            // into the isolated .claude.json after /login). Computed fresh on
+            // every list call — this RPC is infrequent, so no caching.
+            let configDirPath: String? = profile.kind == .bedrock
+                ? nil
+                : configDirManager.configDirectory(forProfileID: profile.id).path
+            let loginIdentity: String? = profile.kind == .oauth
+                ? configDirManager.loginIdentity(forProfileID: profile.id)
+                : nil
+            return ModelProfileWithUsage(
+                profile: profile,
+                usage: usageByID[profile.id],
+                loginIdentity: loginIdentity,
+                configDirPath: configDirPath
+            )
         }
         let config = try await db.config.get()
         return try RPCResponse(result: ModelProfileListResult(
@@ -198,6 +215,25 @@ extension RPCRouter {
         // Remove the per-profile config directory. Non-bedrock profiles have an
         // isolated config dir at ~/tbd/profiles/<uuid>/; bedrock profiles do not.
         if profile.kind != .bedrock {
+            // Also delete the Claude Code OAuth credential item that /login
+            // wrote into the login keychain for this profile's isolated config
+            // dir ("Claude Code-credentials-<sha256-prefix-of-configDir>").
+            // The service name is always suffixed with the path-derived hash of
+            // OUR config dir, so this can never touch the user's bare
+            // "Claude Code-credentials" item (default ~/.claude). Done for
+            // apiKey-kind profiles too — harmless if the item doesn't exist.
+            // errSecItemNotFound is success: there was nothing to clean.
+            let configDir = self.configDirManager.configDirectory(forProfileID: params.id)
+            let status = claudeCredentialsKeychain.deleteCredentials(forConfigDirPath: configDir.path)
+            switch status {
+            case errSecSuccess:
+                logger.info("Deleted Claude Code keychain credentials for profile \(params.id, privacy: .public)")
+            case errSecItemNotFound:
+                logger.debug("No Claude Code keychain credentials to delete for profile \(params.id, privacy: .public)")
+            default:
+                logger.warning("Failed to delete Claude Code keychain credentials for profile \(params.id, privacy: .public): OSStatus \(status, privacy: .public)")
+            }
+
             do {
                 let profileDir = self.configDirManager.profileDirectory(forProfileID: params.id)
                 try FileManager.default.removeItem(at: profileDir)
@@ -370,5 +406,24 @@ extension RPCRouter {
         let params = try decoder.decode(ModelProfileHealthCheckParams.self, from: paramsData)
         let result = await ModelProfileHealthProbe.probe(baseURL: params.baseURL)
         return try RPCResponse(result: result)
+    }
+
+    // MARK: - Prepare Config Dir
+
+    /// Ensure an OAuth profile's isolated `CLAUDE_CONFIG_DIR` exists and is
+    /// seeded, and return its absolute path. Idempotent — safe to call before
+    /// every `tbd profile login`. OAuth-only: apiKey dirs need the secret for
+    /// pre-approval seeding (that provisioning stays on the spawn path), and
+    /// bedrock profiles have no config dir at all.
+    func handleModelProfilePrepareConfigDir(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfilePrepareConfigDirParams.self, from: paramsData)
+        guard let profile = try await db.modelProfiles.get(id: params.id) else {
+            return RPCResponse(error: "Profile not found")
+        }
+        guard profile.kind == .oauth else {
+            return RPCResponse(error: "Profile '\(profile.name)' is a \(profile.kind.rawValue) profile — only OAuth profiles use an isolated login config dir")
+        }
+        let dir = try configDirManager.ensureOAuthDir(forProfileID: profile.id)
+        return try RPCResponse(result: ModelProfilePrepareConfigDirResult(configDirPath: dir.path))
     }
 }

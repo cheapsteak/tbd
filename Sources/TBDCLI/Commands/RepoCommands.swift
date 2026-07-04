@@ -103,16 +103,17 @@ struct RepoList: AsyncParsableCommand {
                 print("No repositories. Use 'tbd repo add <path>' to add one.")
                 return
             }
-            let header = String(format: "%-36s  %-20s  %-9s  %s", "ID", "NAME", "STATUS", "PATH")
+            let header = tableRow([("ID", 36), ("NAME", 20), ("STATUS", 9), ("PATH", 0)])
             print(header)
             print(String(repeating: "-", count: 90))
             for repo in repos {
                 let tag = repo.status == .missing ? "[missing]" : "[ok]"
-                let line = String(format: "%-36s  %-20s  %-9s  %s",
-                    repo.id.uuidString as NSString,
-                    repo.displayName as NSString,
-                    tag as NSString,
-                    repo.path as NSString)
+                let line = tableRow([
+                    (repo.id.uuidString, 36),
+                    (repo.displayName, 20),
+                    (tag, 9),
+                    (repo.path, 0)
+                ])
                 print(line)
             }
         }

@@ -148,8 +148,18 @@ extension WorktreeLifecycle {
         let layout = WorktreeLayout()
         let acceptablePrefixes = layout.legacyAndCanonicalPrefixes(for: repo)
             .map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+        // Paths the user explicitly forgot (`tbd worktree forget`) must NOT be
+        // re-adopted, even though they still sit under a TBD-managed prefix
+        // and remain registered with git. Loaded once per reconcile pass.
+        // Tombstones are cleared by the adopt/create flows when the user
+        // deliberately re-adds a path.
+        let forgottenPaths = try await db.forgottenWorktrees.allPaths()
         for gitWt in gitWorktrees where !dbPaths.contains(gitWt.path) {
             guard acceptablePrefixes.contains(where: { gitWt.path.hasPrefix($0) }) else { continue }
+            if forgottenPaths.contains(gitWt.path) {
+                logger.debug("reconcile: skipping forgotten worktree path \(gitWt.path, privacy: .public)")
+                continue
+            }
 
             let name = (gitWt.path as NSString).lastPathComponent
             let tmuxServer = TmuxManager.serverName(forRepoPath: repo.path)

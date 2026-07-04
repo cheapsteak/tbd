@@ -15,10 +15,11 @@ extension WorktreeLifecycle {
     ///
     /// What `forget` does (mirrors the archive/reconcile cleanup, minus the disk
     /// removal and the archive hook):
-    /// 1. Kills the worktree's tmux windows.
-    /// 2. Deletes its terminals + tabs and clears their pending questions and
+    /// 1. Inserts a `forgotten_worktree` tombstone for the path (see below).
+    /// 2. Kills the worktree's tmux windows.
+    /// 3. Deletes its terminals + tabs and clears their pending questions and
     ///    per-session ClaudeHookOverlay files.
-    /// 3. Hard-deletes the worktree row (so it's gone from BOTH the active and
+    /// 4. Hard-deletes the worktree row (so it's gone from BOTH the active and
     ///    archived lists — not merely flipped to `.archived`).
     ///
     /// What `forget` does NOT do:
@@ -26,15 +27,14 @@ extension WorktreeLifecycle {
     /// - It does not run the `archive` lifecycle hook ("before_worktree_remove"),
     ///   because nothing is being removed from disk.
     ///
-    /// CAVEAT — reconcile re-adoption: `reconcile` re-adopts on-disk git
-    /// worktrees whose path is under one of TBD's own prefixes
-    /// (`~/tbd/worktrees/<slot>/` or `<repo>/.tbd/worktrees/`). A forgotten
-    /// worktree whose path is under such a prefix WILL reappear on the next
-    /// reconcile (it's re-created as a fresh `.active` row). Worktrees living
-    /// outside those prefixes (e.g. `~/conductor/workspaces/...`) are never
-    /// re-adopted, so forget sticks for them. A tombstone/ignore-list to make
-    /// forget stick for TBD-managed paths is a follow-up; this pass only logs a
-    /// warning when forgetting such a worktree.
+    /// Reconcile re-adoption is suppressed via a tombstone: `reconcile`
+    /// re-adopts on-disk git worktrees whose path is under one of TBD's own
+    /// prefixes (`~/tbd/worktrees/<slot>/` or `<repo>/.tbd/worktrees/`), so
+    /// `forget` also inserts a `forgotten_worktree` tombstone row keyed by the
+    /// worktree's absolute path. Reconcile skips tombstoned paths, making
+    /// forget stick even for TBD-managed locations. The tombstone is cleared
+    /// when the user deliberately re-adds the path (adopt or create), which
+    /// restores normal reconcile behavior.
     public func forgetWorktree(worktreeID: UUID) async throws {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
@@ -44,17 +44,19 @@ extension WorktreeLifecycle {
             throw WorktreeLifecycleError.invalidOperation("Cannot forget the main branch worktree")
         }
 
-        // Warn (best-effort) when the path is under a TBD-managed prefix, since
-        // reconcile would re-adopt it. Repo lookup is best-effort — a missing
-        // repo row doesn't block forget (we still want the row gone).
-        if let rid = worktree.repoID, let repo = try? await db.repos.get(id: rid) {
-            let acceptablePrefixes = WorktreeLayout().legacyAndCanonicalPrefixes(for: repo)
-                .map { $0.hasSuffix("/") ? $0 : $0 + "/" }
-            if acceptablePrefixes.contains(where: { worktree.path.hasPrefix($0) }) {
-                forgetLogger.warning(
-                    "forget: worktree \(worktreeID, privacy: .public) at \(worktree.path, privacy: .public) is under a TBD-managed prefix; reconcile will re-adopt it (follow-up: tombstone/ignore-list)"
-                )
-            }
+        // Tombstone the path so reconcile won't re-adopt it. Inserted for any
+        // repo-backed worktree regardless of prefix: for paths outside
+        // TBD-managed prefixes it's inert (reconcile never adopts them anyway),
+        // and skipping the prefix check keeps forget simple and future-proof
+        // against layout changes. Scratch spaces (repoID == nil) need no
+        // tombstone — reconcile only enumerates repo worktrees, so a repo-less
+        // path can never be re-adopted. (Replaces the earlier warning-only
+        // prefix check that pointed at this exact follow-up.)
+        if let repoID = worktree.repoID {
+            try await db.forgottenWorktrees.insert(path: worktree.path, repoID: repoID)
+            forgetLogger.debug(
+                "forget: tombstoned path \(worktree.path, privacy: .public) for worktree \(worktreeID, privacy: .public); reconcile will not re-adopt it"
+            )
         }
 
         // Mirror the archive/reconcile cleanup: kill tmux windows, delete

@@ -134,6 +134,7 @@ public enum RPCMethod {
     public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
+    public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
@@ -489,6 +490,22 @@ public struct ModelProfileHealthCheckResult: Codable, Sendable {
     }
 }
 
+/// Params for `modelProfile.prepareConfigDir` — ensure an OAuth profile's
+/// isolated `CLAUDE_CONFIG_DIR` exists and is seeded (`.claude.json` +
+/// host-mirror symlinks) so a client can hand it to a `claude` process
+/// (e.g. `tbd profile login`) without reimplementing provisioning.
+public struct ModelProfilePrepareConfigDirParams: Codable, Sendable {
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+}
+
+public struct ModelProfilePrepareConfigDirResult: Codable, Sendable {
+    /// Absolute path of the profile's isolated `CLAUDE_CONFIG_DIR`
+    /// (`~/tbd/profiles/<lowercased-uuid>/claude`).
+    public let configDirPath: String
+    public init(configDirPath: String) { self.configDirPath = configDirPath }
+}
+
 public struct NotificationsListResult: Codable, Sendable {
     /// Legacy field — highest-severity unread type per worktree. Retained
     /// for backwards compatibility during rollout. Newer clients should
@@ -802,14 +819,21 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let prompt: String?
     /// Pin a specific profile ID for this terminal, bypassing resolve(repoID:).
     public let overrideProfileID: UUID?
+    /// True for a profile *login session* (Settings → "Open login session"):
+    /// requires `overrideProfileID`; the daemon labels the terminal
+    /// `TerminalLabel.login`, auto-types `/login` once Claude is up, and
+    /// watches the profile's config dir so the UI badge flips on completion.
+    /// Optional so older clients/params decode unchanged (nil = false).
+    public let loginSession: Bool?
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
     /// COLORFGBG environment variable value computed from active terminal color scheme's
     /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
     public let colorFgBg: String?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil) {
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
+        self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
     }
 }

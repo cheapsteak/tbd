@@ -32,6 +32,25 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Persistent, non-blocking cross-build warning: the shared daemon
+            // was started from a different worktree's build than this app.
+            // Advisory only — the app keeps working with whatever RPCs still
+            // decode; the user decides when to restart.
+            if let warning = appState.daemonBuildMismatchMessage,
+               !appState.daemonBuildMismatchDismissed {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                    Text(warning).font(.caption)
+                    Spacer()
+                    Button("Dismiss") {
+                        appState.daemonBuildMismatchDismissed = true
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(8)
+                .background(Color.yellow.opacity(0.2))
+            }
             NavigationSplitView {
                 SidebarView()
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 400)

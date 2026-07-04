@@ -1,5 +1,22 @@
+import AppKit
 import SwiftUI
 import TBDShared
+
+/// Closes the SwiftUI `Settings` scene window so "Open login session" lands
+/// the user directly on the newly focused terminal tab in the main window
+/// instead of leaving Settings floating over it.
+@MainActor
+enum SettingsWindowCloser {
+    static func close() {
+        // The SwiftUI Settings scene window carries the stable identifier
+        // "com_apple_SwiftUI_Settings_window"; match on the substring so a
+        // future macOS rename of the prefix doesn't silently break this.
+        for window in NSApplication.shared.windows
+        where window.identifier?.rawValue.contains("Settings") == true {
+            window.performClose(nil)
+        }
+    }
+}
 
 struct ModelProfilesSettingsView: View {
     @EnvironmentObject var appState: AppState
@@ -99,9 +116,30 @@ struct ModelProfileRow: View {
                 menuButton
             }
             if let caption = endpointCaption {
-                Text(caption)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if needsLogin {
+                    HStack(spacing: 8) {
+                        Text(caption)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Open login session") {
+                            Task {
+                                if await appState.openLoginSession(profileID: profile.id) {
+                                    SettingsWindowCloser.close()
+                                }
+                            }
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                        .disabled(appState.selectedWorktree == nil)
+                        .help(appState.selectedWorktree == nil
+                              ? "Select a worktree in the main window first"
+                              : "Open a Claude session with this profile — /login is typed for you")
+                    }
+                } else {
+                    Text(caption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .contentShape(Rectangle())
@@ -127,7 +165,13 @@ struct ModelProfileRow: View {
         }
     }
 
-    private var endpointCaption: String? { profile.detailCaption }
+    private var endpointCaption: String? { ProfileLoginPresentation.settingsCaption(for: entry) }
+
+    /// True for oauth profiles with no detected login — drives the inline
+    /// "Open login session" affordance next to the caption.
+    private var needsLogin: Bool {
+        ProfileLoginPresentation.needsLogin(kind: profile.kind, loginIdentity: entry.loginIdentity)
+    }
 
     @ViewBuilder
     private var nameView: some View {
@@ -170,6 +214,16 @@ struct ModelProfileRow: View {
             Button("Rename…") {
                 draftName = profile.name
                 isEditingName = true
+            }
+            if needsLogin {
+                Button("Open login session") {
+                    Task {
+                        if await appState.openLoginSession(profileID: profile.id) {
+                            SettingsWindowCloser.close()
+                        }
+                    }
+                }
+                .disabled(appState.selectedWorktree == nil)
             }
             Divider()
             Button("Delete…", role: .destructive) {
@@ -459,8 +513,71 @@ struct AddModelProfileSheet: View {
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var probeStatus: ProbeStatus = .idle
+    /// Set after a NEW oauth (Claude-direct) profile is saved: swaps the sheet
+    /// content to a follow-up step offering a one-click login session.
+    @State private var createdOAuthProfile: ModelProfileWithUsage?
 
     var body: some View {
+        Group {
+            if let created = createdOAuthProfile {
+                loginFollowUp(created)
+            } else {
+                formBody
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+        .onAppear { awsProfileSuggestions = AWSProfiles.discover() }
+        .task(id: "\(preset)|\(awsRegion)|\(awsProfile)") {
+            guard preset == .bedrock else { return }
+            // Debounce so rapid keystrokes don't spam subprocess calls.
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if Task.isCancelled { return }
+            modelDiscovery = .loading
+            modelDiscovery = await BedrockModels.discover(
+                region: awsRegion,
+                awsProfile: awsProfile.isEmpty ? nil : awsProfile
+            )
+        }
+    }
+
+    /// Post-save step for new oauth profiles: the profile exists but has no
+    /// login yet — offer to open a Claude session pinned to it so the user can
+    /// run /login immediately.
+    private func loginFollowUp(_ entry: ModelProfileWithUsage) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Profile Created").font(.headline)
+            (Text("“\(entry.profile.name)” is ready. Open a Claude session with it and run ")
+                + Text("/login").font(.system(.caption, design: .monospaced))
+                + Text(" once to connect an account — TBD keeps the login isolated to this profile."))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if appState.selectedWorktree == nil {
+                Text("Select a worktree in the main window to open a login session.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            HStack {
+                Spacer()
+                Button("Later") { dismiss() }
+                Button("Open login session") {
+                    let profileID = entry.profile.id
+                    Task {
+                        let opened = await appState.openLoginSession(profileID: profileID)
+                        dismiss()
+                        if opened {
+                            SettingsWindowCloser.close()
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(appState.selectedWorktree == nil)
+            }
+        }
+    }
+
+    private var formBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Add Model Profile").font(.headline)
 
@@ -585,20 +702,6 @@ struct AddModelProfileSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canSave)
             }
-        }
-        .padding(20)
-        .frame(width: 520)
-        .onAppear { awsProfileSuggestions = AWSProfiles.discover() }
-        .task(id: "\(preset)|\(awsRegion)|\(awsProfile)") {
-            guard preset == .bedrock else { return }
-            // Debounce so rapid keystrokes don't spam subprocess calls.
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            if Task.isCancelled { return }
-            modelDiscovery = .loading
-            modelDiscovery = await BedrockModels.discover(
-                region: awsRegion,
-                awsProfile: awsProfile.isEmpty ? nil : awsProfile
-            )
         }
     }
 
@@ -736,6 +839,15 @@ struct AddModelProfileSheet: View {
                 // open so the user can acknowledge before deciding to keep the profile.
                 if let warning {
                     errorMessage = warning
+                    return
+                }
+                if preset == .claudeDirect,
+                   let created = appState.modelProfiles.first(where: {
+                       $0.profile.kind == .oauth && $0.profile.name == trimmedName
+                   }) {
+                    // New oauth profile: swap the sheet to the follow-up step
+                    // offering a one-click login session instead of closing.
+                    createdOAuthProfile = created
                     return
                 }
                 dismiss()

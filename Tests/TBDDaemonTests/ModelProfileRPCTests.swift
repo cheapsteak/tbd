@@ -954,4 +954,93 @@ struct ModelProfileRPCTests {
         #expect(await router.handle(req).success)
         #expect(try await db.modelProfiles.get(id: row.id)?.fallbackModels == ["anthropic.claude-haiku-4-5"])
     }
+
+    // MARK: - prepareConfigDir
+
+    private func makeTempConfigDirManager() -> (ClaudeProfileConfigDirManager, URL) {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-prepare-configdir-\(UUID().uuidString)", isDirectory: true)
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: base.appendingPathComponent("profiles", isDirectory: true),
+            hostBaseDirectory: base.appendingPathComponent("host-claude", isDirectory: true)
+        )
+        return (manager, base)
+    }
+
+    @Test("prepareConfigDir: oauth profile gets a seeded dir and its path back")
+    func prepareConfigDirOAuth() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+
+        let profile = try await db.modelProfiles.create(name: "LoginTarget", kind: .oauth)
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfilePrepareConfigDir,
+            params: ModelProfilePrepareConfigDirParams(id: profile.id)
+        )
+        let resp = await router.handle(req)
+        #expect(resp.success)
+        let result = try resp.decodeResult(ModelProfilePrepareConfigDirResult.self)
+        #expect(result.configDirPath == manager.configDirectory(forProfileID: profile.id).path)
+
+        var isDir: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: result.configDirPath, isDirectory: &isDir))
+        #expect(isDir.boolValue)
+        // Seeded with the minimal OAuth .claude.json (hasCompletedOnboarding).
+        let claudeJSON = result.configDirPath + "/.claude.json"
+        #expect(FileManager.default.fileExists(atPath: claudeJSON))
+    }
+
+    @Test("prepareConfigDir: idempotent — second call returns the same path")
+    func prepareConfigDirIdempotent() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+
+        let profile = try await db.modelProfiles.create(name: "Twice", kind: .oauth)
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfilePrepareConfigDir,
+            params: ModelProfilePrepareConfigDirParams(id: profile.id)
+        )
+        let first = try (await router.handle(req)).decodeResult(ModelProfilePrepareConfigDirResult.self)
+        let second = try (await router.handle(req)).decodeResult(ModelProfilePrepareConfigDirResult.self)
+        #expect(first.configDirPath == second.configDirPath)
+    }
+
+    @Test("prepareConfigDir: rejects non-oauth kinds with the kind in the error")
+    func prepareConfigDirRejectsNonOAuth() async throws {
+        let (manager, base) = makeTempConfigDirManager()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (router, db, _) = makeRouter(configDirManager: manager)
+
+        let apiKey = try await db.modelProfiles.create(name: "Keyed", kind: .apiKey)
+        let bedrock = try await db.modelProfiles.create(
+            name: "West", kind: .bedrock, model: "anthropic.claude-sonnet-4-5", awsRegion: "us-west-2"
+        )
+
+        for (profile, kind) in [(apiKey, "apiKey"), (bedrock, "bedrock")] {
+            let req = try RPCRequest(
+                method: RPCMethod.modelProfilePrepareConfigDir,
+                params: ModelProfilePrepareConfigDirParams(id: profile.id)
+            )
+            let resp = await router.handle(req)
+            #expect(!resp.success)
+            #expect(resp.error?.contains(kind) == true)
+            // No config dir was provisioned for the rejected profile.
+            let dir = manager.configDirectory(forProfileID: profile.id)
+            #expect(!FileManager.default.fileExists(atPath: dir.path))
+        }
+    }
+
+    @Test("prepareConfigDir: unknown id fails with profile-not-found")
+    func prepareConfigDirUnknownID() async throws {
+        let (router, _, _) = makeRouter()
+        let req = try RPCRequest(
+            method: RPCMethod.modelProfilePrepareConfigDir,
+            params: ModelProfilePrepareConfigDirParams(id: UUID())
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error == "Profile not found")
+    }
 }

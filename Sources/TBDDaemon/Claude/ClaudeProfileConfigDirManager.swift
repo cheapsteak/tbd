@@ -413,6 +413,27 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         return dir
     }
 
+    /// Read the login identity for a profile from its isolated config dir:
+    /// the `oauthAccount.emailAddress` that Claude Code writes into
+    /// `<configDir>/.claude.json` after the user completes `/login` inside a
+    /// session using this profile.
+    ///
+    /// Returns nil when the profile dir or `.claude.json` is missing, the JSON
+    /// is malformed, or no `oauthAccount` has been written yet — all of which
+    /// mean "not logged in" for TBD-owned profile dirs. Best-effort and
+    /// read-only; never throws.
+    public func loginIdentity(forProfileID profileID: UUID) -> String? {
+        let claudeJSONPath = configDirectory(forProfileID: profileID)
+            .appendingPathComponent(".claude.json")
+        guard let data = try? Data(contentsOf: claudeJSONPath),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = parsed["oauthAccount"] as? [String: Any],
+              let email = account["emailAddress"] as? String,
+              !email.isEmpty
+        else { return nil }
+        return email
+    }
+
     /// Claude Code stores approved keys as the last 20 chars of the key
     /// (confirmed by inspecting `~/.claude.json#customApiKeyResponses.approved`).
     /// For keys shorter than 20 chars (unusual but possible in tests), use the

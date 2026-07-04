@@ -431,9 +431,22 @@ public struct ModelProfileUsage: Codable, Sendable, Equatable {
 public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     public let profile: ModelProfile
     public let usage: ModelProfileUsage?
-    public init(profile: ModelProfile, usage: ModelProfileUsage? = nil) {
+    /// Computed by the daemon at list time (never persisted): the
+    /// `oauthAccount.emailAddress` from the profile's isolated config dir
+    /// `.claude.json`. Non-nil only for `.oauth` profiles that have completed
+    /// `/login` inside a session. nil = not logged in, non-oauth kind, or an
+    /// older daemon that doesn't send the field.
+    public let loginIdentity: String?
+    /// Absolute path of the profile's isolated `CLAUDE_CONFIG_DIR`
+    /// (`~/tbd/profiles/<lowercased-uuid>/claude`). nil for bedrock profiles
+    /// (no config-dir isolation) or an older daemon that doesn't send the field.
+    public let configDirPath: String?
+    public init(profile: ModelProfile, usage: ModelProfileUsage? = nil,
+                loginIdentity: String? = nil, configDirPath: String? = nil) {
         self.profile = profile
         self.usage = usage
+        self.loginIdentity = loginIdentity
+        self.configDirPath = configDirPath
     }
 }
 
