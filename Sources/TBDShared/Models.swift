@@ -428,6 +428,70 @@ public struct ModelProfileUsage: Codable, Sendable, Equatable {
     }
 }
 
+/// One rate-limit bucket from the Claude OAuth usage API's `limits[]` array
+/// (`GET https://api.anthropic.com/api/oauth/usage`). Captured as data —
+/// unknown `kind` values flow through untouched so new API buckets appear
+/// without a code change.
+///
+/// Observed kinds (2026-07): `session` (5-hour window), `weekly_all`
+/// (weekly, all models), `weekly_scoped` (weekly, one model family —
+/// `modelDisplayName` carries the family label, e.g. "Fable").
+public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
+    /// Bucket identifier as the API names it (`session`, `weekly_all`,
+    /// `weekly_scoped`, or a future kind).
+    public var kind: String
+    /// Grouping label from the API (`session`, `weekly`). nil if absent.
+    public var group: String?
+    /// Utilization percent on a 0–100 scale.
+    public var percent: Double
+    /// Severity label from the API (`normal`, `warning`, `critical`). nil if absent.
+    public var severity: String?
+    /// When this window resets. nil when the API sends null (e.g. an unused
+    /// scoped bucket).
+    public var resetsAt: Date?
+    /// For scoped buckets: `scope.model.display_name` (e.g. "Fable").
+    /// nil = bucket is not model-scoped.
+    public var modelDisplayName: String?
+    /// The API's `is_active` flag (which limit is currently binding). nil if absent.
+    public var isActive: Bool?
+
+    public init(kind: String, group: String? = nil, percent: Double,
+                severity: String? = nil, resetsAt: Date? = nil,
+                modelDisplayName: String? = nil, isActive: Bool? = nil) {
+        self.kind = kind
+        self.group = group
+        self.percent = percent
+        self.severity = severity
+        self.resetsAt = resetsAt
+        self.modelDisplayName = modelDisplayName
+        self.isActive = isActive
+    }
+}
+
+/// In-memory per-profile usage snapshot for logged-in OAuth profiles,
+/// maintained by the daemon's background poller (never persisted).
+public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
+    /// Buckets from the last successful fetch (empty if none succeeded yet).
+    public var buckets: [ClaudeUsageLimitBucket]
+    /// When the buckets were last successfully fetched. nil = never.
+    public var fetchedAt: Date?
+    /// When a fetch was last attempted (success or failure).
+    public var lastAttemptAt: Date
+    /// "ok", or a failure description like
+    /// "stale since 2026-07-03T18:00:00Z; fetch failed: HTTP 401".
+    public var status: String
+
+    public init(buckets: [ClaudeUsageLimitBucket], fetchedAt: Date? = nil,
+                lastAttemptAt: Date, status: String) {
+        self.buckets = buckets
+        self.fetchedAt = fetchedAt
+        self.lastAttemptAt = lastAttemptAt
+        self.status = status
+    }
+
+    public var isOK: Bool { status == "ok" }
+}
+
 public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     public let profile: ModelProfile
     public let usage: ModelProfileUsage?
@@ -441,12 +505,19 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     /// (`~/tbd/profiles/<lowercased-uuid>/claude`). nil for bedrock profiles
     /// (no config-dir isolation) or an older daemon that doesn't send the field.
     public let configDirPath: String?
+    /// Cached per-profile usage snapshot from the daemon's in-memory OAuth
+    /// usage poller. Non-nil only for logged-in `.oauth` profiles once the
+    /// poller has attempted a fetch. nil = non-oauth kind, not logged in, or
+    /// an older daemon that doesn't send the field.
+    public let usageSnapshot: ProfileUsageSnapshot?
     public init(profile: ModelProfile, usage: ModelProfileUsage? = nil,
-                loginIdentity: String? = nil, configDirPath: String? = nil) {
+                loginIdentity: String? = nil, configDirPath: String? = nil,
+                usageSnapshot: ProfileUsageSnapshot? = nil) {
         self.profile = profile
         self.usage = usage
         self.loginIdentity = loginIdentity
         self.configDirPath = configDirPath
+        self.usageSnapshot = usageSnapshot
     }
 }
 

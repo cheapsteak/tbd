@@ -133,6 +133,7 @@ public enum RPCMethod {
     public static let modelProfileSetPrimaryAgentPreference = "modelProfile.setPrimaryAgentPreference"
     public static let modelProfileSetRepoOverride = "modelProfile.setRepoOverride"
     public static let modelProfileFetchUsage = "modelProfile.fetchUsage"
+    public static let modelProfileUsageRefresh = "modelProfile.usageRefresh"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let terminalSwapProfile = "terminal.swapProfile"
@@ -474,6 +475,34 @@ public struct ModelProfileListResult: Codable, Sendable {
 public struct ModelProfileFetchUsageResult: Codable, Sendable {
     public let usage: ModelProfileUsage
     public init(usage: ModelProfileUsage) { self.usage = usage }
+}
+
+/// Params for `modelProfile.usageRefresh` — force an immediate usage sweep of
+/// the daemon's in-memory OAuth usage poller (the picker dialog calls this on
+/// open). `id == nil` refreshes every logged-in OAuth profile; a non-nil id
+/// refreshes just that profile.
+public struct ModelProfileUsageRefreshParams: Codable, Sendable {
+    public let id: UUID?
+    public init(id: UUID? = nil) { self.id = id }
+}
+
+public struct ModelProfileUsageSnapshotEntry: Codable, Sendable, Equatable {
+    public let profileID: UUID
+    public let snapshot: ProfileUsageSnapshot
+    public init(profileID: UUID, snapshot: ProfileUsageSnapshot) {
+        self.profileID = profileID
+        self.snapshot = snapshot
+    }
+}
+
+public struct ModelProfileUsageRefreshResult: Codable, Sendable {
+    /// Post-sweep snapshots. All logged-in OAuth profiles when params.id was
+    /// nil; at most the one requested profile otherwise (empty when that
+    /// profile is not an eligible logged-in OAuth profile).
+    public let snapshots: [ModelProfileUsageSnapshotEntry]
+    public init(snapshots: [ModelProfileUsageSnapshotEntry]) {
+        self.snapshots = snapshots
+    }
 }
 
 public struct ModelProfileHealthCheckParams: Codable, Sendable {

@@ -18,6 +18,10 @@ public final class RPCRouter: Sendable {
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
+    /// In-memory per-profile OAuth usage poller. Wired post-construction by
+    /// Daemon.swift (mirrors `claudeUsagePoller`); nil in unit tests / mock
+    /// mode, where usage snapshots are simply absent.
+    public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Live connected-client count, supplied by the SocketServer after it is
     /// constructed (the router is built first in Daemon.swift, so it cannot
     /// take the server as an init dependency). Mirrors `claudeUsagePoller`
@@ -256,6 +260,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileSetEnvOverrides(request.paramsData)
             case RPCMethod.modelProfileFetchUsage:
                 return try await handleModelProfileFetchUsage(request.paramsData)
+            case RPCMethod.modelProfileUsageRefresh:
+                return try await handleModelProfileUsageRefresh(request.paramsData)
             case RPCMethod.modelProfileHealthCheck:
                 return try await handleModelProfileHealthCheck(request.paramsData)
             case RPCMethod.modelProfilePrepareConfigDir:

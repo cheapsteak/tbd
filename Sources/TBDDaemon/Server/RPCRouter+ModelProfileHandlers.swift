@@ -29,6 +29,7 @@ extension RPCRouter {
     func handleModelProfileList() async throws -> RPCResponse {
         let profiles = try await db.modelProfiles.list()
         let usageByID = try await db.modelProfileUsage.fetchAll()
+        let oauthSnapshots = await oauthUsagePoller?.allSnapshots() ?? [:]
         let result = profiles.map { profile -> ModelProfileWithUsage in
             // Bedrock profiles have no isolated config dir; everything else
             // gets one at ~/tbd/profiles/<uuid>/claude. loginIdentity is only
@@ -45,7 +46,8 @@ extension RPCRouter {
                 profile: profile,
                 usage: usageByID[profile.id],
                 loginIdentity: loginIdentity,
-                configDirPath: configDirPath
+                configDirPath: configDirPath,
+                usageSnapshot: oauthSnapshots[profile.id]
             )
         }
         let config = try await db.config.get()
@@ -398,6 +400,25 @@ extension RPCRouter {
         case .decodeError(let msg):
             return RPCResponse(error: "Decode error: \(msg)")
         }
+    }
+
+    // MARK: - Usage Refresh (forced sweep of the in-memory OAuth usage poller)
+
+    /// `modelProfile.usageRefresh` — force a fresh usage sweep for all
+    /// logged-in OAuth profiles (params.id == nil) or one profile, and return
+    /// the post-sweep snapshots. The spawn-time account picker calls this on
+    /// open; background staleness is otherwise bounded by the poller cadence.
+    /// The poller broadcasts `.modelProfilesChanged` itself when data changes.
+    func handleModelProfileUsageRefresh(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ModelProfileUsageRefreshParams.self, from: paramsData)
+        guard let poller = oauthUsagePoller else {
+            return RPCResponse(error: "OAuth usage poller is not running (mock mode or startup)")
+        }
+        let snapshots = await poller.sweepNow(profileID: params.id)
+        let entries = snapshots
+            .map { ModelProfileUsageSnapshotEntry(profileID: $0.key, snapshot: $0.value) }
+            .sorted { $0.profileID.uuidString < $1.profileID.uuidString }
+        return try RPCResponse(result: ModelProfileUsageRefreshResult(snapshots: entries))
     }
 
     // MARK: - Health Check
