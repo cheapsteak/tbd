@@ -119,8 +119,10 @@ public struct ScheduledResumeStore: Sendable {
     }
 
     /// Transition a row's status. Leaving `.pending` clears the terminal's
-    /// `pendingResumeAt` mirror.
+    /// `pendingResumeAt` mirror. Invariant: setStatus never creates or resumes a
+    /// pending row. Use insertPending/reschedule for that.
     public func setStatus(id: UUID, status: ScheduledResumeStatus) async throws {
+        precondition(status != .pending, "use insertPending/reschedule to (re)arm a resume")
         try await writer.write { db in
             guard var record = try ScheduledResumeRecord.fetchOne(db, key: id.uuidString) else {
                 return
@@ -136,10 +138,15 @@ public struct ScheduledResumeStore: Sendable {
     }
 
     /// Push a pending row's fire time (copy-mode retry) and bump attemptCount.
-    public func reschedule(id: UUID, fireAt: Date, attemptCount: Int) async throws {
+    /// - Returns: true if the row was pending and rescheduled, false if row not found or not pending.
+    @discardableResult
+    public func reschedule(id: UUID, fireAt: Date, attemptCount: Int) async throws -> Bool {
         try await writer.write { db in
             guard var record = try ScheduledResumeRecord.fetchOne(db, key: id.uuidString) else {
-                return
+                return false
+            }
+            guard record.status == ScheduledResumeStatus.pending.rawValue else {
+                return false
             }
             record.fireAt = fireAt
             record.attemptCount = attemptCount
@@ -147,6 +154,7 @@ public struct ScheduledResumeStore: Sendable {
             try db.execute(
                 sql: "UPDATE terminal SET pendingResumeAt = ? WHERE id = ?",
                 arguments: [fireAt, record.terminalID])
+            return true
         }
     }
 

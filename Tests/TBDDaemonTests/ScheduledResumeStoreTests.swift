@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -39,10 +40,10 @@ import Testing
         #expect(fetched?.terminalID == resume.terminalID)
         #expect(fetched?.worktreeID == resume.worktreeID)
         #expect(fetched?.claudeSessionID == resume.claudeSessionID)
-        // Dates lose subsecond precision in SQLite, so allow 1-second tolerance
-        #expect(abs(fetched!.fireAt.timeIntervalSince(resume.fireAt)) < 1)
-        #expect(abs(fetched!.resetsAt.timeIntervalSince(resume.resetsAt)) < 1)
-        #expect(abs(fetched!.createdAt.timeIntervalSince(resume.createdAt)) < 1)
+        // Dates lose subsecond precision in SQLite (millisecond precision), so allow 0.01s tolerance
+        #expect(abs(fetched!.fireAt.timeIntervalSince(resume.fireAt)) < 0.01)
+        #expect(abs(fetched!.resetsAt.timeIntervalSince(resume.resetsAt)) < 0.01)
+        #expect(abs(fetched!.createdAt.timeIntervalSince(resume.createdAt)) < 0.01)
         #expect(fetched?.limitType == resume.limitType)
         #expect(fetched?.rawMessage == resume.rawMessage)
         #expect(fetched?.status == .pending)
@@ -84,7 +85,8 @@ import Testing
             #expect(Bool(false), "DB unique index did not reject second pending row")
         } catch {
             // Expected: constraint violation when trying to insert second pending row.
-            #expect(error != nil)
+            // Verify it's a constraint error (result code 19 for SQLITE_CONSTRAINT).
+            #expect((error as? DatabaseError)?.resultCode == .SQLITE_CONSTRAINT)
         }
     }
 
@@ -112,12 +114,13 @@ import Testing
         let resume = makeResume()
         _ = try await db.scheduledResumes.insertPending(resume)
         let newFireAt = resume.fireAt.addingTimeInterval(120)
-        try await db.scheduledResumes.reschedule(id: resume.id, fireAt: newFireAt, attemptCount: 3)
+        let rescheduled = try await db.scheduledResumes.reschedule(id: resume.id, fireAt: newFireAt, attemptCount: 3)
+        #expect(rescheduled)
         let row = try await db.scheduledResumes.get(id: resume.id)
-        #expect(abs(row!.fireAt.timeIntervalSince(newFireAt)) < 1)
+        #expect(abs(row!.fireAt.timeIntervalSince(newFireAt)) < 0.01)
         #expect(row?.attemptCount == 3)
         let terminal = try await db.terminals.get(id: terminalID)
-        #expect(abs(terminal!.pendingResumeAt!.timeIntervalSince(newFireAt)) < 1)
+        #expect(abs(terminal!.pendingResumeAt!.timeIntervalSince(newFireAt)) < 0.01)
     }
 
     @Test func cancelPendingByTerminal() async throws {
@@ -156,5 +159,46 @@ import Testing
         _ = try await db.scheduledResumes.insertPending(sooner)
         let rows = try await db.scheduledResumes.pending()
         #expect(rows.map(\.id) == [sooner.id, later.id])
+    }
+
+    @Test func pendingByTerminalIDReturnsOnlyRequestedTerminal() async throws {
+        let terminal2 = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2")
+        let resume1 = makeResume()
+        let resume2 = ScheduledResume(
+            terminalID: terminal2.id, worktreeID: worktreeID,
+            resetsAt: Date(), fireAt: Date().addingTimeInterval(100),
+            limitType: "session", rawMessage: "m2")
+        _ = try await db.scheduledResumes.insertPending(resume1)
+        _ = try await db.scheduledResumes.insertPending(resume2)
+
+        let forTerminal1 = try await db.scheduledResumes.pending(terminalID: terminalID)
+        #expect(forTerminal1?.id == resume1.id)
+        let forTerminal2 = try await db.scheduledResumes.pending(terminalID: terminal2.id)
+        #expect(forTerminal2?.id == resume2.id)
+        let forUnknown = try await db.scheduledResumes.pending(terminalID: UUID())
+        #expect(forUnknown == nil)
+    }
+
+    @Test func rescheduleReturnsFailsForNonPendingAndMissingRows() async throws {
+        let resume = makeResume()
+        _ = try await db.scheduledResumes.insertPending(resume)
+
+        // Cancel the pending row, making it non-pending
+        _ = try await db.scheduledResumes.cancelPending(terminalID: terminalID)
+        let row = try await db.scheduledResumes.get(id: resume.id)
+        #expect(row?.status == .cancelled)
+
+        // Reschedule on the now-cancelled row should return false and not touch the mirror
+        let rescheduled = try await db.scheduledResumes.reschedule(
+            id: resume.id, fireAt: Date(), attemptCount: 5)
+        #expect(rescheduled == false)
+        let terminal = try await db.terminals.get(id: terminalID)
+        #expect(terminal?.pendingResumeAt == nil)
+
+        // Reschedule on a non-existent row should return false
+        let rescheduleUnknown = try await db.scheduledResumes.reschedule(
+            id: UUID(), fireAt: Date(), attemptCount: 1)
+        #expect(rescheduleUnknown == false)
     }
 }
