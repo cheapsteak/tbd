@@ -1448,7 +1448,7 @@ final class AppState: ObservableObject {
 
             // Auto-mark-as-read for worktrees the user is currently looking at
             let visible = visibleWorktreeIDs
-            let toMarkRead = fetched.keys.filter { visible.contains($0) }
+            let toMarkRead = Self.worktreeIDsToAutoMarkRead(unreadSummaries: fetched, visible: visible)
             for worktreeID in toMarkRead {
                 do {
                     try await daemonClient.markNotificationsRead(worktreeID: worktreeID)
@@ -1466,6 +1466,23 @@ final class AppState: ObservableObject {
             logger.error("Failed to list notifications: \(error)")
             handleConnectionError(error)
         }
+    }
+
+    /// Pure mirror of `refreshNotifications`' auto-mark-read reconcile: a
+    /// `notifications.markRead` RPC is due only for worktrees that BOTH have
+    /// unread rows (present in the daemon's unread-only summary) AND are
+    /// currently visible. Keying off the fetched summary is load-bearing in
+    /// two directions: idle poll ticks (no unread anywhere) fire zero RPCs,
+    /// and a notification arriving while its worktree is already visible is
+    /// still marked read on the next tick. A guard on `unreadByWorktree`
+    /// would break the latter — it excludes visible worktrees by
+    /// construction, so an arrive-while-visible notification would never
+    /// qualify and would resurface as unread once the worktree left view.
+    nonisolated static func worktreeIDsToAutoMarkRead(
+        unreadSummaries: [UUID: UnreadSummary],
+        visible: Set<UUID>
+    ) -> [UUID] {
+        unreadSummaries.keys.filter { visible.contains($0) }
     }
 
     /// UserDefaults key for the WIP terminal-auto-resize feature. Off by
