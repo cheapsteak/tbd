@@ -126,14 +126,20 @@ struct LimitResumeSendSequenceLiveTests {
         // Drain the -CC client's stdout to prevent 64KB pipe backpressure stalling the observer
         ccOut.fileHandleForReading.readabilityHandler = { _ in }
 
-        // Poll tmux list-clients until exactly 1 client is attached
+        // Poll tmux list-clients until exactly 1 client is attached.
+        // Use #{client_pid} format so each attached client emits one non-empty
+        // line — #{client_tty} is empty for -CC control-mode clients.
         let deadline = ContinuousClock.now + .seconds(15)
         while ContinuousClock.now < deadline {
-            if let clientCount = tmuxCapture(["-L", server, "list-clients", "-F", "#{client_tty}"])?
-                .split(separator: "\n").count, clientCount == 1 {
+            if let output = tmuxCapture(["-L", server, "list-clients", "-F", "#{client_pid}"]),
+               output.split(separator: "\n", omittingEmptySubsequences: true).count == 1 {
                 break
             }
             try await Task.sleep(for: .milliseconds(50))
+        }
+        if ContinuousClock.now >= deadline {
+            Issue.record("tmux -CC client never attached within 15s")
+            return
         }
 
         try await runSequence(server: server, paneID: paneID)
