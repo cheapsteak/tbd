@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 
-/// Live-tmux proof of the auto-resume send sequence (spec §Actuation 4):
+/// Live-tmux proof of the auto-resume send sequence (spec §Actuation 5):
 /// Escape → 150ms → literal "continue" → 150ms → Enter must arrive as the
 /// bytes ESC + "continue" + "\r" — no bracketed-paste wrapping, no dropped
 /// keys. The pane captures its own input under a raw tty via

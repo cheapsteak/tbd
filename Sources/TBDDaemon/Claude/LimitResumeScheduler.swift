@@ -47,7 +47,7 @@ public enum LimitResumeOutcome: Equatable, Sendable {
 /// at once). Spec §Scheduler, §State.
 public actor LimitResumeScheduler {
 
-    // MARK: - Constants (spec §Scheduler / §Actuation 3)
+    // MARK: - Constants (spec §Scheduler / §Actuation 4)
 
     public static let slack: TimeInterval = 60
     public static let jitterMax: TimeInterval = 30
@@ -252,7 +252,7 @@ public actor LimitResumeScheduler {
                 logger.warning("fire: copy-mode retry cap hit for terminal \(row.terminalID.uuidString, privacy: .public)")
                 await onOutcome(row, .failed("pane stayed in copy-mode/scrollback for ~30 minutes"))
             } else {
-                // Don't cancel their scroll — retry in 2 minutes (spec §Actuation 3).
+                // Don't cancel their scroll — retry in 2 minutes (spec §Actuation 4).
                 let nextFire = clock.now().addingTimeInterval(Self.copyModeRetryDelay)
                 if let rescheduled = await rescheduleWithRetry(id: row.id, fireAt: nextFire, attemptCount: attempts, terminalID: row.terminalID) {
                     if rescheduled {

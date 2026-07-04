@@ -462,7 +462,7 @@ public struct TmuxManager: Sendable {
     }
 
     /// True when the pane is in copy-mode/scrollback — keystrokes would go
-    /// to the mode, not the application (spec §Actuation 3).
+    /// to the mode, not the application (spec §Actuation 4).
     public func paneInMode(server: String, paneID: String) async throws -> Bool {
         if dryRun { return false }
         let args = Self.paneInModeQuery(server: server, paneID: paneID)
