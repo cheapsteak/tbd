@@ -234,19 +234,25 @@ struct WorktreeRowView: View {
         }
         .overlay(alignment: .trailing) {
             if isRowHovered && !isMain {
-                Button(action: {
-                    let parentID = worktree.id
-                    // Scratch spaces have no repo, so nested-worktree creation
-                    // isn't offered for them — this affordance is repo-only.
-                    guard let repoID = worktree.repoID else { return }
-                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
-                }) {
-                    Image(systemName: "plus")
-                        .font(.caption)
-                        .frame(width: 20, height: 20)
+                HStack(spacing: 2) {
+                    // Per-session account info + switch-account. Hidden until
+                    // hover, calm styling matching the "+" affordance.
+                    RowAccountMenuView(worktree: worktree)
+                        .buttonStyle(HoverPressButtonStyle())
+                    Button(action: {
+                        let parentID = worktree.id
+                        // Scratch spaces have no repo, so nested-worktree creation
+                        // isn't offered for them — this affordance is repo-only.
+                        guard let repoID = worktree.repoID else { return }
+                        appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
+                    }) {
+                        Image(systemName: "plus")
+                            .font(.caption)
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(HoverPressButtonStyle())
+                    .help("New nested worktree")
                 }
-                .buttonStyle(HoverPressButtonStyle())
-                .help("New nested worktree")
                 .padding(.trailing, 4)
             }
         }
