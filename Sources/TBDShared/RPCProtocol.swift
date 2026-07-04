@@ -104,6 +104,7 @@ public enum RPCMethod {
     public static let prRefresh = "pr.refresh"
     public static let cleanup = "cleanup"
     public static let claudeSetSpawnPreferences = "claude.setSpawnPreferences"
+    public static let claudeRateLimitDetected = "claude.rateLimitDetected"
     public static let terminalSuspend = "terminal.suspend"
     public static let terminalResume = "terminal.resume"
     public static let worktreeSuspend = "worktree.suspend"
@@ -1411,6 +1412,22 @@ public struct TerminalActivityEventParams: Codable, Sendable {
     public init(terminalID: UUID, activityState: TerminalActivityState) {
         self.terminalID = terminalID
         self.activityState = activityState
+    }
+}
+
+/// Params for `claude.rateLimitDetected` — sent by `tbd hooks stop-failure`
+/// when the transcript's last API error is a HARD usage limit. `resetsAt`
+/// is absolute: parsed once CLI-side, never re-derived from display text.
+public struct RateLimitDetectedParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let resetsAt: Date
+    public let limitType: String
+    public let rawMessage: String
+    public init(terminalID: UUID, resetsAt: Date, limitType: String, rawMessage: String) {
+        self.terminalID = terminalID
+        self.resetsAt = resetsAt
+        self.limitType = limitType
+        self.rawMessage = rawMessage
     }
 }
 

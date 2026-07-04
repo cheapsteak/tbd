@@ -799,12 +799,16 @@ public enum NotificationType: String, Codable, Sendable {
     /// A focus push from `tbd terminal focus`. Rendered like `.attentionNeeded`
     /// in-app; the macOS banner adds a distinguishing title prefix.
     case focusRequest = "focus_request"
+    /// A session/weekly usage limit was hit. Message carries either the
+    /// scheduled auto-resume time (gate on) or the reset time (gate off).
+    case limitReached = "limit_reached"
 
     public var severity: Int {
         switch self {
         case .error: 4
         case .attentionNeeded: 3
         case .focusRequest: 3
+        case .limitReached: 3
         case .taskComplete: 2
         case .responseComplete: 1
         }

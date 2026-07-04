@@ -63,6 +63,9 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
+    /// Session-limit auto-resume scheduler. Owned here so it can be stopped
+    /// on shutdown; `nil` in mock mode.
+    public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
     /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
     /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
     /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
@@ -546,6 +549,44 @@ public final class Daemon: Sendable {
             rpcRouter.oauthUsagePoller = oauthPoller
             await oauthPoller.start()
 
+            // 12d. Session-limit auto-resume scheduler (spec 2026-07-03).
+            // Pending rows reload on start; past-due rows fire immediately
+            // (covers Mac sleep and multi-day weekly-limit waits).
+            let resumeActuator = LimitResumeActuator(
+                db: database,
+                tmux: tmux,
+                inspector: ProductionPaneProcessInspector(),
+                readTranscript: { path in FileManager.default.contents(atPath: path) },
+                waiter: { duration in _ = try? await Task.sleep(for: duration) }
+            )
+            let resumeScheduler = LimitResumeScheduler(
+                store: database.scheduledResumes,
+                config: database.config,
+                actuator: resumeActuator,
+                clock: SystemPollerClock(),
+                onOutcome: { [weak subs, database] resume, outcome in
+                    let (type, message): (NotificationType, String)
+                    switch outcome {
+                    case .sent:
+                        (type, message) = (.limitReached, "Auto-resumed Claude after the limit reset")
+                    case .failed(let reason):
+                        (type, message) = (.attentionNeeded,
+                            "Auto-resume failed — \(reason). Claude may still be parked at the limit screen.")
+                    }
+                    guard let notification = try? await database.notifications.create(
+                        worktreeID: resume.worktreeID, type: type,
+                        message: message, terminalID: resume.terminalID)
+                    else { return }
+                    subs?.broadcast(delta: .notificationReceived(NotificationDelta(
+                        notificationID: notification.id, worktreeID: notification.worktreeID,
+                        type: notification.type, message: notification.message,
+                        terminalID: notification.terminalID)))
+                }
+            )
+            self.limitResumeScheduler = resumeScheduler
+            rpcRouter.limitResumeScheduler = resumeScheduler
+            await resumeScheduler.start()
+
             // 13. Periodic git status refresh (branch sync, conflict detection).
             // 10s foreground, 60s background (GitPollCadence.statusInterval);
             // per-worktree conflict checks are additionally dirty-gated inside
@@ -612,6 +653,10 @@ public final class Daemon: Sendable {
         }
         if let poller = oauthUsagePoller {
             await poller.stop()
+        }
+
+        if let resumeScheduler = limitResumeScheduler {
+            await resumeScheduler.stop()
         }
 
         // Stop any tmux control-mode connections (no-op when the gate is off).

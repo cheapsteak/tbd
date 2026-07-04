@@ -26,9 +26,7 @@ extension RPCRouter {
             _ = try await db.scheduledResumes.cancelAllPending()
         }
         try await db.config.setAutoResumeOnLimitReset(params.enabled)
-        // NOTE(Task 7): `await limitResumeScheduler?.wake()` is added here in
-        // Task 7 once the router grows that property. Not needed for this
-        // task's tests.
+        await limitResumeScheduler?.wake()
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
