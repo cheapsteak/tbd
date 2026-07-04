@@ -1492,8 +1492,17 @@ final class AppState: ObservableObject {
     /// destination repo, so a promoted row's directory never exists again —
     /// dimming it as "missing" would contradict the "→ promoted to <repo>"
     /// caption shown alongside it. Non-scratch worktrees never dim here.
-    nonisolated static func scratchRowIsDimmed(_ worktree: Worktree, directoryExists: Bool) -> Bool {
-        worktree.isScratch && worktree.promotedToRepoID == nil && !directoryExists
+    ///
+    /// `directoryExists` is an autoclosure so the caller's `stat()` is only
+    /// paid for un-promoted scratch rows: every sidebar row re-evaluates its
+    /// body on any AppState `@Published` change, and an eager argument would
+    /// charge every regular row a synchronous disk hit per render for a flag
+    /// this rule ignores.
+    nonisolated static func scratchRowIsDimmed(
+        _ worktree: Worktree,
+        directoryExists: @autoclosure () -> Bool
+    ) -> Bool {
+        worktree.isScratch && worktree.promotedToRepoID == nil && !directoryExists()
     }
 
     /// Whether the WIP main-area resize broadcast is enabled. Default false.
