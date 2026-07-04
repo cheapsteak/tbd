@@ -26,6 +26,23 @@ public enum GitPollCadence {
     public static func fetchInterval(isForeground: Bool) -> Duration {
         isForeground ? .seconds(60) : .seconds(300)
     }
+
+    /// How often the timer loops wake to re-evaluate the gated interval.
+    /// Short enough that a foreground transition (or the app disappearing)
+    /// changes the effective cadence within ~10s instead of one full
+    /// background interval.
+    public static let pollTick: Duration = .seconds(10)
+
+    /// The daemon treats the app as foreground only while at least one client
+    /// is actually connected. The reported flag alone is not trustworthy: a
+    /// crashed or force-quit app never sends `isForeground: false` (the
+    /// resign-active push is a fire-and-forget Task that dies with the
+    /// process), which would pin the fast cadence forever with nobody
+    /// watching. The app holds a long-lived state-subscription socket while
+    /// running, so `connectedClients == 0` reliably means "no app".
+    public static func isEffectivelyForeground(reportedForeground: Bool, connectedClients: Int) -> Bool {
+        reportedForeground && connectedClients > 0
+    }
 }
 
 /// Last app-reported foreground state (via the `app.setForegroundState` RPC).
@@ -36,11 +53,9 @@ public enum GitPollCadence {
 /// each `didBecomeActive`/`didResignActive` notification, so the daemon
 /// converges to the right cadence as soon as an app is talking to it.
 ///
-/// Note the timer loops sample this once per tick, before sleeping — a
-/// foreground transition that lands mid-sleep takes effect on the next tick,
-/// so the worst-case extra latency after foregrounding is one background
-/// interval. That is acceptable for status freshness and keeps the loops
-/// trivially simple (no sleep cancellation plumbing).
+/// The timer loops re-evaluate this every `GitPollCadence.pollTick` while
+/// waiting (see `Daemon.sleepThroughGatedInterval`), so a transition takes
+/// effect within ~one tick — no sleep-cancellation plumbing needed.
 public actor AppForegroundState {
     public private(set) var isForeground: Bool
 

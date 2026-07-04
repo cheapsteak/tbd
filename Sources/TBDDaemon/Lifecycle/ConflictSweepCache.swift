@@ -10,9 +10,14 @@ import Foundation
 /// Resolving the pair costs one `git for-each-ref` per repo per sweep, instead
 /// of 1-2 subprocesses per worktree per sweep.
 ///
-/// Only successful (non-nil) checks are recorded: a transient git failure
-/// leaves no cache entry, so the next sweep retries instead of freezing on a
-/// never-computed result.
+/// Entries are scoped by repo because the sweep runs per repo in a loop over
+/// all repos: pruning must only ever touch the repo being swept, or repo B's
+/// sweep would evict repo A's fresh entries and the gate would never engage
+/// on multi-repo installs.
+///
+/// Only successful (non-nil) checks whose result was persisted are recorded: a
+/// transient git or DB failure leaves no cache entry, so the next sweep
+/// retries instead of freezing on a never-stored result.
 public actor ConflictSweepCache {
     /// The pair of commits a conflict check was computed against.
     public struct Key: Hashable, Sendable {
@@ -27,24 +32,25 @@ public actor ConflictSweepCache {
         }
     }
 
-    private var lastChecked: [UUID: Key] = [:]
+    /// repoID → (worktreeID → last successfully checked pair).
+    private var lastChecked: [UUID: [UUID: Key]] = [:]
 
     public init() {}
 
     /// True when the worktree has no recorded successful check for `key`
     /// (first sighting, either tip moved, or the entry was pruned).
-    public func shouldCheck(worktreeID: UUID, key: Key) -> Bool {
-        lastChecked[worktreeID] != key
+    public func shouldCheck(repoID: UUID, worktreeID: UUID, key: Key) -> Bool {
+        lastChecked[repoID]?[worktreeID] != key
     }
 
-    /// Record a successful conflict check computed against `key`.
-    public func markChecked(worktreeID: UUID, key: Key) {
-        lastChecked[worktreeID] = key
+    /// Record a successful, persisted conflict check computed against `key`.
+    public func markChecked(repoID: UUID, worktreeID: UUID, key: Key) {
+        lastChecked[repoID, default: [:]][worktreeID] = key
     }
 
-    /// Drop entries for worktrees no longer in the sweep (archived/removed),
-    /// so the cache tracks only live rows.
-    public func retain(worktreeIDs: Set<UUID>) {
-        lastChecked = lastChecked.filter { worktreeIDs.contains($0.key) }
+    /// Drop this repo's entries for worktrees no longer in its sweep
+    /// (archived/removed). Other repos' entries are untouched.
+    public func retain(repoID: UUID, worktreeIDs: Set<UUID>) {
+        lastChecked[repoID] = lastChecked[repoID]?.filter { worktreeIDs.contains($0.key) }
     }
 }

@@ -34,7 +34,7 @@ extension WorktreeLifecycle {
         // and every worktree falls through to the ungated legacy path.
         let tips = (try? await git.refTips(repoPath: repo.path)) ?? [:]
         let baseTip = tips["origin/\(repo.defaultBranch)"]
-        await conflictSweepCache.retain(worktreeIDs: Set(worktrees.map(\.id)))
+        await conflictSweepCache.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
 
         await withTaskGroup(of: Void.self) { group in
             for wt in worktrees {
@@ -47,23 +47,35 @@ extension WorktreeLifecycle {
                         key = ConflictSweepCache.Key(branchTip: branchTip, baseTip: baseTip)
                     }
                     if let key {
-                        guard await self.conflictSweepCache.shouldCheck(worktreeID: wt.id, key: key) else { return }
+                        guard await self.conflictSweepCache.shouldCheck(
+                            repoID: repoID, worktreeID: wt.id, key: key
+                        ) else { return }
                     }
                     guard let newHasConflicts = await self.checkHasConflicts(
                         repoPath: repo.path,
                         defaultBranch: repo.defaultBranch,
                         branch: wt.branch
                     ) else { return }
-                    // Record only successful checks so transient git failures
-                    // retry next sweep instead of caching a non-answer.
-                    if let key {
-                        await self.conflictSweepCache.markChecked(worktreeID: wt.id, key: key)
+                    if newHasConflicts != wt.hasConflicts {
+                        do {
+                            try await self.db.worktrees.updateHasConflicts(id: wt.id, hasConflicts: newHasConflicts)
+                        } catch {
+                            // Persist failed — don't mark the pair checked, so
+                            // the next sweep recomputes and retries the write
+                            // (pre-gate behavior was self-healing on the next
+                            // sweep; the gate must not cache over a lost write).
+                            return
+                        }
+                        self.subscriptions?.broadcast(delta: .worktreeConflictsChanged(
+                            WorktreeConflictDelta(worktreeID: wt.id, hasConflicts: newHasConflicts)
+                        ))
                     }
-                    guard newHasConflicts != wt.hasConflicts else { return }
-                    try? await self.db.worktrees.updateHasConflicts(id: wt.id, hasConflicts: newHasConflicts)
-                    self.subscriptions?.broadcast(delta: .worktreeConflictsChanged(
-                        WorktreeConflictDelta(worktreeID: wt.id, hasConflicts: newHasConflicts)
-                    ))
+                    // Record only successful checks whose result is persisted,
+                    // so transient git/DB failures retry next sweep instead of
+                    // caching a non-answer.
+                    if let key {
+                        await self.conflictSweepCache.markChecked(repoID: repoID, worktreeID: wt.id, key: key)
+                    }
                 }
             }
         }

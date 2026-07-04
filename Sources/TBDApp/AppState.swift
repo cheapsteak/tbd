@@ -621,7 +621,8 @@ final class AppState: ObservableObject {
     // nonisolated deinit, and the leak is bounded by app lifetime.
 
     /// Forward macOS app focus changes to the daemon. The daemon uses this to
-    /// pause/resume the Claude usage poller while the app is in the background.
+    /// pause/resume the Claude usage poller and to pick the git polling
+    /// cadence (fast foreground / slow background) while the app is inactive.
     /// `NotificationCenter.addObserver` does not require a bundle ID, so this
     /// is safe to call from an unbundled SPM executable.
     private func registerFocusObservers() {
@@ -1735,7 +1736,11 @@ final class AppState: ObservableObject {
     func pushForegroundState() {
         let isForeground = NSApp?.isActive ?? false
         Task { [daemonClient] in
-            try? await daemonClient.setAppForegroundState(isForeground: isForeground)
+            do {
+                try await daemonClient.setAppForegroundState(isForeground: isForeground)
+            } catch {
+                logger.warning("pushForegroundState(\(isForeground)) failed: \(error)")
+            }
         }
     }
 

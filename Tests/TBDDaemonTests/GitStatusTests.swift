@@ -299,4 +299,61 @@ struct GitStatusTests {
         await lifecycle.refreshGitStatuses(repoID: repo.id)
         #expect(try await db.worktrees.get(id: wt.id)?.hasConflicts == true)
     }
+
+    /// Ungated fallback: when the worktree's ref is not resolvable from the
+    /// `for-each-ref` tips (here: a tag, which lives outside refs/heads and
+    /// refs/remotes/origin), the dirty gate must fall through to checking
+    /// unconditionally every sweep — fail-open, matching pre-gate behavior —
+    /// rather than skipping (which would freeze hasConflicts forever).
+    @Test func refreshGitStatusesChecksUnconditionallyWhenTipsUnresolvable() async throws {
+        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory())
+        let suffix = UUID().uuidString
+        let repoDir = tempBase.appendingPathComponent("tbd-test-\(suffix)")
+        let originDir = tempBase.appendingPathComponent("tbd-test-origin-\(suffix).git")
+        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: repoDir)
+            try? FileManager.default.removeItem(at: originDir)
+        }
+
+        // Conflict scenario as above, but the worktree row's "branch" is a TAG
+        // pointing at the conflicting commit.
+        try await runShell("git init -b main", at: repoDir)
+        try await runShell("git config commit.gpgSign false", at: repoDir)
+        try await runShell("git config user.email 'test@test.com'", at: repoDir)
+        try await runShell("git config user.name 'Test'", at: repoDir)
+        try await runShell("echo 'line1' > shared.txt && git add . && git commit -m 'initial'", at: repoDir)
+        try await runShell("git init --bare '\(originDir.path)'", at: repoDir)
+        try await runShell("git remote add origin '\(originDir.path)'", at: repoDir)
+        try await runShell("git push -u origin main", at: repoDir)
+        try await runShell("git checkout -b tbd/feature-wt", at: repoDir)
+        try await runShell("echo 'feature-change' > shared.txt && git add . && git commit -m 'feature change'", at: repoDir)
+        try await runShell("git tag feature-tag", at: repoDir)
+        try await runShell("git checkout main", at: repoDir)
+        try await runShell("echo 'main-change' > shared.txt && git add . && git commit -m 'main change'", at: repoDir)
+        try await runShell("git push origin main", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: repoDir.path, displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "feature-wt", branch: "feature-tag",
+            path: repoDir.path + "/.tbd/worktrees/feature-wt", tmuxServer: "tbd-test"
+        )
+
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
+            hooks: HookResolver(), subscriptions: StateSubscriptionManager()
+        )
+
+        // Sweep 1 computes the real answer through the ungated path.
+        await lifecycle.refreshGitStatuses(repoID: repo.id)
+        #expect(try await db.worktrees.get(id: wt.id)?.hasConflicts == true)
+
+        // Tamper, then sweep again with nothing changed: because the ref isn't
+        // gateable, the check re-runs and corrects the value (a gated worktree
+        // would have skipped and left the tamper in place).
+        try await db.worktrees.updateHasConflicts(id: wt.id, hasConflicts: false)
+        await lifecycle.refreshGitStatuses(repoID: repo.id)
+        #expect(try await db.worktrees.get(id: wt.id)?.hasConflicts == true)
+    }
 }
