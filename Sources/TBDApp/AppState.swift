@@ -321,6 +321,13 @@ final class AppState: ObservableObject {
     @Published var dockRatio: CGFloat = 0.3 {
         didSet { userDefaults.set(Double(dockRatio), forKey: Self.dockRatioKey) }
     }
+    /// "Use default without asking": when true, the plain "Claude" action
+    /// spawns silently on the global default profile instead of opening the
+    /// spawn-time account picker. Toggleable from the picker itself and
+    /// Settings → Model Profiles. Persisted per-user.
+    @Published var skipAccountPicker: Bool = false {
+        didSet { userDefaults.set(skipAccountPicker, forKey: Self.skipAccountPickerKey) }
+    }
     /// Pixel size of the main terminal area (the SingleWorktreeView slot
     /// inside DockSplitView, excluding the pinned dock and file panel).
     /// Default matches the typical window: 1200 wide window − sidebar (~280) ≈ 920;
@@ -562,6 +569,7 @@ final class AppState: ObservableObject {
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
+    private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
 
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var focusObservers: [NSObjectProtocol] = []
@@ -577,6 +585,7 @@ final class AppState: ObservableObject {
         if let saved = userDefaults.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
         }
+        skipAccountPicker = userDefaults.bool(forKey: Self.skipAccountPickerKey)
         startMemoryPressureMonitor()
         registerFocusObservers()
         // Give the notification manager a back-reference so banner clicks

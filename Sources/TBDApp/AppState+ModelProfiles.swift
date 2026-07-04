@@ -342,6 +342,46 @@ extension AppState {
             }
     }
 
+    /// Force an immediate daemon-side OAuth usage sweep and merge the returned
+    /// snapshots into local state. The account picker calls this on open —
+    /// cached snapshots stay on screen and update in place when fresh data
+    /// lands. Failures are logged but never surfaced as a blocking alert
+    /// (the picker degrades to cached data).
+    func refreshUsageSnapshots(profileID: UUID? = nil) async {
+        do {
+            let result = try await daemonClient.refreshProfileUsage(id: profileID)
+            let merged = Self.mergingUsageSnapshots(into: modelProfiles, entries: result.snapshots)
+            if merged != modelProfiles {
+                modelProfiles = merged
+            }
+        } catch {
+            logger.warning("Usage snapshot refresh failed: \(error, privacy: .public)")
+        }
+    }
+
+    /// Merge freshly swept snapshots into the current profile list, preserving
+    /// every other field. Profiles without a returned snapshot keep whatever
+    /// snapshot they had (the sweep only reports eligible logged-in OAuth
+    /// profiles). Static + pure for unit testing.
+    nonisolated static func mergingUsageSnapshots(
+        into profiles: [ModelProfileWithUsage],
+        entries: [ModelProfileUsageSnapshotEntry]
+    ) -> [ModelProfileWithUsage] {
+        guard !entries.isEmpty else { return profiles }
+        let snapshotsByID = Dictionary(entries.map { ($0.profileID, $0.snapshot) },
+                                       uniquingKeysWith: { _, last in last })
+        return profiles.map { entry in
+            guard let snapshot = snapshotsByID[entry.profile.id] else { return entry }
+            return ModelProfileWithUsage(
+                profile: entry.profile,
+                usage: entry.usage,
+                loginIdentity: entry.loginIdentity,
+                configDirPath: entry.configDirPath,
+                usageSnapshot: snapshot
+            )
+        }
+    }
+
     /// Fetch fresh usage for a single profile and merge it into local state.
     func fetchProfileUsage(id: UUID) async {
         do {

@@ -25,6 +25,11 @@ struct ModelProfilesSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             globalDefaultHeader
+            // Same persisted flag the spawn-time account picker's checkbox
+            // writes — discoverable/toggleable from either surface.
+            Toggle("Use default without asking (skip the account picker when starting Claude)",
+                   isOn: $appState.skipAccountPicker)
+                .font(.caption)
             Divider()
             profileList
             Spacer()

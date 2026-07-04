@@ -10,22 +10,26 @@ import TBDShared
 private func makeProfile(
     name: String,
     kind: CredentialKind = .oauth,
-    loginIdentity: String? = nil
+    loginIdentity: String? = nil,
+    usageSnapshot: ProfileUsageSnapshot? = nil
 ) -> ModelProfileWithUsage {
     ModelProfileWithUsage(
         profile: ModelProfile(id: UUID(), name: name, kind: kind),
         usage: nil,
-        loginIdentity: loginIdentity
+        loginIdentity: loginIdentity,
+        usageSnapshot: usageSnapshot
     )
 }
 
 private func makeCoordinator(
-    onClaudeProfile: @escaping (UUID) -> Void = { _ in }
+    onClaudeProfile: @escaping (UUID) -> Void = { _ in },
+    onChooseAccount: @escaping () -> Void = {}
 ) -> MenuCoordinator {
     MenuCoordinator(
         onShell: {},
         onClaude: {},
         onClaudeProfile: onClaudeProfile,
+        onChooseAccount: onChooseAccount,
         onCodex: {},
         onNote: {}
     )
@@ -75,7 +79,9 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     let menu = AddTabMenu.build(profiles: [], coordinator: makeCoordinator())
 
     let idx = claudeIndex(menu)
-    #expect(menu.items[idx + 1].title == "Codex")
+    // "Choose account…" always follows the (empty) profile block.
+    #expect(menu.items[idx + 1].title == "Choose account…")
+    #expect(menu.items[idx + 2].title == "Codex")
     #expect(menu.items.allSatisfy { $0.indentationLevel == 0 })
 }
 
@@ -132,7 +138,8 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     #expect(second.image != nil)
     #expect(second.representedObject as? UUID == personal.profile.id)
 
-    #expect(menu.items[idx + 3].title == "Codex")
+    #expect(menu.items[idx + 3].title == "Choose account…")
+    #expect(menu.items[idx + 4].title == "Codex")
 }
 
 @MainActor
@@ -179,6 +186,58 @@ private func makeExecutable(named name: String, in directory: URL) throws {
 
     let item = menu.items[claudeIndex(menu) + 1]
     #expect(item.action == #selector(MenuCoordinator.addClaudeProfile(_:)))
+}
+
+@MainActor
+@Test func addTabMenu_profileItemTitles_carryCompactUsageSuffix() {
+    // A profile with a usage snapshot gets the compact suffix; one without
+    // keeps its plain identity title. (No resetsAt in the fixture so the
+    // expected string is timezone-independent.)
+    let snapshot = ProfileUsageSnapshot(
+        buckets: [
+            ClaudeUsageLimitBucket(kind: "session", percent: 0, severity: "normal"),
+            ClaudeUsageLimitBucket(kind: "weekly_all", percent: 76, severity: "warning"),
+            ClaudeUsageLimitBucket(kind: "weekly_scoped", percent: 100,
+                                   severity: "critical", modelDisplayName: "Fable"),
+        ],
+        fetchedAt: Date(), lastAttemptAt: Date(), status: "ok"
+    )
+    let gmail = makeProfile(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: snapshot)
+    let bare = makeProfile(name: "Work", loginIdentity: "a@b.co")
+    let menu = AddTabMenu.build(profiles: [gmail, bare], coordinator: makeCoordinator())
+
+    let idx = claudeIndex(menu)
+    #expect(menu.items[idx + 1].title == "Gmail — g@x.co · 5h 0% · wk 76% · F 100%")
+    #expect(menu.items[idx + 2].title == "Work — a@b.co")
+}
+
+@MainActor
+@Test func addTabMenu_whenClaudeUnavailable_omitsChooseAccount() {
+    let menu = AddTabMenu.build(
+        profiles: [makeProfile(name: "Work")],
+        availability: AgentExecutableAvailability(claude: false, codex: true),
+        coordinator: makeCoordinator()
+    )
+    #expect(menu.items.contains { $0.title == "Choose account…" } == false)
+}
+
+@MainActor
+@Test func addTabMenu_chooseAccountItem_isWiredToCoordinator() {
+    let coordinator = makeCoordinator()
+    let menu = AddTabMenu.build(profiles: [], coordinator: coordinator)
+
+    let item = menu.items.first { $0.title == "Choose account…" }!
+    #expect(item.action == #selector(MenuCoordinator.chooseAccount))
+    #expect(item.target as? MenuCoordinator === coordinator)
+    #expect(item.image != nil)   // blank icon keeps title-column alignment
+}
+
+@MainActor
+@Test func menuCoordinator_chooseAccount_forwardsToClosure() {
+    var called = false
+    let coordinator = makeCoordinator(onChooseAccount: { called = true })
+    coordinator.chooseAccount()
+    #expect(called)
 }
 
 // MARK: - MenuCoordinator.addClaudeProfile
