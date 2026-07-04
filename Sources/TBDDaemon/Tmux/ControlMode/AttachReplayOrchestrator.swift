@@ -38,6 +38,15 @@ enum AttachReplayError: Error, Equatable {
 ///  4. Open the gate (`markReady`) — ONLY after the replay bytes landed.
 ///  5. Unpause LAST, on EVERY exit path after the pause was sent (a stale
 ///     unpause on an unpaused pane no-ops via tolerate-errors).
+///
+/// Measured residual (tmux 3.6a, M4 live matrix): pause → continue DISCARDS
+/// pane output emitted while paused — tmux resumes delivery from the pane's
+/// CURRENT position, draining nothing (with or without the `pause-after`
+/// client flag; iTerm2 handles `%pause` by re-capturing for the same reason).
+/// So output the pane emits between the capture and the unpause is lost to
+/// the viewer: a boundary-only, strictly-forward gap. Live output still
+/// cannot precede or interleave the replay; closing the gap needs an
+/// interleave buffer (capture fence → gate open), a design follow-up.
 struct AttachReplayOrchestrator: Sendable {
     /// How the sequence ended without error.
     enum Outcome: Equatable {
@@ -144,25 +153,31 @@ struct AttachReplayOrchestrator: Sendable {
                 throw AttachReplayError.captureFailed(command: command)
             }
         }
-        let (history, altScreen, stateLines, pending) = (captured[0], captured[1], captured[2], captured[3])
+        let (currentScreen, savedScreen, stateLines, pending) = (captured[0], captured[1], captured[2], captured[3])
 
         // Truncation telemetry (plan M4.4 fold-in): at >= depth lines the
         // capture almost certainly hit the history ceiling and older
         // scrollback was lost to this replay.
-        if history.count >= historyDepth {
+        if currentScreen.count >= historyDepth {
             Self.logger.info("""
                 capture hit history ceiling for \(server, privacy: .public)/\(paneID, privacy: .public): \
-                \(history.count) lines >= depth \(self.historyDepth)
+                \(currentScreen.count) lines >= depth \(self.historyDepth)
                 """)
-            onHistoryTruncation?(history.count)
+            onHistoryTruncation?(currentScreen.count)
         }
 
         guard let state = try PaneStateCapture.state(forPane: paneID, in: stateLines) else {
             throw AttachReplayError.paneStateMissing
         }
+        // capture-pane's two legs INVERT meaning with `alternate_on` (verified
+        // live against tmux 3.6a by the M4 integration matrix): without `-a`
+        // it returns the pane's CURRENT screen — the ALT content when the pane
+        // is in alt mode (primary history is inaccessible there) — while `-a`
+        // returns the SAVED grid, i.e. the pre-1049h primary snapshot. Map
+        // legs by what each screen must be painted with, not by flag.
         let replay = try ReplayWriter.assemble(
-            history: history,
-            altScreen: state.alternateOn ? altScreen : nil,
+            history: state.alternateOn ? savedScreen : currentScreen,
+            altScreen: state.alternateOn ? currentScreen : nil,
             pending: pending,
             state: state,
             cols: state.width,

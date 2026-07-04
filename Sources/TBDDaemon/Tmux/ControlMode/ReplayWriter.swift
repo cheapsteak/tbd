@@ -75,10 +75,14 @@ enum ReplayWriter {
     /// Assemble the full replay byte stream.
     ///
     /// - Parameters:
-    ///   - history: response lines of `capture-pane -peqJN -S -<N>` (primary
-    ///     screen + scrollback; SGR escapes + text only, `-J` joined wraps).
-    ///   - altScreen: response lines of `capture-pane -peqJN -a`, passed only
-    ///     when `state.alternateOn` (with `-q` an alt-less pane yields empty).
+    ///   - history: lines painted onto the PRIMARY screen (SGR escapes + text
+    ///     only, `-J` joined wraps): the `-S -<N>` capture (screen +
+    ///     scrollback) for a primary-screen pane, or the `-a` saved-primary
+    ///     snapshot when the pane is in alt mode (capture legs invert with
+    ///     `alternate_on` — see the orchestrator; alt panes have no
+    ///     reachable primary scrollback).
+    ///   - altScreen: lines painted onto the ALT screen after `1049h` — the
+    ///     pane's current-screen capture when `state.alternateOn`, else nil.
     ///     `state.alternateOn` alone decides whether the alt screen is
     ///     entered; `nil` content just paints it empty.
     ///   - pending: response lines of `capture-pane -p -P -C` — octal-escaped
