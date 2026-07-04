@@ -17,6 +17,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// JSON-encoded `[String: String]` free-form env overrides (global scope).
     var env_overrides: String?
     var auto_archive_on_merge_default: Bool?
+    var auto_resume_on_limit_reset: Bool?
     var scratch_instructions: String?
     var scratch_rename_prompt: String?
     var scratch_profile_override_id: String?
@@ -33,6 +34,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings),
             envOverrides: EnvOverridesCoding.decode(env_overrides),
             autoArchiveOnMergeDefault: auto_archive_on_merge_default ?? false,
+            autoResumeOnLimitReset: auto_resume_on_limit_reset ?? false,
             scratchInstructions: scratch_instructions,
             scratchRenamePrompt: scratch_rename_prompt,
             scratchProfileOverrideID: scratch_profile_override_id.flatMap(UUID.init(uuidString:)),

@@ -257,6 +257,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// eligible for the idle timer; `true` = the daemon never auto-hibernates
     /// it (manual "Hibernate now" still works). Persisted per-terminal.
     public var keepWarm: Bool
+    /// When non-nil, a session-limit auto-resume is scheduled to fire at this
+    /// instant (mirrors the terminal's single `pending` scheduled_resumes
+    /// row). Drives the "⏳ resumes 1:01pm" tab badge. Optional for
+    /// decode-compat with pre-v43 rows/JSON.
+    public var pendingResumeAt: Date?
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
@@ -267,7 +272,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 kind: TerminalKind? = nil,
                 activityState: TerminalActivityState = .unknown,
                 hibernatedAt: Date? = nil,
-                keepWarm: Bool = false) {
+                keepWarm: Bool = false,
+                pendingResumeAt: Date? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -284,13 +290,14 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.activityState = activityState
         self.hibernatedAt = hibernatedAt
         self.keepWarm = keepWarm
+        self.pendingResumeAt = pendingResumeAt
     }
 
     enum CodingKeys: String, CodingKey {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
         case activityState
-        case hibernatedAt, keepWarm
+        case hibernatedAt, keepWarm, pendingResumeAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -311,6 +318,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
         hibernatedAt = try c.decodeIfPresent(Date.self, forKey: .hibernatedAt)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
+        pendingResumeAt = try c.decodeIfPresent(Date.self, forKey: .pendingResumeAt)
     }
 }
 
@@ -639,6 +647,9 @@ public struct Config: Codable, Sendable, Equatable {
     /// Global default for auto-archive-on-PR-merge, applied to worktrees whose
     /// per-worktree override is `nil`.
     public var autoArchiveOnMergeDefault: Bool
+    /// Global gate for session-limit auto-resume (spec 2026-07-03). Daemon-
+    /// side because the daemon must act while the app is closed. Default OFF.
+    public var autoResumeOnLimitReset: Bool
     /// Global, user-customizable system-prompt layer for scratch spaces
     /// (repo-less worktrees). `nil` means "use the built-in default"
     /// (`RepoConstants.defaultScratchInstructions`).
@@ -670,6 +681,7 @@ public struct Config: Codable, Sendable, Equatable {
                 envSettingOverrides: [String: ClaudeEnvValue] = [:],
                 envOverrides: [String: String] = [:],
                 autoArchiveOnMergeDefault: Bool = false,
+                autoResumeOnLimitReset: Bool = false,
                 scratchInstructions: String? = nil,
                 scratchRenamePrompt: String? = nil,
                 scratchProfileOverrideID: UUID? = nil,
@@ -681,6 +693,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.envSettingOverrides = envSettingOverrides
         self.envOverrides = envOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
+        self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.scratchInstructions = scratchInstructions
         self.scratchRenamePrompt = scratchRenamePrompt
         self.scratchProfileOverrideID = scratchProfileOverrideID
@@ -702,6 +715,8 @@ public struct Config: Codable, Sendable, Equatable {
             [String: String].self, forKey: .envOverrides) ?? [:]
         autoArchiveOnMergeDefault = try c.decodeIfPresent(
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
+        autoResumeOnLimitReset = try c.decodeIfPresent(
+            Bool.self, forKey: .autoResumeOnLimitReset) ?? false
         scratchInstructions = try c.decodeIfPresent(String.self, forKey: .scratchInstructions) ?? nil
         scratchRenamePrompt = try c.decodeIfPresent(String.self, forKey: .scratchRenamePrompt) ?? nil
         scratchProfileOverrideID = try c.decodeIfPresent(UUID.self, forKey: .scratchProfileOverrideID)
@@ -710,6 +725,50 @@ public struct Config: Codable, Sendable, Equatable {
         autoHibernateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateEnabled) ?? true
         hibernateIdleMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateIdleMinutes)
             ?? Config.defaultHibernateIdleMinutes
+    }
+}
+
+public enum ScheduledResumeStatus: String, Codable, Sendable {
+    case pending
+    case sent
+    case cancelled
+    case failed
+}
+
+/// One scheduled "type `continue` at reset time" action. At most one
+/// `pending` row exists per terminal — the row IS the double-send latch.
+public struct ScheduledResume: Codable, Sendable, Identifiable, Equatable {
+    public let id: UUID
+    public let terminalID: UUID
+    public let worktreeID: UUID
+    public let claudeSessionID: String?
+    /// Absolute reset instant (structured epoch or parsed-once display text).
+    public let resetsAt: Date
+    /// Next actuation attempt: resetsAt + 60s slack + jitter(0-30s) at insert;
+    /// pushed +2min per copy-mode retry. Persisted so reschedules survive
+    /// daemon restarts.
+    public var fireAt: Date
+    public let limitType: String
+    public let rawMessage: String
+    public let createdAt: Date
+    public var status: ScheduledResumeStatus
+    public var attemptCount: Int
+
+    public init(id: UUID = UUID(), terminalID: UUID, worktreeID: UUID,
+                claudeSessionID: String? = nil, resetsAt: Date, fireAt: Date,
+                limitType: String, rawMessage: String, createdAt: Date = Date(),
+                status: ScheduledResumeStatus = .pending, attemptCount: Int = 0) {
+        self.id = id
+        self.terminalID = terminalID
+        self.worktreeID = worktreeID
+        self.claudeSessionID = claudeSessionID
+        self.resetsAt = resetsAt
+        self.fireAt = fireAt
+        self.limitType = limitType
+        self.rawMessage = rawMessage
+        self.createdAt = createdAt
+        self.status = status
+        self.attemptCount = attemptCount
     }
 }
 
