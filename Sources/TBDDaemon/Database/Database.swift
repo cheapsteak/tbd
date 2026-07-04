@@ -21,6 +21,8 @@ public final class TBDDatabase: Sendable {
     public let meta: TBDMetaStore
     public let tabs: TabStore
     public let forgottenWorktrees: ForgottenWorktreeStore
+    public let clearance: ClearanceStore
+    public let audit: AuditStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -50,6 +52,8 @@ public final class TBDDatabase: Sendable {
         self.meta = TBDMetaStore(writer: pool)
         self.tabs = TabStore(writer: pool)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: pool)
+        self.clearance = ClearanceStore(writer: pool)
+        self.audit = AuditStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -79,6 +83,8 @@ public final class TBDDatabase: Sendable {
         self.meta = TBDMetaStore(writer: queue)
         self.tabs = TabStore(writer: queue)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: queue)
+        self.clearance = ClearanceStore(writer: queue)
+        self.audit = AuditStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -661,6 +667,41 @@ public final class TBDDatabase: Sendable {
         // existing rows decode to the default 'off'. See Phase 0 design.
         migrator.registerMigration("v38_nightwatch_mode") { db in
             try db.addColumnIfMissing(table: "config", column: "nightwatch_mode", type: .text, defaults: "off")
+        }
+
+        migrator.registerMigration("v39_clearance_ledger") { db in
+            try db.create(table: "clearance") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("pr_number", .integer).notNull()
+                t.column("repo", .text).notNull()
+                t.column("cleared_when_sha", .text).notNull()
+                t.column("pr_state_at_clear", .text)
+                t.column("clearance_kind", .text).notNull()
+                t.column("granted_by", .text)
+                t.column("granted_at", .datetime).notNull()
+                t.column("void_reason", .text)
+            }
+            // Index for quick lookups by PR and repo
+            try db.execute(sql: """
+                CREATE INDEX idx_clearance_pr_repo ON clearance(pr_number, repo)
+            """)
+        }
+
+        migrator.registerMigration("v40_audit_log") { db in
+            try db.create(table: "audit_log") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("action", .text).notNull()
+                t.column("pr_number", .integer)
+                t.column("repo", .text)
+                t.column("head_sha", .text)
+                t.column("merge_commit", .text)
+                t.column("ts", .datetime).notNull()
+                t.column("details", .text)
+            }
+            // Index for efficient time-range queries
+            try db.execute(sql: """
+                CREATE INDEX idx_audit_log_ts ON audit_log(ts)
+            """)
         }
 
         return migrator
