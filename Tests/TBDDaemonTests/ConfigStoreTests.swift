@@ -135,4 +135,46 @@ struct ConfigStoreTests {
         let cfg = try await db.config.get()
         #expect(cfg.scratchProfileOverrideID == nil)
     }
+
+    @Test func nightwatchModeDefaultsToOff() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let cfg = try await db.config.get()
+        #expect(cfg.nightwatchMode == .off)
+    }
+
+    @Test func setAndGetNightwatchModeOff() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setNightwatchMode(.off)
+        let cfg = try await db.config.get()
+        #expect(cfg.nightwatchMode == .off)
+    }
+
+    @Test func setAndGetNightwatchModeDaywatch() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setNightwatchMode(.daywatch)
+        let cfg = try await db.config.get()
+        #expect(cfg.nightwatchMode == .daywatch)
+    }
+
+    @Test func setAndGetNightwatchModeNightwatch() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setNightwatchMode(.nightwatch)
+        let cfg = try await db.config.get()
+        #expect(cfg.nightwatchMode == .nightwatch)
+    }
+
+    @Test func nightwatchModeTransitions() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setNightwatchMode(.nightwatch)
+        var cfg = try await db.config.get()
+        #expect(cfg.nightwatchMode == .nightwatch)
+
+        try await db.config.setNightwatchMode(.daywatch)
+        cfg = try await db.config.get()
+        #expect(cfg.nightwatchMode == .daywatch)
+
+        try await db.config.setNightwatchMode(.off)
+        cfg = try await db.config.get()
+        #expect(cfg.nightwatchMode == .off)
+    }
 }

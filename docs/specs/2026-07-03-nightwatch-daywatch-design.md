@@ -76,6 +76,18 @@ toggle, the surfaces, the resource signals, and the audit trail are native (they
 live where the state and the UI are). The judgment stays a skill (it needs to iterate at
 model speed). Everything below is written to that seam.
 
+> **In-flight adjacent work — the orchestration spine (noted 2026-07-03).** A sibling
+> worktree (`orchestration-spine`, unmerged, ~4.5k lines) is building native TBD
+> **channels** (agent/human `senderKind`, human barge-in), a **Thread pane**, a
+> channel-capable `tbd` on spawned agents' PATH, and **Bench — persistent recurring-task
+> homes**. Three parts of this design should **ride that spine rather than invent parallel
+> mechanism** once it lands: (1) the **in-channel grant** (§7.2c) — "the human said it in
+> the agent's channel" becomes a literal spine channel message with `senderKind: human`,
+> which also solves the grant's authn story; (2) the **handoff chat** (§5.1b) and "an
+> orchestrator he can talk to" (§5.3) — a Thread pane, not a new surface; (3) **Bench** is a
+> candidate home for the persistent watch itself. Do not duplicate; integrate. Coordinate
+> before implementation phases 2/4.
+
 ---
 
 ## 3. Live evidence from the night of 2026-07-03 (T1 — real incidents)
@@ -164,7 +176,8 @@ night showed it's decisive and Tier-0 `tick.py` already parses it via `_composer
 ### 5.1 State
 
 A single global mode on the `Config` row (seam §1): `nightwatchMode ∈ {off, nightwatch,
-daywatch}`. Add `nightwatch_mode` in a new `v32` migration
+daywatch}`. Add `nightwatch_mode` at the next free migration number — **upstream main is
+already at `v37` (checked 2026-07-03, `a65f284`), so v38+; never trust a stale local tip**
 (`Database.swift:504–543` pattern), a field on `Config` (`Models.swift:409–439`), and a
 `setNightwatchMode` RPC modeled on `handleSetClaudeSpawnPreferences`
 (`RPCRouter+ClaudePreferencesHandlers.swift:8–12`), in a new
@@ -554,8 +567,8 @@ its closeout PR *and* its original work have landed or been explicitly parked.
 **Enforce it with a real field, not a principle (stress-test, pre-mortem #2 — the top
 pre-ship fix).** The §3 %69/%12 misclassification is a *recurrence* risk: a stated principle
 with no mechanism will misfire again. Add an explicit `Worktree.closeoutState ∈ {live,
-idleButNotDone, closedOut, dead}` (new field, v32-family migration + Codable default per
-CLAUDE.md), set to `closedOut` only when `/closeout` **completes** (a queued task is not a
+idleButNotDone, closedOut, dead}` (new field, next-free-number migration + Codable default
+per CLAUDE.md), set to `closedOut` only when `/closeout` **completes** (a queued task is not a
 completion) and to `dead` by session-death detection (the reaper design). **Archive refuses
 unless `closeoutState ∈ {closedOut, dead}`** — a compiled hard-gate in
 `WorktreeLifecycle+Archive.swift`, cheap and decisive, that makes losing-work-before-closeout
@@ -772,9 +785,10 @@ derived sensitive-paths + revert blast-radius; §7.2c grant authz; §7.3 void-re
 lifecycle; §11 phasing graph). The remaining implementation-shaping notes:
 
 **Schema (data).** Per CLAUDE.md's three-changes-in-one-commit rule (migration + GRDB
-Record + optional/defaulted Codable model): `v32` = `nightwatch_mode TEXT DEFAULT 'off'` on
-`config`; `v33` = `clearance` table (new `ClearanceStore` under
-`Sources/TBDDaemon/Database/`); `v34` = `audit_log` table; new `PRStatus` fields
+Record + optional/defaulted Codable model) — *numbers below are illustrative; upstream main
+was already at v37 when checked, so renumber from the live upstream tip at implementation
+time*: mode = `nightwatch_mode TEXT DEFAULT 'off'` on `config`; +1 = `clearance` table (new
+`ClearanceStore` under `Sources/TBDDaemon/Database/`); +2 = `audit_log` table; new `PRStatus` fields
 (`files`, `commits`, `authorWorktreeID`) all optional so old rows decode. (The sensitive-paths
 config store this originally proposed is **dropped** per Adam's review — §7.1; the impact map
 lives in editable policy, not a synced native table.)

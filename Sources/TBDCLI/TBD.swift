@@ -24,6 +24,7 @@ struct TBDCommand: AsyncParsableCommand {
             CleanupCommand.self,
             LinkCommand.self,
             DoctorCommand.self,
+            NightwatchCommand.self,
         ]
     )
 }

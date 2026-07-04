@@ -170,6 +170,8 @@ public enum RPCMethod {
     public static let scratchPromote = "scratch.promote"
     public static let scratchArchive = "scratch.archive"
     public static let scratchRevive = "scratch.revive"
+    public static let nightwatchSetMode = "nightwatch.setMode"
+    public static let nightwatchGetMode = "nightwatch.getMode"
 }
 
 // MARK: - Branch Listing
@@ -259,6 +261,18 @@ public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
     /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
     public let value: String
     public init(value: String) { self.value = value }
+}
+
+// MARK: - Nightwatch RPC
+
+public struct NightwatchSetModeParams: Codable, Sendable {
+    public let mode: NightwatchMode
+    public init(mode: NightwatchMode) { self.mode = mode }
+}
+
+public struct NightwatchGetModeResult: Codable, Sendable {
+    public let mode: NightwatchMode
+    public init(mode: NightwatchMode) { self.mode = mode }
 }
 
 // MARK: - Terminal Swap Profile

@@ -103,6 +103,12 @@ public enum PrimaryAgentPreference: String, Codable, Sendable, Equatable, CaseIt
     }
 }
 
+public enum NightwatchMode: String, Codable, Sendable, CaseIterable {
+    case off
+    case daywatch
+    case nightwatch
+}
+
 public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     /// nil for scratch spaces (repo-less worktrees).
@@ -473,6 +479,8 @@ public struct Config: Codable, Sendable, Equatable {
     /// spawns. `nil` means "fall back to the global default profile"
     /// (`defaultProfileID`).
     public var scratchProfileOverrideID: UUID?
+    /// Nightwatch mode flag: off, daywatch, or nightwatch.
+    public var nightwatchMode: NightwatchMode
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -481,7 +489,8 @@ public struct Config: Codable, Sendable, Equatable {
                 autoArchiveOnMergeDefault: Bool = false,
                 scratchInstructions: String? = nil,
                 scratchRenamePrompt: String? = nil,
-                scratchProfileOverrideID: UUID? = nil) {
+                scratchProfileOverrideID: UUID? = nil,
+                nightwatchMode: NightwatchMode = .off) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -490,6 +499,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.scratchInstructions = scratchInstructions
         self.scratchRenamePrompt = scratchRenamePrompt
         self.scratchProfileOverrideID = scratchProfileOverrideID
+        self.nightwatchMode = nightwatchMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -508,6 +518,8 @@ public struct Config: Codable, Sendable, Equatable {
         scratchInstructions = try c.decodeIfPresent(String.self, forKey: .scratchInstructions) ?? nil
         scratchRenamePrompt = try c.decodeIfPresent(String.self, forKey: .scratchRenamePrompt) ?? nil
         scratchProfileOverrideID = try c.decodeIfPresent(UUID.self, forKey: .scratchProfileOverrideID)
+        nightwatchMode = try c.decodeIfPresent(
+            NightwatchMode.self, forKey: .nightwatchMode) ?? .off
     }
 }
 
