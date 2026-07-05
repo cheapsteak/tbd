@@ -117,6 +117,83 @@ struct UsageSuffixTests {
     }
 }
 
+// MARK: - Two-line menu composition
+
+@Suite("ProfileUsagePresentation — two-line menu")
+struct TwoLineMenuTests {
+    @Test func fullSnapshotSpellsOutUsageWithUsedLabelOnce() {
+        let line = ProfileUsagePresentation.usageDetailLine(for: gmailSnapshot, timeZone: utc)
+        #expect(line == "5h 0% used · resets 23:10 · week 76% · Fable 100%")
+    }
+
+    @Test func usedLabelAppearsExactlyOnceOnTheFirstPercentage() {
+        let line = ProfileUsagePresentation.usageDetailLine(for: gmailSnapshot, timeZone: utc) ?? ""
+        #expect(line.components(separatedBy: "used").count - 1 == 1)
+        // It rides the first (5h) segment, not the weekly/family ones.
+        #expect(line.hasPrefix("5h 0% used"))
+    }
+
+    @Test func missingSnapshotHasNoDetailLine() {
+        #expect(ProfileUsagePresentation.usageDetailLine(for: nil) == nil)
+    }
+
+    @Test func emptyBucketsHaveNoDetailLine() {
+        #expect(ProfileUsagePresentation.usageDetailLine(for: snapshot(buckets: [])) == nil)
+    }
+
+    @Test func withoutScopedFamilyBucketOmitsFamilySegment() {
+        let noFable = snapshot(buckets: [
+            bucket(kind: "session", percent: 16, resetsAt: resetDate),
+            bucket(kind: "weekly_all", percent: 79),
+        ])
+        #expect(ProfileUsagePresentation.usageDetailLine(for: noFable, timeZone: utc)
+                == "5h 16% used · resets 23:10 · week 79%")
+    }
+
+    @Test func sessionWithoutResetOmitsClockFragmentButKeepsUsed() {
+        let noReset = snapshot(buckets: [bucket(kind: "session", percent: 29)])
+        #expect(ProfileUsagePresentation.usageDetailLine(for: noReset, timeZone: utc)
+                == "5h 29% used")
+    }
+
+    @Test func usedLabelRidesWeeklyWhenNoSessionBucket() {
+        // If the session bucket is absent, "used" attaches to the first segment
+        // that does appear (weekly) so the line still disambiguates once.
+        let weeklyOnly = snapshot(buckets: [bucket(kind: "weekly_all", percent: 40)])
+        #expect(ProfileUsagePresentation.usageDetailLine(for: weeklyOnly, timeZone: utc)
+                == "week 40% used")
+    }
+
+    @Test func menuLineSplitsIdentityAndUsage() {
+        let gmail = entry(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: gmailSnapshot)
+        let line = ProfileUsagePresentation.menuLine(for: gmail, timeZone: utc)
+        #expect(line.primary == "Gmail — g@x.co")
+        #expect(line.secondary == "5h 0% used · resets 23:10 · week 76% · Fable 100%")
+    }
+
+    @Test func menuLineWithoutSnapshotHasNilSecondary() {
+        let bare = entry(name: "Work", loginIdentity: "a@b.co")
+        let line = ProfileUsagePresentation.menuLine(for: bare)
+        #expect(line.primary == "Work — a@b.co")
+        #expect(line.secondary == nil)
+    }
+
+    @Test func menuLineForNotLoggedInProfileKeepsSingleLineTreatment() {
+        // oauth profile, no identity → "needs /login" primary, no usage line.
+        let needsLogin = entry(name: "Spare")
+        let line = ProfileUsagePresentation.menuLine(for: needsLogin)
+        #expect(line.primary == "Spare — needs /login")
+        #expect(line.secondary == nil)
+    }
+
+    @Test func familyNameSpellsOutTheDisplayNameOrFallsBack() {
+        #expect(ProfileUsagePresentation.familyName("Fable") == "Fable")
+        #expect(ProfileUsagePresentation.familyName("  Opus  ") == "Opus")
+        #expect(ProfileUsagePresentation.familyName(nil) == "?")
+        #expect(ProfileUsagePresentation.familyName("  ") == "?")
+    }
+}
+
 // MARK: - Severity mapping
 
 @Suite("ProfileUsagePresentation — severity")
@@ -391,5 +468,52 @@ struct SkipAccountPickerPersistenceTests {
             state.skipAccountPicker = true
             #expect(UserDefaults.standard.object(forKey: key) == nil || prior != nil)
         }
+    }
+}
+
+// MARK: - Relative weekly reset (granularity matches window scale)
+
+@Suite("RelativeResetText")
+struct RelativeResetTextTests {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    @Test func minutesUnderAnHour() {
+        let resets = now.addingTimeInterval(48 * 60)
+        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == "48m")
+    }
+
+    @Test func hoursDropMinutes() {
+        let resets = now.addingTimeInterval((3 * 60 + 20) * 60)
+        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == "3h")
+    }
+
+    @Test func daysCarryHourRemainder() {
+        let resets = now.addingTimeInterval(((2 * 24 + 5) * 60 + 10) * 60)
+        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == "2d 5h")
+    }
+
+    @Test func exactDaysOmitHours() {
+        let resets = now.addingTimeInterval(3 * 24 * 60 * 60)
+        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == "3d")
+    }
+
+    @Test func pastInstantYieldsNil() {
+        let resets = now.addingTimeInterval(-60)
+        #expect(ProfileUsagePresentation.relativeResetText(resets, now: now) == nil)
+    }
+
+    @Test func weeklyResetAppearsOnceInDetailLine() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let weeklyReset = now.addingTimeInterval(((2 * 24 + 5) * 60 + 10) * 60)
+        let snap = snapshot(buckets: [
+            bucket(kind: "session", percent: 16, severity: "normal", resetsAt: resetDate),
+            bucket(kind: "weekly_all", percent: 79, severity: "normal", resetsAt: weeklyReset),
+            bucket(kind: "weekly_scoped", percent: 45, severity: "normal",
+                   resetsAt: weeklyReset, family: "Fable"),
+        ])
+        let line = ProfileUsagePresentation.usageDetailLine(for: snap, timeZone: utc, now: now)
+        #expect(line == "5h 16% used · resets 23:10 · week 79% · resets in 2d 5h · Fable 45%")
+        // The shared weekly instant renders once (on the week segment), not per family.
+        #expect(line?.components(separatedBy: "resets in").count == 2)
     }
 }

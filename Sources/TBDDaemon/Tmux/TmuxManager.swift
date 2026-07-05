@@ -141,6 +141,43 @@ public struct TmuxManager: Sendable {
             + ["-PF", "#{window_id} #{pane_id}", userShell, "-ic", fullCommand]
     }
 
+    /// Respawn (replace the running program of) an existing window's pane
+    /// IN PLACE, keeping the same window id and pane id. Mirrors
+    /// `newWindowCommand`'s env handling — the `env` map is inlined as an
+    /// `export …; ` prefix on the shell command (runs AFTER rc files), while
+    /// `sensitiveEnv` is passed via tmux `-e KEY=VALUE` so it's in the process
+    /// environment before the shell starts (kept out of `ps aux`, and visible
+    /// during rc execution). `-k` kills the pane's current program first.
+    ///
+    /// Used by the seamless in-place account switch: same tab, same terminal
+    /// row, new profile's `claude --resume` command. See PR 5222a79 for why the
+    /// env re-export must be re-applied on respawn (the original pane env does
+    /// not carry over to the newly-exec'd program).
+    public static func respawnWindowCommand(
+        server: String,
+        windowID: String,
+        cwd: String,
+        shellCommand: String,
+        env: [String: String] = [:],
+        sensitiveEnv: [String: String] = [:]
+    ) -> [String] {
+        let userShell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        var envPrefix = ""
+        for (key, value) in env.sorted(by: { $0.key < $1.key }) {
+            let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+            envPrefix += "export \(key)='\(escaped)'; "
+        }
+        let fullCommand = envPrefix.isEmpty ? shellCommand : "\(envPrefix)\(shellCommand)"
+        var eFlags: [String] = []
+        for (key, value) in sensitiveEnv.sorted(by: { $0.key < $1.key }) {
+            eFlags.append("-e")
+            eFlags.append("\(key)=\(value)")
+        }
+        return ["-L", server, "respawn-window", "-k", "-t", windowID, "-c", cwd]
+            + eFlags
+            + [userShell, "-ic", fullCommand]
+    }
+
     /// Resize an existing tmux window to the given cell dimensions.
     public static func resizeWindowCommand(server: String, windowID: String, cols: Int, rows: Int) -> [String] {
         ["-L", server, "resize-window", "-t", windowID, "-x", "\(cols)", "-y", "\(rows)"]
@@ -296,6 +333,38 @@ public struct TmuxManager: Sendable {
             }
         }
         return result
+    }
+
+    /// Respawn a window's pane in place (same window id / pane id) with a new
+    /// program. See `respawnWindowCommand` for the env-inlining semantics.
+    /// After respawn, re-issues the size lock (mirrors `createWindow`) so the
+    /// replaced pane keeps the requested cell dimensions.
+    public func respawnWindow(
+        server: String,
+        windowID: String,
+        cwd: String,
+        shellCommand: String,
+        env: [String: String] = [:],
+        sensitiveEnv: [String: String] = [:],
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) async throws {
+        let args = Self.respawnWindowCommand(
+            server: server, windowID: windowID, cwd: cwd,
+            shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv
+        )
+        if dryRun {
+            dryRunRecorder?(args)
+            return
+        }
+        try await runTmux(args)
+        if let cols, let rows, cols >= Self.minCols, rows >= Self.minRows {
+            do {
+                try await resizeWindow(server: server, windowID: windowID, cols: cols, rows: rows)
+            } catch {
+                logger.warning("resize-window after respawnWindow failed for \(windowID, privacy: .public) on server \(server, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     public func killWindow(server: String, windowID: String) async throws {

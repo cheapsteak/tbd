@@ -47,9 +47,11 @@ private func claudeTerminal(id: UUID = UUID(),
                             label: String? = nil,
                             profileID: UUID? = nil,
                             createdAt: Date = Date(timeIntervalSince1970: 0),
-                            kind: TerminalKind? = .claude) -> Terminal {
+                            kind: TerminalKind? = .claude,
+                            activityState: TerminalActivityState = .unknown) -> Terminal {
     Terminal(id: id, worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-             label: label, createdAt: createdAt, profileID: profileID, kind: kind)
+             label: label, createdAt: createdAt, profileID: profileID, kind: kind,
+             activityState: activityState)
 }
 
 /// Live-verified Gmail shape: 5h 0% resetting 23:10, weekly 76%, Fable 100%.
@@ -177,17 +179,26 @@ struct RowAccountMenuSwitchTargetTests {
         #expect(row?.action(terminalID: UUID()) == nil)
     }
 
-    @Test func switchTargetTitleCarriesCompactPerFamilyUsageSuffix() {
+    @Test func switchTargetLineSplitsIdentityAndSpelledOutUsage() {
         let target = entry(name: "Fablework", loginIdentity: "f@x.co", usageSnapshot: fableSnapshot)
         let targets = RowAccountMenu.switchTargets(
             currentProfileID: nil, profiles: [target], timeZone: utc
         )
-        let title = targets.first?.title ?? ""
-        #expect(title.contains("f@x.co"))
-        // Compact usage from ProfileUsagePresentation, incl. the per-family "F 100%".
-        #expect(title.contains("5h 0% ↺23:10"))
-        #expect(title.contains("wk 76%"))
-        #expect(title.contains("F 100%"))
+        let line = targets.first?.line
+        // Primary line is identity only — usage moves to the second line.
+        #expect(line?.primary == "Fablework — f@x.co")
+        // Secondary line spells out the roomier form: "used" once, "resets",
+        // "week", full family name "Fable".
+        #expect(line?.secondary == "5h 0% used · resets 23:10 · week 76% · Fable 100%")
+    }
+
+    @Test func switchTargetWithoutSnapshotHasNoSecondaryLine() {
+        let bare = entry(name: "Work", loginIdentity: "a@b.co")   // no usage snapshot
+        let targets = RowAccountMenu.switchTargets(
+            currentProfileID: nil, profiles: [bare], timeZone: utc
+        )
+        #expect(targets.first?.line.primary == "Work — a@b.co")
+        #expect(targets.first?.line.secondary == nil)
     }
 
     @Test func ambientSessionOffersEveryLoggedInProfileAsSelectable() {
@@ -201,5 +212,29 @@ struct RowAccountMenuSwitchTargetTests {
         #expect(targets.count == 2)
         #expect(targets.allSatisfy { $0.isSelectable && !$0.isCurrent })
         #expect(targets.allSatisfy { $0.action(terminalID: UUID()) != nil })
+    }
+
+    // MARK: - Busy-aware switch footer
+
+    @Test func idleSessionFooterHasNoInterruptWarning() {
+        let work = entry(name: "Work", loginIdentity: "a@b.co")
+        let term = claudeTerminal(profileID: nil, activityState: .idle)
+        let session = RowAccountMenu.session(
+            terminal: term, fallbackIndex: 1, profiles: [work], timeZone: utc
+        )
+        #expect(session.isBusy == false)
+        #expect(session.switchFooter == RowAccountMenu.switchAccountCaption)
+        #expect(!session.switchFooter.contains(RowAccountMenu.interruptsRunSuffix))
+    }
+
+    @Test func busySessionFooterWarnsAboutInterrupt() {
+        let work = entry(name: "Work", loginIdentity: "a@b.co")
+        let term = claudeTerminal(profileID: nil, activityState: .working)
+        let session = RowAccountMenu.session(
+            terminal: term, fallbackIndex: 1, profiles: [work], timeZone: utc
+        )
+        #expect(session.isBusy == true)
+        #expect(session.switchFooter.hasPrefix(RowAccountMenu.switchAccountCaption))
+        #expect(session.switchFooter.hasSuffix(RowAccountMenu.interruptsRunSuffix))
     }
 }

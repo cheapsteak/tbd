@@ -272,18 +272,47 @@ public struct NightwatchSetModeParams: Codable, Sendable {
 
 // MARK: - Terminal Swap Profile
 
+/// How `terminal.swapProfile` reshapes the session.
+///
+/// - `inPlace`: SEAMLESS account switch — interrupt the pane's current Claude,
+///   respawn `claude --resume <id>` under the new profile IN THE SAME tmux
+///   window, and update the existing terminal row in place. One tab, no new
+///   row/tab. This is the "Switch account" action.
+/// - `fork`: duplicate the conversation into a NEW tab/terminal row (the old
+///   fork-into-new-tab behavior), leaving the source session untouched. This
+///   is the explicit "Fork session" action.
+public enum TerminalSwapMode: String, Codable, Sendable, Equatable {
+    case inPlace
+    case fork
+}
+
 public struct TerminalSwapProfileParams: Codable, Sendable {
     public let terminalID: UUID
     public let newProfileID: UUID?
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    public init(terminalID: UUID, newProfileID: UUID?, cols: Int? = nil, rows: Int? = nil) {
+    /// Swap reshaping mode. Optional + `decodeIfPresent` so payloads from older
+    /// clients still decode; a missing value defaults to `.inPlace` (seamless
+    /// same-tab switch) — the common "Switch account" path.
+    public let mode: TerminalSwapMode?
+    public init(
+        terminalID: UUID,
+        newProfileID: UUID?,
+        cols: Int? = nil,
+        rows: Int? = nil,
+        mode: TerminalSwapMode? = nil
+    ) {
         self.terminalID = terminalID
         self.newProfileID = newProfileID
         self.cols = cols
         self.rows = rows
+        self.mode = mode
     }
+
+    /// Resolved mode with the default applied — `.inPlace` when the field is
+    /// absent (older clients / the common switch-account path).
+    public var resolvedMode: TerminalSwapMode { mode ?? .inPlace }
 }
 
 // MARK: - Model Profile RPC

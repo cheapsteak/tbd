@@ -427,7 +427,7 @@ struct ModelProfileSpawnTests {
 
     // MARK: - Swap: to a different token
 
-    @Test("swap on blank session: forks into a new tab with a fresh session id and new token")
+    @Test("fork on blank session: forks into a new tab with a fresh session id and new token")
     func swapToDifferentToken() async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
@@ -449,10 +449,10 @@ struct ModelProfileSpawnTests {
 
         let beforeSwap = recorder.calls.count
 
-        // Swap to B → returns a NEW terminal row, old one untouched
+        // FORK to B → returns a NEW terminal row, old one untouched.
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id)
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .fork)
         ))
         #expect(swapResp.success)
         let newTerm = try swapResp.decodeResult(Terminal.self)
@@ -466,11 +466,13 @@ struct ModelProfileSpawnTests {
         let oldAfter = try await db.terminals.get(id: oldTerm.id)
         #expect(oldAfter?.profileID == a.id)
 
-        // Daemon did NOT send C-c or send-keys to the old pane
+        // Daemon did NOT send C-c or send-keys to the old pane (fork spawns a
+        // brand-new window; it never interrupts the source pane).
         let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
         let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
         #expect(!joined.contains("C-c"))
         #expect(!joined.contains("send-keys"))
+        #expect(!joined.contains("respawn-window"))
         // The new tab was spawned with B's CLAUDE_CONFIG_DIR via tmux -e (NOT inlined),
         // and the shell body contains --session-id <newSessionID> (fresh path),
         // never --resume.
@@ -483,9 +485,55 @@ struct ModelProfileSpawnTests {
         #expect(!postBodies.contains("CLAUDE_CODE_OAUTH_TOKEN"))
     }
 
+    @Test("in-place swap (default): keeps terminal id + tmux window id, updates profile_id")
+    func inPlaceSwapKeepsRowAndWindow() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        let oldTerm = try createResp.decodeResult(Terminal.self)
+        #expect(oldTerm.profileID == a.id)
+        let originalWindowID = oldTerm.tmuxWindowID
+
+        let beforeSwap = recorder.calls.count
+
+        // Default mode (nil → .inPlace): same tab.
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id)
+        ))
+        #expect(swapResp.success)
+        let result = try swapResp.decodeResult(Terminal.self)
+        // Same terminal id + same tmux window id — the row and tab survive.
+        #expect(result.id == oldTerm.id)
+        #expect(result.tmuxWindowID == originalWindowID)
+        // profile_id flipped to B, in place.
+        #expect(result.profileID == b.id)
+        // DB reflects the in-place update — no new row was created.
+        let all = try await db.terminals.list(worktreeID: wt.id)
+        #expect(all.count == 1)
+        #expect(all.first?.profileID == b.id)
+
+        // The pane was respawned in place (respawn-window -k on the SAME window),
+        // not spawned as a new window.
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
+        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(joined.contains("respawn-window"))
+        #expect(joined.contains(originalWindowID))
+        #expect(!joined.contains("new-window"))
+        #expect(joined.contains("CLAUDE_CONFIG_DIR="))
+    }
+
     // MARK: - Swap: to nil
 
-    @Test("swap: to nil forks new tab with no env prefix; old tab untouched")
+    @Test("fork: to nil forks new tab with no env prefix; old tab untouched")
     func swapToNil() async throws {
         let (router, db, recorder) = makeFixture()
         defer { Task { await cleanup(db) } }
@@ -504,7 +552,7 @@ struct ModelProfileSpawnTests {
 
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: nil)
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: nil, mode: .fork)
         ))
         #expect(swapResp.success)
         let newTerm = try swapResp.decodeResult(Terminal.self)

@@ -21,8 +21,10 @@ enum RowAccountMenu {
         /// concrete profile (ambient is not offered as a switch destination
         /// here; the info header already names it).
         let profileID: UUID
-        /// "Work — a@b.co · 5h 0% ↺23:10 · wk 76% · F 100%".
-        let title: String
+        /// Two-line row content: "Work — a@b.co" over an indented, spelled-out
+        /// usage line ("5h 0% · resets 23:10 · wk 76% · Fable 100%"). The
+        /// secondary line is nil for not-logged-in / snapshotless profiles.
+        let line: ProfileUsagePresentation.MenuLineModel
         /// True when this profile is the session's current account: shown with
         /// a checkmark and disabled (no-op swap).
         let isCurrent: Bool
@@ -55,8 +57,20 @@ enum RowAccountMenu {
         /// Switch-account destinations, ordered for the picker (healthiest
         /// selectable first, not-logged-in last).
         let switchTargets: [SwitchTarget]
+        /// True when the session is mid-run (activityState == .working). The
+        /// seamless switch interrupts the current run, so the submenu footer
+        /// warns about it. Cheap advisory; no confirm dialog for v1.
+        let isBusy: Bool
 
         var id: UUID { terminalID }
+
+        /// Per-session submenu footer: the shared switch caption, plus an
+        /// interrupt warning when the session is mid-run.
+        var switchFooter: String {
+            isBusy
+                ? "\(RowAccountMenu.switchAccountCaption) \(RowAccountMenu.interruptsRunSuffix)"
+                : RowAccountMenu.switchAccountCaption
+        }
     }
 
     /// Whole-menu model: the worktree's Claude sessions (each with its own
@@ -83,8 +97,14 @@ enum RowAccountMenu {
 
     static let switchAccountLabel = "Switch account"
     static let notLoggedInReason = "run /login first"
+    /// Whole-menu footer under the account section.
     static let footerCaption =
-        "Switching forks the session onto the new account — its context re-reads uncached once."
+        "Switching account resumes this session in place on the new account — its context re-reads uncached once."
+    /// Per-session "Switch account" submenu caption.
+    static let switchAccountCaption =
+        "Resumes in this tab on the new account."
+    /// Appended to the submenu caption when the session is mid-run.
+    static let interruptsRunSuffix = "— interrupts current run"
 
     // MARK: - Composition
 
@@ -119,7 +139,8 @@ enum RowAccountMenu {
             ),
             switchTargets: switchTargets(currentProfileID: terminal.profileID,
                                          profiles: profiles,
-                                         timeZone: timeZone)
+                                         timeZone: timeZone),
+            isBusy: terminal.activityState == .working
         )
     }
 
@@ -144,7 +165,7 @@ enum RowAccountMenu {
             let isCurrent = entry.profile.id == currentProfileID
             return SwitchTarget(
                 profileID: entry.profile.id,
-                title: ProfileUsagePresentation.menuItemTitle(for: entry, timeZone: timeZone),
+                line: ProfileUsagePresentation.menuLine(for: entry, timeZone: timeZone),
                 isCurrent: isCurrent,
                 isSelectable: selectable,
                 disabledReason: selectable ? nil : notLoggedInReason
