@@ -412,4 +412,34 @@ struct NightwatchPolicyTests {
         #expect(policy.testHoldList == [], "Should use default testHoldList")
         #expect(policy.allowRebaseReclearance == false, "Should use default allowRebaseReclearance")
     }
+
+    @Test("Policy file can tighten the size ceiling but never widen past the compiled hard ceiling")
+    func policySizeCeilingClampsToHardCeiling() throws {
+        let tmpDir = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: URL(fileURLWithPath: "/"),
+            create: true
+        ).path
+        defer { try? FileManager.default.removeItem(atPath: tmpDir) }
+
+        let nightwatchDir = (tmpDir as NSString).appendingPathComponent(".nightwatch")
+        try FileManager.default.createDirectory(atPath: nightwatchDir, withIntermediateDirectories: true)
+        let policyPath = (nightwatchDir as NSString).appendingPathComponent("policy.json")
+
+        // Widening attempt (the policy-poisoning vector): clamped to the hard ceiling.
+        try #"{"compiledSizeCeiling": 5000}"#.write(toFile: policyPath, atomically: true, encoding: .utf8)
+        let widened = NightwatchPolicy.load(repoPath: tmpDir)
+        #expect(widened.compiledSizeCeiling == NightwatchPolicy.hardSizeCeiling,
+                "A policy file must never widen the size ceiling past the compiled maximum")
+
+        // Tightening is allowed.
+        try #"{"compiledSizeCeiling": 10}"#.write(toFile: policyPath, atomically: true, encoding: .utf8)
+        let tightened = NightwatchPolicy.load(repoPath: tmpDir)
+        #expect(tightened.compiledSizeCeiling == 10, "A policy file may tighten the ceiling")
+
+        // The memberwise init clamps too (not just the decoder path).
+        let direct = NightwatchPolicy(compiledSizeCeiling: 9999)
+        #expect(direct.compiledSizeCeiling == NightwatchPolicy.hardSizeCeiling)
+    }
 }

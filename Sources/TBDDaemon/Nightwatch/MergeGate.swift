@@ -100,11 +100,17 @@ public struct GateInput: Sendable, Equatable {
 
 /// Nightwatch merge policy: governs what auto-merges and under what conditions.
 public struct NightwatchPolicy: Sendable, Equatable {
+    /// Hard compiled maximum on lines changed for any auto-merge. Editable
+    /// policy (`.nightwatch/policy.json`) may only tighten BELOW this; a
+    /// larger value in a policy file is clamped here, so a policy edit can
+    /// never widen the merge set past the compiled floor (design §7.1).
+    public static let hardSizeCeiling = 50
+
     /// Impact map: glob patterns identifying high-impact, foundational domains.
     /// A change matching any pattern is held regardless of approval/checks.
     public let impactMapGlobs: [String]
-    /// Maximum compiled size ceiling (lines changed) for any auto-merge.
-    /// Policy can only tighten below this; never exceed.
+    /// Effective size ceiling (lines changed) for any auto-merge. Always
+    /// `<= hardSizeCeiling` — enforced in init, not trusted from input.
     public let compiledSizeCeiling: Int
     /// Explicit list of PR numbers/names currently under test-hold.
     public let testHoldList: [Int]
@@ -113,12 +119,12 @@ public struct NightwatchPolicy: Sendable, Equatable {
 
     public init(
         impactMapGlobs: [String] = [],
-        compiledSizeCeiling: Int = 50,
+        compiledSizeCeiling: Int = NightwatchPolicy.hardSizeCeiling,
         testHoldList: [Int] = [],
         allowRebaseReclearance: Bool = false
     ) {
         self.impactMapGlobs = impactMapGlobs
-        self.compiledSizeCeiling = compiledSizeCeiling
+        self.compiledSizeCeiling = min(compiledSizeCeiling, Self.hardSizeCeiling)
         self.testHoldList = testHoldList
         self.allowRebaseReclearance = allowRebaseReclearance
     }
@@ -163,10 +169,16 @@ extension NightwatchPolicy: Codable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        impactMapGlobs = try container.decodeIfPresent([String].self, forKey: .impactMapGlobs) ?? []
-        compiledSizeCeiling = try container.decodeIfPresent(Int.self, forKey: .compiledSizeCeiling) ?? 50
-        testHoldList = try container.decodeIfPresent([Int].self, forKey: .testHoldList) ?? []
-        allowRebaseReclearance = try container.decodeIfPresent(Bool.self, forKey: .allowRebaseReclearance) ?? false
+        // Route through the memberwise init so the hardSizeCeiling clamp
+        // applies to policy files too — a policy edit can tighten the
+        // ceiling but never widen it (design §7.1, policy-poisoning guard).
+        self.init(
+            impactMapGlobs: try container.decodeIfPresent([String].self, forKey: .impactMapGlobs) ?? [],
+            compiledSizeCeiling: try container.decodeIfPresent(Int.self, forKey: .compiledSizeCeiling)
+                ?? NightwatchPolicy.hardSizeCeiling,
+            testHoldList: try container.decodeIfPresent([Int].self, forKey: .testHoldList) ?? [],
+            allowRebaseReclearance: try container.decodeIfPresent(Bool.self, forKey: .allowRebaseReclearance) ?? false
+        )
     }
 
     public func encode(to encoder: Encoder) throws {
