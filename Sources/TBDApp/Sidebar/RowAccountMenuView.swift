@@ -101,15 +101,38 @@ struct RowAccountMenuView: View {
                                     target: RowAccountMenu.SwitchTarget) -> some View {
         if let action = target.action(terminalID: session.terminalID) {
             Button(action: { dispatch(action) }) {
-                Text("  \(target.title)")
+                Text(Self.twoLineLabel(primary: "  \(target.line.primary)",
+                                       secondary: target.line.secondary))
             }
         } else {
             // Disabled: current account (checkmark) or not-logged-in (hint).
             let prefix = target.isCurrent ? "✓ " : "  "
             let suffix = target.disabledReason.map { " — \($0)" } ?? ""
-            Button("\(prefix)\(target.title)\(suffix)") {}
-                .disabled(true)
+            Button {
+            } label: {
+                Text(Self.twoLineLabel(primary: "\(prefix)\(target.line.primary)\(suffix)",
+                                       secondary: target.line.secondary))
+            }
+            .disabled(true)
         }
+    }
+
+    /// Renders a menu row on two lines inside a SwiftUI `Menu`. macOS menus
+    /// flatten a `VStack`-based `Button` label to a single line and drop its
+    /// per-`Text` styling, so we build one `AttributedString` with an embedded
+    /// newline instead: primary line at the default size, a smaller secondary
+    /// line (`.caption`, secondary color, two-space indent) after the break.
+    /// This is the technique that actually renders two styled lines in a Menu.
+    /// When `secondary` is nil we return a plain single-line string so
+    /// snapshotless / not-logged-in rows keep their existing treatment.
+    static func twoLineLabel(primary: String, secondary: String?) -> AttributedString {
+        var result = AttributedString(primary)
+        guard let secondary, !secondary.isEmpty else { return result }
+        var second = AttributedString("\n  " + secondary)
+        second.font = .caption
+        second.foregroundColor = .secondary
+        result.append(second)
+        return result
     }
 
     private func dispatch(_ action: RowAccountMenu.RowAccountMenuAction) {

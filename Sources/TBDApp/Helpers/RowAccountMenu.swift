@@ -21,8 +21,10 @@ enum RowAccountMenu {
         /// concrete profile (ambient is not offered as a switch destination
         /// here; the info header already names it).
         let profileID: UUID
-        /// "Work — a@b.co · 5h 0% ↺23:10 · wk 76% · F 100%".
-        let title: String
+        /// Two-line row content: "Work — a@b.co" over an indented, spelled-out
+        /// usage line ("5h 0% · resets 23:10 · wk 76% · Fable 100%"). The
+        /// secondary line is nil for not-logged-in / snapshotless profiles.
+        let line: ProfileUsagePresentation.MenuLineModel
         /// True when this profile is the session's current account: shown with
         /// a checkmark and disabled (no-op swap).
         let isCurrent: Bool
@@ -144,7 +146,7 @@ enum RowAccountMenu {
             let isCurrent = entry.profile.id == currentProfileID
             return SwitchTarget(
                 profileID: entry.profile.id,
-                title: ProfileUsagePresentation.menuItemTitle(for: entry, timeZone: timeZone),
+                line: ProfileUsagePresentation.menuLine(for: entry, timeZone: timeZone),
                 isCurrent: isCurrent,
                 isSelectable: selectable,
                 disabledReason: selectable ? nil : notLoggedInReason

@@ -177,17 +177,26 @@ struct RowAccountMenuSwitchTargetTests {
         #expect(row?.action(terminalID: UUID()) == nil)
     }
 
-    @Test func switchTargetTitleCarriesCompactPerFamilyUsageSuffix() {
+    @Test func switchTargetLineSplitsIdentityAndSpelledOutUsage() {
         let target = entry(name: "Fablework", loginIdentity: "f@x.co", usageSnapshot: fableSnapshot)
         let targets = RowAccountMenu.switchTargets(
             currentProfileID: nil, profiles: [target], timeZone: utc
         )
-        let title = targets.first?.title ?? ""
-        #expect(title.contains("f@x.co"))
-        // Compact usage from ProfileUsagePresentation, incl. the per-family "F 100%".
-        #expect(title.contains("5h 0% ↺23:10"))
-        #expect(title.contains("wk 76%"))
-        #expect(title.contains("F 100%"))
+        let line = targets.first?.line
+        // Primary line is identity only — usage moves to the second line.
+        #expect(line?.primary == "Fablework — f@x.co")
+        // Secondary line spells out the roomier form: "used" once, "resets",
+        // "week", full family name "Fable".
+        #expect(line?.secondary == "5h 0% used · resets 23:10 · week 76% · Fable 100%")
+    }
+
+    @Test func switchTargetWithoutSnapshotHasNoSecondaryLine() {
+        let bare = entry(name: "Work", loginIdentity: "a@b.co")   // no usage snapshot
+        let targets = RowAccountMenu.switchTargets(
+            currentProfileID: nil, profiles: [bare], timeZone: utc
+        )
+        #expect(targets.first?.line.primary == "Work — a@b.co")
+        #expect(targets.first?.line.secondary == nil)
     }
 
     @Test func ambientSessionOffersEveryLoggedInProfileAsSelectable() {
