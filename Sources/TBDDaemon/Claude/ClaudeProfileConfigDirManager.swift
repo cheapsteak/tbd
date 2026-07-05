@@ -61,6 +61,15 @@ public struct ClaudeProfileConfigDirManager: Sendable {
             .appendingPathComponent("claude", isDirectory: true)
     }
 
+    /// The ambient (non-profile) claude config dir — i.e. the host base dir
+    /// (`~/.claude` in production, or the injected `hostBaseDirectory`). This is
+    /// the config dir an ambient TBD session resolves to on this machine now
+    /// that the zshenv-era ambient-dir switcher was retired. Used as the
+    /// swap-to-ambient transcript destination.
+    public var ambientConfigDirectory: URL {
+        hostBaseDirectory
+    }
+
     /// Slots that each TBD profile dir mirrors from the host's claude config dir.
     /// Symlinked from <profile>/claude/<slot> to <host-base>/<slot>.
     /// `projects` migrates pre-existing real-dir content into the host store

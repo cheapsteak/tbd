@@ -83,6 +83,10 @@ struct RowAccountMenuView: View {
             ForEach(session.switchTargets) { target in
                 switchTargetButton(session: session, target: target)
             }
+            Divider()
+            // Per-session footer: resumes-in-place caption, with an
+            // interrupt warning when the session is mid-run.
+            Text(session.switchFooter).font(.caption)
         }
     }
 

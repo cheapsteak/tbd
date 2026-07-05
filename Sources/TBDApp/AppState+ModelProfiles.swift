@@ -273,15 +273,34 @@ extension AppState {
     }
 
     /// Swap the model profile associated with a running terminal.
-    /// The daemon forks a new tmux tab; this method adds the new terminal and tab to local state
-    /// and selects it so the UI switches immediately.
-    func swapTerminalProfile(terminalID: UUID, newProfileID: UUID?) async {
+    ///
+    /// `.inPlace` (default, "Switch account"): the daemon respawns the SAME
+    /// tmux window/terminal row under the new profile. The row is updated in
+    /// place via the `terminalProfileChanged` delta — no new tab is created, so
+    /// this method just fires the RPC and lets the delta reconcile local state.
+    ///
+    /// `.fork` ("Fork session"): the daemon forks the conversation into a NEW
+    /// tab/terminal row; this method appends it to local state and selects it.
+    func swapTerminalProfile(
+        terminalID: UUID,
+        newProfileID: UUID?,
+        mode: TerminalSwapMode = .inPlace
+    ) async {
         do {
             let size = mainAreaTerminalSize()
-            let newTerminal = try await daemonClient.swapTerminalProfile(terminalID: terminalID, newProfileID: newProfileID, cols: size.cols, rows: size.rows)
-            let worktreeID = newTerminal.worktreeID
-            terminals[worktreeID, default: []].append(newTerminal)
-            let newTab = Tab(id: newTerminal.id, content: .terminal(terminalID: newTerminal.id))
+            let resultTerminal = try await daemonClient.swapTerminalProfile(
+                terminalID: terminalID, newProfileID: newProfileID,
+                mode: mode, cols: size.cols, rows: size.rows
+            )
+            guard mode == .fork else {
+                // In-place: same tab/row. The `terminalProfileChanged` +
+                // `terminalSessionUpdated` deltas already reconciled the row;
+                // nothing to add or re-select here.
+                return
+            }
+            let worktreeID = resultTerminal.worktreeID
+            terminals[worktreeID, default: []].append(resultTerminal)
+            let newTab = Tab(id: resultTerminal.id, content: .terminal(terminalID: resultTerminal.id))
             tabs[worktreeID, default: []].append(newTab)
             setActiveTab(worktreeID: worktreeID, tabIndex: (tabs[worktreeID]?.count ?? 1) - 1)
         } catch {

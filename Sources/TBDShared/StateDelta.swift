@@ -23,7 +23,24 @@ public enum StateDelta: Codable, Sendable {
     case modelProfilesChanged
     case terminalSessionUpdated(TerminalSessionDelta)
     case terminalActivityUpdated(TerminalActivityDelta)
+    case terminalProfileChanged(TerminalProfileDelta)
     case worktreeMoved(WorktreeMovedDelta)
+}
+
+/// Delta payload for a terminal's model-profile change that keeps the SAME
+/// terminal row (the seamless in-place "Switch account" swap). The app updates
+/// the row's `profileID` in place so its account chip re-renders without a full
+/// terminal refetch. `newProfileID == nil` means the session switched to the
+/// ambient (keychain/host) login.
+public struct TerminalProfileDelta: Codable, Sendable {
+    public let terminalID: UUID
+    public let worktreeID: UUID
+    public let newProfileID: UUID?
+    public init(terminalID: UUID, worktreeID: UUID, newProfileID: UUID?) {
+        self.terminalID = terminalID
+        self.worktreeID = worktreeID
+        self.newProfileID = newProfileID
+    }
 }
 
 /// Delta payload for Claude session ID/transcript path rollover, fired when

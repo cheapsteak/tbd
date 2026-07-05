@@ -695,6 +695,97 @@ extension RPCRouter {
         return .resume(sessionID: oldSessionID)
     }
 
+    /// Ensure the session transcript at `source` is reachable under the
+    /// DESTINATION config dir's `projects/` tree, so a `claude --resume <id>`
+    /// spawned with `CLAUDE_CONFIG_DIR=<destConfigDir>` can find it.
+    ///
+    /// `claude` resolves resumable conversations at
+    /// `<CLAUDE_CONFIG_DIR>/projects/<cwd-slug>/<sessionID>.jsonl`. Ambient
+    /// sessions write their transcript under the ambient config dir's
+    /// `projects/`, while TBD profile config dirs symlink their `projects/`
+    /// slot from the host claude dir. So an ambient→profile swap resumes under
+    /// the profile (looking in the host `projects/`) while the transcript sits
+    /// in the ambient config dir's `projects/` — "no conversation found".
+    ///
+    /// This copies (never moves — the source session may still be live) the
+    /// transcript into the destination `projects/<same-parent-dir-name>/<file>`,
+    /// preserving the cwd-slug layout by reusing the SOURCE file's parent-dir
+    /// name rather than recomputing the slug. Writing THROUGH the destination
+    /// config dir naturally follows the `projects/` symlink when one exists.
+    ///
+    /// Best-effort and non-throwing: any failure is logged and the swap proceeds
+    /// (the fork simply starts fresh). No-ops when the destination file already
+    /// exists or resolves (via realpath) to the same file as the source — the
+    /// profile→profile case where both dirs share a symlink target.
+    static func ensureTranscriptReachable(from source: URL, inConfigDir destConfigDir: URL) {
+        let fm = FileManager.default
+
+        guard fm.fileExists(atPath: source.path) else {
+            logger.warning("swap transcript carry: source \(source.path, privacy: .public) missing on disk — fork will start fresh")
+            return
+        }
+
+        // Preserve the source's cwd-slug layout: <projects>/<slug>/<file>.
+        // The slug is the source file's PARENT directory name — reuse it
+        // verbatim rather than recomputing from the worktree path, so a
+        // `/clear`/`/compact`-relocated transcript still lands in the right place.
+        let slug = source.deletingLastPathComponent().lastPathComponent
+        let destProjectsDir = destConfigDir
+            .appendingPathComponent("projects", isDirectory: true)
+            .appendingPathComponent(slug, isDirectory: true)
+        let dest = destProjectsDir.appendingPathComponent(source.lastPathComponent)
+
+        // Same realpath → source and destination resolve to the same file
+        // (profile→profile swaps sharing a symlinked `projects/` target, or a
+        // no-op ambient→ambient). Nothing to copy.
+        if fm.fileExists(atPath: dest.path) {
+            let srcReal = source.resolvingSymlinksInPath().standardizedFileURL.path
+            let dstReal = dest.resolvingSymlinksInPath().standardizedFileURL.path
+            if srcReal == dstReal {
+                logger.debug("swap transcript carry: destination already resolves to source — no copy")
+            } else {
+                logger.debug("swap transcript carry: destination \(dest.path, privacy: .public) already present — skipping")
+            }
+            return
+        }
+
+        do {
+            try fm.createDirectory(at: destProjectsDir, withIntermediateDirectories: true)
+            try fm.copyItem(at: source, to: dest)
+            logger.info("swap transcript carry: copied session transcript into \(destProjectsDir.path, privacy: .public) so resume finds the conversation")
+        } catch {
+            logger.warning("swap transcript carry: copy failed (\(error.localizedDescription, privacy: .public)) — fork will start fresh")
+        }
+    }
+
+    /// Resolve the on-disk source transcript for a swap: prefer the terminal
+    /// row's `transcriptPath` (authoritative live-session jsonl); if that's
+    /// nil/missing, fall back to locating `<sessionID>.jsonl` under the SOURCE
+    /// config dir's `projects/` tree for `worktreePath`. Returns nil when
+    /// neither is found (the fork will start fresh).
+    static func resolveSwapSourceTranscript(
+        transcriptPath: String?,
+        sessionID: String,
+        worktreePath: String,
+        sourceConfigDir: URL
+    ) -> URL? {
+        let fm = FileManager.default
+        if let p = transcriptPath, !p.isEmpty, fm.fileExists(atPath: p) {
+            return URL(fileURLWithPath: p)
+        }
+        // Fall back to the source config dir's projects/ tree. Resolve the
+        // cwd-slug dir for this worktree, then look for <sessionID>.jsonl.
+        let projectsBase = sourceConfigDir.appendingPathComponent("projects", isDirectory: true)
+        guard let projectDir = ClaudeProjectDirectory.resolve(
+            worktreePath: worktreePath,
+            projectsBase: projectsBase
+        ) else {
+            return nil
+        }
+        let candidate = projectDir.appendingPathComponent("\(sessionID).jsonl")
+        return fm.fileExists(atPath: candidate.path) ? candidate : nil
+    }
+
     func handleTerminalSwapProfile(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSwapProfileParams.self, from: paramsData)
 
@@ -724,19 +815,28 @@ extension RPCRouter {
             resolved = nil
         }
 
-        // Spawn a NEW window in the same worktree. If the existing session has
-        // any conversation content, `claude --resume` forks it into a fresh
-        // session file (we recapture the forked ID below). If the session is
-        // blank — JSONL never written or no real entries — resuming it would
-        // produce "no conversation found" and chaotic behavior, so we instead
-        // spawn a brand-new session and skip the recapture.
+        // Two reshaping modes (see `TerminalSwapMode`):
+        //   .inPlace (default) — SEAMLESS "Switch account": interrupt the
+        //     pane's Claude, respawn `claude --resume <id>` under the new
+        //     profile IN THE SAME window, and update the existing terminal row.
+        //     One tab, no new row.
+        //   .fork — explicit "Fork session": spawn a NEW window + terminal row,
+        //     leaving the source session untouched (the old behavior).
+        //
+        // In both modes, if the existing session has conversation content,
+        // `claude --resume` forks it into a fresh session file (recaptured
+        // below). If the session is blank, resuming would produce "no
+        // conversation found", so we spawn a brand-new session instead.
+        let mode = params.resolvedMode
         let repo: Repo?
         if let rid = worktree.repoID {
             repo = try await db.repos.get(id: rid)
         } else {
             repo = nil
         }
-        let plannedTerminalID = UUID()
+        // In-place respawn keeps the EXISTING terminal id so its `TBD_TERMINAL_ID`
+        // (and thus SessionStart-hook routing) stays stable; fork uses a fresh id.
+        let plannedTerminalID = mode == .inPlace ? oldTerminal.id : UUID()
         let swapConfig = try? await db.config.get()
         var env = SystemPromptBuilder.promptLayers(
             repo: repo, worktree: worktree, scratchInstructions: swapConfig?.scratchInstructions,
@@ -750,6 +850,41 @@ extension RPCRouter {
             transcriptFilePath: oldTerminal.transcriptPath
         )
         let plan = Self.planTerminalSwap(oldSessionID: sessionID, isBlank: blank)
+
+        // Carry the session transcript into the DESTINATION config dir so the
+        // forked `claude --resume <id>` finds the conversation. Only matters on
+        // the resume path — a fresh spawn has no prior transcript to carry.
+        // Best-effort: never blocks the swap.
+        if case .resume = plan {
+            // Source config dir: where the OLD session's transcript lives — the
+            // old terminal's profile config dir, or the ambient (host) config
+            // dir for an ambient session (profileID == nil).
+            let sourceConfigDir: URL
+            if let oldProfileID = oldTerminal.profileID {
+                sourceConfigDir = configDirManager.configDirectory(forProfileID: oldProfileID)
+            } else {
+                sourceConfigDir = configDirManager.ambientConfigDirectory
+            }
+            // Destination config dir: the new profile's config dir, or the
+            // ambient (host) config dir when swapping to ambient (nil profile).
+            let destConfigDir: URL
+            if let newProfileID = resolved?.profileID {
+                destConfigDir = configDirManager.configDirectory(forProfileID: newProfileID)
+            } else {
+                destConfigDir = configDirManager.ambientConfigDirectory
+            }
+
+            if let sourceTranscript = Self.resolveSwapSourceTranscript(
+                transcriptPath: oldTerminal.transcriptPath,
+                sessionID: sessionID,
+                worktreePath: worktree.path,
+                sourceConfigDir: sourceConfigDir
+            ) {
+                Self.ensureTranscriptReachable(from: sourceTranscript, inConfigDir: destConfigDir)
+            } else {
+                logger.warning("swap transcript carry: no source transcript found for session \(sessionID, privacy: .public) — fork will start fresh")
+            }
+        }
 
         let claudeEnvOverrides = swapConfig?.envSettingOverrides ?? [:]
         // Free-form env overrides for the swapped-in Claude pane (global < repo <
@@ -823,16 +958,64 @@ extension RPCRouter {
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
         let resolvedCols = params.cols ?? TmuxManager.defaultCols
         let resolvedRows = params.rows ?? TmuxManager.defaultRows
+        let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
 
+        switch mode {
+        case .fork:
+            return try await forkSwapNewTab(
+                worktree: worktree,
+                plannedTerminalID: plannedTerminalID,
+                spawnCommand: spawn.command,
+                env: env,
+                sensitiveEnv: sensitiveEnv,
+                storedSessionID: storedSessionID,
+                profileID: resolved?.profileID,
+                scheduleRecapture: scheduleRecapture,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+
+        case .inPlace:
+            return try await inPlaceSwapRespawn(
+                oldTerminal: oldTerminal,
+                worktree: worktree,
+                spawnCommand: spawn.command,
+                env: env,
+                sensitiveEnv: sensitiveEnv,
+                storedSessionID: storedSessionID,
+                newProfileID: resolved?.profileID,
+                scheduleRecapture: scheduleRecapture,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+        }
+    }
+
+    /// `.fork` swap: spawn a NEW window + terminal row in the same worktree,
+    /// leaving the source session's tab untouched. Preserves the original
+    /// fork-into-new-tab behavior; now only reached via the explicit "Fork
+    /// session" action.
+    private func forkSwapNewTab(
+        worktree: Worktree,
+        plannedTerminalID: UUID,
+        spawnCommand: String,
+        env: [String: String],
+        sensitiveEnv: [String: String],
+        storedSessionID: String,
+        profileID: UUID?,
+        scheduleRecapture: Bool,
+        cols: Int,
+        rows: Int
+    ) async throws -> RPCResponse {
         let window = try await tmux.createWindow(
             server: worktree.tmuxServer,
             session: "main",
             cwd: worktree.path,
-            shellCommand: spawn.command,
+            shellCommand: spawnCommand,
             env: env,
-            sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
-            cols: resolvedCols,
-            rows: resolvedRows
+            sensitiveEnv: sensitiveEnv,
+            cols: cols,
+            rows: rows
         )
 
         let newTerminal = try await db.terminals.create(
@@ -842,7 +1025,7 @@ extension RPCRouter {
             tmuxPaneID: window.paneID,
             label: "claude",
             claudeSessionID: storedSessionID,
-            profileID: resolved?.profileID,
+            profileID: profileID,
             kind: .claude
         )
 
@@ -850,30 +1033,134 @@ extension RPCRouter {
             terminalID: newTerminal.id, worktreeID: newTerminal.worktreeID, label: newTerminal.label
         )))
 
-        // For the resume path, `claude --resume <oldID>` forks the conversation
-        // into a NEW session file with a fresh UUID. Mirror SuspendResumeCoordinator's
-        // post-resume pattern: wait ~5s for Claude to settle, then capture the
-        // new session ID from the pane and persist it. The fresh path already
-        // stored the correct ID, so no recapture is needed.
         if scheduleRecapture {
-            let newTerminalID = newTerminal.id
-            let newPaneID = window.paneID
-            let server = worktree.tmuxServer
-            let tmuxRef = self.tmux
-            let dbRef = self.db
-            Task {
-                try? await Task.sleep(for: .seconds(5))
-                let detector = ClaudeStateDetector(tmux: tmuxRef)
-                if let recaptured = await detector.captureSessionID(server: server, paneID: newPaneID) {
-                    try? await dbRef.terminals.updateSessionID(id: newTerminalID, sessionID: recaptured)
-                }
-            }
+            scheduleSessionRecapture(
+                terminalID: newTerminal.id, paneID: window.paneID, server: worktree.tmuxServer
+            )
         }
 
         guard let updated = try await db.terminals.get(id: newTerminal.id) else {
             return RPCResponse(error: "Terminal vanished after swap")
         }
         return try RPCResponse(result: updated)
+    }
+
+    /// `.inPlace` swap (seamless "Switch account"): gracefully interrupt the
+    /// pane's current Claude, respawn `claude` under the new profile IN THE SAME
+    /// tmux window, and update the EXISTING terminal row (new profile id, same
+    /// session id + tmux ids). One tab, no new row.
+    ///
+    /// The terminal row's `profile_id` is set to the new profile BEFORE the
+    /// respawn so a respawn failure still leaves the row on the new account
+    /// (the pane shows the error; the user can retry). The transcript was
+    /// already carried into the destination config dir upstream.
+    private func inPlaceSwapRespawn(
+        oldTerminal: Terminal,
+        worktree: Worktree,
+        spawnCommand: String,
+        env: [String: String],
+        sensitiveEnv: [String: String],
+        storedSessionID: String,
+        newProfileID: UUID?,
+        scheduleRecapture: Bool,
+        cols: Int,
+        rows: Int
+    ) async throws -> RPCResponse {
+        let server = worktree.tmuxServer
+        let paneID = oldTerminal.tmuxPaneID
+        let windowID = oldTerminal.tmuxWindowID
+
+        // 1. Gracefully interrupt the pane's current Claude before respawn.
+        //    `respawn-window -k` will forcibly replace it regardless, but a
+        //    graceful stop lets Claude finish flushing and avoids yanking an
+        //    in-flight generation. Best-effort — never blocks the swap.
+        await gracefullyInterruptPane(server: server, paneID: paneID)
+
+        // 2. Update the terminal row to the new profile + session up front, so a
+        //    later respawn failure still leaves the row on the new account.
+        try await db.terminals.setProfileID(id: oldTerminal.id, profileID: newProfileID)
+        try await db.terminals.updateSessionID(id: oldTerminal.id, sessionID: storedSessionID)
+
+        // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
+        //    row survive.
+        do {
+            try await tmux.respawnWindow(
+                server: server,
+                windowID: windowID,
+                cwd: worktree.path,
+                shellCommand: spawnCommand,
+                env: env,
+                sensitiveEnv: sensitiveEnv,
+                cols: cols,
+                rows: rows
+            )
+        } catch {
+            // Failure path: the row keeps the new profile id (respawn can be
+            // retried); the pane surfaces the error. Log clearly and still
+            // return the updated row so the app reflects the new account.
+            logger.warning("inPlace swap: respawn failed for terminal \(oldTerminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+
+        subscriptions.broadcast(delta: .terminalSessionUpdated(TerminalSessionDelta(
+            terminalID: oldTerminal.id,
+            worktreeID: worktree.id,
+            sessionID: storedSessionID,
+            transcriptPath: oldTerminal.transcriptPath
+        )))
+        // Update the row's account chip in place — same terminal id, new profile.
+        subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
+            terminalID: oldTerminal.id,
+            worktreeID: worktree.id,
+            newProfileID: newProfileID
+        )))
+
+        if scheduleRecapture {
+            scheduleSessionRecapture(
+                terminalID: oldTerminal.id, paneID: paneID, server: server
+            )
+        }
+
+        guard let updated = try await db.terminals.get(id: oldTerminal.id) else {
+            return RPCResponse(error: "Terminal vanished after swap")
+        }
+        logger.info("inPlace swap: terminal \(oldTerminal.id, privacy: .public) switched to profile \(newProfileID?.uuidString ?? "ambient", privacy: .public) in window \(windowID, privacy: .public)")
+        return try RPCResponse(result: updated)
+    }
+
+    /// Best-effort graceful interrupt of a pane's foreground program before an
+    /// in-place respawn: Escape (stop a Claude generation), a brief settle,
+    /// then C-c C-c, another settle, then a SIGTERM to the pane pid as a
+    /// backstop. Every step is best-effort — failures are logged and ignored,
+    /// since the subsequent `respawn-window -k` guarantees termination.
+    private func gracefullyInterruptPane(server: String, paneID: String) async {
+        // Escape: ask Claude to stop generating.
+        try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
+        try? await Task.sleep(for: .milliseconds(150))
+        // C-c C-c: interrupt / exit the TUI.
+        try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
+        try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
+        try? await Task.sleep(for: .milliseconds(150))
+        // SIGTERM the pane pid as a backstop (respawn -k is the real guarantee).
+        if let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
+           let pid = Int32(pidStr), pid > 0 {
+            kill(pid, SIGTERM)
+        }
+    }
+
+    /// Schedule the post-resume session-id recapture. `claude --resume <id>`
+    /// forks the conversation into a NEW session file with a fresh UUID; mirror
+    /// SuspendResumeCoordinator's pattern — wait ~5s for Claude to settle, then
+    /// capture the new id from the pane and persist it against `terminalID`.
+    private func scheduleSessionRecapture(terminalID: UUID, paneID: String, server: String) {
+        let tmuxRef = self.tmux
+        let dbRef = self.db
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            let detector = ClaudeStateDetector(tmux: tmuxRef)
+            if let recaptured = await detector.captureSessionID(server: server, paneID: paneID) {
+                try? await dbRef.terminals.updateSessionID(id: terminalID, sessionID: recaptured)
+            }
+        }
     }
 
     func handleTerminalSend(_ paramsData: Data) async throws -> RPCResponse {

@@ -134,10 +134,11 @@ struct RowActionMenuActions {
             Task { await appState.archiveWorktree(id: wtID) }
 
         case let .forkSession(terminalID, profileID):
-            // Duplicate the conversation into a new tab on the SAME account —
+            // Duplicate the conversation into a NEW tab on the SAME account —
             // swapTerminalProfile with the session's own profileID (nil = same
-            // ambient login). The daemon resumes/forks the session.
-            Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: profileID) }
+            // ambient login), in `.fork` mode so the daemon forks into a new
+            // tab rather than switching in place.
+            Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: profileID, mode: .fork) }
         }
     }
 

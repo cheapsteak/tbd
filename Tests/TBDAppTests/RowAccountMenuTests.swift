@@ -47,9 +47,11 @@ private func claudeTerminal(id: UUID = UUID(),
                             label: String? = nil,
                             profileID: UUID? = nil,
                             createdAt: Date = Date(timeIntervalSince1970: 0),
-                            kind: TerminalKind? = .claude) -> Terminal {
+                            kind: TerminalKind? = .claude,
+                            activityState: TerminalActivityState = .unknown) -> Terminal {
     Terminal(id: id, worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-             label: label, createdAt: createdAt, profileID: profileID, kind: kind)
+             label: label, createdAt: createdAt, profileID: profileID, kind: kind,
+             activityState: activityState)
 }
 
 /// Live-verified Gmail shape: 5h 0% resetting 23:10, weekly 76%, Fable 100%.
@@ -210,5 +212,29 @@ struct RowAccountMenuSwitchTargetTests {
         #expect(targets.count == 2)
         #expect(targets.allSatisfy { $0.isSelectable && !$0.isCurrent })
         #expect(targets.allSatisfy { $0.action(terminalID: UUID()) != nil })
+    }
+
+    // MARK: - Busy-aware switch footer
+
+    @Test func idleSessionFooterHasNoInterruptWarning() {
+        let work = entry(name: "Work", loginIdentity: "a@b.co")
+        let term = claudeTerminal(profileID: nil, activityState: .idle)
+        let session = RowAccountMenu.session(
+            terminal: term, fallbackIndex: 1, profiles: [work], timeZone: utc
+        )
+        #expect(session.isBusy == false)
+        #expect(session.switchFooter == RowAccountMenu.switchAccountCaption)
+        #expect(!session.switchFooter.contains(RowAccountMenu.interruptsRunSuffix))
+    }
+
+    @Test func busySessionFooterWarnsAboutInterrupt() {
+        let work = entry(name: "Work", loginIdentity: "a@b.co")
+        let term = claudeTerminal(profileID: nil, activityState: .working)
+        let session = RowAccountMenu.session(
+            terminal: term, fallbackIndex: 1, profiles: [work], timeZone: utc
+        )
+        #expect(session.isBusy == true)
+        #expect(session.switchFooter.hasPrefix(RowAccountMenu.switchAccountCaption))
+        #expect(session.switchFooter.hasSuffix(RowAccountMenu.interruptsRunSuffix))
     }
 }

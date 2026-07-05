@@ -849,6 +849,8 @@ final class AppState: ObservableObject {
             applyTerminalCreatedDelta(d)
         case .terminalActivityUpdated(let d):
             applyTerminalActivityDelta(d)
+        case .terminalProfileChanged(let d):
+            applyTerminalProfileDelta(d)
         case .worktreeMoved(let d):
             applyWorktreeMovedDelta(d)
         case .worktreeArchived(let d):
@@ -908,6 +910,15 @@ final class AppState: ObservableObject {
             return
         }
         terminals[delta.worktreeID]?[idx].activityState = delta.activityState
+    }
+
+    /// Seamless in-place "Switch account": the terminal row is unchanged except
+    /// its `profileID`, so update it in place and the account chip re-renders.
+    private func applyTerminalProfileDelta(_ delta: TerminalProfileDelta) {
+        guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
+            return
+        }
+        terminals[delta.worktreeID]?[idx].profileID = delta.newProfileID
     }
 
     /// Update the in-place usage entry for a single profile. If no match,
