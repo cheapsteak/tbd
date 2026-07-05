@@ -293,3 +293,123 @@ struct MergeGateTests {
         #expect(Bool(false), "Expected wouldMerge decision")
     }
 }
+
+@Suite("NightwatchPolicy Unit Tests")
+struct NightwatchPolicyTests {
+
+    @Test("Policy loader: returns conservative defaults when file is absent")
+    func policyLoaderAbsentFile() throws {
+        let tmpDir = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: URL(fileURLWithPath: "/"),
+            create: true
+        ).path
+
+        defer {
+            try? FileManager.default.removeItem(atPath: tmpDir)
+        }
+
+        let policy = NightwatchPolicy.load(repoPath: tmpDir)
+
+        #expect(policy == .conservativeDefaults, "Should return conservative defaults when policy file is absent")
+    }
+
+    @Test("Policy loader: loads valid policy file")
+    func policyLoaderValidFile() throws {
+        let tmpDir = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: URL(fileURLWithPath: "/"),
+            create: true
+        ).path
+
+        defer {
+            try? FileManager.default.removeItem(atPath: tmpDir)
+        }
+
+        // Create .nightwatch directory and policy.json
+        let nightwatchDir = (tmpDir as NSString).appendingPathComponent(".nightwatch")
+        try FileManager.default.createDirectory(atPath: nightwatchDir, withIntermediateDirectories: true)
+
+        let policyJSON = """
+        {
+            "impactMapGlobs": ["**/dangerous/**", "**/critical/**"],
+            "compiledSizeCeiling": 100,
+            "testHoldList": [42, 99],
+            "allowRebaseReclearance": true
+        }
+        """
+
+        let policyPath = (nightwatchDir as NSString).appendingPathComponent("policy.json")
+        try policyJSON.write(toFile: policyPath, atomically: true, encoding: .utf8)
+
+        let policy = NightwatchPolicy.load(repoPath: tmpDir)
+
+        #expect(policy.impactMapGlobs == ["**/dangerous/**", "**/critical/**"], "Should load impactMapGlobs")
+        #expect(policy.compiledSizeCeiling == 100, "Should load compiledSizeCeiling")
+        #expect(policy.testHoldList == [42, 99], "Should load testHoldList")
+        #expect(policy.allowRebaseReclearance == true, "Should load allowRebaseReclearance")
+    }
+
+    @Test("Policy loader: returns conservative defaults on malformed JSON")
+    func policyLoaderMalformedFile() throws {
+        let tmpDir = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: URL(fileURLWithPath: "/"),
+            create: true
+        ).path
+
+        defer {
+            try? FileManager.default.removeItem(atPath: tmpDir)
+        }
+
+        // Create .nightwatch directory with malformed policy.json
+        let nightwatchDir = (tmpDir as NSString).appendingPathComponent(".nightwatch")
+        try FileManager.default.createDirectory(atPath: nightwatchDir, withIntermediateDirectories: true)
+
+        let malformedJSON = "{ invalid json ]"
+        let policyPath = (nightwatchDir as NSString).appendingPathComponent("policy.json")
+        try malformedJSON.write(toFile: policyPath, atomically: true, encoding: .utf8)
+
+        let policy = NightwatchPolicy.load(repoPath: tmpDir)
+
+        #expect(policy == .conservativeDefaults, "Should return conservative defaults on malformed JSON")
+    }
+
+    @Test("Policy loader: handles partial policy file with defaults")
+    func policyLoaderPartialFile() throws {
+        let tmpDir = try FileManager.default.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: URL(fileURLWithPath: "/"),
+            create: true
+        ).path
+
+        defer {
+            try? FileManager.default.removeItem(atPath: tmpDir)
+        }
+
+        // Create .nightwatch directory with partial policy.json
+        let nightwatchDir = (tmpDir as NSString).appendingPathComponent(".nightwatch")
+        try FileManager.default.createDirectory(atPath: nightwatchDir, withIntermediateDirectories: true)
+
+        // Only provide impactMapGlobs; let other fields use defaults
+        let partialJSON = """
+        {
+            "impactMapGlobs": ["**/custom/**"]
+        }
+        """
+
+        let policyPath = (nightwatchDir as NSString).appendingPathComponent("policy.json")
+        try partialJSON.write(toFile: policyPath, atomically: true, encoding: .utf8)
+
+        let policy = NightwatchPolicy.load(repoPath: tmpDir)
+
+        #expect(policy.impactMapGlobs == ["**/custom/**"], "Should load custom impactMapGlobs")
+        #expect(policy.compiledSizeCeiling == 50, "Should use default compiledSizeCeiling")
+        #expect(policy.testHoldList == [], "Should use default testHoldList")
+        #expect(policy.allowRebaseReclearance == false, "Should use default allowRebaseReclearance")
+    }
+}

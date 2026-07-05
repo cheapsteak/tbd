@@ -1,5 +1,6 @@
 import Foundation
 import TBDShared
+import os
 
 // MARK: - Gate Decision Types
 
@@ -129,6 +130,52 @@ public struct NightwatchPolicy: Sendable, Equatable {
         testHoldList: [],
         allowRebaseReclearance: false
     )
+
+    /// Load policy from `<repo>/.nightwatch/policy.json`.
+    /// Returns conservativeDefaults if file is absent or unparseable (with one warning logged if malformed).
+    public static func load(repoPath: String) -> NightwatchPolicy {
+        let policyPath = (repoPath as NSString).appendingPathComponent(".nightwatch/policy.json")
+        guard FileManager.default.fileExists(atPath: policyPath) else {
+            return conservativeDefaults
+        }
+
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: policyPath))
+            let decoded = try JSONDecoder().decode(NightwatchPolicy.self, from: data)
+            return decoded
+        } catch {
+            let logger = Logger(subsystem: "com.tbd.daemon", category: "nightwatch.policy")
+            logger.warning("Failed to parse nightwatch policy at \(policyPath, privacy: .public): \(error, privacy: .public). Using conservative defaults.")
+            return conservativeDefaults
+        }
+    }
+}
+
+// MARK: - Codable support for NightwatchPolicy
+
+extension NightwatchPolicy: Codable {
+    enum CodingKeys: String, CodingKey {
+        case impactMapGlobs = "impactMapGlobs"
+        case compiledSizeCeiling = "compiledSizeCeiling"
+        case testHoldList = "testHoldList"
+        case allowRebaseReclearance = "allowRebaseReclearance"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        impactMapGlobs = try container.decodeIfPresent([String].self, forKey: .impactMapGlobs) ?? []
+        compiledSizeCeiling = try container.decodeIfPresent(Int.self, forKey: .compiledSizeCeiling) ?? 50
+        testHoldList = try container.decodeIfPresent([Int].self, forKey: .testHoldList) ?? []
+        allowRebaseReclearance = try container.decodeIfPresent(Bool.self, forKey: .allowRebaseReclearance) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(impactMapGlobs, forKey: .impactMapGlobs)
+        try container.encode(compiledSizeCeiling, forKey: .compiledSizeCeiling)
+        try container.encode(testHoldList, forKey: .testHoldList)
+        try container.encode(allowRebaseReclearance, forKey: .allowRebaseReclearance)
+    }
 }
 
 // MARK: - Merge Gate Evaluator
