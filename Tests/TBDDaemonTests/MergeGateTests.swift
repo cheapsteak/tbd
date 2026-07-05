@@ -22,10 +22,10 @@ struct MergeGateTests {
         )
         let decision = gate.evaluate(input: input)
 
-        #expect(
-            if case .wouldMerge = decision { true } else { false },
-            "Expected wouldMerge decision for valid input"
-        )
+        guard case .wouldMerge = decision else {
+            Issue.record("Expected wouldMerge decision for valid input, got \(decision)")
+            return
+        }
     }
 
     @Test("Safety floor: fails for draft PR")
@@ -221,10 +221,10 @@ struct MergeGateTests {
         )
         let decision = gate.evaluate(input: input)
 
-        #expect(
-            if case .wouldMerge = decision { true } else { false },
-            "Expected wouldMerge when test coverage is adequate"
-        )
+        guard case .wouldMerge = decision else {
+            Issue.record("Expected wouldMerge when test coverage is adequate, got \(decision)")
+            return
+        }
     }
 
     @Test("Hard hold: doc-only changes (no test requirement)")
@@ -241,10 +241,10 @@ struct MergeGateTests {
         )
         let decision = gate.evaluate(input: input)
 
-        #expect(
-            if case .wouldMerge = decision { true } else { false },
-            "Expected wouldMerge for doc-only changes"
-        )
+        guard case .wouldMerge = decision else {
+            Issue.record("Expected wouldMerge for doc-only changes, got \(decision)")
+            return
+        }
     }
 
     // MARK: - Policy Tests
