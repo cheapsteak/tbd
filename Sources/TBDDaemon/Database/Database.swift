@@ -669,7 +669,7 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "config", column: "nightwatch_mode", type: .text, defaults: "off")
         }
 
-        migrator.registerMigration("v39_clearance_ledger") { db in
+        migrator.registerMigration("v41_clearance_ledger") { db in
             try db.create(table: "clearance") { t in
                 t.primaryKey("id", .text).notNull()
                 t.column("pr_number", .integer).notNull()
@@ -687,7 +687,7 @@ public final class TBDDatabase: Sendable {
             """)
         }
 
-        migrator.registerMigration("v40_audit_log") { db in
+        migrator.registerMigration("v42_audit_log") { db in
             try db.create(table: "audit_log") { t in
                 t.primaryKey("id", .text).notNull()
                 t.column("action", .text).notNull()

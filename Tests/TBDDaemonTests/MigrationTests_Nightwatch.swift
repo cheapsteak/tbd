@@ -34,7 +34,7 @@ struct MigrationTests_Nightwatch {
         #expect(columnNames.contains("void_reason"))
     }
 
-    @Test("v40_audit_log migration creates table with correct schema")
+    @Test("v42_audit_log migration creates table with correct schema")
     func v40AuditLogSchema() throws {
         let db = try TBDDatabase(inMemory: true)
 
