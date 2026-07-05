@@ -61,7 +61,7 @@ struct MigrationTests_Nightwatch {
     }
 
     @Test("Clearance table has correct primary key")
-    func clearancePrimaryKey() throws {
+    func clearancePrimaryKey() async throws {
         let db = try TBDDatabase(inMemory: true)
 
         // Insert a record
@@ -93,7 +93,7 @@ struct MigrationTests_Nightwatch {
     }
 
     @Test("Audit log table allows multiple entries")
-    func auditLogAllowsMultiple() throws {
+    func auditLogAllowsMultiple() async throws {
         let db = try TBDDatabase(inMemory: true)
 
         try await db.audit.logAction(AuditLogEntry(action: .wouldMerge, prNumber: 1))

@@ -70,7 +70,8 @@ public struct ClearanceStore: Sendable {
         }
     }
 
-    /// Void all clearances for a PR by PR number and repo due to a new SHA.
+    /// Void every live clearance for the PR that is pinned to a SHA other
+    /// than `newSHA` — a clearance granted on the current head stays valid.
     public func voidBySHA(pr: Int, repo: String, newSHA: String, reason: String) async throws {
         try await writer.write { db in
             try db.execute(
@@ -78,8 +79,9 @@ public struct ClearanceStore: Sendable {
                 UPDATE clearance
                 SET void_reason = ?
                 WHERE pr_number = ? AND repo = ? AND void_reason IS NULL
+                  AND cleared_when_sha != ?
                 """,
-                arguments: [reason, pr, repo]
+                arguments: [reason, pr, repo, newSHA]
             )
         }
     }

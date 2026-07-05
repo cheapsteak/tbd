@@ -313,15 +313,46 @@ public struct MergeGate: Sendable {
     }
 
     private func fileMatchesGlob(files: [String], glob: String) -> Bool {
-        // Simple glob matching: * = any characters in path component, ** = any depth.
-        let pattern = glob.replacingOccurrences(of: ".", with: "\\.")
-            .replacingOccurrences(of: "**/", with: ".*\\/")
-            .replacingOccurrences(of: "*", with: "[^/]*")
-        guard let regex = try? NSRegularExpression(pattern: "^" + pattern + "$") else {
+        guard let regex = try? NSRegularExpression(pattern: Self.globToRegexPattern(glob)) else {
             return false
         }
         return files.contains { path in
             regex.firstMatch(in: path, range: NSRange(path.startIndex..., in: path)) != nil
         }
+    }
+
+    /// Translate a path glob to an anchored regex by scanning characters —
+    /// NOT by cascading string replacements, which corrupt each other's
+    /// output (a prior version turned its own `.*` into `.[^/]*`).
+    /// Semantics: `**/` = zero or more whole path segments (so `**/x` also
+    /// matches a repo-root `x`), `**` = any characters incl. `/`,
+    /// `*` = any characters within one segment.
+    static func globToRegexPattern(_ glob: String) -> String {
+        var out = "^"
+        var i = glob.startIndex
+        while i < glob.endIndex {
+            let c = glob[i]
+            if c == "*" {
+                let next = glob.index(after: i)
+                if next < glob.endIndex, glob[next] == "*" {
+                    let after = glob.index(after: next)
+                    if after < glob.endIndex, glob[after] == "/" {
+                        out += "(?:[^/]+/)*"   // "**/" — zero or more segments
+                        i = glob.index(after: after)
+                    } else {
+                        out += ".*"            // "**" — any depth
+                        i = after
+                    }
+                } else {
+                    out += "[^/]*"             // "*" — within one segment
+                    i = next
+                }
+            } else {
+                if #"\^$.|?+()[]{}"#.contains(c) { out += "\\" }
+                out.append(c)
+                i = glob.index(after: i)
+            }
+        }
+        return out + "$"
     }
 }

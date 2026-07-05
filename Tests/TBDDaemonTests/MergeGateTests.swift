@@ -271,6 +271,30 @@ struct MergeGateTests {
         #expect(Bool(false), "Expected conservative policy to hold scripts/**")
     }
 
+    @Test("Glob translation: **/ matches repo-root paths and nesting; * stays within a segment")
+    func globTranslationSemantics() {
+        // The regression: cascading replacements meant "**/x/**" could NEVER
+        // match a repo-root "x/..." path, silently no-opping the default holds.
+        let cases: [(glob: String, path: String, matches: Bool)] = [
+            ("**/.nightwatch/**", ".nightwatch/policy.json", true),   // root-level
+            ("**/.nightwatch/**", "a/b/.nightwatch/policy.json", true),
+            ("**/scripts/**", "scripts/ci/deploy.sh", true),          // root-level
+            ("**/scripts/**", "tools/scripts/x.sh", true),
+            ("**/scripts/**", "Sources/main.swift", false),
+            ("**/.claude/**", ".claude/settings.json", true),
+            ("src/*.swift", "src/main.swift", true),
+            ("src/*.swift", "src/nested/main.swift", false),          // * ≠ cross-segment
+        ]
+        for c in cases {
+            let pattern = MergeGate.globToRegexPattern(c.glob)
+            let regex = try? NSRegularExpression(pattern: pattern)
+            let hit = regex.map {
+                $0.firstMatch(in: c.path, range: NSRange(c.path.startIndex..., in: c.path)) != nil
+            } ?? false
+            #expect(hit == c.matches, "\(c.glob) vs \(c.path): expected \(c.matches), got \(hit) (pattern: \(pattern))")
+        }
+    }
+
     // MARK: - Decision Type Tests
 
     @Test("wouldMerge decision includes clearance ID")
@@ -347,7 +371,9 @@ struct NightwatchPolicyTests {
         let policy = NightwatchPolicy.load(repoPath: tmpDir)
 
         #expect(policy.impactMapGlobs == ["**/dangerous/**", "**/critical/**"], "Should load impactMapGlobs")
-        #expect(policy.compiledSizeCeiling == 100, "Should load compiledSizeCeiling")
+        // 100 in the file exceeds the compiled hard ceiling → clamped to 50.
+        #expect(policy.compiledSizeCeiling == NightwatchPolicy.hardSizeCeiling,
+                "Ceiling above the compiled max must clamp, never widen")
         #expect(policy.testHoldList == [42, 99], "Should load testHoldList")
         #expect(policy.allowRebaseReclearance == true, "Should load allowRebaseReclearance")
     }
