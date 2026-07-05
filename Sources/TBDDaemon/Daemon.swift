@@ -60,6 +60,7 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
+    public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     public nonisolated(unsafe) var oauthUsagePoller: OAuthProfileUsagePoller?
     /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
@@ -479,6 +480,20 @@ public final class Daemon: Sendable {
                     guard !Task.isCancelled else { break }
                 }
             }
+
+            // 14. Auto-hibernate idle sweep. Cheap poll every 30s; the actual
+            // kill decision is made against the configured idle window (default
+            // 30 min) with a debounce, inside the coordinator. The feature's
+            // master switch is read from config on each sweep, so toggling it
+            // off takes effect without a restart.
+            let hibernationCoordinator = rpcRouter.hibernationCoordinator
+            self.hibernationSweepTask = Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(30))
+                    guard !Task.isCancelled else { break }
+                    await hibernationCoordinator.sweep()
+                }
+            }
         } else {
             daemonLogger.info("Mock mode: skipping periodic background tasks")
         }
@@ -509,6 +524,7 @@ public final class Daemon: Sendable {
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
         reaperTask?.cancel()
+        hibernationSweepTask?.cancel()
 
         // Stop servers
         if let sock = socketServer {

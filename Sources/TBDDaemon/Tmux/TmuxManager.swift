@@ -226,6 +226,10 @@ public struct TmuxManager: Sendable {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_pid}"]
     }
 
+    public static func paneCurrentPathQuery(server: String, paneID: String) -> [String] {
+        ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_current_path}"]
+    }
+
     public static func serverPIDQuery(server: String) -> [String] {
         ["-L", server, "display-message", "-p", "#{pid}"]
     }
@@ -440,6 +444,15 @@ public struct TmuxManager: Sendable {
     public func panePID(server: String, paneID: String) async throws -> String {
         if dryRun { return "0" }
         let args = Self.panePIDQuery(server: server, paneID: paneID)
+        return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The pane's current working directory (`#{pane_current_path}`). Used by
+    /// the hibernation wake path to assert the cwd matches the worktree before
+    /// a cwd-scoped `claude --resume`.
+    public func paneCurrentPath(server: String, paneID: String) async throws -> String {
+        if dryRun { return "" }
+        let args = Self.paneCurrentPathQuery(server: server, paneID: paneID)
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

@@ -1,0 +1,56 @@
+import Foundation
+import TBDShared
+
+extension RPCRouter {
+
+    /// `terminal.hibernate` — manually hibernate one Claude terminal (kill its
+    /// process, keep the tmux window). Honors the running/permission rails.
+    func handleTerminalHibernate(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalHibernateParams.self, from: paramsData)
+        let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
+        switch result {
+        case .ok, .alreadyHibernated:
+            return .ok()
+        case .notEligible(let reason):
+            return RPCResponse(error: reason)
+        case .notFound:
+            return RPCResponse(error: "Terminal not found")
+        }
+    }
+
+    /// `terminal.wake` — respawn `claude --resume <id>` in the hibernated
+    /// terminal's kept-alive window. Idempotent.
+    func handleTerminalWake(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalWakeParams.self, from: paramsData)
+        let result = await hibernationCoordinator.wake(
+            terminalID: params.terminalID, cols: params.cols, rows: params.rows
+        )
+        switch result {
+        case .ok, .notHibernated, .inFlight:
+            // notHibernated / inFlight are benign no-ops for an idempotent wake.
+            return .ok()
+        case .notFound:
+            return RPCResponse(error: "Terminal not found")
+        case .noSessionID:
+            return RPCResponse(error: "No session ID to resume")
+        }
+    }
+
+    /// `terminal.setKeepWarm` — pin/unpin a terminal against auto-hibernation.
+    func handleTerminalSetKeepWarm(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSetKeepWarmParams.self, from: paramsData)
+        let ok = await hibernationCoordinator.setKeepWarm(
+            terminalID: params.terminalID, keepWarm: params.keepWarm
+        )
+        return ok ? .ok() : RPCResponse(error: "Terminal not found")
+    }
+
+    /// `config.setAutoHibernate` — master enable + idle-timeout minutes.
+    func handleConfigSetAutoHibernate(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetAutoHibernateParams.self, from: paramsData)
+        try await db.config.setAutoHibernate(enabled: params.enabled, idleMinutes: params.idleMinutes)
+        // Reuse the config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+}

@@ -48,6 +48,14 @@ struct RowActionMenuActions {
             hasSuspendedClaude: terminals.contains {
                 $0.isClaudeResumable && $0.suspendedAt != nil
             },
+            hasHibernatableClaude: terminals.contains { $0.isManuallyHibernatable },
+            hasHibernatedClaude: terminals.contains { $0.isHibernated },
+            hasUnpinnedClaude: terminals.contains {
+                $0.isClaudeResumable && !$0.keepWarm && !$0.isHibernated
+            },
+            hasKeepWarmClaude: terminals.contains {
+                $0.isClaudeResumable && $0.keepWarm
+            },
             hasActiveChildren: !appState.children(of: worktree.id).isEmpty,
             pathIsEmpty: worktree.path.isEmpty,
             hasRepoID: worktree.repoID != nil,
@@ -113,6 +121,36 @@ struct RowActionMenuActions {
             Task {
                 try? await appState.daemonClient.worktreeResume(worktreeID: wtID)
                 await appState.refreshTerminals(worktreeID: wtID)
+            }
+
+        case .hibernateNow:
+            let wtID = worktree.id
+            let ids = terminals.filter { $0.isManuallyHibernatable }.map { $0.id }
+            Task {
+                for id in ids {
+                    await appState.hibernateTerminal(terminalID: id, worktreeID: wtID)
+                }
+            }
+
+        case .wakeHibernated:
+            let wtID = worktree.id
+            let ids = terminals.filter { $0.isHibernated }.map { $0.id }
+            Task {
+                for id in ids {
+                    await appState.wakeTerminal(terminalID: id, worktreeID: wtID)
+                }
+            }
+
+        case let .toggleKeepWarm(enable):
+            let wtID = worktree.id
+            // Only flip terminals not already in the requested state.
+            let ids = terminals
+                .filter { $0.isClaudeResumable && $0.keepWarm != enable && !$0.isHibernated }
+                .map { $0.id }
+            Task {
+                for id in ids {
+                    await appState.setTerminalKeepWarm(terminalID: id, keepWarm: enable, worktreeID: wtID)
+                }
             }
 
         case .createNestedWorktree:

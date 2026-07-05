@@ -143,6 +143,33 @@ struct GeneralSettingsTab: View {
                     .help("Skip the interactive permission prompt when launching claude in new worktrees")
             }
 
+            Section("Session Hibernation") {
+                Toggle("Auto-hibernate idle Claude sessions", isOn: Binding(
+                    get: { appState.autoHibernateEnabled },
+                    set: { newValue in
+                        Task { await appState.setAutoHibernate(
+                            enabled: newValue, idleMinutes: appState.hibernateIdleMinutes) }
+                    }
+                ))
+                .help("Kill the claude process of a session idle at rest, keeping its tab alive. It respawns automatically on focus. The prompt cache has already expired by then, so resume is cheap. Never touches a running turn, a permission prompt, or a keep-warm session.")
+
+                if appState.autoHibernateEnabled {
+                    Stepper(
+                        "Idle before hibernating: \(appState.hibernateIdleMinutes) min",
+                        value: Binding(
+                            get: { appState.hibernateIdleMinutes },
+                            set: { newValue in
+                                Task { await appState.setAutoHibernate(
+                                    enabled: appState.autoHibernateEnabled, idleMinutes: newValue) }
+                            }
+                        ),
+                        in: 5...240,
+                        step: 5
+                    )
+                    .help("How long a Claude session must sit idle before it's hibernated.")
+                }
+            }
+
             Section {
                 EnvOverridesEditor(
                     initial: appState.globalEnvOverrides,

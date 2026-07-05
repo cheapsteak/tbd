@@ -166,6 +166,10 @@ public enum RPCMethod {
     public static let configSetScratchInstructions = "config.setScratchInstructions"
     public static let configSetScratchRenamePrompt = "config.setScratchRenamePrompt"
     public static let configSetScratchProfileOverride = "config.setScratchProfileOverride"
+    public static let terminalHibernate = "terminal.hibernate"
+    public static let terminalWake = "terminal.wake"
+    public static let terminalSetKeepWarm = "terminal.setKeepWarm"
+    public static let configSetAutoHibernate = "config.setAutoHibernate"
     public static let scratchCreate = "scratch.create"
     public static let scratchDelete = "scratch.delete"
     public static let scratchPromote = "scratch.promote"
@@ -1022,6 +1026,53 @@ public struct ConfigSetScratchRenamePromptParams: Codable, Sendable {
 public struct ConfigSetScratchProfileOverrideParams: Codable, Sendable {
     public let profileID: UUID?
     public init(profileID: UUID?) { self.profileID = profileID }
+}
+
+// MARK: - Session Hibernation
+
+/// Params for `terminal.hibernate` — manually hibernate one Claude terminal
+/// (kill its process, keep the tmux window). Subject to the running/permission
+/// rails but not keep-warm or idle-time.
+public struct TerminalHibernateParams: Codable, Sendable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+/// Params for `terminal.wake` — respawn `claude --resume <id>` in the
+/// hibernated terminal's kept-alive tmux window. Idempotent: waking a
+/// non-hibernated terminal is a no-op.
+public struct TerminalWakeParams: Codable, Sendable {
+    public let terminalID: UUID
+    /// Initial tmux window size in cells (see TerminalSwapProfileParams).
+    public let cols: Int?
+    public let rows: Int?
+    public init(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) {
+        self.terminalID = terminalID
+        self.cols = cols
+        self.rows = rows
+    }
+}
+
+/// Params for `terminal.setKeepWarm` — pin/unpin a terminal against
+/// auto-hibernation.
+public struct TerminalSetKeepWarmParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let keepWarm: Bool
+    public init(terminalID: UUID, keepWarm: Bool) {
+        self.terminalID = terminalID
+        self.keepWarm = keepWarm
+    }
+}
+
+/// Params for `config.setAutoHibernate` — master enable + idle-timeout minutes
+/// for the auto-hibernate idle timer.
+public struct ConfigSetAutoHibernateParams: Codable, Sendable {
+    public let enabled: Bool
+    public let idleMinutes: Int
+    public init(enabled: Bool, idleMinutes: Int) {
+        self.enabled = enabled
+        self.idleMinutes = idleMinutes
+    }
 }
 
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.
