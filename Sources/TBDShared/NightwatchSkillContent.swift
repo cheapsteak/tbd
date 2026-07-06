@@ -21,7 +21,7 @@ Keep a fleet of TBD agent worktrees unblocked, productive, and gated while the h
 
 | Tier | Runs on | Does |
 |---|---|---|
-| **0** | `scripts/tick.py` — pure Python, $0 | sweep all panes (every tmux server), daemon + proxy health, classify every agent, split into auto/judgment/human, write `queue/tick-report.json` |
+| **0** | `scripts/tick.py` — pure Python, $0 | sweep all panes (every tmux server), daemon health + fleet capacity, classify every agent, split into auto/judgment/human, write `queue/tick-report.json` |
 | **1** | local model (Ollama) or Haiku — *future* | classify ambiguous panes, triage escalations, draft routine nudges. Off the Opus quota. |
 | **2** | **Opus — rare** | resolve genuinely ambiguous decisions, the deep review, any prod/security/CJI/access call. Wakes only when `queue/decisions.jsonl` has items. |
 | **Human** | Adam | merge PRs, proxy/IAM/prod restarts, Slack pings, access, the capacity (Bedrock) lever. |
@@ -40,7 +40,7 @@ python3 scripts/tick.py --prs  # also gate open PRs (wraps loop_perfect_sweep.py
 - `queue/decisions.jsonl` — append-only judgment items (decisions to resolve, maybe-archive)
 - `queue/for-adam.md` — human-only items
 
-**Capacity-aware backoff is built in:** when the proxy has `< MIN_ROUTABLE` (2) accounts routable, or is degraded/unreachable, tick.py *holds* all nudges (nudging into a saturated proxy only adds contention) and says so. This is the rule I otherwise have to notice by hand.
+**Capacity-aware backoff is built in:** there is no shared proxy pool anymore (better-ccflare was removed 2026-07-01 — every session talks to Anthropic directly over its own OAuth), so capacity exhaustion is a *per-account* event that shows up per-agent as a rate-limited pane. tick.py counts those and, when `RATE_SATURATION_MIN` (3) or more agents are capped at once — a genuine cohort-wide crunch — *holds* all nudges (piling onto capped accounts only adds contention) and says so. Individual rate-limited agents are never nudged either (a retry just re-hits the cap). This is the rule I otherwise have to notice by hand.
 
 ## When paged (Tier 2 — Opus drains the queue)
 
@@ -78,7 +78,6 @@ When enabled, launchd runs `tick.py` on the interval ($0, no model), stays silen
 and on exit 10 (judgment queued) records a marker + fires `tbd notify`. This is the durable,
 quota-free replacement for waking Opus on a timer. It is intentionally NOT loaded by the
 plugin installer — you turn it on only where you want a fleet babysat.
-
 """#
 
     public static let tickPy: String = #"""
@@ -87,7 +86,7 @@ plugin installer — you turn it on only where you want a fleet babysat.
 nightwatch tick — Tier-0 orchestrator. NO model in the hot path.
 
 Reads the whole TBD fleet across all tmux servers, the babysitter daemon health,
-and the Opus proxy capacity, classifies every agent deterministically, and emits:
+and fleet-derived capacity, classifies every agent deterministically, and emits:
   - a structured tick-report.json  (machine-readable)
   - a short human summary to stdout
   - queue/decisions.jsonl   (items that need Tier-2 / Opus judgment)
@@ -96,7 +95,7 @@ and the Opus proxy capacity, classifies every agent deterministically, and emits
 Exit code 0 = nothing needs Opus (silent-ok).  Exit code 10 = judgment items queued.
 Run with --prs to also gate open PRs (makes gh calls — skip during GitHub rate crunch).
 """
-import subprocess, os, re, json, time, sys, urllib.request
+import subprocess, os, re, json, time, sys
 
 HOME = os.path.expanduser("~")
 DB = f"{HOME}/tbd/state.db"
@@ -104,7 +103,13 @@ SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QUEUE = f"{SKILL}/queue"
 CFG = f"{SKILL}/config"
 DAEMON_LOG = "/tmp/babysitter.log"
-PROXY_HEALTH = "http://localhost:8080/health"
+
+# Fleet-wide backoff threshold. Post-ccflare (proxy removed 2026-07-01) there is no
+# shared account pool to saturate: every session talks to Anthropic directly over its
+# own OAuth, so capacity exhaustion is a PER-ACCOUNT event that surfaces per-agent as a
+# rate-limited pane. We only hold nudges during a genuine COHORT-wide crunch — when this
+# many agents are simultaneously rate-limited, more nudges just pile onto capped accounts.
+RATE_SATURATION_MIN = 3
 
 def sh(args, t=8):
     try: return subprocess.run(args, capture_output=True, text=True, timeout=t).stdout
@@ -140,17 +145,22 @@ def load_policies():
 POLICIES = load_policies()
 
 DECISION_PAT = re.compile(r"Enter to select|❯ 1\.|Ready to submit|Tab/Arrow keys to navigate|Do you want to proceed")
-ERR_PAT = re.compile(r"API error|rate.?limit|overloaded|529|503|All accounts.*unavailable|ECONNRESET|inference gateway", re.I)
+# RATE = genuine capacity exhaustion (per-account limit hit). Nudging these is pointless —
+# the retry just re-hits the cap — AND their count is the fleet's saturation signal.
+RATE_PAT = re.compile(r"rate.?limit|overloaded|usage limit|weekly limit|reset[s]? at|upgrade to increase|All accounts.*unavailable|529", re.I)
+# ERROR = transient/network faults worth a nudge (a resend usually clears them).
+ERR_PAT = re.compile(r"API error|503|ECONNRESET|inference gateway", re.I)
 DONE_PAT = re.compile(r"ready to archive|you're done|nothing (?:open|left)|winding down|wind down|/closeout|all merged", re.I)
 
 def classify(cap):
-    """Return state for a captured pane: WORKING / DECISION / ERROR / STRANDED / DONE / IDLE."""
+    """Return state for a captured pane: WORKING / DECISION / RATE / ERROR / STRANDED / DONE / IDLE."""
     lines = [x for x in cap.splitlines() if x.strip()]
     if not lines: return "EMPTY", ""
     tail = "\n".join(lines[-18:])
     if "esc to interrupt" in tail: return "WORKING", _lastmeaning(lines)
     if DECISION_PAT.search(tail): return "DECISION", _lastmeaning(lines)
     comp = _composer(lines)
+    if RATE_PAT.search(tail): return "RATE", comp or _lastmeaning(lines)
     if ERR_PAT.search(tail): return "ERROR", comp or _lastmeaning(lines)
     if DONE_PAT.search(tail): return "DONE", _lastmeaning(lines)
     if comp: return "STRANDED", comp
@@ -197,24 +207,6 @@ def daemon_health():
     age = int(time.time() - os.path.getmtime(DAEMON_LOG))
     return {"ok": age <= 720, "age_s": age, "reason": ("stale" if age > 720 else "fresh")}
 
-def proxy_health():
-    # bypass any HTTP(S)_PROXY env — localhost must be direct
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    def parse(raw):
-        d = json.loads(raw); p = d.get("pool", {})
-        return {"ok": d.get("status") == "ok", "status": d.get("status"),
-                "routable": p.get("routable"), "rate_limited": p.get("rate_limited"),
-                "configured": p.get("configured"), "next": p.get("next_available_at")}
-    try:
-        with opener.open(PROXY_HEALTH, timeout=5) as r:
-            return parse(r.read())
-    except urllib.error.HTTPError as e:
-        # ccflare returns 503 when degraded — the body still carries the pool JSON
-        try: return parse(e.read())
-        except Exception: return {"ok": False, "status": f"http{e.code}", "routable": 0}
-    except Exception as e:
-        return {"ok": False, "status": "unreachable", "err": str(e)[:60]}
-
 def fleet():
     rows = sh(["sqlite3","-separator","\t",DB,
       "SELECT t.tmuxPaneID, w.displayName, w.tmuxServer, t.id, w.repoID "
@@ -243,11 +235,9 @@ def fleet():
     return out
 
 def main():
-    capacity = proxy_health()
     rep = {
         "ts": int(time.time()),
         "daemon": daemon_health(),
-        "capacity": capacity,
         "hooks": {v["name"]: {"gate": v["policy"].get("gate",{}).get("ready_when"),
                               "advance_skill": v["policy"].get("advance_skill"),
                               "deploy_skill": v["policy"].get("deploy_skill")}
@@ -255,24 +245,35 @@ def main():
         "agents": fleet(),
     }
     # ---- deterministic triage (Tier 0): split into auto / judgment / human ----
-    # Don't nudge unless we can confirm healthy spare capacity. Unknown/unreachable/tight => hold.
-    MIN_ROUTABLE = 2   # need >=2 routable accounts before adding nudge contention
-    rt = capacity.get("routable")
-    saturated = (rt is None) or (rt < MIN_ROUTABLE) or (capacity.get("status") not in ("ok",))
-    decisions, stranded, errors, done, working, idle = ([] for _ in range(6))
+    decisions, stranded, errors, rate, done, working, idle = ([] for _ in range(7))
     for a in rep["agents"]:
         s = a["state"]
         if s == "WORKING": working.append(a)
         elif s == "DECISION": decisions.append(a)
         elif s == "STRANDED": stranded.append(a)
+        elif s == "RATE": rate.append(a)
         elif s == "ERROR": errors.append(a)
         elif s == "DONE": done.append(a)
         else: idle.append(a)
 
+    # ---- fleet-derived capacity (post-ccflare: no shared pool to poll) ----
+    # Saturation is now a cohort-wide rate-limit event. A single capped session no longer
+    # implies a starved fleet (each has its own OAuth account), so hold nudges only when
+    # RATE_SATURATION_MIN+ agents are rate-limited at once — that's a real crunch.
+    saturated = len(rate) >= RATE_SATURATION_MIN
+    capacity = {
+        "status": "saturated" if saturated else "ok",
+        "rate_limited": len(rate),
+        "active": len(rep["agents"]) - len(idle),
+        "reason": (f"{len(rate)} agents rate-limited (cohort crunch)" if saturated
+                   else "direct-oauth: per-account limits, no shared pool"),
+    }
+    rep["capacity"] = capacity
+
     rep["summary"] = {
         "working": len(working), "idle": len(idle), "decisions": len(decisions),
-        "stranded": len(stranded), "errors": len(errors), "done_maybe": len(done),
-        "saturated": saturated,
+        "stranded": len(stranded), "errors": len(errors), "rate_limited": len(rate),
+        "done_maybe": len(done), "saturated": saturated,
     }
     # Judgment queue = DECISIONS (a model/human must pick) + DONE (archive judgement)
     judgment = [{"kind":"decision","pane":a["pane"],"server":a["server"],"name":a["name"],
@@ -307,11 +308,12 @@ def main():
     else:
         print("hooks: (none — repos can ship .nightwatch/policy.json)")
     print(f"daemon: {d['reason']} ({d['age_s']}s)   "
-          f"proxy: {c.get('status')} routable={c.get('routable')}/{c.get('configured')} "
-          f"{'⚠ SATURATED — backoff, no nudging' if saturated else ''}")
+          f"capacity: {c['status']} (rate-limited {c['rate_limited']}/{len(rep['agents'])})"
+          f"{' ⚠ SATURATED — backoff, no nudging' if saturated else ''}")
     sm = rep["summary"]
     print(f"agents: {len(rep['agents'])}  working={sm['working']} idle={sm['idle']} "
-          f"decisions={sm['decisions']} stranded={sm['stranded']} errors={sm['errors']} done?={sm['done_maybe']}")
+          f"decisions={sm['decisions']} stranded={sm['stranded']} errors={sm['errors']} "
+          f"rate-limited={sm['rate_limited']} done?={sm['done_maybe']}")
     for a in working:
         if a["priority"]: print(f"  ★ PRIORITY {a['name']} ({a['pane']}): WORKING ✓")
     pr = [a for a in rep["agents"] if a["priority"] and a["state"]!="WORKING"]
@@ -319,6 +321,9 @@ def main():
     if decisions:
         print("DECISIONS (need judgment → queued):")
         for a in decisions: print(f"  ▸ {a['name']} ({a['server']} {a['pane']}): {a['note'][:70]}")
+    if rate:
+        print(f"RATE-LIMITED ({len(rate)} — per-account cap, NOT nudged; a retry just re-hits it):")
+        for a in rate: print(f"  · {a['name']} ({a['pane']}): {a['note'][:60]}")
     burners = sorted([a for a in rep["agents"] if a.get("burn_risk")],
                      key=lambda a: -(a.get("ctx_pct") or 0))
     if burners:
@@ -330,14 +335,14 @@ def main():
         print(f"AUTO (Tier-0 safe, {len(auto)}):")
         for x in auto: print(f"  · {x['kind']}: {x['name']} ({x['pane']})")
     elif saturated and (stranded or errors):
-        print(f"HELD (saturated): {len(stranded)} stranded + {len(errors)} errors — NOT nudging (would add contention)")
+        print(f"HELD (cohort rate-crunch, {len(rate)} capped): {len(stranded)} stranded + {len(errors)} errors "
+              f"— NOT nudging (would pile onto capped accounts)")
     needs_opus = bool(judgment)
     print(f"\n→ {'JUDGMENT ITEMS QUEUED — page Opus (nightwatch judge)' if needs_opus else 'nothing needs Opus — silent-ok'}")
     sys.exit(10 if needs_opus else 0)
 
 if __name__ == "__main__":
     main()
-
 """#
 
     public static let judgePy: String = #"""
@@ -352,7 +357,7 @@ and ROUTES each item through the owning repo's HOOK (.nightwatch/policy.json):
 nightwatch core never hardcodes a gate or a drive command — it asks the repo.
 
 Capacity-aware: with `--act` it dispatches via `tbd terminal send`, but REFUSES to
-act when the proxy is saturated (driving into a capped pool only adds contention).
+act during a cohort-wide rate crunch (driving into capped accounts only adds contention).
 Default is dry-run (prints the plan, touches nothing). `--prs` also gates open PRs
 (makes gh calls — skip during a GitHub-rate crunch). Dedupes + clears the queue on a
 successful --act drain.
@@ -378,9 +383,11 @@ def load_report():
     return json.load(open(p)) if os.path.exists(p) else None
 
 def saturated(rep):
-    c = (rep or {}).get("capacity", {})
-    rt = c.get("routable")
-    return rt is None or rt < 2 or c.get("status") not in ("ok",)
+    # tick.py writes an authoritative fleet-derived flag (cohort-wide rate crunch, post-ccflare).
+    # Prefer it; fall back to the capacity status for older reports.
+    s = (rep or {}).get("summary", {})
+    if "saturated" in s: return bool(s["saturated"])
+    return (rep or {}).get("capacity", {}).get("status") not in ("ok",)
 
 def dispatch(tid, text, act):
     """Run the repo's bound skill in the owner's terminal (or describe it in dry-run)."""
@@ -474,7 +481,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 """#
 
     public static let tickCronSh: String = #"""
