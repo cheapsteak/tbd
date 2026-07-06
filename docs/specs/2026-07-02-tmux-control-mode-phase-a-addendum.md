@@ -41,6 +41,15 @@ No local echo: SwiftTerm renders only what returns via `%output`. The spec's p99
 
 *App side:* `TerminalPanelView`'s coordinator branches its send path exactly where rendering branches — control-mode attach present → keystroke frame on the sidecar; otherwise → local PTY as today.
 
+### Input-failure UX: passive indicator (user ruling)
+
+The plumbing stays tolerant — a pane dying mid-keystroke is a race, not an error, so `send-keys` failures complete silently and never tear anything down. But silence must not reach the user: the daemon tracks per-pane input delivery health **edge-triggered** — first failure after health pushes one "input failing" event, first success after failure pushes one "recovered" event, no per-keystroke spam — and pushes transitions to the app, which shows an unobtrusive "input not being delivered" indicator on the affected pane, cleared on recovery or detach. (Semantics-level contract; wire and view details are implementation's.)
+
+Alternatives held in reserve:
+
+- **Silent status quo.** Rejected: typing into a dead pane with zero feedback is the worst failure mode a terminal can have.
+- **Auto-fallback to the grouped-session viewer after N consecutive failures.** Rejected *for now*: seamless for the user, but it masks exactly the control-mode failures Phase A dogfooding exists to surface (§5 keeps the grouped session alive precisely so fallback stays cheap). Becomes attractive post-Phase-B, when control mode is default-on and hiding its faults is a feature rather than a bug.
+
 ## 3. Replay ordering: pause-gated, no interleave buffer
 
 The spec's attach sequence (§Scrollback, §Flow control "attach interactions with pause state") is implemented with **pause as the serialization mechanism**, following iTerm2's `TmuxWindowOpener` shape:
@@ -48,16 +57,23 @@ The spec's attach sequence (§Scrollback, §Flow control "attach interactions wi
 1. Pane is paused — either auto-paused (Phase B's `pause-after`) or explicitly paused as the attach's first command.
 2. The 4-command capture goes down the stream as **one command list**: main-screen history (`capture-pane -peqJN -S -<N>`), alt screen (`-a`), pane state (`list-panes -F` with cursor/mode/`alternate_on` format), pending output (`capture-pane -p -P -C`).
 3. The orchestrator assembles and writes the replay into the pane's pipe (spec's byte order: reset prelude → history → mode escapes → scroll region → alt screen → pending → cursor), then opens the write gate.
-4. **Unpause is the last command** (`refresh-client -A '%<pane>:continue'`, tolerate-errors — it must no-op when the pane wasn't paused or was already unpaused). Drained output arrives as `%extended-output` strictly after the capture responses, because everything shares one FIFO stream.
+4. **Unpause is the last command** (`refresh-client -A '%<pane>:continue'`, tolerate-errors — it must no-op when the pane wasn't paused or was already unpaused). **Pause discards — it does not queue.** Live-verified on tmux 3.6a (M4 integration matrix): `continue` resumes delivery from the pane's *current* position; output the pane emitted while paused is never delivered to this client (even under `pause-after`, tmux flushes at most a row or two of `%extended-output` before jumping). This is exactly why iTerm2 re-captures the pane on a `%pause` notification instead of trusting a drain.
 
 Consequences:
 
-- **No interleave buffer.** Live output physically cannot race the replay: the pane emits nothing between pause and the unpause that the orchestrator sends only after the replay bytes are in the pipe. Phase 2's "not ready → drop" rule stays; the `Replaying` FSM state reduces to bookkeeping.
+- **No interleave buffer — and an accepted boundary gap (user ruling, Phase A).** Pause is the *serialization* mechanism, not a *losslessness* mechanism. The serialization property holds: live output physically cannot race or corrupt the replay, because the pane delivers nothing between pause and the unpause sent only after the replay bytes are in the pipe. But output the pane emits between the capture and the unpause (~0.2–0.5 s under load) is lost from *this attach's view*. The accepted contract, pinned by the live matrix: the gap is **boundary-only** (attach time, never steady-state), **forward-only** (never duplication, reordering, or corruption), and **self-healing** — the lost output still lands in tmux history, so the next attach's snapshot includes it, and fullscreen (alt-screen) apps repaint themselves current on their next frame. Phase 2's "not ready → drop" rule stays; the `Replaying` FSM state reduces to bookkeeping.
 - **Generations still guard identity.** The fanout's per-attach generation (added in #317 for the ready-timeout race) tags the replay too — a superseded attach's in-flight replay must not write into its successor's pipe.
 - **Fullscreen Claude is the primary replay path, not the exotic one.** TBD spawns Claude with `CLAUDE_CODE_NO_FLICKER=1` (alt-screen renderer) by default, so `alternate_on=1` + alt-screen capture is the common case. The Phase A test plan must include attaching to a fullscreen Claude session mid-stream. (Alt screens have no tmux history; for these panes replay is a cheap screen snapshot + mode flags, and the reflow-on-resize win applies to primary-screen content.)
 - Pre-implementation smoke test (spec's open verification item): confirm SwiftTerm applies the synthesized mode escapes (`\e[?1h`, `\e[?1049h`, `\e[?7l`, DECKPAM, bracketed paste, mouse modes) via `feed`.
 
 **What we deliberately do differently from iTerm2:** they parse capture output into structured screen lines (`TmuxHistoryParser` → their own LineBuffer). We feed bytes through SwiftTerm per the base spec's verified α approach — no structural parsing, no emulator fork.
+
+### Alternatives held in reserve (revisit in Phase B or if dogfooding hurts)
+
+Two designs that close the boundary gap, rejected for Phase A but documented for pickup:
+
+- **Scoped interleave buffer.** The fanout buffers live output events for the pane between capture-fence completion and gate-open, flushing them into the pipe after the replay bytes. This is the *correct* fix — no gap at all — but the cost is a state machine in the exact spot where attach-generation races live (a review-caught critical bug class in #317's lineage), plus generation-scoped buffer invalidation so a superseded attach's buffered output can't leak into its successor. Deferred because Phase B's flow-control work rebuilds this area anyway; building the buffer twice is worse than living with a sub-second boundary gap once.
+- **iTerm2's shape: re-capture on `%pause`.** Don't pause explicitly at attach; instead treat the `%pause` notification as "my view is stale" and re-run the capture sequence. Converges to correct without a buffer, at the cost of a second full capture round-trip and re-entrant replay orchestration. Becomes more attractive in Phase B, where `pause-after` is on and `%pause` handling must exist regardless.
 
 ## 4. Resize: daemon arbitration with echo suppression
 
