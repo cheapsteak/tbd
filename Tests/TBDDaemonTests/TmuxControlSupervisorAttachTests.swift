@@ -179,6 +179,36 @@ struct PaneFanoutTests {
         #expect(fanout.acknowledge(key: PaneKey(server: server, paneID: "%404")) == .noSink)
     }
 
+    @Test("a second attach.ready for the same generation is rejected, not re-acknowledged")
+    func doubleAcknowledgeSameGenerationRejected() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%33")
+        let (readFD, gen) = try fanout.attach(key: key)
+        defer { Darwin.close(readFD) }
+
+        // First ack lands normally…
+        #expect(fanout.acknowledge(key: key, expectedGeneration: gen)
+                == .acknowledged(generation: gen))
+        // …a duplicate for the SAME generation must be refused: two
+        // orchestration sequences would otherwise writeReplay concurrently
+        // into one pipe. Both the echoed and the unchecked (older app) forms.
+        #expect(fanout.acknowledge(key: key, expectedGeneration: gen) == .alreadyAcknowledged)
+        #expect(fanout.acknowledge(key: key) == .alreadyAcknowledged)
+
+        // The rejection must not disturb the sink: still acked (survives the
+        // ready-timeout) and a fresh RE-attach acknowledges normally again.
+        fanout.detachIfNotReady(key: key, generation: gen)
+        let flags = fcntl(readFD, F_GETFL)
+        _ = fcntl(readFD, F_SETFL, flags | O_NONBLOCK)
+        var buffer = [UInt8](repeating: 0, count: 8)
+        let n = buffer.withUnsafeMutableBytes { Darwin.read(readFD, $0.baseAddress, $0.count) }
+        #expect(n < 0 && errno == EAGAIN, "duplicate ack must leave the acked sink alive")
+        let (read2, gen2) = try fanout.attach(key: key)
+        defer { Darwin.close(read2) }
+        #expect(fanout.acknowledge(key: key, expectedGeneration: gen2)
+                == .acknowledged(generation: gen2))
+    }
+
     @Test("a mismatched expectedGeneration is superseded and leaves the successor un-acked")
     func acknowledgeMismatchedGenerationIsSuperseded() throws {
         let fanout = PaneFanout()

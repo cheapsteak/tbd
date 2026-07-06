@@ -153,6 +153,16 @@ struct AttachReplayOrchestrator: Sendable {
                 echoed gen=\(expectedGeneration ?? 0) — a newer attach owns the pane; sending nothing
                 """)
             return .superseded
+        case .alreadyAcknowledged:
+            // A duplicate ready for an already-acked generation (R5-4): the
+            // first ready's sequence owns the replay — running a second one
+            // would write concurrently into the same pipe. Benign: surfaced
+            // as RPC success, nothing sent on the shared correlator.
+            Self.logger.debug("""
+                duplicate attach.ready for \(server, privacy: .public)/\(paneID, privacy: .public) \
+                echoed gen=\(expectedGeneration ?? 0) — replay already owned; sending nothing
+                """)
+            return .superseded
         case .acknowledged(let acknowledged):
             generation = acknowledged
         }

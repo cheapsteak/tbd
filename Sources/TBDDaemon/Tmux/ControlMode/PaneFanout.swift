@@ -44,6 +44,12 @@ enum PaneAcknowledgeResult: Equatable {
     /// flag: disarming the successor's ready-timeout is the successor's own
     /// ready's job.
     case superseded
+    /// The sink is ALREADY acknowledged at this same generation (R5-4): a
+    /// prior `attach.ready` sequence owns (or has completed) the replay. A
+    /// duplicate ack must be refused — two orchestration sequences would
+    /// otherwise `writeReplay` concurrently into one pipe. Treated by the
+    /// orchestrator like `superseded`: benign, send nothing.
+    case alreadyAcknowledged
 }
 
 /// Routes decoded `%output`/`%extended-output` bytes into per-pane pipe write
@@ -141,6 +147,11 @@ final class PaneFanout: @unchecked Sendable {
         if let expected = expectedGeneration, expected != sink.generation {
             return .superseded
         }
+        // A second attach.ready for the SAME generation must not acknowledge
+        // again (R5-4): the first ack's sequence owns the replay, and handing
+        // out a second `.acknowledged` would let two sequences writeReplay
+        // concurrently into one pipe. The sink itself is left untouched.
+        if sink.acknowledged { return .alreadyAcknowledged }
         sinks[key]?.acknowledged = true
         return .acknowledged(generation: sink.generation)
     }

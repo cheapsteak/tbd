@@ -243,6 +243,26 @@ struct AttachReplayOrchestratorTests {
         #expect(n == 0, "successor must still be un-acked (timer detach EOFs it)")
     }
 
+    @Test("a duplicate attach.ready for an already-acked generation sends ZERO commands (benign success)")
+    func duplicateReadySameGenerationSendsNothing() async throws {
+        let (supervisor, orchestrator, recorder, _) = makeHarness()
+        let paneID = "%13"
+        let (readFD, gen) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+        // The first ready's sequence already owns the attach (acked; its
+        // replay may still be in flight).
+        #expect(await supervisor.acknowledgeAttach(
+            server: server, paneID: paneID, expectedGeneration: gen)
+            == .acknowledged(generation: gen))
+
+        // A second ready for the SAME generation must not start a second
+        // replay sequence into the same pipe: benign success, nothing sent.
+        let outcome = try await orchestrator.performAttachReady(
+            server: server, paneID: paneID, expectedGeneration: gen)
+        #expect(outcome == .superseded)
+        #expect(recorder.writes.isEmpty)
+    }
+
     @Test("a capture %error fails the attach but the unpause is still sent")
     func captureErrorFailsAttachUnpauseStillSent() async throws {
         let (supervisor, orchestrator, recorder, client) = makeHarness()
