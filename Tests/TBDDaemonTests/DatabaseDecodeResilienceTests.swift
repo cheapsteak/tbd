@@ -76,8 +76,10 @@ struct DatabaseDecodeResilienceTests {
 
         let bad = try await db.notifications.create(worktreeID: wtBad.id, type: .responseComplete)
         // Plant an enum rawValue this build's NotificationType does not have.
+        // (Must stay genuinely-unknown: "limit_reached" became a real case when
+        // #341's auto-resume landed, so use a value no NotificationType maps to.)
         try await rawUpdate(db, sql: "UPDATE notification SET type = ? WHERE id = ?",
-                            ["limit_reached", bad.id.uuidString])
+                            ["totally_unknown_type", bad.id.uuidString])
         _ = try await db.notifications.create(worktreeID: wtGood.id, type: .error)
 
         // Must not throw/crash even though one row has an unknown type.

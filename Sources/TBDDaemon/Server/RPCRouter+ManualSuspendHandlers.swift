@@ -17,15 +17,18 @@ extension RPCRouter {
     func handleTerminalSuspend(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSuspendParams.self, from: paramsData)
         // Parking (formerly suspend) routes to the unified HibernationCoordinator.
-        // A successful park cancels any pending auto-resume inside the coordinator
-        // (spec §Cancellation, mirrored on the hibernate path); wake the scheduler
-        // so it re-reads pending rows instead of sleeping until a stale fire time.
+        // Cancel any pending auto-resume up-front and unconditionally (spec
+        // §Cancellation, preserving #341's shim behavior): the intent to park
+        // means "don't send an unattended resume", even if the actual park is
+        // then refused (session-less, running, etc.). performHibernate also
+        // cancels on a successful park; the up-front cancel covers the refused
+        // case. Wake the scheduler so it re-reads pending rows.
+        if (try? await db.scheduledResumes.cancelPending(terminalID: params.terminalID)) == true {
+            await limitResumeScheduler?.wake()
+        }
         let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
         switch result {
-        case .ok:
-            await limitResumeScheduler?.wake()
-            return .ok()
-        case .alreadyHibernated:
+        case .ok, .alreadyHibernated:
             return .ok()
         case .notEligible(let reason):
             return RPCResponse(error: reason)
