@@ -125,6 +125,8 @@ public final class TBDDatabase: Sendable {
     private static func buildMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
 
+        // v1–v42 predate/are frozen under the helper mandate; new migrations below the enable line must use the helpers (see Database/CLAUDE.md).
+        // swiftlint:disable migration_use_helpers
         migrator.registerMigration("v1") { db in
             try db.create(table: "repo") { t in
                 t.primaryKey("id", .text).notNull()
@@ -716,6 +718,7 @@ public final class TBDDatabase: Sendable {
             // Index for efficient time-range queries
             try db.addIndexIfMissing("idx_audit_log_ts", on: "audit_log", columns: ["ts"])
         }
+        // swiftlint:enable migration_use_helpers
 
         return migrator
     }
