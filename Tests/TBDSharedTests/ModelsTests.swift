@@ -461,6 +461,7 @@ import Testing
     repo.worktreeSlot = "r"
     repo.status = .missing
     let data = try JSONEncoder().encode(repo)
+    // swiftlint:disable:next optional_data_string_conversion
     let s = String(decoding: data, as: UTF8.self)
     #expect(s.contains("\"worktreeSlot\":\"r\""))
     #expect(s.contains("\"status\":\"missing\""))

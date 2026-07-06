@@ -1,6 +1,12 @@
 # Lint scope. These keys take GLOB syntax.
 included:
   - Sources
+  # The two test targets guarded by the no_setenv_tbdhome_wrong_target custom rule.
+  # A custom rule only runs on files already inside the global lint scope, so these
+  # dirs must be listed here for that rule to fire in CI (`swiftlint --strict`).
+  # TBDDaemonTests is intentionally left out — setenv("TBD_HOME") is legitimate there.
+  - Tests/TBDSharedTests
+  - Tests/TBDAppTests
 
 excluded:
   - .build
@@ -66,4 +72,28 @@ custom_rules:
     match_kinds:
       - identifier
     message: "Transcript row cards must not contain a direct ScrollView — see Sources/TBDApp/Panes/Transcript/CLAUDE.md and issue #129."
+    severity: error
+
+  migration_use_helpers:
+    name: "Use idempotent migration helpers"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/TBDDaemon/Database/Database\\.swift"
+    regex: 'create\(table:|\.add\(column:|CREATE\s+(?:TABLE|INDEX)'
+    match_kinds:
+      - identifier
+      - string
+    message: "New migrations must use createTableIfNotExists / addIndexIfMissing / addColumnIfMissing from MigrationHelpers.swift, not raw DDL. See Sources/TBDDaemon/Database/CLAUDE.md."
+    severity: error
+
+  no_setenv_tbdhome_wrong_target:
+    name: "No setenv(TBD_HOME) outside TBDDaemonTests"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Tests/(TBDSharedTests|TBDAppTests)/.*\\.swift"
+    regex: 'setenv\(\s*"TBD_HOME"'
+    match_kinds:
+      - identifier
+      - string
+    message: "setenv(\"TBD_HOME\") is only allowed in TBDDaemonTests under TBDHomeSerialized — it races concurrent suites in other targets (see CLAUDE.md, ConstantsTests flake)."
     severity: error

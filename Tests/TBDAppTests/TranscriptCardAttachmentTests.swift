@@ -27,6 +27,7 @@ struct TranscriptCardAttachmentTests {
         let provider = TranscriptCardViewProvider(textAttachment: att, parentView: nil, textLayoutManager: nil, location: TestTextLocation(), card: card)
         provider.loadView()
         #expect(provider.view is NSHostingView<AnyView>)
+        // swiftlint:disable:next force_cast
         let h = TranscriptCardSizing.fittingHeight(of: provider.view as! NSHostingView<AnyView>, width: 300)
         #expect(h > 0)
     }
