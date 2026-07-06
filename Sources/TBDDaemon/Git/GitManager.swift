@@ -1,4 +1,18 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "GitManager")
+
+/// Error thrown when a git subprocess outlives its timeout and is killed.
+/// Distinct from `GitError` (which represents a clean non-zero exit) so the
+/// exit-code-1 catch sites don't accidentally swallow a wedged-command kill.
+public struct GitTimeoutError: Error, CustomStringConvertible {
+    public let command: String
+    public let timeout: Duration
+    public var description: String {
+        "Git command timed out after \(timeout): \(command)"
+    }
+}
 
 /// A branch reference returned by `GitManager.listBranches`.
 ///
@@ -34,7 +48,19 @@ public struct GitError: Error, CustomStringConvertible {
 /// Manages git operations by shelling out to the `git` CLI.
 public struct GitManager: Sendable {
 
-    public init() {}
+    /// Hard ceiling on any single `git` subprocess. Network git ops (fetch,
+    /// clone) can legitimately run for tens of seconds, so this is far more
+    /// generous than tmux's ceiling — but it is still bounded. A daemon-child
+    /// `git fetch origin main` was once found stuck for 95 minutes, holding a
+    /// continuation open forever; this converts that into a catchable failure.
+    public static let commandTimeout: Duration = .seconds(120)
+
+    /// Per-instance timeout; tests inject a tiny value to exercise the kill path.
+    let subprocessTimeout: Duration
+
+    public init(subprocessTimeout: Duration = GitManager.commandTimeout) {
+        self.subprocessTimeout = subprocessTimeout
+    }
 
     // MARK: - Public API
 
@@ -402,7 +428,15 @@ public struct GitManager: Sendable {
     /// Runs a git command with the given arguments at the given directory and returns stdout.
     /// Throws `GitError` on non-zero exit.
     private func run(arguments: [String], at directory: String) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
+        let timeout = subprocessTimeout
+        let commandDescription = "git " + arguments.joined(separator: " ")
+        // Single-resume guard shared by the termination handler, the timeout
+        // timer, and the spawn-failure path (mirrors TmuxManager.runExternalCommand).
+        let state = ContinuationGuard()
+        let timeoutNanos = UInt64(max(0, timeout.components.seconds)) * 1_000_000_000
+            + UInt64(max(0, timeout.components.attoseconds / 1_000_000_000))
+
+        return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
@@ -413,7 +447,25 @@ public struct GitManager: Sendable {
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
 
-            let commandDescription = "git " + arguments.joined(separator: " ")
+            // Watchdog: a wedged git child (a `git fetch` was once stuck 95 min)
+            // is escalated SIGTERM → SIGKILL and the call throws GitTimeoutError.
+            let timer = DispatchSource.makeTimerSource(queue: .global())
+            timer.schedule(deadline: .now() + .nanoseconds(Int(min(timeoutNanos, UInt64(Int.max)))))
+            timer.setEventHandler {
+                guard state.claim() else { return }
+                timer.cancel()
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                let pid = process.processIdentifier
+                if pid > 0 {
+                    kill(pid, SIGTERM)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(500)) {
+                        if process.isRunning { kill(pid, SIGKILL) }
+                    }
+                }
+                logger.warning("git subprocess timed out after \(timeout, privacy: .public): \(commandDescription, privacy: .public)")
+                continuation.resume(throwing: GitTimeoutError(command: commandDescription, timeout: timeout))
+            }
 
             // Drain pipes incrementally to prevent deadlock when output exceeds the
             // OS pipe buffer (~64KB). Without this, the child process blocks on
@@ -442,6 +494,9 @@ public struct GitManager: Sendable {
                 let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
                 let stderr = String(data: stderrData, encoding: .utf8) ?? ""
 
+                guard state.claim() else { return }  // timer already won → timed out
+                timer.cancel()
+
                 if process.terminationStatus != 0 {
                     continuation.resume(throwing: GitError(
                         command: commandDescription,
@@ -455,7 +510,10 @@ public struct GitManager: Sendable {
 
             do {
                 try process.run()
+                timer.resume()
             } catch {
+                guard state.claim() else { return }
+                timer.cancel()
                 continuation.resume(throwing: error)
             }
         }

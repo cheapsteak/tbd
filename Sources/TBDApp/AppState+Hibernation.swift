@@ -77,16 +77,40 @@ extension AppState {
         }
     }
 
-    /// Auto-wake any PARKED Claude terminals in a worktree the user just
-    /// focused/selected. Covers both hibernated (authoritative) and legacy
-    /// suspended rows — wake is the one resume path. Called from the
-    /// selection-change hook. Idempotent via `wakeTerminal`'s in-flight guard,
-    /// so double-focus is safe.
+    /// Auto-wake the PARKED Claude terminal the user is actually about to look
+    /// at in a worktree they just focused/selected. Covers both hibernated
+    /// (authoritative) and legacy suspended rows — wake is the one resume path.
+    /// Called from the selection-change hook. Idempotent via `wakeTerminal`'s
+    /// in-flight guard, so double-focus is safe.
+    ///
+    /// Deliberately does NOT wake every parked terminal in the worktree. A
+    /// worktree with ~20+ hibernated sessions on ONE tmux server used to fire
+    /// that many simultaneous `respawn-window -k … claude --resume` (heavy Node)
+    /// spawns on focus → a spawn storm that queued respawns past the app's 300s
+    /// RPC ceiling → the "recv timed out after 300s" hang, which then re-fired
+    /// on the next focus (~5-min loop) and re-inflated memory/swap each cycle.
+    ///
+    /// Strategy: wake ONLY the terminal that autofocus will surface (the active
+    /// tab's terminal). The rest stay hibernated until the user actually
+    /// navigates to them (selecting their tab re-invokes this hook). If the
+    /// focused terminal can't be resolved to a parked row, fall back to waking
+    /// at most one parked terminal — never a parallel fan-out.
     func wakeHibernatedTerminalsOnFocus(worktreeID: UUID) {
-        let hibernated = (terminals[worktreeID] ?? []).filter { $0.isParked }
-        guard !hibernated.isEmpty else { return }
-        for terminal in hibernated {
-            Task { await wakeTerminal(terminalID: terminal.id, worktreeID: worktreeID) }
+        let parked = (terminals[worktreeID] ?? []).filter { $0.isParked }
+        guard !parked.isEmpty else { return }
+
+        // Preferred: wake exactly the terminal the user is about to view.
+        if let focusedID = terminalIDForAutofocus(worktreeID: worktreeID),
+           parked.contains(where: { $0.id == focusedID }) {
+            Task { await wakeTerminal(terminalID: focusedID, worktreeID: worktreeID) }
+            return
+        }
+
+        // Fallback (no resolvable focused terminal, e.g. history view active):
+        // wake a single parked terminal rather than storming all N. The others
+        // wake lazily when their tab is selected.
+        if let first = parked.first {
+            Task { await wakeTerminal(terminalID: first.id, worktreeID: worktreeID) }
         }
     }
 }

@@ -4,7 +4,22 @@ import os
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "TmuxManager")
 
 public struct TmuxManager: Sendable {
+    /// Hard ceiling on any single tmux subprocess. tmux control operations
+    /// (respawn-window, new-session, kill-window, capture-pane, …) normally
+    /// complete in milliseconds; a tmux child still running after this long is
+    /// wedged (spawn storm / heavy `claude --resume` under load / a hung
+    /// server). Bounding it converts an otherwise-infinite `await` — which
+    /// used to hang the wake RPC until the app's 300s ceiling and produced the
+    /// "recv timed out after 300s" loop — into a fast, catchable failure that
+    /// leaves the hibernated row intact for a later retry. 15s is generous
+    /// enough that a merely-slow-but-progressing tmux op still succeeds.
+    public static let commandTimeout: Duration = .seconds(15)
+
     public let dryRun: Bool
+    /// Per-instance timeout applied to every external tmux subprocess. Defaults
+    /// to `commandTimeout`; tests inject a tiny value to exercise the timeout /
+    /// SIGTERM-then-SIGKILL path against a real slow command without waiting 15s.
+    let subprocessTimeout: Duration
     private let counter: Counter
     /// Optional test hook that records every dryRun command invocation. When set,
     /// dry-run paths still no-op, but the recorder receives the argv that would
@@ -45,8 +60,9 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
+        self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
@@ -557,17 +573,65 @@ public struct TmuxManager: Sendable {
 
     @discardableResult
     private func runTmux(_ arguments: [String]) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
+        try await Self.runExternalCommand(
+            executable: Self.tmuxPath(),
+            arguments: arguments,
+            label: "tmux",
+            timeout: subprocessTimeout
+        )
+    }
+
+    /// Runs an external command with a hard timeout, draining stdout/stderr.
+    /// On timeout the child is signalled SIGTERM, then SIGKILL after a short
+    /// grace, and the call throws `TmuxError.timedOut` — never hangs. The
+    /// continuation is guarded by a lock so exactly one of {termination,
+    /// timeout, spawn-failure} resumes it, satisfying the single-resume
+    /// contract even when the process exits concurrently with the timer.
+    ///
+    /// Package-internal (not `private`) so timeout tests can drive it directly
+    /// against a real slow binary (`/bin/sleep`) without a tmux server.
+    @discardableResult
+    static func runExternalCommand(
+        executable: String,
+        arguments: [String],
+        label: String,
+        timeout: Duration
+    ) async throws -> String {
+        // Single-resume guard shared between the termination handler and the
+        // timeout timer. Whichever fires first wins; the loser is a no-op.
+        let state = ContinuationGuard()
+        let commandDescription = "\(label) " + arguments.joined(separator: " ")
+        let timeoutNanos = UInt64(max(0, timeout.components.seconds)) * 1_000_000_000
+            + UInt64(max(0, timeout.components.attoseconds / 1_000_000_000))
+
+        return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
 
-            process.executableURL = URL(fileURLWithPath: Self.tmuxPath())
+            process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
 
-            let commandDescription = "tmux " + arguments.joined(separator: " ")
+            // Watchdog timer: on fire, escalate SIGTERM → SIGKILL and resume
+            // with a timeout error (if the process hasn't already exited).
+            let timer = DispatchSource.makeTimerSource(queue: .global())
+            timer.schedule(deadline: .now() + .nanoseconds(Int(min(timeoutNanos, UInt64(Int.max)))))
+            timer.setEventHandler {
+                guard state.claim() else { return }
+                timer.cancel()
+                let pid = process.processIdentifier
+                if pid > 0 {
+                    kill(pid, SIGTERM)
+                    // Give it a brief grace to exit on SIGTERM, then SIGKILL.
+                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(500)) {
+                        if process.isRunning { kill(pid, SIGKILL) }
+                    }
+                }
+                logger.warning("subprocess timed out after \(timeout, privacy: .public): \(commandDescription, privacy: .public)")
+                continuation.resume(throwing: TmuxError.timedOut(command: commandDescription, timeout: timeout))
+            }
 
             process.terminationHandler = { _ in
                 let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
@@ -575,6 +639,9 @@ public struct TmuxManager: Sendable {
                 let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
                 let stderr = String(data: stderrData, encoding: .utf8) ?? ""
                 let output = stdout.isEmpty ? stderr : stdout
+
+                guard state.claim() else { return }  // timer already won → timed out
+                timer.cancel()
 
                 if process.terminationStatus != 0 {
                     continuation.resume(throwing: TmuxError.commandFailed(
@@ -589,9 +656,28 @@ public struct TmuxManager: Sendable {
 
             do {
                 try process.run()
+                timer.resume()
             } catch {
+                guard state.claim() else { return }
+                timer.cancel()
                 continuation.resume(throwing: error)
             }
+        }
+    }
+}
+
+/// One-shot claim used to enforce the single-resume contract of a
+/// `CheckedContinuation` shared across a termination handler, a timeout timer,
+/// and a spawn-failure path. `claim()` returns `true` exactly once.
+/// Package-internal so the git runner reuses it for the same purpose.
+final class ContinuationGuard: @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: false)
+    /// Returns true the first time it is called, false thereafter.
+    func claim() -> Bool {
+        lock.withLock { resumed in
+            if resumed { return false }
+            resumed = true
+            return true
         }
     }
 }
@@ -599,4 +685,8 @@ public struct TmuxManager: Sendable {
 public enum TmuxError: Error, Sendable {
     case commandFailed(command: String, status: Int32, output: String)
     case unexpectedOutput(String)
+    /// The subprocess outlived its timeout and was killed. Callers on the wake
+    /// path catch this and leave the row hibernated for retry rather than
+    /// hanging until the app's 300s RPC ceiling.
+    case timedOut(command: String, timeout: Duration)
 }
