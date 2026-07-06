@@ -96,15 +96,21 @@ struct AttachReplayOrchestrator: Sendable {
     /// the main-history capture hits the ceiling (see `performAttachReady`);
     /// production relies on the `.info` log line.
     let onHistoryTruncation: (@Sendable (Int) -> Void)?
+    /// Pause-failure test hook (review M4): invoked with the error's
+    /// description when the batch's pause command fails while the sequence
+    /// proceeds anyway; production relies on the `.error` log line.
+    let onPauseFailure: (@Sendable (String) -> Void)?
 
     init(supervisor: TmuxControlSupervisor,
          commandProvider: @escaping @Sendable (String) async -> TmuxControlCommandClient?,
          historyDepth: Int = 50_000,
-         onHistoryTruncation: (@Sendable (Int) -> Void)? = nil) {
+         onHistoryTruncation: (@Sendable (Int) -> Void)? = nil,
+         onPauseFailure: (@Sendable (String) -> Void)? = nil) {
         self.supervisor = supervisor
         self.commandProvider = commandProvider
         self.historyDepth = historyDepth
         self.onHistoryTruncation = onHistoryTruncation
+        self.onPauseFailure = onPauseFailure
     }
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
@@ -188,6 +194,23 @@ struct AttachReplayOrchestrator: Sendable {
             "capture-pane -p -P -C -t \(paneID)",
         ]
         let results = await sendBatch(client, texts: [pause] + captureCommands)
+
+        // A failed pause means the captures below ran UNPAUSED: the pane may
+        // have emitted between the capture replies and the gate opening, so
+        // the replay can be slightly torn (cursor vs content mismatch).
+        // Surface it and PROCEED rather than fail the attach: the tear is the
+        // same class as the accepted pause-discard boundary gap — fullscreen
+        // apps repaint differentially and self-heal, and a genuinely dead
+        // pane %errors the captures right below, which fails the attach on
+        // its own (review M4).
+        if case .failure(let pauseError) = results.first {
+            Self.logger.error("""
+                attach pause failed for \(server, privacy: .public)/\(paneID, privacy: .public) \
+                (\(pause, privacy: .public)): \(String(describing: pauseError), privacy: .public) \
+                — proceeding with an unpaused capture (replay may be slightly torn; self-heals)
+                """)
+            onPauseFailure?(String(describing: pauseError))
+        }
 
         // The pause has been sent — from here, unpause runs on every exit
         // path EXCEPT mid-sequence supersession (defer-equivalent; `defer`

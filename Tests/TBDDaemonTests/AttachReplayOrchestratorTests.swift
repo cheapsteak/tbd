@@ -32,7 +32,8 @@ struct AttachReplayOrchestratorTests {
 
     private func makeHarness(
         historyDepth: Int = 50_000,
-        onHistoryTruncation: (@Sendable (Int) -> Void)? = nil
+        onHistoryTruncation: (@Sendable (Int) -> Void)? = nil,
+        onPauseFailure: (@Sendable (String) -> Void)? = nil
     ) -> (TmuxControlSupervisor, AttachReplayOrchestrator, Recorder, TmuxControlCommandClient) {
         let recorder = Recorder()
         let client = TmuxControlCommandClient(
@@ -43,7 +44,8 @@ struct AttachReplayOrchestratorTests {
             supervisor: supervisor,
             commandProvider: { [server] in $0 == server ? client : nil },
             historyDepth: historyDepth,
-            onHistoryTruncation: onHistoryTruncation)
+            onHistoryTruncation: onHistoryTruncation,
+            onPauseFailure: onPauseFailure)
         return (supervisor, orchestrator, recorder, client)
     }
 
@@ -419,6 +421,51 @@ struct AttachReplayOrchestratorTests {
         #expect(altOn.upperBound <= altRange.lowerBound)
         // The primary rows are contiguous lines (scrollback \r\n viewport).
         #expect(text.contains("OLD-SCROLLBACK\r\nSAVED-VIEWPORT"))
+    }
+
+    @Test("pause %error is surfaced but the replay still runs and the gate opens (review M4)")
+    func pauseFailureSurfacedReplayProceeds() async throws {
+        let failures = Recorder()
+        let (supervisor, orchestrator, recorder, client) = makeHarness(
+            onPauseFailure: { failures.record($0) })
+        let paneID = "%15"
+        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+
+        let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+
+        // The PAUSE fails; every capture succeeds. The captures therefore ran
+        // UNPAUSED — a possibly-torn replay that self-heals — so the sequence
+        // must proceed to a ready gate, and the failure must be surfaced.
+        await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["bad refresh-client"]))
+        await succeed(client, [["hist"], ["screen"], [], [stateLine(paneID: paneID)], []])
+
+        let outcome = try await task.value
+        #expect(outcome == .ready)
+        #expect(await supervisor.isReady(server: server, paneID: paneID) == true)
+        #expect(failures.writes.count == 1, "the failed pause must be surfaced, not discarded")
+        // The replay landed despite the failed pause.
+        let text = (String(bytes: drain(readFD), encoding: .utf8) ?? "")
+        #expect(text.contains("hist\r\nscreen"))
+    }
+
+    @Test("a successful pause does not trip the pause-failure hook")
+    func pauseSuccessDoesNotFireHook() async throws {
+        let failures = Recorder()
+        let (supervisor, orchestrator, recorder, client) = makeHarness(
+            onPauseFailure: { failures.record($0) })
+        let paneID = "%16"
+        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+
+        let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        await succeed(client, [[], ["hist"], ["screen"], [], [stateLine(paneID: paneID)], []])
+        let outcome = try await task.value
+        #expect(outcome == .ready)
+        #expect(failures.writes.isEmpty)
+        _ = drain(readFD)
     }
 
     @Test("list-panes reply missing the pane fails the attach")
