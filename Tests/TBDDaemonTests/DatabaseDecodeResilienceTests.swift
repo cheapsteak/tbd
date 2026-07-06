@@ -5,11 +5,13 @@ import GRDB
 @testable import TBDShared
 
 /// Regression coverage for the 2026-07-06 crash-loop: a `notification` row with
-/// `type = "limit_reached"` (a `NotificationType` case only present on an
-/// unmerged branch) made `toModel()`'s force-unwrap crash the daemon on
-/// startup, because `notifications.list` decodes the whole result set. These
-/// tests assert the failable `toModel()` SKIPS the offending row (no throw/
-/// crash) while valid rows in the same fetch are unaffected.
+/// `type = "limit_reached"` (at the time, a `NotificationType` case only
+/// present on an unmerged branch) made `toModel()`'s force-unwrap crash the
+/// daemon on startup, because `notifications.list` decodes the whole result
+/// set. `limit_reached` has since merged as a real case (PR #341), so these
+/// tests plant a synthetic never-valid rawValue instead. They assert the
+/// failable `toModel()` SKIPS the offending row (no throw/crash) while valid
+/// rows in the same fetch are unaffected.
 @Suite("Database Decode Resilience Tests")
 struct DatabaseDecodeResilienceTests {
 
@@ -75,9 +77,10 @@ struct DatabaseDecodeResilienceTests {
         let wtGood = try await makeWorktree(db, name: "wt-good-type")
 
         let bad = try await db.notifications.create(worktreeID: wtBad.id, type: .responseComplete)
-        // Plant an enum rawValue this build's NotificationType does not have.
+        // Plant an enum rawValue NotificationType can never gain (synthetic,
+        // test-only) so this stays unknown even as real cases are added.
         try await rawUpdate(db, sql: "UPDATE notification SET type = ? WHERE id = ?",
-                            ["limit_reached", bad.id.uuidString])
+                            ["test_only_unknown_type", bad.id.uuidString])
         _ = try await db.notifications.create(worktreeID: wtGood.id, type: .error)
 
         // Must not throw/crash even though one row has an unknown type.
