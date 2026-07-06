@@ -174,9 +174,16 @@ public struct LimitResumeActuator: LimitResumeActuating {
             return .notEligible(.cancelledExternally)
         }
 
-        // 1. Terminal alive.
+        // 1. Terminal alive AND not parked. Under the unified park model a
+        //    parked session's pane has been respawned to a bare shell (its
+        //    claude process is gone) and is marked via `hibernatedAt`
+        //    (authoritative) or a legacy `suspendedAt` — either way `isParked`.
+        //    Never fire keys into a parked pane: parking already cancels the
+        //    pending row (spec §Cancellation), so this is the fire-time backstop
+        //    for a park that raced the scheduler. Classify as `.terminalGone`
+        //    (cancel silently), same as a dead window.
         guard let terminal = ((try? await db.terminals.get(id: resume.terminalID)) ?? nil),
-              terminal.suspendedAt == nil,
+              !terminal.isParked,
               let worktree = ((try? await db.worktrees.get(id: terminal.worktreeID)) ?? nil)
         else { return .notEligible(.terminalGone) }
         let server = worktree.tmuxServer

@@ -114,6 +114,19 @@ struct FakeInspector: PaneProcessInspecting {
         #expect(tmux.sends.isEmpty)
     }
 
+    /// Reconciliation guard: under the unified park model a limit-parked
+    /// session is HIBERNATED (authoritative `hibernatedAt`), its pane
+    /// respawned to a bare shell. The actuator must never fire the
+    /// Escape/continue/Enter sequence into a parked pane — it classifies
+    /// `isParked` as `.terminalGone` (send nothing), the fire-time backstop
+    /// for a park that raced the scheduler.
+    @Test func hibernatedTerminalIsTerminalGone() async throws {
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess", snapshot: nil)
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .terminalGone)
+        #expect(tmux.sends.isEmpty)
+    }
+
     @Test func deadWindowIsTerminalGone() async throws {
         tmux.windowAlive = false
         let outcome = await makeActuator().actuate(row)

@@ -337,7 +337,23 @@ public extension Terminal {
 
     /// True when the terminal is currently hibernated (claude process killed,
     /// tmux window kept alive). See `hibernatedAt`.
+    ///
+    /// `hibernatedAt` is the ONE authoritative "parked" timestamp going forward.
+    /// (`suspendedAt` is legacy-read-only — see `isParked`.)
     var isHibernated: Bool { hibernatedAt != nil }
+
+    /// The single authoritative "is this session parked?" concept after the
+    /// suspend/hibernate merge. A terminal is parked when its Claude process has
+    /// been torn down and the row is holding a resume session id, regardless of
+    /// which timestamp column recorded it:
+    ///   - `hibernatedAt` — written by ALL new code (the unified park path).
+    ///   - `suspendedAt` — LEGACY, read-only. Rows parked by the pre-merge
+    ///     Suspend feature (or by an old daemon build) only have this column set;
+    ///     they must still read as parked so the UI shows the moon + snapshot and
+    ///     wake fully un-parks them. New code never writes `suspendedAt`; the v40
+    ///     migration backfills existing legacy rows into `hibernatedAt`, but a row
+    ///     written by an old binary after the migration ran would still land here.
+    var isParked: Bool { hibernatedAt != nil || suspendedAt != nil }
 
     /// Whether this terminal may be AUTO-hibernated by the idle timer right
     /// now. Encodes the hard safety rails (see `HibernationGate` for the

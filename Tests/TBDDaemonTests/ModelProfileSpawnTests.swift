@@ -616,6 +616,143 @@ struct ModelProfileSpawnTests {
         #expect(!swapResp.success)
     }
 
+    // MARK: - Cold profile swap (parked session re-home without waking)
+
+    /// Swapping a PARKED (hibernated) session's profile must NOT wake it: no
+    /// respawn-window / new-window is issued, the profile_id updates, and the
+    /// parked timestamps + snapshot are left untouched.
+    @Test("cold swap: parked (hibernated) session re-homes profile without respawn")
+    func coldSwapParkedDoesNotRespawn() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        let term = try createResp.decodeResult(Terminal.self)
+        #expect(term.profileID == a.id)
+
+        // Park it (hibernated) with a snapshot backdrop.
+        try await db.terminals.setHibernated(
+            id: term.id, sessionID: term.claudeSessionID ?? "s", snapshot: "FROZEN")
+        let parkedBefore = try await db.terminals.get(id: term.id)
+        let hibAt = parkedBefore?.hibernatedAt
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: term.id, newProfileID: b.id)
+        ))
+        #expect(swapResp.success)
+        let result = try swapResp.decodeResult(Terminal.self)
+
+        // profile flipped, but the session stays parked (result reads as parked).
+        #expect(result.profileID == b.id)
+        #expect(result.isParked, "cold swap must leave the session parked")
+
+        // No spawn of any kind.
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
+        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(!joined.contains("respawn-window"), "cold swap must not respawn; got: \(joined)")
+        #expect(!joined.contains("new-window"), "cold swap must not spawn a new window; got: \(joined)")
+        #expect(!joined.contains("C-c"), "cold swap must not interrupt the pane; got: \(joined)")
+
+        // Parked timestamps + snapshot untouched.
+        let after = try await db.terminals.get(id: term.id)
+        #expect(after?.profileID == b.id)
+        #expect(after?.hibernatedAt == hibAt, "hibernatedAt must be untouched")
+        #expect(after?.suspendedSnapshot == "FROZEN", "snapshot backdrop must survive")
+    }
+
+    /// A legacy-parked session (only `suspendedAt` set) also gets a cold swap,
+    /// not a respawn.
+    @Test("cold swap: legacy-suspended session also re-homes without respawn")
+    func coldSwapLegacySuspendedDoesNotRespawn() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        let term = try createResp.decodeResult(Terminal.self)
+
+        // Legacy park: only suspendedAt.
+        try await db.terminals.setSuspended(id: term.id, sessionID: term.claudeSessionID ?? "s")
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: term.id, newProfileID: b.id)
+        ))
+        #expect(swapResp.success)
+        let result = try swapResp.decodeResult(Terminal.self)
+        #expect(result.profileID == b.id)
+        #expect(result.isParked)
+
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap))
+        let joined = postSwap.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(!joined.contains("respawn-window"))
+        #expect(!joined.contains("new-window"))
+
+        let after = try await db.terminals.get(id: term.id)
+        #expect(after?.suspendedAt != nil, "legacy suspendedAt stays set (still parked)")
+        #expect(after?.profileID == b.id)
+    }
+
+    /// After a cold swap, waking the session resumes under the NEW profile's
+    /// config dir — verified by the wake respawn carrying B's CLAUDE_CONFIG_DIR.
+    @Test("cold swap then wake: resumes under the new profile's config dir")
+    func wakeAfterColdSwapUsesNewProfileConfigDir() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, type: .claude)
+        ))
+        let term = try createResp.decodeResult(Terminal.self)
+        try await db.terminals.setHibernated(id: term.id, sessionID: "sess-cold")
+
+        // Cold swap to B.
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: term.id, newProfileID: b.id)
+        ))
+        #expect(try await db.terminals.get(id: term.id)?.profileID == b.id)
+
+        // Now wake via the unified coordinator (the router's own instance).
+        let beforeWake = recorder.calls.count
+        let wakeResult = await router.hibernationCoordinator.wake(terminalID: term.id)
+        #expect(wakeResult == .ok)
+
+        let postWake = Array(recorder.calls.dropFirst(beforeWake))
+        let joined = postWake.map { $0.joined(separator: " ") }.joined(separator: "\n")
+        // Wake must respawn `claude --resume` under B's config dir. The config
+        // dir path embeds the profile's (lowercased) UUID, so asserting B's UUID
+        // appears in a CLAUDE_CONFIG_DIR arg proves the resume targets B — not A.
+        #expect(joined.contains("claude --resume sess-cold"))
+        #expect(joined.contains("CLAUDE_CONFIG_DIR="),
+                "wake must inject a profile config dir; got: \(joined)")
+        #expect(joined.lowercased().contains(b.id.uuidString.lowercased()),
+                "wake after cold swap must resume under B's config dir (B's UUID); got: \(joined)")
+        #expect(!joined.lowercased().contains(a.id.uuidString.lowercased()),
+                "wake must NOT reference A's config dir after a cold swap to B")
+    }
+
     // MARK: - Login sessions (Settings → "Open login session")
 
     /// Mutable pane-text holder so tests can drive what the auto-login pump

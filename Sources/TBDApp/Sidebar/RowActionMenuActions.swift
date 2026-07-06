@@ -42,14 +42,10 @@ struct RowActionMenuActions {
     /// inputs the old `SidebarContextMenu` read inline.
     func context() -> RowActionMenu.Context {
         RowActionMenu.Context(
-            hasUnsuspendedClaude: terminals.contains {
-                $0.isClaudeResumable && $0.suspendedAt == nil
-            },
-            hasSuspendedClaude: terminals.contains {
-                $0.isClaudeResumable && $0.suspendedAt != nil
-            },
             hasHibernatableClaude: terminals.contains { $0.isManuallyHibernatable },
-            hasHibernatedClaude: terminals.contains { $0.isHibernated },
+            // "Wake" acts on any PARKED session (authoritative hibernatedAt OR
+            // legacy suspendedAt) — the unified park state.
+            hasHibernatedClaude: terminals.contains { $0.isParked },
             hasUnpinnedClaude: terminals.contains {
                 $0.isClaudeResumable && !$0.keepWarm && !$0.isHibernated
             },
@@ -113,16 +109,6 @@ struct RowActionMenuActions {
             let wtID = worktree.id
             Task { await appState.deleteScratch(id: wtID) }
 
-        case .suspendClaude:
-            suspendClaude()
-
-        case .resumeClaude:
-            let wtID = worktree.id
-            Task {
-                try? await appState.daemonClient.worktreeResume(worktreeID: wtID)
-                await appState.refreshTerminals(worktreeID: wtID)
-            }
-
         case .hibernateNow:
             let wtID = worktree.id
             let ids = terminals.filter { $0.isManuallyHibernatable }.map { $0.id }
@@ -134,7 +120,8 @@ struct RowActionMenuActions {
 
         case .wakeHibernated:
             let wtID = worktree.id
-            let ids = terminals.filter { $0.isHibernated }.map { $0.id }
+            // Wake every PARKED session (hibernated or legacy-suspended).
+            let ids = terminals.filter { $0.isParked }.map { $0.id }
             Task {
                 for id in ids {
                     await appState.wakeTerminal(terminalID: id, worktreeID: wtID)
@@ -180,42 +167,6 @@ struct RowActionMenuActions {
         }
     }
 
-    /// Suspend all unsuspended resumable Claude terminals. Screenshot-capture +
-    /// suspending-state + poll-until-suspended loop preserved byte-for-byte from
-    /// the original `SidebarContextMenu` implementation.
-    private func suspendClaude() {
-        let wtID = worktree.id
-        let claudeTerminalIDs = terminals
-            .filter { $0.isClaudeResumable && $0.suspendedAt == nil }
-            .map { $0.id }
-        // Capture screenshot synchronously before any state change
-        for id in claudeTerminalIDs {
-            if let screenshot = appState.snapshotProviders[id]?() {
-                appState.setSuspendingSnapshot(screenshot, for: id)
-            }
-        }
-        // Now set suspending state (removes TerminalPanelView, shows screenshot)
-        claudeTerminalIDs.forEach { appState.suspendingTerminalIDs.insert($0) }
-        Task {
-            try? await appState.daemonClient.worktreeSuspend(worktreeID: wtID)
-            // Poll until all Claude terminals are suspended (daemon now async)
-            // 200ms intervals for first 2s, 500ms after — up to 15s total
-            for i in 0..<30 {
-                await appState.refreshTerminals(worktreeID: wtID)
-                let updated = appState.terminals[wtID] ?? []
-                if claudeTerminalIDs.allSatisfy({ id in
-                    updated.first(where: { $0.id == id })?.suspendedAt != nil
-                }) {
-                    break
-                }
-                try? await Task.sleep(for: .milliseconds(i < 10 ? 200 : 500))
-            }
-            claudeTerminalIDs.forEach {
-                appState.suspendingTerminalIDs.remove($0)
-                appState.removeSuspendingSnapshot(for: $0)
-            }
-        }
-    }
 }
 
 // MARK: - Rendering
