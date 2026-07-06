@@ -760,9 +760,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     return
                 }
                 // Scope the teardown detach to THIS attach when its generation
-                // is known (openAttach succeeded); nil (openAttach itself
-                // failed) falls back to the unconditional detach.
-                let failedGeneration = controlModeAttach?.generation
+                // is known: from the committed attach record, or — when the
+                // fd-vend wait timed out inside openAttach AFTER attach.request
+                // minted one — from the AttachFDVendError that carries it
+                // (R6-H2). Only a failure before attach.request succeeded
+                // (truly no generation) falls back to the unconditional detach.
+                let failedGeneration = ControlModeAttachAbort.teardownGeneration(
+                    committed: controlModeAttach?.generation, error: error)
                 controlModeAttach = nil
                 (terminalView as? TBDTerminalView)?.onControlModePaste = nil
                 // Clear any attach record / stale failing flag for this pane

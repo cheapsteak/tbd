@@ -52,4 +52,39 @@ struct ControlModeAttachAbortTests {
         #expect(ControlModeAttachAbort.shouldStartFallback(tornDown: false) == true)
         #expect(ControlModeAttachAbort.shouldStartFallback(tornDown: true) == false)
     }
+
+    // MARK: - Failure-teardown generation (R6-H2)
+    //
+    // The DaemonClient throw site itself (openAttach's fd-vend wait timing
+    // out against a live daemon) is not constructible headlessly — it needs a
+    // real RPC socket plus a daemon that vends nothing. What IS testable is
+    // the decision the catch in `startControlModeClient` makes: which
+    // generation the failure teardown is scoped to. These pin that table.
+
+    @Test("a committed attach's generation wins over anything on the error")
+    func committedGenerationWins() {
+        let error = AttachFDVendError(generation: 9, underlying: FDSidecarError.timedOut)
+        #expect(ControlModeAttachAbort.teardownGeneration(committed: 4, error: error) == 4)
+        #expect(ControlModeAttachAbort.teardownGeneration(
+            committed: 4, error: FDSidecarError.timedOut) == 4)
+    }
+
+    @Test("fd-vend timeout before commit: the daemon-minted generation rides the error")
+    func vendTimeoutCarriesMintedGeneration() {
+        // openAttach threw after attach.request succeeded (generation minted)
+        // but before the fd arrived: the teardown must be scoped to THAT
+        // generation — a nil-generation detach could kill a healthy racing
+        // re-attach's sink (the 56029f5b class).
+        let error = AttachFDVendError(generation: 7, underlying: FDSidecarError.timedOut)
+        #expect(ControlModeAttachAbort.teardownGeneration(committed: nil, error: error) == 7)
+    }
+
+    @Test("failure before attach.request succeeded: truly no generation → nil (unconditional path)")
+    func preRequestFailureHasNoGeneration() {
+        #expect(ControlModeAttachAbort.teardownGeneration(
+            committed: nil, error: FDSidecarError.timedOut) == nil)
+        // An older daemon can mint no generation: the vend error carries nil.
+        let error = AttachFDVendError(generation: nil, underlying: FDSidecarError.timedOut)
+        #expect(ControlModeAttachAbort.teardownGeneration(committed: nil, error: error) == nil)
+    }
 }

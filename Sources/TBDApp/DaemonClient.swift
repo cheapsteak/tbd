@@ -42,6 +42,19 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
     var errorDescription: String? { description }
 }
 
+/// `openAttach` failed AFTER `attach.request` succeeded — the daemon minted
+/// an attach (generation known, sink allocated) but the vended fd never
+/// arrived on the sidecar (timeout, supersession, or disconnect). The minted
+/// generation rides the error (R6-H2) so the caller's failure teardown stays
+/// generation-scoped: a nil-generation `pane.detach` here is UNCONDITIONAL
+/// and can kill a healthy racing re-attach's fresh sink (the 56029f5b class,
+/// from a different throw site). `generation` is nil only when an older
+/// daemon minted none.
+struct AttachFDVendError: Error {
+    let generation: UInt64?
+    let underlying: any Error
+}
+
 /// Actor that communicates with the TBD daemon over a Unix domain socket.
 /// Uses one-shot POSIX socket connections per RPC call (same approach as the CLI).
 actor DaemonClient {
@@ -857,7 +870,16 @@ actor DaemonClient {
             promise.cancel()
             throw error
         }
-        return (try await promise.value(timeout: .seconds(5)), generation)
+        do {
+            return (try await promise.value(timeout: .seconds(5)), generation)
+        } catch {
+            // attach.request already succeeded, so the daemon-minted
+            // generation is known — it must survive this throw (R6-H2): the
+            // caller's failure teardown detaches by it, and losing it here
+            // would force the unconditional nil-generation detach that can
+            // kill a healthy racing re-attach.
+            throw AttachFDVendError(generation: generation, underlying: error)
+        }
     }
 
     /// Ack that the app's reader is draining the vended fd — opens the

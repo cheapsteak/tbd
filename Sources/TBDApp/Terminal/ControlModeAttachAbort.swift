@@ -62,4 +62,17 @@ enum ControlModeAttachAbort {
     static func shouldStartFallback(tornDown: Bool) -> Bool {
         !tornDown
     }
+
+    /// The generation an attach-failure teardown should be scoped to (R6-H2).
+    /// `committed` is `controlModeAttach?.generation` — set once the attach
+    /// got far enough to commit. When the failure happened INSIDE `openAttach`
+    /// (the fd-vend wait timed out AFTER `attach.request` succeeded), nothing
+    /// was committed but the daemon-minted generation rides the error as
+    /// `AttachFDVendError` — the teardown must use it rather than fall back to
+    /// the unconditional nil-generation detach, which can kill a healthy
+    /// racing re-attach's sink. Only a failure BEFORE `attach.request`
+    /// succeeded (truly no generation anywhere) returns nil.
+    static func teardownGeneration(committed: UInt64?, error: any Error) -> UInt64? {
+        committed ?? (error as? AttachFDVendError)?.generation
+    }
 }
