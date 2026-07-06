@@ -31,6 +31,23 @@ struct SubprocessTimeoutTests {
         }
     }
 
+    @Test func runExternalCommandDrainsOutputLargerThanPipeBuffer() async throws {
+        // A macOS pipe buffer is 64KB. Before stdout was drained concurrently
+        // with the child, a command emitting more (e.g. `ps -Ao` with ~900+
+        // processes) blocked writing to the full pipe while the caller waited
+        // for exit — mutual deadlock, resolved only by the timeout (or, at the
+        // original detectOrphanedClaudeProcesses call site, never). Lock down
+        // that a 100KB emitter completes and returns its FULL output.
+        let bytes = 102_400
+        let out = try await TmuxManager.runExternalCommand(
+            executable: "/bin/sh",
+            arguments: ["-c", "yes x | head -c \(bytes)"],
+            label: "big-output-test",
+            timeout: .seconds(10)
+        )
+        #expect(out.utf8.count == bytes)
+    }
+
     @Test func runExternalCommandSucceedsWellWithinTimeout() async throws {
         // A fast binary returns normally — the timeout wrapper must not break the
         // happy path (regression guard for the kill/continuation plumbing).
