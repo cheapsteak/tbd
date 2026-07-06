@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
+
+private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
 /// GRDB Record type for the `worktree` table.
 struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
@@ -53,7 +56,15 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.promotedToRepoID = wt.promotedToRepoID?.uuidString
     }
 
-    func toModel() -> Worktree {
+    /// Failable decode: skips (returns nil after a logged warning) only when the
+    /// primary key UUID fails to parse — that row is unrecoverable. An unknown
+    /// `status` rawValue instead falls back to `.active` (see below) so the
+    /// worktree is preserved rather than dropped. `worktrees.list` runs
+    /// constantly and on every reconcile, so one row written by a branch build
+    /// whose `WorktreeStatus` enum has a case this build lacks must not crash the
+    /// fetch. `repoID` already decodes safely via `flatMap` and is intentionally
+    /// left as-is.
+    func toModel() -> Worktree? {
         var sessions: [String]?
         if let json = archivedClaudeSessions,
            let data = json.data(using: .utf8) {
@@ -63,14 +74,30 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         if let json = prStatus, let data = json.data(using: .utf8) {
             pr = try? JSONDecoder().decode(PRStatus.self, from: data)
         }
+        guard let uuid = UUID(uuidString: id) else {
+            decodeLogger.warning("Skipping worktree row \(id, privacy: .public): malformed id")
+            return nil
+        }
+        // Unlike a malformed primary-key UUID (genuinely unrecoverable → drop the
+        // row), an unknown status is recoverable: dropping the whole worktree
+        // mid-reconcile could orphan its terminals/tmux, which is worse than the
+        // startup crash we're fixing. Fall back to `.active` (the safe visible/
+        // normal default) — matching sibling stores' `RepoStatus(rawValue:) ?? .ok`.
+        let worktreeStatus: WorktreeStatus
+        if let parsed = WorktreeStatus(rawValue: status) {
+            worktreeStatus = parsed
+        } else {
+            decodeLogger.warning("worktree row \(id, privacy: .public): unknown status \(status, privacy: .public); defaulting to .active")
+            worktreeStatus = .active
+        }
         return Worktree(
-            id: UUID(uuidString: id)!,
+            id: uuid,
             repoID: repoID.flatMap { UUID(uuidString: $0) },
             name: name,
             displayName: displayName,
             branch: branch,
             path: path,
-            status: WorktreeStatus(rawValue: status)!,
+            status: worktreeStatus,
             hasConflicts: hasConflicts,
             createdAt: createdAt,
             archivedAt: archivedAt,
@@ -205,7 +232,7 @@ public struct WorktreeStore: Sendable {
             try WorktreeRecord
                 .filter(Column("repoID") == nil)
                 .order(Column("sortOrder").asc)
-                .fetchAll(db).map { $0.toModel() }
+                .fetchAll(db).compactMap { $0.toModel() }
         }
     }
 
@@ -350,7 +377,7 @@ public struct WorktreeStore: Sendable {
             if let limit {
                 request = request.limit(limit, offset: offset ?? 0)
             }
-            return try request.fetchAll(db).map { $0.toModel() }
+            return try request.fetchAll(db).compactMap { $0.toModel() }
         }
     }
 
@@ -730,7 +757,7 @@ public struct WorktreeStore: Sendable {
             var result: [UUID: PRStatus] = [:]
             for record in try WorktreeRecord.fetchAll(db) {
                 guard let wtID = UUID(uuidString: record.id),
-                      let model = record.toModel().prStatus else { continue }
+                      let model = record.toModel()?.prStatus else { continue }
                 result[wtID] = model
             }
             return result

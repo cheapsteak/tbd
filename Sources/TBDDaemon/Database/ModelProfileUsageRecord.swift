@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
+
+private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
 struct ModelProfileUsageRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "model_profile_usage"
@@ -23,9 +26,15 @@ struct ModelProfileUsageRecord: Codable, FetchableRecord, PersistableRecord, Sen
         self.last_status = u.lastStatus
     }
 
-    func toModel() -> ModelProfileUsage {
-        ModelProfileUsage(
-            profileID: UUID(uuidString: profile_id)!,
+    /// Failable decode: skips (returns nil after a logged warning) rather than
+    /// crashing when the profile_id UUID fails to parse.
+    func toModel() -> ModelProfileUsage? {
+        guard let uuid = UUID(uuidString: profile_id) else {
+            decodeLogger.warning("Skipping model_profile_usage row: malformed profile_id \(profile_id, privacy: .public)")
+            return nil
+        }
+        return ModelProfileUsage(
+            profileID: uuid,
             fiveHourPct: five_hour_pct,
             sevenDayPct: seven_day_pct,
             fiveHourResetsAt: five_hour_resets_at,
@@ -62,7 +71,7 @@ public struct ModelProfileUsageStore: Sendable {
             var byProfileID: [UUID: ModelProfileUsage] = [:]
             byProfileID.reserveCapacity(records.count)
             for record in records {
-                let usage = record.toModel()
+                guard let usage = record.toModel() else { continue }
                 byProfileID[usage.profileID] = usage
             }
             return byProfileID

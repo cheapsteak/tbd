@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
+
+private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
 /// GRDB Record type for the `notification` table.
 struct NotificationRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
@@ -24,11 +27,28 @@ struct NotificationRecord: Codable, FetchableRecord, PersistableRecord, Sendable
         self.terminalID = notification.terminalID?.uuidString
     }
 
-    func toModel() -> TBDNotification {
-        TBDNotification(
-            id: UUID(uuidString: id)!,
-            worktreeID: UUID(uuidString: worktreeID)!,
-            type: NotificationType(rawValue: type)!,
+    /// Failable decode: skips (returns nil after a logged warning) rather than
+    /// crashing when a required UUID or the notification type fails to parse.
+    /// A single unknown `type` rawValue (e.g. a row written by a branch build
+    /// whose enum has a case this build lacks) must not take down the whole
+    /// `notifications.list` fetch — and thus the daemon — on startup.
+    func toModel() -> TBDNotification? {
+        guard let uuid = UUID(uuidString: id) else {
+            decodeLogger.warning("Skipping notification row \(id, privacy: .public): malformed id")
+            return nil
+        }
+        guard let wtID = UUID(uuidString: worktreeID) else {
+            decodeLogger.warning("Skipping notification row \(id, privacy: .public): malformed worktreeID \(worktreeID, privacy: .public)")
+            return nil
+        }
+        guard let notificationType = NotificationType(rawValue: type) else {
+            decodeLogger.warning("Skipping notification row \(id, privacy: .public): unknown type \(type, privacy: .public)")
+            return nil
+        }
+        return TBDNotification(
+            id: uuid,
+            worktreeID: wtID,
+            type: notificationType,
             message: message,
             read: read,
             createdAt: createdAt,
@@ -73,7 +93,7 @@ public struct NotificationStore: Sendable {
                 .filter(Column("read") == false)
                 .order(Column("createdAt").desc)
                 .fetchAll(db)
-                .map { $0.toModel() }
+                .compactMap { $0.toModel() }
         }
     }
 
@@ -106,7 +126,7 @@ public struct NotificationStore: Sendable {
         }
         var result: [UUID: UnreadSummary] = [:]
         for record in records {
-            let model = record.toModel()
+            guard let model = record.toModel() else { continue }
             if let existing = result[model.worktreeID] {
                 let newType = model.type.severity > existing.type.severity
                     ? model.type
