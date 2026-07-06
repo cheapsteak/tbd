@@ -77,16 +77,42 @@ extension AppState {
         }
     }
 
-    /// Auto-wake any PARKED Claude terminals in a worktree the user just
-    /// focused/selected. Covers both hibernated (authoritative) and legacy
-    /// suspended rows — wake is the one resume path. Called from the
-    /// selection-change hook. Idempotent via `wakeTerminal`'s in-flight guard,
-    /// so double-focus is safe.
+    /// Auto-wake the PARKED Claude terminal the user is actually about to look
+    /// at in a worktree they just focused/selected. Covers both hibernated
+    /// (authoritative) and legacy suspended rows — wake is the one resume path.
+    /// Called from the selection-change hook. Idempotent via `wakeTerminal`'s
+    /// in-flight guard, so double-focus is safe.
+    ///
+    /// Deliberately does NOT wake every parked terminal in the worktree. A
+    /// worktree with ~20+ hibernated sessions on ONE tmux server used to fire
+    /// that many simultaneous `respawn-window -k … claude --resume` (heavy Node)
+    /// spawns on focus → a spawn storm that queued respawns past the app's 300s
+    /// RPC ceiling → the "recv timed out after 300s" hang, which then re-fired
+    /// on the next focus (~5-min loop) and re-inflated memory/swap each cycle.
+    ///
+    /// Strategy: wake ONLY the terminal that autofocus will surface (the active
+    /// tab's terminal). The rest stay hibernated until the user actually
+    /// navigates to them (selecting their tab re-invokes this hook). If the
+    /// focused terminal can't be resolved to a parked row, fall back to waking
+    /// at most one parked terminal — never a parallel fan-out.
     func wakeHibernatedTerminalsOnFocus(worktreeID: UUID) {
-        let hibernated = (terminals[worktreeID] ?? []).filter { $0.isParked }
-        guard !hibernated.isEmpty else { return }
-        for terminal in hibernated {
-            Task { await wakeTerminal(terminalID: terminal.id, worktreeID: worktreeID) }
+        guard let target = terminalIDToWakeOnFocus(worktreeID: worktreeID) else { return }
+        // Wake exactly one; never a parallel fan-out (see the storm rationale above).
+        Task { await wakeTerminal(terminalID: target, worktreeID: worktreeID) }
+    }
+
+    /// Pure decision behind `wakeHibernatedTerminalsOnFocus`: the single parked
+    /// terminal (if any) to wake on focus. Three branches — (1) the focused
+    /// terminal when it is itself parked; (2) otherwise the first parked
+    /// terminal; (3) nil when none are parked. Extracted as a pure function so
+    /// the fan-out choice is unit-tested without a live `DaemonClient`.
+    func terminalIDToWakeOnFocus(worktreeID: UUID) -> UUID? {
+        let parked = (terminals[worktreeID] ?? []).filter { $0.isParked }
+        guard !parked.isEmpty else { return nil }
+        if let focusedID = terminalIDForAutofocus(worktreeID: worktreeID),
+           parked.contains(where: { $0.id == focusedID }) {
+            return focusedID
         }
+        return parked.first?.id
     }
 }
