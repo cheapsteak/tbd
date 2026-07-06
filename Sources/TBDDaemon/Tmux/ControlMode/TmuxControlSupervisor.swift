@@ -38,12 +38,28 @@ actor TmuxControlSupervisor {
     /// mediates attach/ready/detach. Test-visible so orchestration tests can
     /// fabricate `%output` events against the same fanout the supervisor owns.
     nonisolated let fanout = PaneFanout()
+    /// Connection factory seam. Production builds a real `tmux -CC` connection;
+    /// tests substitute one backed by a stub binary so teardown paths can run
+    /// without a live tmux.
+    private let makeConnection: @Sendable (String) -> TmuxControlConnection
+    /// How a fatally-faulted connection is stopped (see `teardownConnection`).
+    /// `TmuxControlConnection.stop()` blocks up to ~2 s (SIGTERM → SIGKILL
+    /// escalation), so this MUST only ever run off the actor. Injectable so
+    /// tests can hold a stop mid-flight deterministically.
+    private let stopConnection: @Sendable (TmuxControlConnection) -> Void
+
+    init(makeConnection: @escaping @Sendable (String) -> TmuxControlConnection
+            = { TmuxControlConnection(serverName: $0) },
+         stopConnection: @escaping @Sendable (TmuxControlConnection) -> Void = { $0.stop() }) {
+        self.makeConnection = makeConnection
+        self.stopConnection = stopConnection
+    }
 
     /// Idempotently ensure a control connection exists for `serverName`.
     /// A no-op if one is already running.
     func ensureConnection(serverName: String) {
         guard connections[serverName] == nil else { return }
-        let connection = TmuxControlConnection(serverName: serverName)
+        let connection = makeConnection(serverName)
         let fanout = self.fanout
         connection.outputSink = { [fanout] event in
             fanout.route(server: serverName, event: event)
@@ -97,13 +113,41 @@ actor TmuxControlSupervisor {
         layoutFilterBox.set(filter)
     }
 
-    /// Tear a connection down after a fatal correlator violation. Guarded on
-    /// identity so a stale callback from a superseded connection is a no-op.
-    /// `stop()` ends the event stream, so `drain` performs the client cleanup.
-    private func teardownConnection(serverName: String, connection: TmuxControlConnection) {
-        guard connections[serverName] === connection else { return }
+    /// Tear a connection down after a fatal correlator violation. `nonisolated`
+    /// on purpose (same rule as `writeReplay`): `stop()` blocks up to ~2 s on
+    /// the SIGTERM → SIGKILL escalation, and that wait must run on the caller's
+    /// task — never on this actor, where it would stall every supervisor call
+    /// for every worktree. The actor-isolated half (`evictForTeardown`) is
+    /// bookkeeping only and runs first: state leaves the maps BEFORE `stop()`,
+    /// so a concurrent `ensureConnection` can create a successor safely — the
+    /// successor opens its own fresh pty, and the old connection's primary fd
+    /// is owned by (and closed only inside) its own still-running `stop()`, so
+    /// no fd can be reused through the connection object mid-teardown.
+    private nonisolated func teardownConnection(
+        serverName: String, connection: TmuxControlConnection
+    ) async {
+        guard await evictForTeardown(serverName: serverName, connection: connection) else { return }
+        stopConnection(connection)
+    }
+
+    /// Bookkeeping half of the fatal-error teardown. Guarded on identity so a
+    /// stale callback from a superseded connection is a no-op (the M1-era
+    /// stale-drain rule: never evict a successor's entries). Removes the maps'
+    /// state and fails the client's pending sends NOW — waiting for `stop()`
+    /// to end the stream (and `drain` to observe it) could take the whole
+    /// SIGKILL escalation. `drain`'s own end-of-stream cleanup then no-ops on
+    /// the maps (identity guard) and re-calls `connectionClosed` (idempotent).
+    /// Returns whether this call still owned the connection — only the owner
+    /// proceeds to `stop()`.
+    private func evictForTeardown(
+        serverName: String, connection: TmuxControlConnection
+    ) async -> Bool {
+        guard connections[serverName] === connection else { return false }
         logger.error("tearing down tmux -CC connection for \(serverName, privacy: .public) after correlator fault")
-        connection.stop()
+        connections[serverName] = nil
+        let client = commandClients.removeValue(forKey: serverName)
+        await client?.connectionClosed()  // fail pending sends without waiting for stop()
+        return true
     }
 
     /// Allocate a per-pane pipe in the fanout and return the read end for the
