@@ -260,31 +260,89 @@ private final class ProfileUsageMockURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
-/// Token reader stub — never touches the keychain.
-private struct StubTokenReader: ClaudeOAuthTokenReading {
-    enum Behavior {
-        case token(String)
+/// Credential-store stub — never touches the keychain. Serves a blob and
+/// records write-backs.
+private final class StubCredentialStore: ClaudeCredentialStoring, @unchecked Sendable {
+    enum ReadBehavior {
+        case blob(Data)
         case absent
         case failure(String)
     }
-    let behavior: Behavior
+    private let queue = DispatchQueue(label: "StubCredentialStore")
+    private var read: ReadBehavior
+    private var writeSucceeds: Bool
+    private var _writes: [Data] = []
 
-    func accessToken(forConfigDirPath path: String) async throws -> String? {
-        switch behavior {
-        case .token(let token): return token
+    init(read: ReadBehavior, writeSucceeds: Bool = true) {
+        self.read = read
+        self.writeSucceeds = writeSucceeds
+    }
+
+    var writes: [Data] { queue.sync { _writes } }
+
+    func readBlob(forConfigDirPath path: String) async throws -> Data? {
+        switch queue.sync(execute: { read }) {
+        case .blob(let data): return data
         case .absent: return nil
-        case .failure(let message): throw ClaudeOAuthTokenReadError(message)
+        case .failure(let msg): throw ClaudeOAuthTokenReadError(msg)
+        }
+    }
+
+    func writeBlob(_ data: Data, forConfigDirPath path: String) async -> Bool {
+        queue.sync {
+            _writes.append(data)
+            return writeSucceeds
         }
     }
 }
 
-private func makeProfileFetcher(_ behavior: StubTokenReader.Behavior) -> LiveProfileUsageFetcher {
+/// Refresher stub returning a scripted result.
+private struct StubRefresher: ClaudeOAuthRefreshing {
+    let result: Result<RefreshedOAuthToken, ClaudeOAuthRefreshError>
+    func refresh(refreshToken: String, scopes: [String])
+        async -> Result<RefreshedOAuthToken, ClaudeOAuthRefreshError> { result }
+}
+
+/// A valid credential blob. `expiresAtMillis` defaults far in the future so the
+/// fetcher doesn't preemptively refresh unless a test asks for expiry.
+private func credentialBlob(accessToken: String = "at-live",
+                            refreshToken: String = "rt-live",
+                            expiresAtMillis: Double = 9_999_999_999_999) -> Data {
+    """
+    {
+      "mcpOAuth": {},
+      "claudeAiOauth": {
+        "accessToken": "\(accessToken)",
+        "refreshToken": "\(refreshToken)",
+        "expiresAt": \(Int(expiresAtMillis)),
+        "scopes": ["user:inference"],
+        "subscriptionType": "max"
+      }
+    }
+    """.data(using: .utf8)!
+}
+
+private func mockSession() -> URLSession {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [ProfileUsageMockURLProtocol.self]
-    return LiveProfileUsageFetcher(
-        tokenReader: StubTokenReader(behavior: behavior),
-        session: URLSession(configuration: config)
+    return URLSession(configuration: config)
+}
+
+private func makeProfileFetcher(
+    store: StubCredentialStore,
+    refresher: ClaudeOAuthRefreshing = StubRefresher(result: .failure(.invalidGrant)),
+    now: @escaping @Sendable () -> Date = { Date() }
+) -> LiveProfileUsageFetcher {
+    LiveProfileUsageFetcher(
+        credentialStore: store,
+        refresher: refresher,
+        session: mockSession(),
+        now: now
     )
+}
+
+private func okResponse(_ req: URLRequest, body: Data) -> (HTTPURLResponse, Data) {
+    (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!, body)
 }
 
 @Suite(.serialized)
@@ -295,11 +353,9 @@ struct LiveProfileUsageFetcherTests {
     }
 
     @Test func happyPathSendsBearerTokenAndParsesBuckets() async throws {
-        ProfileUsageMockURLProtocol.handler = { req in
-            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!,
-             capturedUsageJSON)
-        }
-        let status = await makeProfileFetcher(.token("sk-ant-oat01-TEST")).fetchUsage(configDirPath: "/tmp/x")
+        ProfileUsageMockURLProtocol.handler = { req in okResponse(req, body: capturedUsageJSON) }
+        let store = StubCredentialStore(read: .blob(credentialBlob(accessToken: "sk-ant-oat01-TEST")))
+        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
         guard case .ok(let buckets) = status else {
             Issue.record("expected .ok, got \(status)")
             return
@@ -309,6 +365,7 @@ struct LiveProfileUsageFetcherTests {
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer sk-ant-oat01-TEST")
         #expect(request.value(forHTTPHeaderField: "anthropic-beta") == "oauth-2025-04-20")
         #expect(request.url?.absoluteString == "https://api.anthropic.com/api/oauth/usage")
+        #expect(store.writes.isEmpty)  // fresh token → no refresh/write
     }
 
     @Test func missingCredentialShortCircuitsWithoutHTTP() async {
@@ -316,15 +373,17 @@ struct LiveProfileUsageFetcherTests {
             Issue.record("no HTTP call expected when credentials are absent")
             throw URLError(.badServerResponse)
         }
-        let status = await makeProfileFetcher(.absent).fetchUsage(configDirPath: "/tmp/x")
+        let store = StubCredentialStore(read: .absent)
+        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
         guard case .noCredentials = status else {
             Issue.record("expected .noCredentials, got \(status)")
             return
         }
     }
 
-    @Test func tokenReadErrorMapsToNoCredentials() async {
-        let status = await makeProfileFetcher(.failure("security exited 51")).fetchUsage(configDirPath: "/tmp/x")
+    @Test func credentialReadErrorMapsToNoCredentials() async {
+        let store = StubCredentialStore(read: .failure("security exited 51"))
+        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
         guard case .noCredentials(let reason) = status else {
             Issue.record("expected .noCredentials, got \(status)")
             return
@@ -332,25 +391,118 @@ struct LiveProfileUsageFetcherTests {
         #expect(reason.contains("security exited 51"))
     }
 
-    @Test func http401MapsToHTTPError() async {
+    @Test func rateLimitedResponseMapsToRateLimitedWithRetryAfter() async {
         ProfileUsageMockURLProtocol.handler = { req in
-            (HTTPURLResponse(url: req.url!, statusCode: 401, httpVersion: "HTTP/1.1", headerFields: nil)!,
-             Data())
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
+                             headerFields: ["Retry-After": "120"])!, Data())
         }
-        let status = await makeProfileFetcher(.token("sk-ant-oat01-TEST")).fetchUsage(configDirPath: "/tmp/x")
-        #expect(status == .httpError(401))
+        let store = StubCredentialStore(read: .blob(credentialBlob()))
+        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
+        #expect(status == .rateLimited(retryAfter: 120))
     }
 
     @Test func malformedBodyMapsToDecodeError() async {
         ProfileUsageMockURLProtocol.handler = { req in
-            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!,
-             Data("<!doctype html>".utf8))
+            okResponse(req, body: Data("<!doctype html>".utf8))
         }
-        let status = await makeProfileFetcher(.token("sk-ant-oat01-TEST")).fetchUsage(configDirPath: "/tmp/x")
+        let store = StubCredentialStore(read: .blob(credentialBlob()))
+        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
         guard case .decodeError = status else {
             Issue.record("expected .decodeError, got \(status)")
             return
         }
+    }
+
+    // MARK: Token refresh paths
+
+    @Test func expiredTokenIsRefreshedAndWrittenBackBeforeFetch() async throws {
+        // First (and only) HTTP call should carry the REFRESHED token, proving
+        // the preemptive refresh happened before the usage GET.
+        ProfileUsageMockURLProtocol.handler = { req in okResponse(req, body: capturedUsageJSON) }
+        let store = StubCredentialStore(
+            read: .blob(credentialBlob(accessToken: "old-at", expiresAtMillis: 1000)))
+        let refresher = StubRefresher(result: .success(RefreshedOAuthToken(
+            accessToken: "fresh-at", refreshToken: "fresh-rt", expiresAtMillis: 9_999_999_999_999)))
+        // now well past the 1000ms expiry.
+        let status = await makeProfileFetcher(
+            store: store, refresher: refresher, now: { Date(timeIntervalSince1970: 2_000_000) }
+        ).fetchUsage(configDirPath: "/tmp/x")
+
+        guard case .ok = status else { Issue.record("expected .ok, got \(status)"); return }
+        let request = try #require(ProfileUsageMockURLProtocol.lastRequest)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer fresh-at")
+        // Rotated pair persisted.
+        #expect(store.writes.count == 1)
+        let written = try #require(parseClaudeCredentials(store.writes[0]))
+        #expect(written.accessToken == "fresh-at")
+        #expect(written.refreshToken == "fresh-rt")
+    }
+
+    @Test func deadRefreshTokenSurfacesNeedsLogin() async {
+        // Expired access token, refresh returns invalid_grant → needs re-login.
+        let store = StubCredentialStore(
+            read: .blob(credentialBlob(expiresAtMillis: 1000)))
+        let refresher = StubRefresher(result: .failure(.invalidGrant))
+        let status = await makeProfileFetcher(
+            store: store, refresher: refresher, now: { Date(timeIntervalSince1970: 2_000_000) }
+        ).fetchUsage(configDirPath: "/tmp/x")
+        guard case .needsLogin = status else {
+            Issue.record("expected .needsLogin, got \(status)"); return
+        }
+    }
+
+    @Test func refreshWriteBackDenialSurfacesNeedsLogin() async {
+        // Refresh succeeds server-side but the keychain write is denied; we must
+        // NOT report success against a token the CLI can't see.
+        ProfileUsageMockURLProtocol.handler = { req in okResponse(req, body: capturedUsageJSON) }
+        let store = StubCredentialStore(
+            read: .blob(credentialBlob(expiresAtMillis: 1000)), writeSucceeds: false)
+        let refresher = StubRefresher(result: .success(RefreshedOAuthToken(
+            accessToken: "fresh-at", refreshToken: "fresh-rt", expiresAtMillis: 9_999_999_999_999)))
+        let status = await makeProfileFetcher(
+            store: store, refresher: refresher, now: { Date(timeIntervalSince1970: 2_000_000) }
+        ).fetchUsage(configDirPath: "/tmp/x")
+        guard case .needsLogin = status else {
+            Issue.record("expected .needsLogin, got \(status)"); return
+        }
+    }
+
+    @Test func http401TriggersRefreshAndRetry() async {
+        // Fresh (non-expired) token, but the server rejects it 401 → refresh
+        // once and retry; the retry sees 200.
+        let responder = ResponseScript(responses: [401, 200])
+        ProfileUsageMockURLProtocol.handler = { req in responder.next(req, okBody: capturedUsageJSON) }
+        let store = StubCredentialStore(read: .blob(credentialBlob(accessToken: "stale-at")))
+        let refresher = StubRefresher(result: .success(RefreshedOAuthToken(
+            accessToken: "fresh-at", refreshToken: "fresh-rt", expiresAtMillis: 9_999_999_999_999)))
+        let status = await makeProfileFetcher(store: store, refresher: refresher)
+            .fetchUsage(configDirPath: "/tmp/x")
+        guard case .ok = status else { Issue.record("expected .ok, got \(status)"); return }
+        #expect(store.writes.count == 1)  // refresh persisted
+    }
+
+    @Test func rateLimitedDoesNotTriggerRefresh() async {
+        // 429 is not an auth failure — must NOT refresh (that would waste the
+        // single-use refresh token and could compound the rate limit).
+        ProfileUsageMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1", headerFields: nil)!, Data())
+        }
+        let store = StubCredentialStore(read: .blob(credentialBlob()))
+        let status = await makeProfileFetcher(store: store).fetchUsage(configDirPath: "/tmp/x")
+        #expect(status == .rateLimited(retryAfter: nil))
+        #expect(store.writes.isEmpty)
+    }
+}
+
+/// Ordered HTTP status responder for multi-call tests.
+private final class ResponseScript: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "ResponseScript")
+    private var statuses: [Int]
+    init(responses: [Int]) { self.statuses = responses }
+    func next(_ req: URLRequest, okBody: Data) -> (HTTPURLResponse, Data) {
+        let code = queue.sync { statuses.isEmpty ? 200 : statuses.removeFirst() }
+        let body = code == 200 ? okBody : Data()
+        return (HTTPURLResponse(url: req.url!, statusCode: code, httpVersion: "HTTP/1.1", headerFields: nil)!, body)
     }
 }
 

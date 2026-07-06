@@ -527,6 +527,36 @@ public struct ClaudeUsageLimitBucket: Codable, Sendable, Equatable {
     }
 }
 
+/// Machine-readable classification of a profile's last usage-fetch outcome,
+/// so the UI can render honest, distinct states instead of parsing the
+/// free-form `status` string. Separates auth failures from rate limits from
+/// network errors — the three demand different user affordances ("needs
+/// re-login" vs "retrying" vs "temporarily unavailable").
+///
+/// New field: `statusKind` is optional on `ProfileUsageSnapshot` with an
+/// `.unknown` default so payloads from an older daemon (which only sent the
+/// `status` string) still decode.
+public enum ProfileUsageStatusKind: String, Codable, Sendable, Equatable {
+    /// Last fetch succeeded; `buckets` are current.
+    case ok
+    /// HTTP 429 — rate limited. The poller is backing off and will retry.
+    case rateLimited
+    /// HTTP 401/403 with a credential the daemon believes is present but the
+    /// server rejected, AND automatic token refresh could not recover it. The
+    /// profile needs the user to re-run `/login`.
+    case needsLogin
+    /// No stored credential at all for this profile (never logged in, or the
+    /// keychain item is gone).
+    case noCredentials
+    /// A transport-level failure (DNS, timeout, offline). Transient; retried.
+    case networkError
+    /// The server replied 200 but the body didn't parse. Retried.
+    case decodeError
+    /// Some other HTTP status, or a snapshot from an older daemon that didn't
+    /// classify. Treated as a generic retryable failure by the UI.
+    case unknown
+}
+
 /// In-memory per-profile usage snapshot for logged-in OAuth profiles,
 /// maintained by the daemon's background poller (never persisted).
 public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
@@ -539,13 +569,31 @@ public struct ProfileUsageSnapshot: Codable, Sendable, Equatable {
     /// "ok", or a failure description like
     /// "stale since 2026-07-03T18:00:00Z; fetch failed: HTTP 401".
     public var status: String
+    /// Machine-readable classification of the last fetch outcome. Optional for
+    /// decode-compat with older daemons; defaults to `.unknown` when absent.
+    public var statusKind: ProfileUsageStatusKind
 
     public init(buckets: [ClaudeUsageLimitBucket], fetchedAt: Date? = nil,
-                lastAttemptAt: Date, status: String) {
+                lastAttemptAt: Date, status: String,
+                statusKind: ProfileUsageStatusKind = .unknown) {
         self.buckets = buckets
         self.fetchedAt = fetchedAt
         self.lastAttemptAt = lastAttemptAt
         self.status = status
+        self.statusKind = statusKind
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.buckets = try container.decode([ClaudeUsageLimitBucket].self, forKey: .buckets)
+        self.fetchedAt = try container.decodeIfPresent(Date.self, forKey: .fetchedAt)
+        self.lastAttemptAt = try container.decode(Date.self, forKey: .lastAttemptAt)
+        self.status = try container.decode(String.self, forKey: .status)
+        // Absent (older daemon) → infer from the legacy string so callers still
+        // get a usable classification: "ok" → .ok, else .unknown.
+        self.statusKind = try container.decodeIfPresent(
+            ProfileUsageStatusKind.self, forKey: .statusKind)
+            ?? (self.status == "ok" ? .ok : .unknown)
     }
 
     public var isOK: Bool { status == "ok" }

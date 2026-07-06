@@ -117,7 +117,15 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
     /// credential could not be read. The reason is human-readable and MUST
     /// NOT contain token bytes.
     case noCredentials(String)
-    case httpError(Int)  // 401 = token invalid/expired, 429 = rate limited, ...
+    /// The stored credential is present but the account needs the user to
+    /// re-run `/login`: either the access token was rejected (401/403) and
+    /// automatic refresh could not recover it, or the refresh token itself is
+    /// dead (`invalid_grant`).
+    case needsLogin(String)
+    /// HTTP 429. `retryAfter` carries the server's `Retry-After` (seconds) when
+    /// present, so the poller can honor it instead of guessing a backoff.
+    case rateLimited(retryAfter: TimeInterval?)
+    case httpError(Int)
     case networkError(String)
     case decodeError(String)
 
@@ -127,10 +135,32 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
         switch self {
         case .ok: return nil
         case .noCredentials(let reason): return "no credentials (\(reason))"
+        case .needsLogin(let reason): return "needs re-login (\(reason))"
+        case .rateLimited(let ra):
+            return ra.map { "rate limited (retry \(Int($0))s)" } ?? "rate limited"
         case .httpError(let code): return "HTTP \(code)"
         case .networkError(let msg): return "network error: \(msg)"
         case .decodeError(let msg): return "decode error: \(msg)"
         }
+    }
+
+    /// Machine-readable classification for the snapshot / UI.
+    public var kind: ProfileUsageStatusKind {
+        switch self {
+        case .ok: return .ok
+        case .noCredentials: return .noCredentials
+        case .needsLogin: return .needsLogin
+        case .rateLimited: return .rateLimited
+        case .httpError: return .unknown
+        case .networkError: return .networkError
+        case .decodeError: return .decodeError
+        }
+    }
+
+    /// The `Retry-After` the server asked for, if any (429 only).
+    public var retryAfter: TimeInterval? {
+        if case .rateLimited(let ra) = self { return ra }
+        return nil
     }
 }
 
@@ -145,35 +175,134 @@ public protocol ProfileUsageFetching: Sendable {
 /// `https://api.anthropic.com/api/oauth/usage` with it — the same endpoint
 /// `LiveClaudeUsageFetcher` uses for API-key profiles, but with CLI-mediated
 /// (keychain) credentials and the richer `limits[]` parse.
+///
+/// Token freshness is handled here so a profile whose access token has expired
+/// (nothing running a Claude session on it to refresh it) recovers on its own:
+/// before the GET, an expired credential is refreshed via the OAuth
+/// `refresh_token` grant and the rotated pair written back to the keychain (so
+/// the CLI benefits too); a 401/403 on the GET triggers one refresh-and-retry.
+/// When refresh fails because the refresh token is dead, the profile is
+/// classified `.needsLogin` rather than an eternal auth error.
 public struct LiveProfileUsageFetcher: ProfileUsageFetching {
-    public let tokenReader: ClaudeOAuthTokenReading
+    public let credentialStore: ClaudeCredentialStoring
+    public let refresher: ClaudeOAuthRefreshing
     public let session: URLSession
+    private let now: @Sendable () -> Date
 
     public init(
-        tokenReader: ClaudeOAuthTokenReading = SecurityCLIOAuthTokenReader(),
-        session: URLSession = .shared
+        credentialStore: ClaudeCredentialStoring = SecurityCLIClaudeCredentialStore(),
+        refresher: ClaudeOAuthRefreshing = LiveClaudeOAuthRefresher(),
+        session: URLSession = .shared,
+        now: (@Sendable () -> Date)? = nil
     ) {
-        self.tokenReader = tokenReader
+        self.credentialStore = credentialStore
+        self.refresher = refresher
         self.session = session
+        self.now = now ?? { Date() }
     }
 
     public func fetchUsage(configDirPath: String) async -> ProfileUsageFetchStatus {
-        let token: String?
+        // 1. Read the full credential blob.
+        let blob: Data?
         do {
-            token = try await tokenReader.accessToken(forConfigDirPath: configDirPath)
+            blob = try await credentialStore.readBlob(forConfigDirPath: configDirPath)
         } catch {
             return .noCredentials("credential read failed: \(error)")
         }
-        guard let token else {
+        guard let blob, var creds = parseClaudeCredentials(blob) else {
             return .noCredentials("no stored credential — needs /login")
         }
 
+        // 2. Proactively refresh an already-expired access token before the
+        //    request (avoids a guaranteed 401 round-trip).
+        if creds.isExpired(now: now()) {
+            switch await refreshAndPersist(creds, blob: blob, configDirPath: configDirPath) {
+            case .refreshed(let updated):
+                creds = updated
+            case .needsLogin(let reason):
+                return .needsLogin(reason)
+            case .transient(let status):
+                return status
+            }
+        }
+
+        // 3. Fetch usage. On 401/403, refresh once and retry.
+        let firstAttempt = await requestUsage(accessToken: creds.accessToken)
+        if case .httpError(let code) = firstAttempt, code == 401 || code == 403 {
+            switch await refreshAndPersist(creds, blob: blob, configDirPath: configDirPath) {
+            case .refreshed(let updated):
+                return await requestUsage(accessToken: updated.accessToken)
+            case .needsLogin(let reason):
+                return .needsLogin(reason)
+            case .transient(let status):
+                return status
+            }
+        }
+        return firstAttempt
+    }
+
+    // MARK: Refresh + persist
+
+    private enum RefreshOutcome {
+        case refreshed(ClaudeOAuthCredentials)
+        case needsLogin(String)
+        case transient(ProfileUsageFetchStatus)
+    }
+
+    /// Refresh the access token and write the rotated pair back to the
+    /// keychain. A failed write-back is treated as `.needsLogin`: we must not
+    /// report success against a token the CLI can't see (the refresh token has
+    /// already rotated server-side, so the un-persisted old one is now dead).
+    private func refreshAndPersist(_ creds: ClaudeOAuthCredentials, blob: Data,
+                                   configDirPath: String) async -> RefreshOutcome {
+        guard let refreshToken = creds.refreshToken else {
+            return .needsLogin("no refresh token stored")
+        }
+        let result = await refresher.refresh(refreshToken: refreshToken, scopes: creds.scopes)
+        switch result {
+        case .success(let token):
+            guard let rewritten = rewriteClaudeCredentials(
+                original: blob,
+                newAccessToken: token.accessToken,
+                newRefreshToken: token.refreshToken,
+                newExpiresAtMillis: token.expiresAtMillis
+            ) else {
+                return .needsLogin("could not rewrite credential blob")
+            }
+            let wrote = await credentialStore.writeBlob(rewritten, forConfigDirPath: configDirPath)
+            guard wrote else {
+                return .needsLogin("token refreshed but keychain write-back was denied")
+            }
+            var updated = creds
+            updated.accessToken = token.accessToken
+            updated.refreshToken = token.refreshToken
+            updated.expiresAtMillis = token.expiresAtMillis
+            return .refreshed(updated)
+        case .failure(let error):
+            switch error {
+            case .invalidGrant:
+                return .needsLogin("refresh token expired")
+            case .rateLimited(let ra):
+                return .transient(.rateLimited(retryAfter: ra))
+            case .network(let msg):
+                return .transient(.networkError("refresh: \(msg)"))
+            case .http(let code):
+                return .transient(.httpError(code))
+            case .badResponse(let msg):
+                return .transient(.networkError("refresh: \(msg)"))
+            }
+        }
+    }
+
+    // MARK: Usage request
+
+    private func requestUsage(accessToken: String) async -> ProfileUsageFetchStatus {
         guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
             return .networkError("invalid URL")
         }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
@@ -187,13 +316,18 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
         guard let http = response as? HTTPURLResponse else {
             return .networkError("non-HTTP response")
         }
-        guard http.statusCode == 200 else {
+        switch http.statusCode {
+        case 200:
+            do {
+                return .ok(try ClaudeUsagePayloadParser.parseBuckets(from: data))
+            } catch {
+                return .decodeError("\(error)")
+            }
+        case 429:
+            let ra = (http.value(forHTTPHeaderField: "Retry-After")).flatMap(TimeInterval.init)
+            return .rateLimited(retryAfter: ra)
+        default:
             return .httpError(http.statusCode)
-        }
-        do {
-            return .ok(try ClaudeUsagePayloadParser.parseBuckets(from: data))
-        } catch {
-            return .decodeError("\(error)")
         }
     }
 }

@@ -234,6 +234,31 @@ struct OAuthProfileUsagePollerTests {
         #expect(snapshots[drop.id] == nil)
     }
 
+    @Test func failedFetchSetsTypedStatusKind() async {
+        let profile = oauthProfile(named: "Rate")
+        let fetcher = ScriptedProfileUsageFetcher(default: .rateLimited(retryAfter: 60))
+        let broadcasts = BroadcastCounter()
+        let poller = makePoller(
+            profiles: [profile], loggedIn: [profile.id],
+            fetcher: fetcher, broadcasts: broadcasts
+        )
+        let snapshots = await poller.sweepNow()
+        #expect(snapshots[profile.id]?.statusKind == .rateLimited)
+    }
+
+    @Test func needsLoginStatusFlowsThroughToSnapshot() async {
+        let profile = oauthProfile(named: "Expired")
+        let fetcher = ScriptedProfileUsageFetcher(default: .needsLogin("refresh token expired"))
+        let broadcasts = BroadcastCounter()
+        let poller = makePoller(
+            profiles: [profile], loggedIn: [profile.id],
+            fetcher: fetcher, broadcasts: broadcasts
+        )
+        let snapshots = await poller.sweepNow()
+        #expect(snapshots[profile.id]?.statusKind == .needsLogin)
+        #expect(snapshots[profile.id]?.status.contains("needs re-login") == true)
+    }
+
     @Test func profilesProviderErrorLeavesExistingSnapshotsIntact() async {
         let profile = oauthProfile(named: "Sticky")
         let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
@@ -262,6 +287,145 @@ struct OAuthProfileUsagePollerTests {
         let second = await poller.sweepNow()
         #expect(second[profile.id]?.status == "ok")
         #expect(broadcasts.count == 1)
+    }
+}
+
+// MARK: - Backoff scheduling
+
+/// Thread-safe mutable clock for backoff tests.
+private final class MutableClock: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "MutableClock")
+    private var _now: Date
+    init(_ start: Date) { _now = start }
+    var now: Date { queue.sync { _now } }
+    func advance(_ interval: TimeInterval) { queue.sync { _now = _now.addingTimeInterval(interval) } }
+}
+
+@Suite struct OAuthProfileUsagePollerBackoffTests {
+
+    /// Build a poller whose scheduled loop runs exactly one sweep (the cadence
+    /// sleeper throws to stop the loop), with a deterministic clock and zero
+    /// jitter.
+    private func scheduledPoller(
+        profile: ModelProfile,
+        fetcher: ScriptedProfileUsageFetcher,
+        clock: MutableClock
+    ) -> OAuthProfileUsagePoller {
+        OAuthProfileUsagePoller(
+            profilesProvider: { [profile] },
+            loginIdentity: { _ in "someone@example.com" },
+            configDirPath: { id in "/profiles/\(id.uuidString.lowercased())/claude" },
+            fetcher: fetcher,
+            broadcast: {},
+            sleeper: { _ in },  // instant staggers
+            now: { clock.now },
+            jitter: { _ in 0 }
+        )
+    }
+
+    @Test func retryAfterGatesTheNextScheduledSweep() async {
+        let profile = oauthProfile(named: "Limited")
+        let dir = "/profiles/\(profile.id.uuidString.lowercased())/claude"
+        // First fetch: 429 Retry-After 300s. Second (if it happened): ok.
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        fetcher.enqueue(configDirPath: dir, .rateLimited(retryAfter: 300))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = scheduledPoller(profile: profile, fetcher: fetcher, clock: clock)
+
+        // Forced sweep records the 429 and arms the 300s backoff.
+        _ = await poller.sweepNow()
+        #expect(fetcher.calls.count == 1)
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .rateLimited)
+
+        // A scheduled sweep only 100s later must SKIP this profile (still inside
+        // the 300s Retry-After window).
+        clock.advance(100)
+        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        #expect(fetcher.calls.count == 1)  // no new fetch
+
+        // Past the window: scheduled sweep tries again and recovers.
+        clock.advance(300)
+        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        #expect(fetcher.calls.count == 2)
+        #expect(await poller.snapshot(for: profile.id)?.statusKind == .ok)
+    }
+
+    @Test func forcedSweepIgnoresBackoffWindow() async {
+        let profile = oauthProfile(named: "Limited")
+        let dir = "/profiles/\(profile.id.uuidString.lowercased())/claude"
+        let fetcher = ScriptedProfileUsageFetcher(default: .rateLimited(retryAfter: 600))
+        fetcher.enqueue(configDirPath: dir, .rateLimited(retryAfter: 600))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = scheduledPoller(profile: profile, fetcher: fetcher, clock: clock)
+
+        _ = await poller.sweepNow()               // arms 600s backoff
+        #expect(fetcher.calls.count == 1)
+        // A user-forced refresh 1s later still fetches (explicit intent).
+        clock.advance(1)
+        _ = await poller.sweepNow()
+        #expect(fetcher.calls.count == 2)
+    }
+
+    @Test func exponentialBackoffGrowsWithConsecutiveFailures() async {
+        let profile = oauthProfile(named: "Flaky")
+        // Always fails with a network error (no Retry-After) → exponential path.
+        let fetcher = ScriptedProfileUsageFetcher(default: .networkError("down"))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = scheduledPoller(profile: profile, fetcher: fetcher, clock: clock)
+
+        // Failure 1 → base backoff (30s). A scheduled sweep at +29s is skipped,
+        // at +31s it runs (failure 2), which arms ~60s.
+        _ = await poller.sweepNow()  // forced; failure 1, arms 30s
+        #expect(fetcher.calls.count == 1)
+
+        clock.advance(29)
+        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        #expect(fetcher.calls.count == 1)  // still gated
+
+        clock.advance(2)  // now +31s
+        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        #expect(fetcher.calls.count == 2)  // failure 2, arms ~60s
+
+        // +31s from failure-2 is NOT enough now (window doubled to 60s).
+        clock.advance(31)
+        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        #expect(fetcher.calls.count == 2)  // still gated by the longer window
+
+        clock.advance(30)  // +61s total from failure 2
+        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        #expect(fetcher.calls.count == 3)
+    }
+
+    @Test func oneProfileBackoffDoesNotBlockAnother() async {
+        let limited = oauthProfile(named: "Limited")
+        let healthy = oauthProfile(named: "Healthy")
+        let limitedDir = "/profiles/\(limited.id.uuidString.lowercased())/claude"
+        let fetcher = ScriptedProfileUsageFetcher(default: .ok(okBuckets))
+        fetcher.enqueue(configDirPath: limitedDir, .rateLimited(retryAfter: 600))
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_000_000))
+        let poller = OAuthProfileUsagePoller(
+            profilesProvider: { [limited, healthy] },
+            loginIdentity: { _ in "someone@example.com" },
+            configDirPath: { id in "/profiles/\(id.uuidString.lowercased())/claude" },
+            fetcher: fetcher,
+            broadcast: {},
+            sleeper: { _ in },
+            now: { clock.now },
+            jitter: { _ in 0 }
+        )
+
+        _ = await poller.sweepNow()  // limited → 429 (backoff), healthy → ok
+        let firstCalls = fetcher.calls.count
+        #expect(firstCalls == 2)
+
+        // Scheduled sweep shortly after: limited is gated, but healthy still
+        // polls — proving isolation.
+        clock.advance(10)
+        _ = await poller.sweepNow(profileID: nil, forcedForTest: false)
+        // Only the healthy profile fetched again.
+        #expect(fetcher.calls.count == firstCalls + 1)
+        #expect(await poller.snapshot(for: healthy.id)?.statusKind == .ok)
+        #expect(await poller.snapshot(for: limited.id)?.statusKind == .rateLimited)
     }
 }
 

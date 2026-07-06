@@ -28,9 +28,11 @@ private func bucket(kind: String, percent: Double, severity: String? = nil,
 
 private func snapshot(buckets: [ClaudeUsageLimitBucket],
                       fetchedAt: Date? = Date(),
-                      status: String = "ok") -> ProfileUsageSnapshot {
+                      status: String = "ok",
+                      statusKind: ProfileUsageStatusKind = .ok) -> ProfileUsageSnapshot {
     ProfileUsageSnapshot(buckets: buckets, fetchedAt: fetchedAt,
-                         lastAttemptAt: Date(), status: status)
+                         lastAttemptAt: Date(), status: status,
+                         statusKind: statusKind)
 }
 
 private func entry(name: String,
@@ -272,18 +274,12 @@ struct PickerSortTests {
 
 // MARK: - Staleness
 
-@Suite("ProfileUsagePresentation — staleness")
+@Suite("ProfileUsagePresentation — staleness / honest states")
 struct StalenessNoteTests {
     @Test func freshHealthySnapshotHasNoNote() {
         let now = Date()
         let fresh = snapshot(buckets: [], fetchedAt: now.addingTimeInterval(-30))
         #expect(ProfileUsagePresentation.stalenessNote(for: fresh, now: now) == nil)
-    }
-
-    @Test func failingSnapshotSurfacesDaemonStatusVerbatim() {
-        let status = "stale since 2026-07-03T18:00:00Z; fetch failed: HTTP 401"
-        let failing = snapshot(buckets: [], status: status)
-        #expect(ProfileUsagePresentation.stalenessNote(for: failing) == status)
     }
 
     @Test func neverFetchedSnapshotSaysNoDataYet() {
@@ -299,6 +295,118 @@ struct StalenessNoteTests {
 
     @Test func missingSnapshotHasNoNote() {
         #expect(ProfileUsagePresentation.stalenessNote(for: nil) == nil)
+    }
+
+    // MARK: Typed failure states — each renders distinct, explicit copy.
+
+    @Test func needsLoginRendersActionableNote() {
+        let failing = snapshot(buckets: [], fetchedAt: nil,
+                               status: "fetch failed: needs re-login (refresh token expired)",
+                               statusKind: .needsLogin)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing) == "needs re-login")
+    }
+
+    @Test func noCredentialsRendersNotLoggedIn() {
+        let failing = snapshot(buckets: [], fetchedAt: nil,
+                               status: "fetch failed: no credentials", statusKind: .noCredentials)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing) == "not logged in")
+    }
+
+    @Test func rateLimitedWithoutPriorDataSaysRetrying() {
+        let failing = snapshot(buckets: [], fetchedAt: nil,
+                               status: "fetch failed: rate limited", statusKind: .rateLimited)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing)
+                == "usage unavailable — retrying")
+    }
+
+    @Test func rateLimitedWithPriorDataAppendsLastKnownAge() {
+        let now = Date()
+        // Older successful buckets exist; status now reflects a 429.
+        let failing = snapshot(buckets: [bucket(kind: "session", percent: 20)],
+                               fetchedAt: now.addingTimeInterval(-7200),
+                               status: "stale since …; fetch failed: rate limited",
+                               statusKind: .rateLimited)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing, now: now)
+                == "usage unavailable — retrying · last data 2h ago")
+    }
+
+    @Test func networkErrorSaysRetrying() {
+        let failing = snapshot(buckets: [], fetchedAt: nil,
+                               status: "fetch failed: network error: timed out",
+                               statusKind: .networkError)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing)
+                == "usage unavailable — retrying")
+    }
+
+    @Test func unknownStatusFromOlderDaemonSaysRetrying() {
+        // Older daemon: no statusKind field → inferred .unknown on decode.
+        let failing = snapshot(buckets: [], fetchedAt: nil,
+                               status: "fetch failed: HTTP 503", statusKind: .unknown)
+        #expect(ProfileUsagePresentation.stalenessNote(for: failing)
+                == "usage unavailable — retrying")
+    }
+
+    @Test func ageTextGranularity() {
+        let now = Date()
+        #expect(ProfileUsagePresentation.ageText(since: now.addingTimeInterval(-30), now: now) == "just now")
+        #expect(ProfileUsagePresentation.ageText(since: now.addingTimeInterval(-180), now: now) == "3m")
+        #expect(ProfileUsagePresentation.ageText(since: now.addingTimeInterval(-7200), now: now) == "2h")
+        #expect(ProfileUsagePresentation.ageText(since: now.addingTimeInterval(-172800), now: now) == "2d")
+    }
+}
+
+// MARK: - Secondary menu line honesty (menuLine composition)
+
+@Suite("ProfileUsagePresentation — secondary line honesty")
+struct SecondaryLineHonestyTests {
+    @Test func healthyFreshShowsUsageNumbers() {
+        let line = ProfileUsagePresentation.secondaryLine(for: gmailSnapshot, timeZone: utc)
+        #expect(line == "5h 0% used · resets 23:10 · week 76% · Fable 100%")
+    }
+
+    @Test func rateLimitedProfileShowsRetryNoteNotStaleNumbers() {
+        // Even though old buckets exist, a 429 snapshot must not present them as
+        // current — the retry note carries the row.
+        let now = Date()
+        let stale = ProfileUsageSnapshot(
+            buckets: gmailSnapshot.buckets,
+            fetchedAt: now.addingTimeInterval(-3600),
+            lastAttemptAt: now,
+            status: "stale since …; fetch failed: rate limited",
+            statusKind: .rateLimited)
+        let line = ProfileUsagePresentation.secondaryLine(for: stale, timeZone: utc, now: now)
+        #expect(line == "usage unavailable — retrying · last data 1h ago")
+    }
+
+    @Test func needsLoginProfileShowsReloginNote() {
+        let needs = ProfileUsageSnapshot(
+            buckets: [], fetchedAt: nil, lastAttemptAt: Date(),
+            status: "fetch failed: needs re-login", statusKind: .needsLogin)
+        #expect(ProfileUsagePresentation.secondaryLine(for: needs) == "needs re-login")
+    }
+
+    @Test func noSnapshotHasNoSecondaryLine() {
+        #expect(ProfileUsagePresentation.secondaryLine(for: nil) == nil)
+    }
+
+    @Test func healthyButAgingAppendsAgeNote() {
+        let now = Date()
+        let aging = ProfileUsageSnapshot(
+            buckets: [bucket(kind: "session", percent: 12)],
+            fetchedAt: now.addingTimeInterval(-600),
+            lastAttemptAt: now, status: "ok", statusKind: .ok)
+        #expect(ProfileUsagePresentation.secondaryLine(for: aging, timeZone: utc, now: now)
+                == "5h 12% used · updated 10m ago")
+    }
+
+    @Test func menuLineForFailingProfileHasHonestSecondary() {
+        let entry = entry(name: "Gmail", loginIdentity: "g@x.co",
+                          usageSnapshot: ProfileUsageSnapshot(
+                            buckets: [], fetchedAt: nil, lastAttemptAt: Date(),
+                            status: "fetch failed: needs re-login", statusKind: .needsLogin))
+        let line = ProfileUsagePresentation.menuLine(for: entry)
+        #expect(line.primary == "Gmail — g@x.co")
+        #expect(line.secondary == "needs re-login")
     }
 }
 
