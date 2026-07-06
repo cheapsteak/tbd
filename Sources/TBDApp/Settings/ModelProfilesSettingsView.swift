@@ -98,7 +98,6 @@ struct ModelProfileRow: View {
     @State private var showEditClaudeDirect = false
 
     private var profile: ModelProfile { entry.profile }
-    private var usage: ModelProfileUsage? { entry.usage }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -184,10 +183,13 @@ struct ModelProfileRow: View {
     }
 
     /// Per-account usage summary shown under the identity/endpoint caption,
-    /// reusing `ModelProfileUsage.usageLine` so the format matches everywhere
-    /// usage is rendered. `nil` (no line) for profiles that carry no usage
-    /// snapshot — e.g. Bedrock/proxy profiles, which have no usage concept.
-    private var usageLine: String? { usage?.usageLine() }
+    /// reusing `ProfileUsagePresentation.usageSummary` over the daemon poller's
+    /// `usageSnapshot` — the SAME source the account menus render, so the pane
+    /// stays in sync with them. `nil` (no line) for profiles with no snapshot
+    /// (Bedrock/proxy profiles, or not-yet-polled), which keep a plain identity.
+    private var usageLine: String? {
+        ProfileUsagePresentation.usageSummary(for: entry.usageSnapshot)
+    }
 
     @ViewBuilder
     private var nameView: some View {
