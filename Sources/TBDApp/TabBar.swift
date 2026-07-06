@@ -769,7 +769,27 @@ private struct TabBarItem: View {
 
             Divider()
 
-            Button(action: onFork) {
+            Menu {
+                Button {
+                    guard let terminalID = terminal?.id else { return }
+                    Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: nil, mode: .fork) }
+                } label: {
+                    let prefix = terminal?.profileID == nil ? "● " : "  "
+                    Text("\(prefix)Default (logged in)")
+                }
+
+                Divider()
+
+                ForEach(appState.modelProfiles, id: \.profile.id) { entry in
+                    Button {
+                        guard let terminalID = terminal?.id else { return }
+                        Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: entry.profile.id, mode: .fork) }
+                    } label: {
+                        let prefix = terminal?.profileID == entry.profile.id ? "● " : "  "
+                        Text("\(prefix)\(formatProfileSubmenuLabel(entry))")
+                    }
+                }
+            } label: {
                 Label("Fork Session", systemImage: "arrow.triangle.branch")
             }
 
