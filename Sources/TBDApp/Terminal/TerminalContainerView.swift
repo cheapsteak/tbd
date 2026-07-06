@@ -192,15 +192,6 @@ struct SingleWorktreeView: View {
                             await appState.refreshTerminals(worktreeID: worktreeID)
                         }
                     },
-                    onForkTab: { tabID in
-                        guard let tID = terminalID(for: tabID) else { return }
-                        let terminal = appState.terminals[worktreeID]?.first { $0.id == tID }
-                        guard let sessionID = terminal?.claudeSessionID else { return }
-                        Task {
-                            await appState.forkClaudeTerminal(worktreeID: worktreeID, sessionID: sessionID, tokenID: terminal?.profileID)
-                            selectLastTab()
-                        }
-                    },
                     isHistorySelected: appState.historyActiveWorktrees.contains(worktreeID),
                     onHistoryTab: {
                         appState.toggleHistory(worktreeID: worktreeID)

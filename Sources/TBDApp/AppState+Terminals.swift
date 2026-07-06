@@ -367,28 +367,6 @@ extension AppState {
         }
     }
 
-    /// Fork a Claude terminal by resuming from an existing session ID.
-    func forkClaudeTerminal(worktreeID: UUID, sessionID: String, tokenID: UUID? = nil) async {
-        do {
-            let size = mainAreaTerminalSize()
-            let colorFgBg = appearance?.currentColorFgBg
-            let terminal = try await daemonClient.createTerminal(
-                worktreeID: worktreeID,
-                resumeSessionID: sessionID,
-                overrideProfileID: tokenID,
-                cols: size.cols,
-                rows: size.rows,
-                colorFgBg: colorFgBg
-            )
-            terminals[worktreeID, default: []].append(terminal)
-            let tab = Tab(id: terminal.id, content: .terminal(terminalID: terminal.id), label: initialTabLabel(for: terminal))
-            tabs[worktreeID, default: []].append(tab)
-        } catch {
-            logger.error("Failed to fork Claude terminal: \(error)")
-            handleConnectionError(error)
-        }
-    }
-
     /// Toggle pin state for a terminal.
     func setTerminalPin(id: UUID, pinned: Bool) async {
         // Optimistic local update

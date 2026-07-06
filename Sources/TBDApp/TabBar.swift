@@ -96,7 +96,6 @@ struct TabBar: View {
     var terminalForTab: (UUID) -> Terminal? = { _ in nil }
     var onSuspendTab: (UUID) -> Void = { _ in }
     var onResumeTab: (UUID) -> Void = { _ in }
-    var onForkTab: (UUID) -> Void = { _ in }
     var isHistorySelected: Bool = false
     var onHistoryTab: () -> Void = {}
 
@@ -119,8 +118,7 @@ struct TabBar: View {
                     onSelect: { activeTabIndex = index },
                     onClose: { onCloseTab(index) },
                     onSuspend: { onSuspendTab(tab.id) },
-                    onResume: { onResumeTab(tab.id) },
-                    onFork: { onForkTab(tab.id) }
+                    onResume: { onResumeTab(tab.id) }
                 )
             }
 
@@ -474,7 +472,6 @@ private struct TabBarItem: View {
     let onClose: () -> Void
     let onSuspend: () -> Void
     let onResume: () -> Void
-    let onFork: () -> Void
 
     @State private var isHovering = false
     @State private var isHoveringClose = false
