@@ -6,6 +6,7 @@ struct SidebarView: View {
     @EnvironmentObject var appState: AppState
     @AppStorage("sidebar.showHiddenRepos") private var showHiddenRepos: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
+    @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
 
     var filteredRepos: [Repo] {
         let base: [Repo]
@@ -54,10 +55,12 @@ struct SidebarView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 Divider()
-                NightwatchModeToggle()
-                    .padding(.horizontal, 12)
-                    .padding(.top, 8)
-                    .padding(.bottom, 6)
+                if nightwatchExperimental {
+                    NightwatchModeToggle()
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                        .padding(.bottom, 6)
+                }
                 HStack(spacing: 4) {
                     Button(action: addRepo) {
                         Label("Add Repository", systemImage: "plus.rectangle")

@@ -37,6 +37,7 @@ struct GeneralSettingsTab: View {
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = false
     @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript: Bool = true
+    @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
@@ -191,6 +192,18 @@ struct GeneralSettingsTab: View {
                 Toggle("New transcript renderer", isOn: $useTableViewTranscript)
                     .help("On by default. Off falls back to the legacy renderer (for comparison).")
                     .disabled(!enableTranscript)
+                Toggle("Nightwatch / Daywatch", isOn: $nightwatchExperimental)
+                    .help("""
+                    Experimental — an autonomous fleet babysitter. It sweeps your \
+                    worktrees, keeps stuck agents unblocked, and gates open PRs, using \
+                    cheap local scripts and only paging a model for genuine judgment \
+                    calls. Daywatch (◐) is a lighter pass for when you're at the \
+                    keyboard; Nightwatch (🌙) is the fuller autonomous mode for when \
+                    you're away. Evaluate-only for now — it records what it would do \
+                    without acting, and its behavior and safety rules are still \
+                    changing. Turning this on shows a mode control in the sidebar; off \
+                    hides it. You still merge PRs and make prod/access calls yourself.
+                    """)
             }
         }
         .formStyle(.grouped)
