@@ -183,12 +183,13 @@ struct ModelProfileRow: View {
     }
 
     /// Per-account usage summary shown under the identity/endpoint caption,
-    /// reusing `ProfileUsagePresentation.usageSummary` over the daemon poller's
-    /// `usageSnapshot` — the SAME source the account menus render, so the pane
-    /// stays in sync with them. `nil` (no line) for profiles with no snapshot
-    /// (Bedrock/proxy profiles, or not-yet-polled), which keep a plain identity.
+    /// reusing `ProfileUsagePresentation.secondaryLine` over the daemon poller's
+    /// `usageSnapshot` — the SAME source and honest-state handling the account
+    /// menus render, so a rate-limited / needs-re-login / stale profile shows an
+    /// explicit note rather than a silent blank. `nil` (no line) only when there
+    /// is genuinely no snapshot (Bedrock/proxy profiles, or not yet polled).
     private var usageLine: String? {
-        ProfileUsagePresentation.usageSummary(for: entry.usageSnapshot)
+        ProfileUsagePresentation.secondaryLine(for: entry.usageSnapshot)
     }
 
     @ViewBuilder
