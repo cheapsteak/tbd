@@ -1,3 +1,11 @@
+# ⚠️  Before changing this workflow, read docs/pr-review-gate.md — it documents the
+# merge-gate design (trust model, verdict token + Stop hook, exact-match enforce) and
+# two gotchas that cost real debugging time:
+#   • Runs on pull_request_target and MUST pass github_token: the OIDC app-token
+#     exchange 401s on this trigger (anthropics/claude-code-action#1017).
+#   • Changing the *trigger event* here needs a one-time admin merge — a PR that
+#     changes the trigger matches neither the old nor the new event, so no review runs
+#     and the required check never reports.
 name: Claude Code Review
 
 on:

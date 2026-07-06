@@ -73,6 +73,9 @@ Use `os.Logger` (`import os`) with one of the established subsystems (`com.tbd.a
 
 This rule is enforced mechanically by SwiftLint (custom rule `no_print_in_sources`) in the dedicated `lint` CI job and the pre-push git hook, both invoking a Homebrew-installed `swiftlint --strict` directly. To lint manually: `swiftlint --strict`. Prerequisite: `brew install swiftlint`. See `.swiftlint.yml`.
 
+### Changing the PR-review merge gate
+`claude-review` is a required check on `main`, produced by `.github/workflows/claude-code-review.yml`. Before touching that workflow or its `claude-review-hooks/`, read [`docs/pr-review-gate.md`](docs/pr-review-gate.md). Two traps it documents: the workflow runs on `pull_request_target` and **must** pass `github_token` (the OIDC app-token exchange 401s on that trigger), and changing the workflow's *trigger event* requires a one-time **admin merge** (such a PR matches neither the old nor new event, so no review runs and the required check never reports).
+
 ## Quick Reference
 
 - **Build**: `swift build`

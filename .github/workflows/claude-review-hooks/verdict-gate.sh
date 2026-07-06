@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Stop hook for the Claude PR-review session.
+# Part of the merge gate documented in docs/pr-review-gate.md.
 #
 # Refuses to let the review session end until it has recorded a clean,
 # machine-readable verdict in claude-verdict.txt. The workflow's merge gate reads
