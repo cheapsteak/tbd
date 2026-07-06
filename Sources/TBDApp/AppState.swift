@@ -918,10 +918,16 @@ final class AppState: ObservableObject {
     /// attach owned by `generation` (from `openAttach`; nil when the daemon
     /// vended none). Called by the terminal coordinator once `attach.ready`
     /// is acked. A re-attach for the same pane overwrites the record with its
-    /// own generation.
+    /// own generation AND clears any stale failing flag — a fresh attach
+    /// starts from a healthy baseline, mirroring the daemon router's
+    /// `register()` reset. Without this, a failing flag from a previous
+    /// generation could stick forever: the stale detach's generation guard
+    /// (correctly) refuses to clear it, and the daemon's register-reset is
+    /// silent — no recovery delta ever arrives to un-stick the indicator.
     func controlModePaneAttached(worktreeID: UUID, paneID: String, generation: UInt64?) {
-        controlModeAttachedPanes[ControlModePaneKey(worktreeID: worktreeID, paneID: paneID)] =
-            generation
+        let key = ControlModePaneKey(worktreeID: worktreeID, paneID: paneID)
+        controlModeAttachedPanes[key] = generation
+        controlModeFailingInputPanes.remove(key)
     }
 
     /// Clear a pane's attach record AND any failing flag — the indicator must

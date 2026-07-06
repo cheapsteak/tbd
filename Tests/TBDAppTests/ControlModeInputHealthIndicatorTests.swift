@@ -139,6 +139,33 @@ struct ControlModeInputHealthIndicatorTests {
         }
     }
 
+    @Test func reattach_clearsStaleFailingFlagFromPriorGeneration() {
+        withState { state in
+            let worktreeID = UUID()
+            let key = ControlModePaneKey(worktreeID: worktreeID, paneID: "%3")
+            // Gen 1 attaches and takes a REAL failure — the flag is set while
+            // gen 1 is still the recorded attach.
+            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%3", generation: 1)
+            state.handleDelta(failingDelta(worktreeID: worktreeID, paneID: "%3"))
+            #expect(state.isInputDeliveryFailing(key))
+
+            // The pane re-attaches (gen 2) BEFORE the stale gen-1 detach is
+            // processed. A fresh attach starts healthy — the stale flag must
+            // clear here, because nothing else ever will: the stale detach is
+            // (correctly) generation-guarded, and the daemon's register-reset
+            // is silent (no recovery delta arrives).
+            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%3", generation: 2)
+            #expect(!state.isInputDeliveryFailing(key), "fresh attach must start from a healthy baseline")
+
+            // The stale gen-1 detach then lands: attached state survives AND
+            // the indicator stays clear.
+            state.controlModePaneDetached(worktreeID: worktreeID, paneID: "%3", generation: 1)
+            #expect(!state.isInputDeliveryFailing(key))
+            state.handleDelta(failingDelta(worktreeID: worktreeID, paneID: "%3"))
+            #expect(state.isInputDeliveryFailing(key), "gen-2 attach record must have survived the stale detach")
+        }
+    }
+
     @Test func detachWithoutGeneration_clearsUnconditionally() {
         withState { state in
             let worktreeID = UUID()
