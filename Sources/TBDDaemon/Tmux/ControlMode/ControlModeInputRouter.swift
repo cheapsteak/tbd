@@ -42,11 +42,23 @@ final class ControlModeInputRouter: @unchecked Sendable {
     /// Resolves a server name to its FIFO correlator. Production passes
     /// `{ await supervisor.command(server: $0) }`; tests inject a fake.
     private let commandProvider: @Sendable (String) async -> TmuxControlCommandClient?
+    /// Sink for per-pane input-delivery health TRANSITIONS (#318 polish
+    /// ruling). Called with `(worktreeID, paneID, healthy)` exactly once per
+    /// edge — into failing, back to healthy — never per keystroke. The daemon
+    /// wires this to a `StateDelta.controlModeInputHealthChanged` broadcast;
+    /// tests inject a recorder; the default is a no-op.
+    private let onHealthChange: @Sendable (UUID, String, Bool) -> Void
     private let latency: InputLatencyRecorder
     private let chunkSize: Int
 
     private let lock = NSLock()
     private var servers: [InputKey: String] = [:]
+    /// Panes currently considered input-failing, for edge-triggering health
+    /// notifications. Guarded by `lock`. Delivery outcomes are reported from
+    /// two places — the consumer task (no command client) and the correlator
+    /// actor (per-command completions, which are FIFO per client) — so the
+    /// set, not the reporter, is the single source of truth for edges.
+    private var failingPanes: Set<InputKey> = []
 
     private let continuation: AsyncStream<Item>.Continuation
     /// The single sequential consumer. Retained so it lives as long as the
@@ -56,10 +68,12 @@ final class ControlModeInputRouter: @unchecked Sendable {
 
     init(commandProvider: @escaping @Sendable (String) async -> TmuxControlCommandClient?,
          latency: InputLatencyRecorder = InputLatencyRecorder(),
-         chunkSize: Int = 330) {
+         chunkSize: Int = 330,
+         onHealthChange: @escaping @Sendable (UUID, String, Bool) -> Void = { _, _, _ in }) {
         self.commandProvider = commandProvider
         self.latency = latency
         self.chunkSize = chunkSize
+        self.onHealthChange = onHealthChange
 
         var escapedContinuation: AsyncStream<Item>.Continuation!
         let stream = AsyncStream<Item>(bufferingPolicy: .unbounded) { escapedContinuation = $0 }
@@ -83,10 +97,15 @@ final class ControlModeInputRouter: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Forget a pane's routing (on detach). Idempotent.
+    /// Forget a pane's routing (on detach). Idempotent. Also drops the pane's
+    /// tracked input health SILENTLY (no recovery notification): the app
+    /// clears its indicator on detach itself, and a later re-attach must
+    /// start from a clean healthy baseline so a fresh failure re-fires.
     func unregister(worktreeID: UUID, paneID: String) {
+        let key = InputKey(worktreeID: worktreeID, paneID: paneID)
         lock.lock()
-        servers.removeValue(forKey: InputKey(worktreeID: worktreeID, paneID: paneID))
+        servers.removeValue(forKey: key)
+        failingPanes.remove(key)
         lock.unlock()
     }
 
@@ -121,6 +140,12 @@ final class ControlModeInputRouter: @unchecked Sendable {
 
     private func deliver(_ item: Item) async {
         guard let server = resolveServer(item.header) else {
+            // Deliberately NOT a failing-health signal: input for an
+            // unregistered pane is the normal teardown race — the app's
+            // keystroke crossing the pane's detach in flight, or arriving
+            // before an attach completed. It says nothing about the health
+            // of a pane the user is looking at, so flagging it would show
+            // the indicator on freshly-(re)attached panes for no reason.
             logger.debug("""
                 input for unregistered pane \(item.header.paneID, privacy: .public); \
                 dropping \(item.bytes.count, privacy: .public) bytes
@@ -128,7 +153,11 @@ final class ControlModeInputRouter: @unchecked Sendable {
             return
         }
         guard let client = await commandProvider(server) else {
+            // A REGISTERED pane whose server has no live command client:
+            // the -CC connection is down, the user's typing is going
+            // nowhere — that IS failing health.
             logger.debug("no command client for server \(server, privacy: .public); dropping input")
+            reportDelivery(header: item.header, success: false)
             return
         }
         switch item.kind {
@@ -148,11 +177,13 @@ final class ControlModeInputRouter: @unchecked Sendable {
     private func deliverPaste(_ item: Item, client: TmuxControlCommandClient) async {
         do {
             try await PasteExecutor.paste(client: client, paneID: item.header.paneID, bytes: item.bytes)
+            reportDelivery(header: item.header, success: true)
         } catch {
             logger.error("""
                 paste failed for pane \(item.header.paneID, privacy: .public): \
                 \(String(describing: error), privacy: .public)
                 """)
+            reportDelivery(header: item.header, success: false)
         }
     }
 
@@ -163,11 +194,18 @@ final class ControlModeInputRouter: @unchecked Sendable {
 
         // Every keystroke command tolerates errors: a pane dying mid-keystroke
         // is a constant race and must NOT tear down the repo's whole -CC
-        // connection. Failures are logged at debug; nothing else.
+        // connection. Failures are logged at debug and reported to the health
+        // tracker; nothing else. `[weak self]` because the client's pending
+        // queue holds these closures until their reply blocks arrive.
+        let header = item.header
         let commands = commandTexts.map { text in
-            TmuxCommand(text: text, tolerateErrors: true) { [logger] result in
-                if case .failure(let error) = result {
+            TmuxCommand(text: text, tolerateErrors: true) { [weak self, logger] result in
+                switch result {
+                case .success:
+                    self?.reportDelivery(header: header, success: true)
+                case .failure(let error):
                     logger.debug("send-keys failed (pane death race): \(String(describing: error), privacy: .public)")
+                    self?.reportDelivery(header: header, success: false)
                 }
             }
         }
@@ -176,5 +214,40 @@ final class ControlModeInputRouter: @unchecked Sendable {
         // sendList returns after the stream write — the addendum's "frame
         // receipt → after stream write" latency window.
         latency.record(item.receivedAt.duration(to: ContinuousClock.now))
+    }
+
+    // MARK: - Input-delivery health (#318 polish)
+
+    /// Record one delivery outcome for a pane and fire `onHealthChange` ONLY
+    /// on an edge (healthy → failing, failing → healthy).
+    ///
+    /// What counts as an outcome — and why COMPLETIONS, not write acceptance,
+    /// are the recovery signal: `sendList` always accepts a write locally
+    /// (the stream is unbounded), so "write accepted" would mark a wedged
+    /// server healthy forever. The per-command completion is tmux's actual
+    /// `%end`/`%error` verdict, delivered FIFO per correlator, so success
+    /// there proves keys REACHED tmux. Consequences, both deliberate:
+    ///   - Recovery is observed lazily, on the next delivery the user
+    ///     attempts (passive indicator — nothing probes the pane).
+    ///   - A chunked batch that partially fails may produce transitions in
+    ///     both directions (one per edge). Steady-state failure or success
+    ///     stays silent, which is the ruling's no-spam requirement.
+    /// `.connectionClosed` completions flow through the same failure path.
+    private func reportDelivery(header: SidecarInputHeader, success: Bool) {
+        let key = InputKey(worktreeID: header.worktreeID, paneID: header.paneID)
+        lock.lock()
+        var transitionedToHealthy: Bool?
+        if success {
+            if failingPanes.remove(key) != nil { transitionedToHealthy = true }
+        } else if failingPanes.insert(key).inserted {
+            transitionedToHealthy = false
+        }
+        lock.unlock()
+        guard let healthy = transitionedToHealthy else { return }
+        logger.info("""
+            input-delivery health for pane \(key.paneID, privacy: .public): \
+            \(healthy ? "recovered" : "FAILING", privacy: .public)
+            """)
+        onHealthChange(key.worktreeID, key.paneID, healthy)
     }
 }

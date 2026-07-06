@@ -26,6 +26,7 @@ public enum StateDelta: Codable, Sendable {
     case terminalProfileChanged(TerminalProfileDelta)
     case worktreeMoved(WorktreeMovedDelta)
     case terminalHibernationChanged(TerminalHibernationDelta)
+    case controlModeInputHealthChanged(ControlModeInputHealthDelta)
 }
 
 /// Delta payload for a terminal's hibernation state change (hibernate / wake)
@@ -61,6 +62,26 @@ public struct TerminalProfileDelta: Codable, Sendable {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.newProfileID = newProfileID
+    }
+}
+
+/// Delta payload for a control-mode input-delivery health transition (#318
+/// polish ruling). EDGE-TRIGGERED by the daemon's `ControlModeInputRouter`:
+/// one `healthy: false` when a pane's keystroke/paste delivery starts
+/// failing, one `healthy: true` when a subsequent delivery succeeds — never
+/// one per keystroke. The app shows/clears a passive "input not being
+/// delivered" indicator on the affected pane; delivery plumbing stays
+/// tolerant (nothing is torn down on failure).
+public struct ControlModeInputHealthDelta: Codable, Sendable, Equatable {
+    public let worktreeID: UUID
+    /// tmux pane id (`%N`) — only unique within one server, so it is always
+    /// paired with `worktreeID` (same keying as `SidecarInputHeader`).
+    public let paneID: String
+    public let healthy: Bool
+    public init(worktreeID: UUID, paneID: String, healthy: Bool) {
+        self.worktreeID = worktreeID
+        self.paneID = paneID
+        self.healthy = healthy
     }
 }
 

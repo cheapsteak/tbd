@@ -30,6 +30,14 @@ struct TabCloseContext: Equatable {
     let tabID: UUID
 }
 
+/// Identifies one control-mode pane app-side. `paneID` (tmux `%N`) is only
+/// unique within one server, so it is always paired with `worktreeID` — the
+/// same keying as the daemon router and `SidecarInputHeader`.
+struct ControlModePaneKey: Hashable {
+    let worktreeID: UUID
+    let paneID: String
+}
+
 @MainActor
 final class AppState: ObservableObject {
     /// Reference to the global appearance settings, wired by `TBDAppMain`
@@ -422,6 +430,17 @@ final class AppState: ObservableObject {
     /// User dismissed the build-mismatch banner. In-memory only (advisory);
     /// reset whenever the mismatch message changes.
     @Published var daemonBuildMismatchDismissed = false
+    /// Panes currently rendered through a live control-mode attach.
+    /// Maintained by `TerminalPanelRepresentable.Coordinator` (attach success
+    /// inserts; detach/fallback removes). Gates the input-health indicator:
+    /// it must NEVER show on a pane that isn't control-mode attached (#318
+    /// polish), whatever health deltas arrive.
+    @Published private(set) var controlModeAttachedPanes: Set<ControlModePaneKey> = []
+    /// Panes the daemon has flagged input-failing via edge-triggered
+    /// `controlModeInputHealthChanged` deltas. A `healthy: true` delta or a
+    /// detach clears the flag. Read through `isInputDeliveryFailing(_:)`,
+    /// which applies the attached-pane gate.
+    @Published private(set) var controlModeFailingInputPanes: Set<ControlModePaneKey> = []
     @Published var historyActiveWorktrees: Set<UUID> = []
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
@@ -881,8 +900,46 @@ final class AppState: ObservableObject {
         case .worktreeRevived(let d):
             recentlyArchivedWorktreeIDs.removeValue(forKey: d.worktreeID)
             Task { [weak self] in await self?.refreshWorktrees() }
+        case .controlModeInputHealthChanged(let d):
+            applyControlModeInputHealthDelta(d)
         default:
             break
+        }
+    }
+
+    // MARK: - Control-mode input-delivery health (#318 polish)
+
+    /// Record that `paneID` is now rendered through a live control-mode
+    /// attach. Called by the terminal coordinator once `attach.ready` is acked.
+    func controlModePaneAttached(worktreeID: UUID, paneID: String) {
+        controlModeAttachedPanes.insert(ControlModePaneKey(worktreeID: worktreeID, paneID: paneID))
+    }
+
+    /// Clear a pane's attach record AND any failing flag — the indicator must
+    /// vanish on detach, and a later re-attach starts from a healthy baseline
+    /// (mirrors the daemon router's unregister semantics). Idempotent; also
+    /// safe to call from the attach-failure fallback path where the pane was
+    /// never marked attached.
+    func controlModePaneDetached(worktreeID: UUID, paneID: String) {
+        let key = ControlModePaneKey(worktreeID: worktreeID, paneID: paneID)
+        controlModeAttachedPanes.remove(key)
+        controlModeFailingInputPanes.remove(key)
+    }
+
+    /// Whether the "input not being delivered" indicator should show for a
+    /// pane: it must be BOTH control-mode attached and flagged failing. A
+    /// failing delta for a non-attached pane (stale, or grouped-sessions
+    /// fallback) never surfaces.
+    func isInputDeliveryFailing(_ key: ControlModePaneKey) -> Bool {
+        controlModeAttachedPanes.contains(key) && controlModeFailingInputPanes.contains(key)
+    }
+
+    private func applyControlModeInputHealthDelta(_ delta: ControlModeInputHealthDelta) {
+        let key = ControlModePaneKey(worktreeID: delta.worktreeID, paneID: delta.paneID)
+        if delta.healthy {
+            controlModeFailingInputPanes.remove(key)
+        } else {
+            controlModeFailingInputPanes.insert(key)
         }
     }
 

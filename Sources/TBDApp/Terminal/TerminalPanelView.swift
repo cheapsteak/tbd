@@ -63,6 +63,14 @@ struct TerminalPanelView: View {
             .first(where: { $0.id == terminalID })?.profileID
     }
 
+    /// This terminal's control-mode pane key, for the input-health indicator.
+    /// `nil` while AppState hasn't loaded the terminal yet.
+    private var controlModePaneKey: ControlModePaneKey? {
+        appState.terminals.values.flatMap({ $0 })
+            .first(where: { $0.id == terminalID })
+            .map { ControlModePaneKey(worktreeID: $0.worktreeID, paneID: $0.tmuxPaneID) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let warning = proxyWarning,
@@ -79,6 +87,22 @@ struct TerminalPanelView: View {
                 }
                 .padding(8)
                 .background(Color.yellow.opacity(0.2))
+            }
+            // Passive input-delivery indicator (#318 polish): shows only while
+            // this pane is control-mode attached AND the daemon has flagged
+            // its input failing (edge-triggered deltas); clears itself on the
+            // recovery delta or on detach — no dismiss affordance.
+            if let paneKey = controlModePaneKey, appState.isInputDeliveryFailing(paneKey) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("Input not being delivered — keystrokes are not reaching this pane")
+                        .font(.caption)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.orange.opacity(0.18))
             }
             TerminalPanelRepresentable(
                 terminalID: terminalID,
@@ -542,6 +566,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             if let attach = controlModeAttach, let appState {
                 controlModeAttach = nil
                 Task {
+                    // Clear the attach record + any failing-input flag first
+                    // so the indicator vanishes with the pane (#318 polish).
+                    await appState.controlModePaneDetached(
+                        worktreeID: attach.worktreeID, paneID: attach.paneID)
                     // Order matters: detach first so the daemon closes the
                     // pipe's write end (EOF unblocks the reader thread), then
                     // flag the reader — it closes its own fd on exit. The
@@ -630,6 +658,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     }
                 }
                 logger.info("control-mode attach live for pane \(paneID, privacy: .public)")
+                // Gate the input-health indicator open for this pane (#318
+                // polish): failing deltas only surface while attached.
+                appState.controlModePaneAttached(worktreeID: worktreeID, paneID: paneID)
             } catch {
                 logger.warning("""
                     control-mode attach failed for pane \(paneID, privacy: .public); \
@@ -641,6 +672,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 let failedGeneration = controlModeAttach?.generation
                 controlModeAttach = nil
                 (terminalView as? TBDTerminalView)?.onControlModePaste = nil
+                // Clear any attach record / stale failing flag for this pane
+                // — the indicator must never show over the grouped-sessions
+                // fallback rendering.
+                appState.controlModePaneDetached(worktreeID: worktreeID, paneID: paneID)
                 // Best-effort teardown of any half-completed attach (e.g. fd
                 // received and reader registered, but attach.ready failed):
                 // detach so the daemon EOFs the pipe, then flag the reader.

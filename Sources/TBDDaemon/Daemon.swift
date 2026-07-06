@@ -319,10 +319,23 @@ public final class Daemon: Sendable {
         // gated control connection through a single supervisor. When the gate
         // is off (the default), `enableIfGated` is a no-op.
         let tmuxVersion = await TmuxVersion.detect()
+        // Input router with the health sink wired to the state-delta broadcast
+        // (#318 polish): edge-triggered per-pane input-delivery transitions
+        // ride the same subscription channel the app already listens on.
+        let controlModeInputRouter = ControlModeInputRouter(
+            commandProvider: { [supervisor = controlModeSupervisor] server in
+                await supervisor.command(server: server)
+            },
+            onHealthChange: { [subs] worktreeID, paneID, healthy in
+                subs.broadcast(delta: .controlModeInputHealthChanged(ControlModeInputHealthDelta(
+                    worktreeID: worktreeID, paneID: paneID, healthy: healthy)))
+            }
+        )
         let controlModeBridge = TmuxControlModeBridge(
             supervisor: controlModeSupervisor,
             tmuxVersion: tmuxVersion,
             fdVending: fdVendingServer,
+            inputRouter: controlModeInputRouter,
             // Live provider, not a snapshot: the gate re-reads the persisted
             // Settings flag on every attach decision (M5), so a toggle takes
             // effect without a daemon restart.
@@ -449,7 +462,8 @@ public final class Daemon: Sendable {
         // 9a. Install the app → daemon input sink BEFORE the sidecar listens:
         // each adopted connection captures `onInput` at adopt time (M2.1
         // contract), so wiring it after `listen` would miss the app's connect.
-        // The router is the bridge's (default-wired to `controlModeSupervisor`).
+        // The router is the bridge's (built above with the health sink, wired
+        // to `controlModeSupervisor`'s correlators).
         await fdVendingServer.setOnInput { [inputRouter = controlModeBridge.inputRouter] header, bytes in
             inputRouter.enqueue(header: header, bytes: bytes)
         }
