@@ -96,7 +96,6 @@ struct TabBar: View {
     var terminalForTab: (UUID) -> Terminal? = { _ in nil }
     var onSuspendTab: (UUID) -> Void = { _ in }
     var onResumeTab: (UUID) -> Void = { _ in }
-    var onForkTab: (UUID) -> Void = { _ in }
     var isHistorySelected: Bool = false
     var onHistoryTab: () -> Void = {}
 
@@ -119,8 +118,7 @@ struct TabBar: View {
                     onSelect: { activeTabIndex = index },
                     onClose: { onCloseTab(index) },
                     onSuspend: { onSuspendTab(tab.id) },
-                    onResume: { onResumeTab(tab.id) },
-                    onFork: { onForkTab(tab.id) }
+                    onResume: { onResumeTab(tab.id) }
                 )
             }
 
@@ -474,7 +472,6 @@ private struct TabBarItem: View {
     let onClose: () -> Void
     let onSuspend: () -> Void
     let onResume: () -> Void
-    let onFork: () -> Void
 
     @State private var isHovering = false
     @State private var isHoveringClose = false
@@ -721,6 +718,29 @@ private struct TabBarItem: View {
         entry.profile.name
     }
 
+    @ViewBuilder
+    private func swapProfileMenuItems(mode: TerminalSwapMode) -> some View {
+        Button {
+            guard let terminalID = terminal?.id else { return }
+            Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: nil, mode: mode) }
+        } label: {
+            let prefix = terminal?.profileID == nil ? "● " : "  "
+            Text("\(prefix)Default (logged in)")
+        }
+
+        Divider()
+
+        ForEach(appState.modelProfiles, id: \.profile.id) { entry in
+            Button {
+                guard let terminalID = terminal?.id else { return }
+                Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: entry.profile.id, mode: mode) }
+            } label: {
+                let prefix = terminal?.profileID == entry.profile.id ? "● " : "  "
+                Text("\(prefix)\(formatProfileSubmenuLabel(entry))")
+            }
+        }
+    }
+
     /// Absolute path on disk for tab content that has a backing file
     /// (codeViewer points at the file directly; liveTranscript points at
     /// the resolved Claude session JSONL via the underlying terminal).
@@ -756,30 +776,14 @@ private struct TabBarItem: View {
                 .disabled(true)
 
             Menu("Swap profile") {
-                Button {
-                    guard let terminalID = terminal?.id else { return }
-                    Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: nil) }
-                } label: {
-                    let prefix = terminal?.profileID == nil ? "● " : "  "
-                    Text("\(prefix)Default (logged in)")
-                }
-
-                Divider()
-
-                ForEach(appState.modelProfiles, id: \.profile.id) { entry in
-                    Button {
-                        guard let terminalID = terminal?.id else { return }
-                        Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: entry.profile.id) }
-                    } label: {
-                        let prefix = terminal?.profileID == entry.profile.id ? "● " : "  "
-                        Text("\(prefix)\(formatProfileSubmenuLabel(entry))")
-                    }
-                }
+                swapProfileMenuItems(mode: .inPlace)
             }
 
             Divider()
 
-            Button(action: onFork) {
+            Menu {
+                swapProfileMenuItems(mode: .fork)
+            } label: {
                 Label("Fork Session", systemImage: "arrow.triangle.branch")
             }
 
