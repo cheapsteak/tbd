@@ -686,7 +686,7 @@ public final class TBDDatabase: Sendable {
         }
 
         migrator.registerMigration("v41_clearance_ledger") { db in
-            try db.create(table: "clearance") { t in
+            try db.createTableIfNotExists("clearance") { t in
                 t.primaryKey("id", .text).notNull()
                 t.column("pr_number", .integer).notNull()
                 t.column("repo", .text).notNull()
@@ -698,13 +698,12 @@ public final class TBDDatabase: Sendable {
                 t.column("void_reason", .text)
             }
             // Index for quick lookups by PR and repo
-            try db.execute(sql: """
-                CREATE INDEX idx_clearance_pr_repo ON clearance(pr_number, repo)
-            """)
+            try db.addIndexIfMissing(
+                "idx_clearance_pr_repo", on: "clearance", columns: ["pr_number", "repo"])
         }
 
         migrator.registerMigration("v42_audit_log") { db in
-            try db.create(table: "audit_log") { t in
+            try db.createTableIfNotExists("audit_log") { t in
                 t.primaryKey("id", .text).notNull()
                 t.column("action", .text).notNull()
                 t.column("pr_number", .integer)
@@ -715,9 +714,7 @@ public final class TBDDatabase: Sendable {
                 t.column("details", .text)
             }
             // Index for efficient time-range queries
-            try db.execute(sql: """
-                CREATE INDEX idx_audit_log_ts ON audit_log(ts)
-            """)
+            try db.addIndexIfMissing("idx_audit_log_ts", on: "audit_log", columns: ["ts"])
         }
 
         return migrator
