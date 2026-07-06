@@ -861,11 +861,16 @@ actor DaemonClient {
     }
 
     /// Ack that the app's reader is draining the vended fd — opens the
-    /// daemon-side write gate.
-    func attachReady(worktreeID: UUID, paneID: String) async throws {
+    /// daemon-side write gate. Pass the `generation` from `openAttach` so the
+    /// daemon runs the replay sequence only if this attach still owns the
+    /// pane — a stale ready (superseded by a faster re-attach) must not
+    /// pause/unpause the pane out from under the successor's sequence; nil
+    /// (unknown generation) acks unchecked, as before.
+    func attachReady(worktreeID: UUID, paneID: String, generation: UInt64? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.attachReady,
-            params: AttachReadyParams(worktreeID: worktreeID, paneID: paneID)
+            params: AttachReadyParams(
+                worktreeID: worktreeID, paneID: paneID, generation: generation)
         )
     }
 

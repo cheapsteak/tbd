@@ -116,10 +116,15 @@ struct AttachReplayOrchestratorTests {
     func happyPathOrder() async throws {
         let (supervisor, orchestrator, recorder, client) = makeHarness()
         let paneID = "%1"
-        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(readFD) }
 
-        let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
+        // Echo the generation like the app does (M2 review fix): a MATCHING
+        // echo must run the sequence exactly like a generation-less ready.
+        let task = Task {
+            try await orchestrator.performAttachReady(
+                server: server, paneID: paneID, expectedGeneration: generation)
+        }
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
 
         // ONE atomic stream write: pause FIRST, then the 4-command capture.
@@ -166,7 +171,7 @@ struct AttachReplayOrchestratorTests {
         #expect(String(decoding: drain(readFD), as: UTF8.self) == "live-after")
     }
 
-    @Test("superseded mid-sequence: outcome success-shaped, successor's gate untouched, unpause still sent")
+    @Test("superseded mid-sequence: outcome success-shaped, successor's gate untouched, NO unpause")
     func supersededMidSequence() async throws {
         let (supervisor, orchestrator, recorder, client) = makeHarness()
         let paneID = "%2"
@@ -187,9 +192,42 @@ struct AttachReplayOrchestratorTests {
         // This task must NOT open the successor's gate — its own sequence does.
         #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
 
-        // Unpause still runs on the superseded path.
-        try await waitFor("unpause write") { recorder.writes.count >= 2 }
-        #expect(recorder.writes.last == "refresh-client -A '%2:continue'")
+        // And it must NOT unpause either (M2 review fix): pause state is per
+        // PANE on the shared correlator, and the successor's own sequence —
+        // FIFO-behind ours — pauses and unpauses it. A stale `continue` here
+        // could land while the successor is mid-capture with its gate still
+        // closed, resuming live output into a closed gate. The sequence ended
+        // (task.value returned), so the write log is final: batch only.
+        #expect(recorder.writes.count == 1)
+        #expect(!recorder.writes.contains { $0.contains(":continue'") })
+    }
+
+    @Test("stale ready (echoed generation != current attach) sends ZERO commands, successor stays un-acked")
+    func staleReadyMismatchedGenerationSendsNothing() async throws {
+        let (supervisor, orchestrator, recorder, _) = makeHarness()
+        let paneID = "%11"
+        let (read1, gen1) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read1) }
+        // A newer attach owns the pane before the stale ready is processed
+        // (the worst interleaving: the stale ready would otherwise PAUSE the
+        // pane after the successor's full sequence and leave it paused).
+        let (read2, gen2) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read2) }
+
+        let outcome = try await orchestrator.performAttachReady(
+            server: server, paneID: paneID, expectedGeneration: gen1)
+        #expect(outcome == .superseded)
+        // NOTHING on the shared correlator: no pause, no captures, no continue.
+        #expect(recorder.writes.isEmpty)
+
+        // The stale ready must not have ACKED the successor's sink either —
+        // its ready-timeout still stands guard, so a gen-2 timer still fires.
+        await supervisor.detachIfNotReady(server: server, paneID: paneID, generation: gen2)
+        let flags = fcntl(read2, F_GETFL)
+        _ = fcntl(read2, F_SETFL, flags | O_NONBLOCK)
+        var probe = [UInt8](repeating: 0, count: 8)
+        let n = probe.withUnsafeMutableBytes { Darwin.read(read2, $0.baseAddress, $0.count) }
+        #expect(n == 0, "successor must still be un-acked (timer detach EOFs it)")
     }
 
     @Test("a capture %error fails the attach but the unpause is still sent")

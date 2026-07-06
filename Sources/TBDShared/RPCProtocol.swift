@@ -1179,9 +1179,19 @@ public struct AttachRequestResult: Codable, Sendable {
 public struct AttachReadyParams: Codable, Sendable {
     public let worktreeID: UUID
     public let paneID: String
-    public init(worktreeID: UUID, paneID: String) {
+    /// The attach generation this ready acknowledges (echoed from
+    /// `AttachRequestResult.generation`). When present, the daemon runs the
+    /// replay sequence ONLY if it still matches the pane's current attach —
+    /// a stale ready (a superseded viewer's ack landing after a successor's
+    /// attach) must send NOTHING on the shared per-server command client:
+    /// pause state is keyed per PANE there, so a stale pause/continue would
+    /// freeze the pane or resume output into the successor's closed gate.
+    /// Optional for wire back-compat; absent → behave as before.
+    public let generation: UInt64?
+    public init(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
         self.worktreeID = worktreeID
         self.paneID = paneID
+        self.generation = generation
     }
 }
 

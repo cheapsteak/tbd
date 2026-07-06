@@ -55,8 +55,13 @@ struct AttachReplayFailure: Error {
 ///  3. Assemble the replay (`ReplayWriter`) and write it into the pane's
 ///     pipe behind the still-closed gate (`writeReplay`, generation-checked).
 ///  4. Open the gate (`markReady`) — ONLY after the replay bytes landed.
-///  5. Unpause LAST, on EVERY exit path after the pause was sent (a stale
-///     unpause on an unpaused pane no-ops via tolerate-errors).
+///  5. Unpause LAST, on every exit path after the pause was sent EXCEPT
+///     mid-sequence supersession: pause state is per PANE on the shared
+///     per-server correlator, so a superseded generation leaves the unpause
+///     to its successor's own FIFO-ordered sequence — a stale continue could
+///     otherwise land inside the successor's pause window and resume output
+///     into its still-closed gate. (A stale unpause on an unpaused pane
+///     no-ops via tolerate-errors.)
 ///
 /// Measured residual (tmux 3.6a, M4 live matrix): pause → continue DISCARDS
 /// pane output emitted while paused — tmux resumes delivery from the pane's
@@ -112,12 +117,37 @@ struct AttachReplayOrchestrator: Sendable {
     /// - Every later failure is wrapped in `AttachReplayFailure`, carrying
     ///   the generation this sequence was tagged with so the caller's detach
     ///   cannot hit a successor attach's sink.
-    func performAttachReady(server: String, paneID: String) async throws -> Outcome {
+    ///
+    /// `expectedGeneration` is the app's echo of its own attach's generation
+    /// (`AttachRequestResult.generation`). When present and no longer the
+    /// pane's CURRENT generation, this ready is stale — a superseded viewer's
+    /// ack landing after a successor's attach — and returns `.superseded`
+    /// having sent NOTHING on the shared correlator: pause state is keyed per
+    /// PANE there, so a stale pause would freeze the pane after the
+    /// successor's completed sequence, and a stale continue could resume
+    /// output into the successor's still-closed gate. Absent (older app) →
+    /// generation-unchecked, as before.
+    func performAttachReady(
+        server: String, paneID: String, expectedGeneration: UInt64? = nil
+    ) async throws -> Outcome {
         // Steps 1+2 of the milestone, atomic in the fanout: read the CURRENT
         // generation and mark the attach acknowledged so the ready-timeout
-        // stands down (the sequence below has its own deadlines).
-        guard let generation = await supervisor.acknowledgeAttach(server: server, paneID: paneID) else {
+        // stands down. (Only the post-capture replay WRITE below has a
+        // deadline; the capture wait itself has none — a mute-but-alive tmux
+        // stalls the attach until the stream closes. Phase B owns that.)
+        let generation: UInt64
+        switch await supervisor.acknowledgeAttach(
+            server: server, paneID: paneID, expectedGeneration: expectedGeneration) {
+        case .noSink:
             throw AttachReplayError.notAttached
+        case .superseded:
+            Self.logger.debug("""
+                stale attach.ready for \(server, privacy: .public)/\(paneID, privacy: .public) \
+                echoed gen=\(expectedGeneration ?? 0) — a newer attach owns the pane; sending nothing
+                """)
+            return .superseded
+        case .acknowledged(let acknowledged):
+            generation = acknowledged
         }
         guard let client = await commandProvider(server) else {
             throw AttachReplayFailure(
@@ -143,14 +173,27 @@ struct AttachReplayOrchestrator: Sendable {
         ]
         let results = await sendBatch(client, texts: [pause] + captureCommands)
 
-        // The pause has been sent — from here, unpause runs on EVERY exit
-        // path (defer-equivalent; `defer` can't await the actor call).
+        // The pause has been sent — from here, unpause runs on every exit
+        // path EXCEPT mid-sequence supersession (defer-equivalent; `defer`
+        // can't await the actor call).
         do {
             let outcome = try await replayAndOpenGate(
                 server: server, paneID: paneID, generation: generation,
                 captureResults: Array(results.dropFirst()),
                 captureCommands: captureCommands)
-            await sendUnpause(client, paneID: paneID)
+            // `.superseded` (writeReplay saw a newer generation) SKIPS the
+            // unpause: pause state is per PANE on the shared correlator, and
+            // FIFO ordering puts the successor's own pause → captures →
+            // replay → unpause sequence AFTER ours — a stale continue here
+            // could land while the successor is mid-capture with its gate
+            // still closed, resuming live output into a closed gate (dropped;
+            // widens the boundary gap). Accepted residual: if the successor's
+            // ready never arrives, the pane stays paused until the NEXT
+            // attach's sequence unpauses it — benign (no viewer is watching;
+            // tmux buffers server-side).
+            if outcome == .ready {
+                await sendUnpause(client, paneID: paneID)
+            }
             return outcome
         } catch {
             await sendUnpause(client, paneID: paneID)

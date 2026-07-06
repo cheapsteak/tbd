@@ -617,7 +617,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                             weakTV.view?.feed(byteArray: bytes[...])
                         }
                     }
-                try await appState.daemonClient.attachReady(worktreeID: worktreeID, paneID: paneID)
+                // Echo this attach's generation so a stale ready — superseded
+                // by a faster re-attach for the same pane — sends nothing on
+                // the daemon's shared command client (no pause/unpause under
+                // the successor's sequence).
+                try await appState.daemonClient.attachReady(
+                    worktreeID: worktreeID, paneID: paneID, generation: generation)
                 // Send one initial resize at the view's real size: the window is
                 // otherwise stuck at whatever size it had until the user first
                 // drags, so fullscreen Claude would render at the wrong width.

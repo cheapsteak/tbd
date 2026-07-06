@@ -433,10 +433,129 @@ struct AttachRPCOrchestrationTests {
         let response = await readyTask.value
         #expect(response.success)
         #expect(await supervisor.isReady(server: "tbd-supersede-test", paneID: "%8") == false)
-        // Unpause still runs after the superseded write.
-        try await waitFor("unpause write") { recorder.writes.count >= 2 }
-        #expect(recorder.writes.last == "refresh-client -A '%8:continue'")
+        // No unpause from the superseded sequence (M2 review fix): the
+        // successor's own FIFO-ordered sequence unpauses the pane. The RPC
+        // returned, so the write log is final — batch only, no continue.
+        #expect(recorder.writes.count == 1)
+        #expect(!recorder.writes.contains { $0.contains(":continue'") })
         #expect(drain(rxFD2).isEmpty, "successor's pipe must not receive the stale replay")
+    }
+
+    @Test("a stale attach.ready (echoed older generation) sends ZERO commands on the shared correlator")
+    func staleReadyEchoedGenerationSendsNothing() async throws {
+        let (serverSide, clientSide) = try makeSocketPair()
+        defer { Darwin.close(clientSide) }
+
+        let supervisor = TmuxControlSupervisor()
+        let vending = FDVendingServer()
+        await vending.adoptConnection(fd: serverSide)
+        let (router, db) = try makeRouterAndDB()
+        let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-staleready-test")
+        // ONE fake correlator for BOTH generations — pause state is keyed per
+        // pane on the shared per-server command client, so this is the seam
+        // the reviewer flagged as untested with per-generation clients.
+        let (client, recorder) = makeFakeClient()
+        router.controlMode = bridge(
+            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
+
+        func attach() async throws -> UInt64 {
+            let request = try RPCRequest(
+                method: RPCMethod.attachRequest,
+                params: AttachRequestParams(
+                    worktreeID: worktreeID, paneID: "%12", windowID: "@12", attachID: UUID()))
+            let result = try (await router.handle(request)).decodeResult(AttachRequestResult.self)
+            return try #require(result.generation)
+        }
+        // Attach #1 (the stale viewer's) … superseded by attach #2 before the
+        // stale ready is processed.
+        let gen1 = try await attach()
+        let (fd1, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(fd1) }
+        let gen2 = try await attach()
+        let (fd2, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(fd2) }
+
+        // The stale ready echoes gen 1: RPC success (benign race), but ZERO
+        // commands — no pause that could freeze the pane, no continue that
+        // could resume output into the successor's still-closed gate.
+        let staleReady = try RPCRequest(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: "%12", generation: gen1))
+        #expect((await router.handle(staleReady)).success)
+        #expect(recorder.writes.isEmpty, "stale ready must send NOTHING on the shared correlator")
+
+        // The successor's OWN ready (echoing gen 2) runs the full sequence.
+        let freshReady = try RPCRequest(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: "%12", generation: gen2))
+        let readyTask = Task { await router.handle(freshReady) }
+        try await waitFor("successor capture batch") { recorder.writes.count >= 1 }
+        await feedCaptureReplies(client, paneID: "%12", history: ["fresh"])
+        #expect((await readyTask.value).success)
+        #expect(await supervisor.isReady(server: "tbd-staleready-test", paneID: "%12") == true)
+        try await waitFor("successor unpause") { recorder.writes.count >= 2 }
+        #expect(recorder.writes.last == "refresh-client -A '%12:continue'")
+    }
+
+    @Test("mid-sequence supersession on ONE shared correlator: stale generation sends no continue; the successor's sequence ends with its own")
+    func midSequenceSupersedeOnSharedClientSkipsUnpause() async throws {
+        let (serverSide, clientSide) = try makeSocketPair()
+        defer { Darwin.close(clientSide) }
+
+        let supervisor = TmuxControlSupervisor()
+        let vending = FDVendingServer()
+        await vending.adoptConnection(fd: serverSide)
+        let (router, db) = try makeRouterAndDB()
+        let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-sharedsup-test")
+        let (client, recorder) = makeFakeClient()
+        router.controlMode = bridge(
+            supervisor: supervisor, vending: vending, commandProvider: { _ in client })
+
+        func attach() async throws -> UInt64 {
+            let request = try RPCRequest(
+                method: RPCMethod.attachRequest,
+                params: AttachRequestParams(
+                    worktreeID: worktreeID, paneID: "%13", windowID: "@13", attachID: UUID()))
+            let result = try (await router.handle(request)).decodeResult(AttachRequestResult.self)
+            return try #require(result.generation)
+        }
+        // Attach #1 (gen 1); its ready sequence starts, then stalls on replies.
+        let gen1 = try await attach()
+        let (fd1, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(fd1) }
+        let ready1 = try RPCRequest(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: "%13", generation: gen1))
+        let ready1Task = Task { await router.handle(ready1) }
+        try await waitFor("gen 1 capture batch") { recorder.writes.count >= 1 }
+
+        // Attach #2 replaces the sink MID-sequence; gen 1's replies then land.
+        let gen2 = try await attach()
+        let (fd2, _) = try SidecarTestSupport.receiveVend(from: clientSide)
+        defer { Darwin.close(fd2) }
+        await feedCaptureReplies(client, paneID: "%13", history: ["stale"])
+        #expect((await ready1Task.value).success)
+        // The superseded sequence sent its batch and NOTHING else — its
+        // unpause is skipped so it cannot land inside the successor's own
+        // pause window (FIFO puts the successor's sequence after this one).
+        #expect(recorder.writes.count == 1)
+        #expect(!recorder.writes.contains { $0.contains(":continue'") })
+
+        // The successor's sequence runs on the SAME correlator and ends with
+        // its own continue — the pane ends unpaused, exactly once.
+        let ready2 = try RPCRequest(
+            method: RPCMethod.attachReady,
+            params: AttachReadyParams(worktreeID: worktreeID, paneID: "%13", generation: gen2))
+        let ready2Task = Task { await router.handle(ready2) }
+        try await waitFor("gen 2 capture batch") { recorder.writes.count >= 2 }
+        await feedCaptureReplies(client, paneID: "%13", history: ["fresh"])
+        #expect((await ready2Task.value).success)
+        #expect(await supervisor.isReady(server: "tbd-sharedsup-test", paneID: "%13") == true)
+        try await waitFor("gen 2 unpause") { recorder.writes.count >= 3 }
+        let continues = recorder.writes.filter { $0.contains(":continue'") }
+        #expect(continues == ["refresh-client -A '%13:continue'"],
+                "exactly ONE continue, the successor's own")
+        #expect(recorder.writes.last == "refresh-client -A '%13:continue'")
     }
 
     @Test("a stale attach's late failure must not kill a healthy successor's sink")

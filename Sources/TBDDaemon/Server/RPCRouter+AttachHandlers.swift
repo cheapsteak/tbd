@@ -162,8 +162,11 @@ extension RPCRouter {
         do {
             // Both outcomes are RPC success: `.ready` is the happy path;
             // `.superseded` means a newer attach owns the pane and runs its
-            // own sequence — the stale caller just goes away quietly.
-            _ = try await orchestrator.performAttachReady(server: server, paneID: paneID)
+            // own sequence — the stale caller just goes away quietly. The
+            // echoed generation (when the app sent one) makes that detection
+            // possible BEFORE anything is sent on the shared correlator.
+            _ = try await orchestrator.performAttachReady(
+                server: server, paneID: paneID, expectedGeneration: params.generation)
             return .ok()
         } catch let failure as AttachReplayFailure {
             logger.error("""

@@ -119,11 +119,16 @@ actor TmuxControlSupervisor {
     }
 
     /// Record the app's `attach.ready` ack and return the attach's CURRENT
-    /// generation (M4.3) — the whole replay sequence is tagged with it. `nil`
-    /// when the pane has no live attach. Once acknowledged, the ready-timeout
-    /// no longer threatens this attach.
-    func acknowledgeAttach(server: String, paneID: String) -> UInt64? {
-        fanout.acknowledge(key: PaneKey(server: server, paneID: paneID))
+    /// generation (M4.3) — the whole replay sequence is tagged with it.
+    /// Generation-checked when the app echoed one (`expectedGeneration`): a
+    /// stale ready for a superseded attach returns `.superseded` without
+    /// touching the successor's sink. Once acknowledged, the ready-timeout no
+    /// longer threatens this attach.
+    func acknowledgeAttach(
+        server: String, paneID: String, expectedGeneration: UInt64? = nil
+    ) -> PaneAcknowledgeResult {
+        fanout.acknowledge(
+            key: PaneKey(server: server, paneID: paneID), expectedGeneration: expectedGeneration)
     }
 
     func isReady(server: String, paneID: String) -> Bool {

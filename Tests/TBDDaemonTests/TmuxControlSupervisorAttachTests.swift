@@ -155,7 +155,7 @@ struct PaneFanoutTests {
 
         // attach.ready arrived (M4.3 step 2) — the replay is still in flight,
         // so the gate is NOT open yet…
-        #expect(fanout.acknowledge(key: key) == gen)
+        #expect(fanout.acknowledge(key: key) == .acknowledged(generation: gen))
         #expect(fanout.isReady(key: key) == false)
 
         // …and the ready-timeout firing NOW must not tear the attach down.
@@ -173,10 +173,35 @@ struct PaneFanoutTests {
         #expect(Data(buffer[0..<max(m, 0)]) == Data("replay".utf8))
     }
 
-    @Test("acknowledge returns nil for a pane with no live attach")
-    func acknowledgeUnattachedReturnsNil() {
+    @Test("acknowledge reports noSink for a pane with no live attach")
+    func acknowledgeUnattachedReturnsNoSink() {
         let fanout = PaneFanout()
-        #expect(fanout.acknowledge(key: PaneKey(server: server, paneID: "%404")) == nil)
+        #expect(fanout.acknowledge(key: PaneKey(server: server, paneID: "%404")) == .noSink)
+    }
+
+    @Test("a mismatched expectedGeneration is superseded and leaves the successor un-acked")
+    func acknowledgeMismatchedGenerationIsSuperseded() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%22")
+        let (read1, gen1) = try fanout.attach(key: key)
+        defer { Darwin.close(read1) }
+        let (read2, gen2) = try fanout.attach(key: key)   // successor
+        defer { Darwin.close(read2) }
+
+        // The stale ack (echoing gen 1) must not touch the gen-2 sink…
+        #expect(fanout.acknowledge(key: key, expectedGeneration: gen1) == .superseded)
+        // …not even its acknowledged flag: the successor's ready-timeout must
+        // still stand guard, so detachIfNotReady still tears it down.
+        fanout.detachIfNotReady(key: key, generation: gen2)
+        var buffer = [UInt8](repeating: 0, count: 8)
+        let n = buffer.withUnsafeMutableBytes { Darwin.read(read2, $0.baseAddress, $0.count) }
+        #expect(n == 0, "successor must still be un-acked (timer detach EOFs it)")
+
+        // A MATCHING expectedGeneration acknowledges normally.
+        let (read3, gen3) = try fanout.attach(key: key)
+        defer { Darwin.close(read3) }
+        #expect(fanout.acknowledge(key: key, expectedGeneration: gen3)
+                == .acknowledged(generation: gen3))
     }
 
     @Test("markReady implies acknowledged: a ready sink survives the timer too")
@@ -230,7 +255,8 @@ struct TmuxControlSupervisorAttachTests {
         defer { Darwin.close(readFD) }
         #expect(await supervisor.isReady(server: "srv", paneID: "%1") == false)
         // acknowledgeAttach returns the attach's current generation (M4.3).
-        #expect(await supervisor.acknowledgeAttach(server: "srv", paneID: "%1") == generation)
+        #expect(await supervisor.acknowledgeAttach(server: "srv", paneID: "%1")
+                == .acknowledged(generation: generation))
         await supervisor.markReady(server: "srv", paneID: "%1")
         #expect(await supervisor.isReady(server: "srv", paneID: "%1") == true)
         await supervisor.detach(server: "srv", paneID: "%1")

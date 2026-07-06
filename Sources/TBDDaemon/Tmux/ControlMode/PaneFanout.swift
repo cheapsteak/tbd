@@ -31,6 +31,21 @@ enum PaneReplayWriteError: Error, Equatable {
     case writeFailed(errno: Int32)
 }
 
+/// Outcome of the generation-checked `PaneFanout.acknowledge`.
+enum PaneAcknowledgeResult: Equatable {
+    /// The ack landed: a sink exists and (when a generation was echoed) it
+    /// matched. Carries the sink's generation — the replay sequence is tagged
+    /// with it.
+    case acknowledged(generation: UInt64)
+    /// No sink for the key (detached, timed out, or never attached).
+    case noSink
+    /// A sink exists but belongs to a NEWER attach than the acknowledging
+    /// caller. The stale ack must not touch it — not even the `acknowledged`
+    /// flag: disarming the successor's ready-timeout is the successor's own
+    /// ready's job.
+    case superseded
+}
+
 /// Routes decoded `%output`/`%extended-output` bytes into per-pane pipe write
 /// ends. `route(server:event:)` is called SYNCHRONOUSLY on each connection's
 /// reader thread — the spec's data-flow keeps the render hot path off actors
@@ -108,16 +123,26 @@ final class PaneFanout: @unchecked Sendable {
 
     /// Record the app's `attach.ready` ack and return the sink's CURRENT
     /// generation — atomically, so the replay sequence the caller starts is
-    /// tagged with exactly the generation it acknowledged. `nil` when no sink
-    /// exists (detached, timed out, or never attached). Once acknowledged, the
-    /// ready-timeout (`detachIfNotReady`) no longer threatens this attach —
-    /// the replay sequence has its own deadlines.
-    func acknowledge(key: PaneKey) -> UInt64? {
+    /// tagged with exactly the generation it acknowledged. When the app
+    /// echoed its attach's generation (`expectedGeneration`), the ack is
+    /// generation-checked: a mismatch means a newer attach owns the pane and
+    /// the stale ack must leave the sink UNTOUCHED (returning `.superseded`
+    /// without setting `acknowledged` — the successor's ready-timeout keeps
+    /// standing guard until its OWN ready arrives). Once acknowledged, the
+    /// ready-timeout (`detachIfNotReady`) no longer threatens this attach;
+    /// from here the only deadline-bounded wait is the replay WRITE's
+    /// (`writeReplay`, 5 s) — the capture wait itself has no timeout, so a
+    /// mute-but-alive tmux stalls the attach until the stream closes (Phase B
+    /// owns that).
+    func acknowledge(key: PaneKey, expectedGeneration: UInt64? = nil) -> PaneAcknowledgeResult {
         lock.lock()
         defer { lock.unlock() }
-        guard sinks[key] != nil else { return nil }
+        guard let sink = sinks[key] else { return .noSink }
+        if let expected = expectedGeneration, expected != sink.generation {
+            return .superseded
+        }
         sinks[key]?.acknowledged = true
-        return sinks[key]?.generation
+        return .acknowledged(generation: sink.generation)
     }
 
     func isReady(key: PaneKey) -> Bool {
