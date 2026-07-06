@@ -119,12 +119,30 @@ final class PaneFanout: @unchecked Sendable {
     /// replay bytes are in the pipe (M4.3). Also marks the sink acknowledged
     /// (ready implies acked), so direct `markReady` callers — tests, or any
     /// future replay-less path — are equally safe from the ready-timeout.
-    func markReady(key: PaneKey) {
+    ///
+    /// Generation-checked like every other sink mutation (R6-H1): the replay
+    /// write and this gate-open are two separate steps, and a concurrent
+    /// re-attach can swap the sink between them. A stale markReady must not
+    /// open the gate on the successor's UN-REPLAYED sink — live `%output`
+    /// would land before the successor's own replay, breaking the core M4
+    /// ordering invariant. Mismatch or missing sink → no-op, returns `false`
+    /// (the caller treats it like `superseded`: benign, the successor's own
+    /// sequence opens its gate).
+    @discardableResult
+    func markReady(key: PaneKey, generation: UInt64) -> Bool {
         lock.lock()
+        guard let sink = sinks[key], sink.generation == generation else {
+            lock.unlock()
+            logger.info(
+                "fanout stale ready refused \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
+            return false
+        }
         sinks[key]?.ready = true
         sinks[key]?.acknowledged = true
         lock.unlock()
-        logger.info("fanout ready \(key.server, privacy: .public)/\(key.paneID, privacy: .public)")
+        logger.info(
+            "fanout ready \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
+        return true
     }
 
     /// Record the app's `attach.ready` ack and return the sink's CURRENT

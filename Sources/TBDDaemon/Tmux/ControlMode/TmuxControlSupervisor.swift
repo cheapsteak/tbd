@@ -158,8 +158,13 @@ actor TmuxControlSupervisor {
         try fanout.attach(key: PaneKey(server: server, paneID: paneID))
     }
 
-    func markReady(server: String, paneID: String) {
-        fanout.markReady(key: PaneKey(server: server, paneID: paneID))
+    /// Open the pane's write gate — generation-checked (R6-H1): a stale
+    /// sequence's markReady, superseded between its replay write and this
+    /// call, must not open a successor's un-replayed gate. Returns whether
+    /// the gate actually opened (`false` → the caller's attach was replaced).
+    @discardableResult
+    func markReady(server: String, paneID: String, generation: UInt64) -> Bool {
+        fanout.markReady(key: PaneKey(server: server, paneID: paneID), generation: generation)
     }
 
     /// Record the app's `attach.ready` ack and return the attach's CURRENT

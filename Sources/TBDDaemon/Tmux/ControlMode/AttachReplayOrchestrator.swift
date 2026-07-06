@@ -77,9 +77,10 @@ struct AttachReplayOrchestrator: Sendable {
     enum Outcome: Equatable {
         /// Replay delivered, gate open — the attach is live.
         case ready
-        /// A newer attach replaced this one mid-sequence (`writeReplay` saw a
-        /// different generation). Benign race: the stale viewer is gone and
-        /// the successor runs its own sequence — surfaced as RPC success.
+        /// A newer attach replaced this one mid-sequence (`writeReplay` or
+        /// `markReady` saw a different generation). Benign race: the stale
+        /// viewer is gone and the successor runs its own sequence — surfaced
+        /// as RPC success.
         case superseded
     }
 
@@ -230,7 +231,7 @@ struct AttachReplayOrchestrator: Sendable {
                 server: server, paneID: paneID, generation: generation,
                 captureResults: Array(results.dropFirst()),
                 captureCommands: captureCommands)
-            // `.superseded` (writeReplay saw a newer generation) SKIPS the
+            // `.superseded` (writeReplay/markReady saw a newer generation) SKIPS the
             // unpause: pause state is per PANE on the shared correlator, and
             // FIFO ordering puts the successor's own pause → captures →
             // replay → unpause sequence AFTER ours — a stale continue here
@@ -322,8 +323,18 @@ struct AttachReplayOrchestrator: Sendable {
             return .superseded
         }
         // Gate opens ONLY after the replay bytes are in the pipe: live output
-        // routed from here lands strictly after the replay.
-        await supervisor.markReady(server: server, paneID: paneID)
+        // routed from here lands strictly after the replay. Generation-checked
+        // (R6-H1): a re-attach can swap the sink between the writeReplay above
+        // and this call, and a stale markReady must not open the successor's
+        // gate before ITS replay landed. Refusal is the same benign race as a
+        // superseded writeReplay — the successor's own sequence opens its gate.
+        guard await supervisor.markReady(server: server, paneID: paneID, generation: generation) else {
+            Self.logger.debug("""
+                markReady superseded for \(server, privacy: .public)/\(paneID, privacy: .public) \
+                gen=\(generation) — a newer attach owns the pane; leaving its gate closed
+                """)
+            return .superseded
+        }
         return .ready
     }
 

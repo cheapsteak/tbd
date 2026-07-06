@@ -57,7 +57,7 @@ struct PaneFanoutReplayTests {
         // Live output routed while not ready is still dropped…
         fanout.route(server: server, event: .output(paneID: "%1", bytes: Data("dropped".utf8)))
         // …and output after markReady lands strictly after the replay bytes.
-        fanout.markReady(key: key)
+        fanout.markReady(key: key, generation: generation)
         fanout.route(server: server, event: .output(paneID: "%1", bytes: Data("LIVE".utf8)))
 
         let expected = replay + Data("LIVE".utf8)
