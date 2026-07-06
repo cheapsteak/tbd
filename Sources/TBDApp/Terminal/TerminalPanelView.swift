@@ -342,6 +342,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// so only the tail of a window-drag flurry reaches the daemon; cancelled
         /// in `cleanup()`.
         private var resizeDebounceTask: Task<Void, Never>?
+        /// Latest-wins cross-call ordering for the debounced resizes (R5-M3):
+        /// at most one `paneResize` RPC in flight; a tick landing meanwhile
+        /// stashes and the in-flight sender's completion drains it. MainActor-
+        /// confined like `resizeDebounceTask` — mutated only from the
+        /// `@MainActor` debounce path.
+        private var resizeSerializer = ControlModeResizeSerializer()
         /// Set (permanently) by `cleanup()` when the view is torn down. The
         /// attach establishment in `startControlModeClient` re-checks it
         /// after every `await` resumption and self-detaches anything it
@@ -918,23 +924,37 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            // Grouped / local-PTY path (UNCHANGED): propagate resize to the PTY so
-            // tmux/shell gets SIGWINCH. In control mode `localProcess` is nil, so
-            // this is a no-op there and the daemon-authoritative path below runs.
-            if newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 {
-                var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
-                _ = ioctl(fd, TIOCSWINSZ, &size)
-                debugLog("PANEL: resize -> \(newCols)x\(newRows)")
+            // SwiftTerm delivers delegate callbacks on the main thread; the
+            // resize/debounce state (`resizeDebounceTask`, `resizeSerializer`,
+            // `controlModeAttach`) is MainActor-confined like the rest of the
+            // coordinator — same guard as `getWindowSize`/`requestOpenLink`.
+            MainActor.assumeIsolated {
+                // Grouped / local-PTY path (UNCHANGED): propagate resize to the PTY so
+                // tmux/shell gets SIGWINCH. In control mode `localProcess` is nil, so
+                // this is a no-op there and the daemon-authoritative path below runs.
+                if newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 {
+                    var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
+                    _ = ioctl(fd, TIOCSWINSZ, &size)
+                    debugLog("PANEL: resize -> \(newCols)x\(newRows)")
+                }
+                // Control-mode path (M3.2): the daemon is the sole size authority
+                // (addendum §4). Debounced so only the tail of a drag flurry lands.
+                scheduleControlModeResize(cols: newCols, rows: newRows)
             }
-            // Control-mode path (M3.2): the daemon is the sole size authority
-            // (addendum §4). Debounced so only the tail of a drag flurry lands.
-            scheduleControlModeResize(cols: newCols, rows: newRows)
         }
 
         /// Debounced `pane.resize` for the control-mode window. No-op unless this
         /// panel is control-mode attached. Cancel-and-replace ~100ms debounce so a
         /// window-drag flurry collapses to one RPC. Errors are dropped: the resize
         /// is re-sent on the next tick and self-heals (the daemon is authoritative).
+        ///
+        /// Cross-call ordering (R5-M3): cancel-and-replace only stops the
+        /// debounce wrapper — an RPC already in flight rides its own socket
+        /// task and could be processed AFTER a newer one. `resizeSerializer`
+        /// makes delivery latest-wins: at most one RPC in flight; a tick that
+        /// fires meanwhile stashes its size, and the in-flight sender drains
+        /// the stash on completion (looping until quiescent).
+        @MainActor
         private func scheduleControlModeResize(cols: Int, rows: Int) {
             guard let attach = controlModeAttach,
                   ControlModeResizeGate.shouldSend(
@@ -942,12 +962,25 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             else { return }
             resizeDebounceTask?.cancel()
             let daemonClient = appState?.daemonClient
-            resizeDebounceTask = Task {
+            resizeDebounceTask = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(100))
-                guard !Task.isCancelled else { return }
-                try? await daemonClient?.paneResize(
-                    worktreeID: attach.worktreeID, windowID: attach.windowID,
-                    cols: cols, rows: rows)
+                guard !Task.isCancelled, let self else { return }
+                guard var size = self.resizeSerializer.sizeToSend(cols: cols, rows: rows) else {
+                    // A send is in flight; the size is stashed and ITS sender
+                    // will deliver it — this tick must not race a second RPC.
+                    return
+                }
+                // Deliberately NOT re-checking Task.isCancelled in this loop: a
+                // newer tick that cancelled this wrapper has only STASHED its
+                // size (see above) — this loop is the sole sender left to
+                // deliver it, in order, after the in-flight call completes.
+                while true {
+                    try? await daemonClient?.paneResize(
+                        worktreeID: attach.worktreeID, windowID: attach.windowID,
+                        cols: size.cols, rows: size.rows)
+                    guard let next = self.resizeSerializer.completedInFlight() else { return }
+                    size = next
+                }
             }
         }
 
