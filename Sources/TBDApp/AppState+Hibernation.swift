@@ -96,21 +96,23 @@ extension AppState {
     /// focused terminal can't be resolved to a parked row, fall back to waking
     /// at most one parked terminal — never a parallel fan-out.
     func wakeHibernatedTerminalsOnFocus(worktreeID: UUID) {
-        let parked = (terminals[worktreeID] ?? []).filter { $0.isParked }
-        guard !parked.isEmpty else { return }
+        guard let target = terminalIDToWakeOnFocus(worktreeID: worktreeID) else { return }
+        // Wake exactly one; never a parallel fan-out (see the storm rationale above).
+        Task { await wakeTerminal(terminalID: target, worktreeID: worktreeID) }
+    }
 
-        // Preferred: wake exactly the terminal the user is about to view.
+    /// Pure decision behind `wakeHibernatedTerminalsOnFocus`: the single parked
+    /// terminal (if any) to wake on focus. Three branches — (1) the focused
+    /// terminal when it is itself parked; (2) otherwise the first parked
+    /// terminal; (3) nil when none are parked. Extracted as a pure function so
+    /// the fan-out choice is unit-tested without a live `DaemonClient`.
+    func terminalIDToWakeOnFocus(worktreeID: UUID) -> UUID? {
+        let parked = (terminals[worktreeID] ?? []).filter { $0.isParked }
+        guard !parked.isEmpty else { return nil }
         if let focusedID = terminalIDForAutofocus(worktreeID: worktreeID),
            parked.contains(where: { $0.id == focusedID }) {
-            Task { await wakeTerminal(terminalID: focusedID, worktreeID: worktreeID) }
-            return
+            return focusedID
         }
-
-        // Fallback (no resolvable focused terminal, e.g. history view active):
-        // wake a single parked terminal rather than storming all N. The others
-        // wake lazily when their tab is selected.
-        if let first = parked.first {
-            Task { await wakeTerminal(terminalID: first.id, worktreeID: worktreeID) }
-        }
+        return parked.first?.id
     }
 }
