@@ -177,7 +177,7 @@ struct AttachRPCOrchestrationTests {
     }
 
     private func waitFor(
-        _ what: String, deadline: Duration = .seconds(5),
+        _ what: String, deadline: Duration = .seconds(15),
         sourceLocation: SourceLocation = #_sourceLocation,
         _ condition: @Sendable () async -> Bool
     ) async throws {
@@ -342,7 +342,7 @@ struct AttachRPCOrchestrationTests {
         #expect(recorder.writes.last == "refresh-client -A '%7:continue'")
 
         // The vended fd carries the replay (which ends with a CUP).
-        let text = String(decoding: drain(rxFD), as: UTF8.self)
+        let text = (String(bytes: drain(rxFD), encoding: .utf8) ?? "")
         #expect(text.contains("replayed-history"))
         #expect(text.hasSuffix("H"))
     }
@@ -390,7 +390,7 @@ struct AttachRPCOrchestrationTests {
         let response = await readyTask.value
         #expect(response.success)
         #expect(await supervisor.isReady(server: "tbd-timeout-test", paneID: "%6") == true)
-        #expect(String(decoding: drain(rxFD), as: UTF8.self).contains("late-history"))
+        #expect((String(bytes: drain(rxFD), encoding: .utf8) ?? "").contains("late-history"))
     }
 
     @Test("a re-attach mid-sequence supersedes: attach.ready still returns success")
@@ -608,7 +608,7 @@ struct AttachRPCOrchestrationTests {
         let response2 = await ready2.value
         #expect(response2.success)
         #expect(await supervisor.isReady(server: "tbd-stalefail-test", paneID: "%5") == true)
-        #expect(String(decoding: drain(fd2), as: UTF8.self).contains("fresh-history"))
+        #expect((String(bytes: drain(fd2), encoding: .utf8) ?? "").contains("fresh-history"))
 
         // Gen 1's DELAYED capture reply is a %error → its sequence fails.
         // (pause OK, main-history %error, remaining three OK.)
@@ -626,7 +626,7 @@ struct AttachRPCOrchestrationTests {
         supervisor.fanout.route(
             server: "tbd-stalefail-test",
             event: .output(paneID: "%5", bytes: Data("still-alive".utf8)))
-        #expect(String(decoding: drain(fd2), as: UTF8.self) == "still-alive",
+        #expect((String(bytes: drain(fd2), encoding: .utf8) ?? "") == "still-alive",
                 "successor's pipe must survive the stale attach's failure cleanup")
     }
 

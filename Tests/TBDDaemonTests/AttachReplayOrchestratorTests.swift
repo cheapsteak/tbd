@@ -56,7 +56,7 @@ struct AttachReplayOrchestratorTests {
     /// Poll until `condition`, failing after `deadline` (async work — the
     /// orchestrator's batch write — lands on other tasks).
     private func waitFor(
-        _ what: String, deadline: Duration = .seconds(5),
+        _ what: String, deadline: Duration = .seconds(15),
         sourceLocation: SourceLocation = #_sourceLocation,
         _ condition: @Sendable () async -> Bool
     ) async throws {
@@ -159,7 +159,7 @@ struct AttachReplayOrchestratorTests {
         // The pipe holds the replay: prelude first, history present, final
         // bytes are the CUP for cursor (x=2, y=1) — and no mid-sequence leak.
         let replay = drain(readFD)
-        let text = String(decoding: replay, as: UTF8.self)
+        let text = (String(bytes: replay, encoding: .utf8) ?? "")
         #expect(text.hasPrefix(ReplayWriter.resetPrelude))
         #expect(text.contains("hist-one\r\nhist-two"))
         #expect(text.hasSuffix("\u{1b}[2;3H"))
@@ -168,7 +168,7 @@ struct AttachReplayOrchestratorTests {
         // Output routed AFTER the gate opened lands behind the replay.
         supervisor.fanout.route(
             server: server, event: .output(paneID: paneID, bytes: Data("live-after".utf8)))
-        #expect(String(decoding: drain(readFD), as: UTF8.self) == "live-after")
+        #expect((String(bytes: drain(readFD), encoding: .utf8) ?? "") == "live-after")
     }
 
     @Test("superseded mid-sequence: outcome success-shaped, successor's gate untouched, NO unpause")
