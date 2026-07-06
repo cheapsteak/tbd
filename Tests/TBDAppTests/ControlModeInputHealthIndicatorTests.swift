@@ -20,14 +20,14 @@ struct ControlModeInputHealthIndicatorTests {
         body(AppState(userDefaults: defaults))
     }
 
-    private func failingDelta(worktreeID: UUID, paneID: String) -> StateDelta {
+    private func failingDelta(worktreeID: UUID, paneID: String, generation: UInt64? = nil) -> StateDelta {
         .controlModeInputHealthChanged(ControlModeInputHealthDelta(
-            worktreeID: worktreeID, paneID: paneID, healthy: false))
+            worktreeID: worktreeID, paneID: paneID, healthy: false, generation: generation))
     }
 
-    private func healthyDelta(worktreeID: UUID, paneID: String) -> StateDelta {
+    private func healthyDelta(worktreeID: UUID, paneID: String, generation: UInt64? = nil) -> StateDelta {
         .controlModeInputHealthChanged(ControlModeInputHealthDelta(
-            worktreeID: worktreeID, paneID: paneID, healthy: true))
+            worktreeID: worktreeID, paneID: paneID, healthy: true, generation: generation))
     }
 
     @Test func attachedAndFailing_showsIndicator() {
@@ -194,5 +194,90 @@ struct ControlModeInputHealthIndicatorTests {
             state.handleDelta(failingDelta(worktreeID: worktreeID, paneID: "%3"))
             #expect(!state.isInputDeliveryFailing(key))
         }
+    }
+
+    // MARK: - Generation-scoped failing deltas (R6-M7)
+
+    @Test func staleGenerationFailingDelta_doesNotFlagAFreshAttach() {
+        withState { state in
+            let worktreeID = UUID()
+            let key = ControlModePaneKey(worktreeID: worktreeID, paneID: "%3")
+            // The race: gen 1's keystrokes fail while its teardown is in
+            // flight; the pane re-attaches as gen 2, and only THEN does the
+            // gen-1 failure's delta arrive. The fresh attach must stay clear.
+            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%3", generation: 2)
+
+            state.handleDelta(failingDelta(worktreeID: worktreeID, paneID: "%3", generation: 1))
+
+            #expect(!state.isInputDeliveryFailing(key),
+                    "a stale attach's failure must not flag its successor")
+        }
+    }
+
+    @Test func matchingGenerationFailingDelta_applies() {
+        withState { state in
+            let worktreeID = UUID()
+            let key = ControlModePaneKey(worktreeID: worktreeID, paneID: "%3")
+            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%3", generation: 2)
+
+            state.handleDelta(failingDelta(worktreeID: worktreeID, paneID: "%3", generation: 2))
+
+            #expect(state.isInputDeliveryFailing(key))
+        }
+    }
+
+    @Test func nilGenerationFailingDelta_appliesForBackCompat() {
+        withState { state in
+            let worktreeID = UUID()
+            let key = ControlModePaneKey(worktreeID: worktreeID, paneID: "%3")
+            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%3", generation: 2)
+
+            // Older daemon stamps no generation: apply, as before R6-M7.
+            state.handleDelta(failingDelta(worktreeID: worktreeID, paneID: "%3", generation: nil))
+
+            #expect(state.isInputDeliveryFailing(key))
+        }
+    }
+
+    @Test func generationDelta_againstRecordWithoutGeneration_applies() {
+        withState { state in
+            let worktreeID = UUID()
+            let key = ControlModePaneKey(worktreeID: worktreeID, paneID: "%3")
+            // The record can't be discriminated (older daemon vended no
+            // generation at attach): a generation-stamped delta still applies.
+            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%3", generation: nil)
+
+            state.handleDelta(failingDelta(worktreeID: worktreeID, paneID: "%3", generation: 4))
+
+            #expect(state.isInputDeliveryFailing(key))
+        }
+    }
+
+    @Test func recoveryDelta_clearsRegardlessOfGeneration() {
+        withState { state in
+            let worktreeID = UUID()
+            let key = ControlModePaneKey(worktreeID: worktreeID, paneID: "%3")
+            state.controlModePaneAttached(worktreeID: worktreeID, paneID: "%3", generation: 2)
+            state.handleDelta(failingDelta(worktreeID: worktreeID, paneID: "%3", generation: 2))
+            #expect(state.isInputDeliveryFailing(key))
+
+            // Even a stale-generation recovery clears: clearing is safe (the
+            // worst case is an indicator that re-fires on the next failure).
+            state.handleDelta(healthyDelta(worktreeID: worktreeID, paneID: "%3", generation: 1))
+
+            #expect(!state.isInputDeliveryFailing(key))
+        }
+    }
+
+    @Test func deltaJSONWithoutGeneration_decodes_wireBackCompat() throws {
+        // An older daemon's delta payload has no `generation` key: the app
+        // must decode it (nil) rather than drop the whole delta.
+        let json = """
+            {"worktreeID":"\(UUID().uuidString)","paneID":"%3","healthy":false}
+            """
+        let decoded = try JSONDecoder().decode(
+            ControlModeInputHealthDelta.self, from: Data(json.utf8))
+        #expect(decoded.generation == nil)
+        #expect(decoded.healthy == false)
     }
 }

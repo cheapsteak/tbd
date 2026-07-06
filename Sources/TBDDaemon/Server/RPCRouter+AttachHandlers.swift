@@ -86,8 +86,12 @@ extension RPCRouter {
             // the fanout detach. The ready-timeout expiry deliberately does NOT
             // unregister — it has no hook here, and it's harmless: input to a
             // timed-out pane still resolves to the live tmux pane, and a
-            // re-attach overwrites this entry.
-            bridge.inputRouter.register(worktreeID: params.worktreeID, paneID: paneID, server: server)
+            // re-attach overwrites this entry. The attach generation rides the
+            // route (R6-M7) so input-health deltas are stamped with it — a
+            // stale attach's failure cannot flag a fresh attach app-side.
+            bridge.inputRouter.register(
+                worktreeID: params.worktreeID, paneID: paneID, server: server,
+                generation: generation)
             do {
                 try await bridge.fdVending.send(fd: readFD, header: header)
             } catch {

@@ -23,6 +23,13 @@ final class ControlModeInputRouter: @unchecked Sendable {
         let worktreeID: UUID
         let paneID: String
     }
+    /// A pane's routing entry: the tmux server that owns it, plus the attach
+    /// generation it was registered under (R6-M7) — stamped on health events
+    /// so the app can refuse a stale attach's failure against a fresh attach.
+    private struct Route {
+        let server: String
+        let generation: UInt64?
+    }
     /// Whether a queued item is a keystroke batch or a bulk paste. Both ride the
     /// SAME ordered stream so a keystroke enqueued after a paste is delivered
     /// strictly after the paste's `paste-buffer` completes (the M2 ruling's
@@ -43,16 +50,18 @@ final class ControlModeInputRouter: @unchecked Sendable {
     /// `{ await supervisor.command(server: $0) }`; tests inject a fake.
     private let commandProvider: @Sendable (String) async -> TmuxControlCommandClient?
     /// Sink for per-pane input-delivery health TRANSITIONS (#318 polish
-    /// ruling). Called with `(worktreeID, paneID, healthy)` exactly once per
-    /// edge — into failing, back to healthy — never per keystroke. The daemon
-    /// wires this to a `StateDelta.controlModeInputHealthChanged` broadcast;
-    /// tests inject a recorder; the default is a no-op.
-    private let onHealthChange: @Sendable (UUID, String, Bool) -> Void
+    /// ruling). Called with `(worktreeID, paneID, healthy, generation)`
+    /// exactly once per edge — into failing, back to healthy — never per
+    /// keystroke. `generation` is the attach generation the pane's route was
+    /// registered under (R6-M7; nil when none was). The daemon wires this to
+    /// a `StateDelta.controlModeInputHealthChanged` broadcast; tests inject
+    /// a recorder; the default is a no-op.
+    private let onHealthChange: @Sendable (UUID, String, Bool, UInt64?) -> Void
     private let latency: InputLatencyRecorder
     private let chunkSize: Int
 
     private let lock = NSLock()
-    private var servers: [InputKey: String] = [:]
+    private var routes: [InputKey: Route] = [:]
     /// Panes currently considered input-failing, for edge-triggering health
     /// notifications. Guarded by `lock`. Delivery outcomes are reported from
     /// two places — the consumer task (no command client) and the correlator
@@ -69,7 +78,7 @@ final class ControlModeInputRouter: @unchecked Sendable {
     init(commandProvider: @escaping @Sendable (String) async -> TmuxControlCommandClient?,
          latency: InputLatencyRecorder = InputLatencyRecorder(),
          chunkSize: Int = 330,
-         onHealthChange: @escaping @Sendable (UUID, String, Bool) -> Void = { _, _, _ in }) {
+         onHealthChange: @escaping @Sendable (UUID, String, Bool, UInt64?) -> Void = { _, _, _, _ in }) {
         self.commandProvider = commandProvider
         self.latency = latency
         self.chunkSize = chunkSize
@@ -95,10 +104,15 @@ final class ControlModeInputRouter: @unchecked Sendable {
     /// flag cannot survive into a new attach when the detach's `pane.detach`
     /// RPC (and thus its unregister) was lost: the fresh attach starts from a
     /// healthy baseline and its first real failure re-fires the edge.
-    func register(worktreeID: UUID, paneID: String, server: String) {
+    ///
+    /// `generation` is the attach generation this route belongs to (R6-M7):
+    /// health events for the pane are stamped with it so the app can refuse a
+    /// stale attach's failure against a fresh attach. Nil (no generation
+    /// available) stamps nil — the app applies those unchecked, as before.
+    func register(worktreeID: UUID, paneID: String, server: String, generation: UInt64? = nil) {
         let key = InputKey(worktreeID: worktreeID, paneID: paneID)
         lock.lock()
-        servers[key] = server
+        routes[key] = Route(server: server, generation: generation)
         failingPanes.remove(key)
         lock.unlock()
     }
@@ -110,7 +124,7 @@ final class ControlModeInputRouter: @unchecked Sendable {
     func unregister(worktreeID: UUID, paneID: String) {
         let key = InputKey(worktreeID: worktreeID, paneID: paneID)
         lock.lock()
-        servers.removeValue(forKey: key)
+        routes.removeValue(forKey: key)
         failingPanes.remove(key)
         lock.unlock()
     }
@@ -141,7 +155,7 @@ final class ControlModeInputRouter: @unchecked Sendable {
     private func resolveServer(_ header: SidecarInputHeader) -> String? {
         lock.lock()
         defer { lock.unlock() }
-        return servers[InputKey(worktreeID: header.worktreeID, paneID: header.paneID)]
+        return routes[InputKey(worktreeID: header.worktreeID, paneID: header.paneID)]?.server
     }
 
     private func deliver(_ item: Item) async {
@@ -242,6 +256,11 @@ final class ControlModeInputRouter: @unchecked Sendable {
     private func reportDelivery(header: SidecarInputHeader, success: Bool) {
         let key = InputKey(worktreeID: header.worktreeID, paneID: header.paneID)
         lock.lock()
+        // Stamp the CURRENT route's generation (R6-M7). Read under the same
+        // lock as the edge decision so the stamp and the transition agree; a
+        // route unregistered between delivery and this report stamps nil
+        // (applied unchecked app-side — the attached-pane gate hides it).
+        let generation = routes[key]?.generation
         var transitionedToHealthy: Bool?
         if success {
             if failingPanes.remove(key) != nil { transitionedToHealthy = true }
@@ -252,8 +271,8 @@ final class ControlModeInputRouter: @unchecked Sendable {
         guard let healthy = transitionedToHealthy else { return }
         logger.info("""
             input-delivery health for pane \(key.paneID, privacy: .public): \
-            \(healthy ? "recovered" : "FAILING", privacy: .public)
+            \(healthy ? "recovered" : "FAILING", privacy: .public) gen=\(generation ?? 0)
             """)
-        onHealthChange(key.worktreeID, key.paneID, healthy)
+        onHealthChange(key.worktreeID, key.paneID, healthy, generation)
     }
 }

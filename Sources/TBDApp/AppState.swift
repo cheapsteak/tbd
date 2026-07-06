@@ -966,8 +966,22 @@ final class AppState: ObservableObject {
     private func applyControlModeInputHealthDelta(_ delta: ControlModeInputHealthDelta) {
         let key = ControlModePaneKey(worktreeID: delta.worktreeID, paneID: delta.paneID)
         if delta.healthy {
+            // Recovery clears regardless of generation: clearing is always
+            // safe (worst case the indicator re-fires on the next failure).
             controlModeFailingInputPanes.remove(key)
         } else {
+            // A FAILING delta is generation-scoped (R6-M7): apply only if it
+            // belongs to the attach this pane currently records — a stale
+            // attach's failure surfacing after a re-attach must not flag the
+            // fresh, healthy attach. Nil on either side (older daemon delta,
+            // or a record vended without a generation) applies unchecked,
+            // preserving pre-R6 behavior — same discrimination rule as
+            // `controlModePaneDetached`.
+            if let deltaGeneration = delta.generation,
+               let record = controlModeAttachedPanes[key], let recordedGeneration = record,
+               recordedGeneration != deltaGeneration {
+                return
+            }
             controlModeFailingInputPanes.insert(key)
         }
     }

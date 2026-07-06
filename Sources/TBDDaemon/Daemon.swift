@@ -326,9 +326,10 @@ public final class Daemon: Sendable {
             commandProvider: { [supervisor = controlModeSupervisor] server in
                 await supervisor.command(server: server)
             },
-            onHealthChange: { [subs] worktreeID, paneID, healthy in
+            onHealthChange: { [subs] worktreeID, paneID, healthy, generation in
                 subs.broadcast(delta: .controlModeInputHealthChanged(ControlModeInputHealthDelta(
-                    worktreeID: worktreeID, paneID: paneID, healthy: healthy)))
+                    worktreeID: worktreeID, paneID: paneID, healthy: healthy,
+                    generation: generation)))
             }
         )
         let controlModeBridge = TmuxControlModeBridge(

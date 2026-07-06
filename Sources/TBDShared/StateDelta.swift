@@ -78,10 +78,19 @@ public struct ControlModeInputHealthDelta: Codable, Sendable, Equatable {
     /// paired with `worktreeID` (same keying as `SidecarInputHeader`).
     public let paneID: String
     public let healthy: Bool
-    public init(worktreeID: UUID, paneID: String, healthy: Bool) {
+    /// Attach generation the health observation belongs to (R6-M7), stamped
+    /// from the input route registered at attach time. The app applies a
+    /// FAILING delta only when this matches its recorded attach generation —
+    /// a stale attach's failure surfacing after a re-attach must not flag
+    /// the fresh, healthy attach. Optional for wire back-compat: nil (older
+    /// daemon, or a route registered without one) applies unchecked, as
+    /// before. Recovery deltas clear regardless — clearing is always safe.
+    public let generation: UInt64?
+    public init(worktreeID: UUID, paneID: String, healthy: Bool, generation: UInt64? = nil) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.healthy = healthy
+        self.generation = generation
     }
 }
 

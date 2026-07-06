@@ -18,11 +18,11 @@ struct ControlModeInputHealthTests {
     /// Thread-safe recorder of health transitions in call order.
     private final class HealthRecorder: @unchecked Sendable {
         private let lock = NSLock()
-        private var _events: [(worktreeID: UUID, paneID: String, healthy: Bool)] = []
-        func record(_ worktreeID: UUID, _ paneID: String, _ healthy: Bool) {
-            lock.lock(); _events.append((worktreeID, paneID, healthy)); lock.unlock()
+        private var _events: [(worktreeID: UUID, paneID: String, healthy: Bool, generation: UInt64?)] = []
+        func record(_ worktreeID: UUID, _ paneID: String, _ healthy: Bool, _ generation: UInt64?) {
+            lock.lock(); _events.append((worktreeID, paneID, healthy, generation)); lock.unlock()
         }
-        var events: [(worktreeID: UUID, paneID: String, healthy: Bool)] {
+        var events: [(worktreeID: UUID, paneID: String, healthy: Bool, generation: UInt64?)] {
             lock.lock(); defer { lock.unlock() }; return _events
         }
     }
@@ -93,8 +93,8 @@ struct ControlModeInputHealthTests {
         holder.client = client
         let router = ControlModeInputRouter(
             commandProvider: { server in server == "srv" ? client : nil },
-            onHealthChange: { worktreeID, paneID, healthy in
-                health.record(worktreeID, paneID, healthy)
+            onHealthChange: { worktreeID, paneID, healthy, generation in
+                health.record(worktreeID, paneID, healthy, generation)
             })
         return (router, recorder, health)
     }
@@ -185,8 +185,8 @@ struct ControlModeInputHealthTests {
         let health = HealthRecorder()
         let router = ControlModeInputRouter(
             commandProvider: { _ in nil },   // server connection is down
-            onHealthChange: { worktreeID, paneID, healthy in
-                health.record(worktreeID, paneID, healthy)
+            onHealthChange: { worktreeID, paneID, healthy, generation in
+                health.record(worktreeID, paneID, healthy, generation)
             })
         let worktreeID = UUID()
         router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
@@ -236,6 +236,43 @@ struct ControlModeInputHealthTests {
         router.enqueue(header: header, bytes: Data([0x41]))   // fails → event 2
         try await waitForEvents(health, count: 2)
         #expect(health.events.map(\.healthy) == [false, false])
+        router.shutdown()
+    }
+
+    @Test("health events carry the attach generation registered with the route (R6-M7)")
+    func healthEventsCarryRegisteredGeneration() async throws {
+        let worktreeID = UUID()
+        let (router, _, health) = makeRouter(shouldFail: Self.failUnlessFF)
+        router.register(worktreeID: worktreeID, paneID: "%0", server: "srv", generation: 42)
+        let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
+
+        router.enqueue(header: header, bytes: Data([0x41]))   // fails → failing event
+        router.enqueue(header: header, bytes: Data([0xff]))   // succeeds → recovery event
+
+        try await waitForEvents(health, count: 2)
+        // Both edges are stamped with the registered attach generation, so
+        // the app can refuse a stale attach's failure against a fresh attach.
+        #expect(health.events.map(\.generation) == [42, 42])
+
+        // A re-attach re-registers with a NEWER generation: subsequent
+        // events carry it — never the stale one.
+        router.register(worktreeID: worktreeID, paneID: "%0", server: "srv", generation: 43)
+        router.enqueue(header: header, bytes: Data([0x41]))   // fails again → event 3
+        try await waitForEvents(health, count: 3)
+        #expect(health.events.last?.generation == 43)
+        router.shutdown()
+    }
+
+    @Test("a route registered without a generation stamps nil (back-compat)")
+    func generationlessRouteStampsNil() async throws {
+        let worktreeID = UUID()
+        let (router, _, health) = makeRouter(shouldFail: Self.failUnlessFF)
+        router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
+        let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
+
+        router.enqueue(header: header, bytes: Data([0x41]))
+        try await waitForEvents(health, count: 1)
+        #expect(health.events.map(\.generation) == [nil])
         router.shutdown()
     }
 
