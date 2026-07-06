@@ -234,16 +234,45 @@ enum ProfileUsagePresentation {
         return "\(max(totalMinutes % 60, 1))m"
     }
 
-    /// Two-line menu-row model for a profile: identity on the primary line,
-    /// spelled-out usage on the secondary line (nil when there's no snapshot).
+    /// Two-line menu-row model for a profile: identity on the primary line, and
+    /// a secondary line that is the spelled-out usage when a fresh healthy
+    /// snapshot exists, otherwise an EXPLICIT honest state — "needs re-login",
+    /// "usage unavailable — retrying · last data 2h ago", "updated 6m ago" —
+    /// so a logged-in profile whose fetch is failing never renders a silent
+    /// blank second line. nil only when there is genuinely nothing to say (not
+    /// logged in / no snapshot yet), which keeps the single-line identity
+    /// treatment for those rows.
     static func menuLine(for entry: ModelProfileWithUsage,
                          timeZone: TimeZone = .current,
                          now: Date = Date()) -> MenuLineModel {
         MenuLineModel(
             primary: ProfileLoginPresentation.menuItemTitle(for: entry),
-            secondary: usageDetailLine(for: entry.usageSnapshot,
-                                       timeZone: timeZone, now: now)
+            secondary: secondaryLine(for: entry.usageSnapshot,
+                                     timeZone: timeZone, now: now)
         )
+    }
+
+    /// The secondary menu line: fresh usage numbers when healthy, else the
+    /// honest staleness/failure note (which already appends the last-known age
+    /// when older data exists). Detail line wins when present AND healthy so a
+    /// rate-limited profile with old numbers still shows the retry note rather
+    /// than silently presenting stale figures as current.
+    static func secondaryLine(for snapshot: ProfileUsageSnapshot?,
+                              timeZone: TimeZone = .current,
+                              now: Date = Date()) -> String? {
+        // Healthy + fresh: numbers.
+        if let snapshot, snapshot.isOK,
+           let detail = usageDetailLine(for: snapshot, timeZone: timeZone, now: now) {
+            // A fresh healthy snapshot may still be aging; append the age note
+            // when it crosses the stale threshold so "5h 12% used …" doesn't
+            // masquerade as up-to-the-second.
+            if let note = stalenessNote(for: snapshot, now: now) {
+                return "\(detail) · \(note)"
+            }
+            return detail
+        }
+        // Otherwise the honest note carries the row (nil for no-snapshot rows).
+        return stalenessNote(for: snapshot, now: now)
     }
 
     // MARK: - Picker ordering & row state
@@ -289,17 +318,69 @@ enum ProfileUsagePresentation {
     /// The daemon poller sweeps ~every 90s, so 5 minutes means several misses.
     static let staleAge: TimeInterval = 300
 
-    /// Staleness note for a picker row. nil = data is fresh and healthy (no
-    /// note). A failing snapshot surfaces the daemon's status string verbatim
-    /// (it already reads "stale since …; fetch failed: …").
+    /// Compact "how long ago" for a fetch timestamp: "just now", "3m", "2h",
+    /// "1d". Used to age both fresh-but-old and stale-with-old-data rows.
+    static func ageText(since date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "just now" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        return "\(hours / 24)d"
+    }
+
+    /// Staleness / health note for a picker or menu row. Every logged-in
+    /// profile that lacks a fresh, healthy snapshot gets an EXPLICIT note —
+    /// never a silent blank — so the three failure modes read differently:
+    ///
+    /// - fresh & healthy → nil (no note; the usage line speaks for itself)
+    /// - fresh but aging (>= staleAge) → "updated 6m ago"
+    /// - `needsLogin` → "needs re-login" (actionable: the user must `/login`)
+    /// - `noCredentials` → "not logged in"
+    /// - `rateLimited` → "usage unavailable — retrying" (+ "· last data 2h ago"
+    ///   when we still have older numbers to show alongside)
+    /// - network/decode/unknown failure → "usage unavailable — retrying"
+    ///   (again suffixed with the last-known age when present)
+    ///
+    /// The daemon's verbose `status` string is no longer surfaced verbatim
+    /// (it leaked ISO timestamps into the UI); the typed `statusKind` drives
+    /// the copy instead.
     static func stalenessNote(for snapshot: ProfileUsageSnapshot?,
                               now: Date = Date()) -> String? {
         guard let snapshot else { return nil }
-        guard snapshot.isOK else { return snapshot.status }
-        guard let fetchedAt = snapshot.fetchedAt else { return "no usage data yet" }
-        let age = now.timeIntervalSince(fetchedAt)
-        guard age >= staleAge else { return nil }
-        return "updated \(Int(age / 60))m ago"
+
+        if snapshot.isOK {
+            guard let fetchedAt = snapshot.fetchedAt else { return "no usage data yet" }
+            let age = now.timeIntervalSince(fetchedAt)
+            guard age >= staleAge else { return nil }
+            return "updated \(ageText(since: fetchedAt, now: now)) ago"
+        }
+
+        // Failing snapshot: classify by the typed kind.
+        switch snapshot.statusKind {
+        case .ok:
+            // status text says failure but kind says ok — shouldn't happen;
+            // fall through to a generic note.
+            return retryingNote(for: snapshot, now: now)
+        case .needsLogin:
+            return "needs re-login"
+        case .noCredentials:
+            return "not logged in"
+        case .rateLimited, .networkError, .decodeError, .unknown:
+            return retryingNote(for: snapshot, now: now)
+        }
+    }
+
+    /// "usage unavailable — retrying", plus "· last data Nago" when the profile
+    /// has older buckets to show alongside the note.
+    private static func retryingNote(for snapshot: ProfileUsageSnapshot,
+                                     now: Date) -> String {
+        let base = "usage unavailable — retrying"
+        if let fetchedAt = snapshot.fetchedAt, !snapshot.buckets.isEmpty {
+            return "\(base) · last data \(ageText(since: fetchedAt, now: now)) ago"
+        }
+        return base
     }
 
     // MARK: - Per-session tooltips
