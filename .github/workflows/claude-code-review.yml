@@ -1,8 +1,8 @@
 name: Claude Code Review
 
 on:
-  pull_request:
-    types: [opened, synchronize, ready_for_review, reopened, labeled]
+  pull_request_target:
+    types: [opened, synchronize, ready_for_review, reopened]
 
 concurrency:
   group: claude-review-pr-${{ github.event.pull_request.number }}
@@ -10,11 +10,13 @@ concurrency:
 
 jobs:
   claude-review:
-    if: >-
-      github.event.pull_request.draft != true &&
-      (github.event.pull_request.head.repo.full_name == github.repository ||
-      contains(github.event.pull_request.labels.*.name, 'agent-review')) &&
-      (github.event.action != 'labeled' || github.event.label.name == 'agent-review')
+    # Draft PRs are the only skip path (they can't merge, so a skipped==passing
+    # required check is harmless). Every *mergeable* trigger runs the job so it
+    # always produces a fresh verdict for the head SHA — we never leave a stale
+    # check that a later skipped run could supersede. `labeled` is deliberately
+    # NOT a trigger: a job-level skip on an unrelated label would emit a
+    # skipped==passing check that overwrites an earlier failing verdict.
+    if: github.event.pull_request.draft != true
 
     runs-on: ubuntu-latest
     permissions:
@@ -26,44 +28,58 @@ jobs:
       checks: read
 
     steps:
-      - name: Check for existing Claude review on this commit
-        id: check-existing-review
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Determine author trust
+        id: trust
+        # Trusted = branch pushed to this repo, OR the author is a
+        # collaborator/member/owner. Only the string `true`/`false` reaches the
+        # shell — no PR-controlled text is interpolated — so this is safe under
+        # pull_request_target. Untrusted-fork code is never checked out or run
+        # (every step below that touches PR content is gated on trusted == true).
         run: |
-          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          echo "trusted=${{ github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}" >> "$GITHUB_OUTPUT"
 
-          EXISTING_REVIEW=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" \
-            --jq "[.[] | select(.user.login == \"claude[bot]\" and .commit_id == \"$HEAD_SHA\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\"))] | length")
+      - name: Block untrusted fork
+        if: steps.trust.outputs.trusted != 'true'
+        run: |
+          echo "::error::Claude review is required, but this PR is from an untrusted fork and cannot be auto-reviewed (the review needs repository secrets that are withheld from fork runs). Push the branch to this repository to have it reviewed. No untrusted code is executed here."
+          exit 1
 
-          if [ "$EXISTING_REVIEW" -gt 0 ] && [ "${{ github.run_attempt }}" -eq 1 ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "Claude already reviewed commit $HEAD_SHA — skipping"
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Checkout repository
-        if: steps.check-existing-review.outputs.skip != 'true'
+      - name: Checkout PR head
+        if: steps.trust.outputs.trusted == 'true'
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
 
+      - name: Reset any pre-committed verdict file
+        if: steps.trust.outputs.trusted == 'true'
+        # SECURITY: the verdict file lives in the checked-out (PR-controlled) tree.
+        # Delete any copy the PR itself committed so the only file the enforce step
+        # and Stop hook can read is one THIS review session wrote. Without this a PR
+        # could commit claude-verdict.txt=APPROVE and, if the review session were
+        # killed or timed out before writing its own, sail through the gate.
+        run: rm -f "$GITHUB_WORKSPACE/claude-verdict.txt"
+
       - name: Run Claude Code Review
-        if: steps.check-existing-review.outputs.skip != 'true'
+        if: steps.trust.outputs.trusted == 'true'
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           show_full_output: true
           use_sticky_comment: true
-          track_progress: ${{ github.event.action != 'labeled' }}
+          track_progress: true
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
+          # Installs a Stop hook that refuses to end the session until a clean,
+          # machine-readable verdict (exactly APPROVE or REJECT) has been written
+          # to claude-verdict.txt. Keeps the merge gate an exact string match with
+          # no regex/intent-guessing over free-form review prose.
+          settings: ${{ github.workspace }}/.github/workflows/claude-review-hooks/settings.json
           prompt: |
             /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
 
-            IMPORTANT: The repository is checked out locally. Use Read, Glob, and Grep tools to inspect source files — do NOT use gh api to fetch file contents. The runner is ubuntu-latest so you cannot build or run this macOS Swift project; focus on static code review only.
+            IMPORTANT: The repository is checked out locally at the PR's head commit. Use Read, Glob, and Grep tools to inspect source files — do NOT use gh api to fetch file contents. The runner is ubuntu-latest so you cannot build or run this macOS Swift project; focus on static code review only.
 
             Additional review instructions:
 
@@ -90,13 +106,41 @@ jobs:
             - Don't spill ink glazing the PR (Strengths and Highlights should be rarely warranted and extremely succinct).
             - Include a count of invalid feedback not posted.
 
+            VERDICT GATE (required, machine-read): Before you finish, use the Write tool to create the file `claude-verdict.txt` in the repository root containing EXACTLY one uppercase word and nothing else — either `APPROVE` or `REJECT`. Write `REJECT` if the PR has any unaddressed High or Medium severity issue; otherwise write `APPROVE`. This single token drives a required merge gate and is compared exactly, so the file must contain no other text, punctuation, emoji, or explanation (keep all of that in the sticky comment). A stop hook will refuse to let the session end until this file contains exactly APPROVE or REJECT.
+
             DIAGNOSTICS: At the very end of your comment, add a collapsed section:
             <details><summary>Review diagnostics</summary>
             List any tool calls that failed or were denied (e.g. "Write to /tmp/ blocked", "gh api denied"). If none failed, say so. This helps us tune the workflow permissions and allowedTools over time.
             </details>
 
-            Do NOT submit a formal GitHub review (no `gh pr review`). Your only output is the sticky comment via `mcp__github_comment__update_claude_comment`.
+            Do NOT submit a formal GitHub review (no `gh pr review`). Your outputs are the sticky comment via `mcp__github_comment__update_claude_comment` and the `claude-verdict.txt` file.
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           claude_args: |
             --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(cat:*),WebSearch,Read,Write,Glob,Grep,Task"
+
+      - name: Enforce review verdict (block merge on Reject)
+        if: steps.trust.outputs.trusted == 'true'
+        run: |
+          verdict_file="$GITHUB_WORKSPACE/claude-verdict.txt"
+          if [ ! -f "$verdict_file" ]; then
+            echo "::error::Claude review recorded no verdict file — failing closed. Re-run the review."
+            exit 1
+          fi
+          # Whitespace-trimmed exact comparison — NO regex/substring matching, so
+          # review prose can never be misread as a verdict. The Stop hook normally
+          # guarantees the file is exactly APPROVE or REJECT; because the pre-review
+          # reset deleted any PR-committed copy, a killed/timed-out session leaves no
+          # file here and this step fails closed rather than trusting stale content.
+          verdict="$(tr -d '[:space:]' < "$verdict_file")"
+          echo "Recorded verdict: '$verdict'"
+          case "$verdict" in
+            APPROVE)
+              echo "Claude approved — merge gate satisfied." ;;
+            REJECT)
+              echo "::error::Claude review requested changes. Resolve the flagged High/Medium issues and push again."
+              exit 1 ;;
+            *)
+              echo "::error::Verdict file did not contain exactly APPROVE or REJECT (got '$verdict') — failing closed."
+              exit 1 ;;
+          esac
