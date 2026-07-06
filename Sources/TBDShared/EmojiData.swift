@@ -14,7 +14,7 @@ public enum EmojiData: Sendable {
         }
     }
 
-    public static let all: [Entry] = [
+    private static let all0: [Entry] = [
         Entry(emoji: "😀", name: "grinning", keywords: ["smile", "happy", "face"]),
         Entry(emoji: "😃", name: "smiley", keywords: ["happy", "joy", "haha", "grinning", "face", "big", "eyes"]),
         Entry(emoji: "😄", name: "smile", keywords: ["happy", "joy", "laugh", "pleased", "grinning", "face", "smiling", "eyes"]),
@@ -265,6 +265,9 @@ public enum EmojiData: Sendable {
         Entry(emoji: "🧔‍♂️", name: "man_beard", keywords: ["man:", "beard"]),
         Entry(emoji: "🧔‍♀️", name: "woman_beard", keywords: ["woman:", "beard"]),
         Entry(emoji: "👨‍🦰", name: "red_haired_man", keywords: ["man:", "red", "hair"]),
+    ]
+
+    private static let all1: [Entry] = [
         Entry(emoji: "👨‍🦱", name: "curly_haired_man", keywords: ["man:", "curly", "hair"]),
         Entry(emoji: "👨‍🦳", name: "white_haired_man", keywords: ["man:", "white", "hair"]),
         Entry(emoji: "👨‍🦲", name: "bald_man", keywords: ["man:", "bald"]),
@@ -515,6 +518,9 @@ public enum EmojiData: Sendable {
         Entry(emoji: "🤽‍♂️", name: "man_playing_water_polo", keywords: ["man", "playing", "water", "polo"]),
         Entry(emoji: "🤽‍♀️", name: "woman_playing_water_polo", keywords: ["woman", "playing", "water", "polo"]),
         Entry(emoji: "🤾", name: "handball_person", keywords: ["person", "playing", "handball"]),
+    ]
+
+    private static let all2: [Entry] = [
         Entry(emoji: "🤾‍♂️", name: "man_playing_handball", keywords: ["man", "playing", "handball"]),
         Entry(emoji: "🤾‍♀️", name: "woman_playing_handball", keywords: ["woman", "playing", "handball"]),
         Entry(emoji: "🤹", name: "juggling_person", keywords: ["person", "juggling"]),
@@ -765,6 +771,9 @@ public enum EmojiData: Sendable {
         Entry(emoji: "🥐", name: "croissant"),
         Entry(emoji: "🥖", name: "baguette_bread", keywords: ["baguette", "bread"]),
         Entry(emoji: "🫓", name: "flatbread"),
+    ]
+
+    private static let all3: [Entry] = [
         Entry(emoji: "🥨", name: "pretzel"),
         Entry(emoji: "🥯", name: "bagel"),
         Entry(emoji: "🥞", name: "pancakes"),
@@ -1015,6 +1024,9 @@ public enum EmojiData: Sendable {
         Entry(emoji: "🕑", name: "clock2", keywords: ["two", "o’clock"]),
         Entry(emoji: "🕝", name: "clock230", keywords: ["two-thirty"]),
         Entry(emoji: "🕒", name: "clock3", keywords: ["three", "o’clock"]),
+    ]
+
+    private static let all4: [Entry] = [
         Entry(emoji: "🕞", name: "clock330", keywords: ["three-thirty"]),
         Entry(emoji: "🕓", name: "clock4", keywords: ["four", "o’clock"]),
         Entry(emoji: "🕟", name: "clock430", keywords: ["four-thirty"]),
@@ -1265,6 +1277,9 @@ public enum EmojiData: Sendable {
         Entry(emoji: "📀", name: "dvd"),
         Entry(emoji: "🧮", name: "abacus"),
         Entry(emoji: "🎥", name: "movie_camera", keywords: ["film", "video", "movie", "camera"]),
+    ]
+
+    private static let all5: [Entry] = [
         Entry(emoji: "🎞️", name: "film_strip", keywords: ["film", "frames"]),
         Entry(emoji: "📽️", name: "film_projector", keywords: ["film", "projector"]),
         Entry(emoji: "🎬", name: "clapper", keywords: ["film", "board"]),
@@ -1515,6 +1530,9 @@ public enum EmojiData: Sendable {
         Entry(emoji: "⏯️", name: "play_or_pause_button", keywords: ["play", "pause", "button"]),
         Entry(emoji: "◀️", name: "arrow_backward", keywords: ["reverse", "button"]),
         Entry(emoji: "⏪", name: "rewind", keywords: ["fast", "reverse", "button"]),
+    ]
+
+    private static let all6: [Entry] = [
         Entry(emoji: "⏮️", name: "previous_track_button", keywords: ["last", "track", "button"]),
         Entry(emoji: "🔼", name: "arrow_up_small", keywords: ["upwards", "button"]),
         Entry(emoji: "⏫", name: "arrow_double_up", keywords: ["fast", "up", "button"]),
@@ -1765,6 +1783,9 @@ public enum EmojiData: Sendable {
         Entry(emoji: "🇬🇹", name: "guatemala", keywords: ["flag:"]),
         Entry(emoji: "🇬🇺", name: "guam", keywords: ["flag:"]),
         Entry(emoji: "🇬🇼", name: "guinea_bissau", keywords: ["flag:"]),
+    ]
+
+    private static let all7: [Entry] = [
         Entry(emoji: "🇬🇾", name: "guyana", keywords: ["flag:"]),
         Entry(emoji: "🇭🇰", name: "hong_kong", keywords: ["flag:", "hong", "kong", "sar", "china"]),
         Entry(emoji: "🇭🇲", name: "heard_mcdonald_islands", keywords: ["flag:", "heard", "mcdonald", "islands"]),
@@ -1929,6 +1950,8 @@ public enum EmojiData: Sendable {
         Entry(emoji: "🏴󠁧󠁢󠁳󠁣󠁴󠁿", name: "scotland", keywords: ["flag:"]),
         Entry(emoji: "🏴󠁧󠁢󠁷󠁬󠁳󠁿", name: "wales", keywords: ["flag:"]),
     ]
+
+    public static let all: [Entry] = all0 + all1 + all2 + all3 + all4 + all5 + all6 + all7
 
     /// Search emoji by prefix match on name and keywords, with contains fallback.
     public static func search(_ query: String, limit: Int = 8) -> [Entry] {
