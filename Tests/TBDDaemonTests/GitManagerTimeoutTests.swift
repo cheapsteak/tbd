@@ -4,8 +4,9 @@ import Testing
 
 /// Exercises `GitManager`'s subprocess timeout/kill path (`GitTimeoutError`) via
 /// the package-internal `runForTimeoutTesting` seam driven against `/bin/sleep`.
-/// Asserts the OUTCOME (an error is thrown), never timing — CI runners can be
-/// pathologically slow, so a wall-clock bound would be flaky. A real git hang is
+/// Asserts the OUTCOME (an error is thrown), never tight timing — CI runners
+/// can be pathologically slow, so wall-clock bounds appear only where the
+/// bound itself is the regression signal, and generously. A real git hang is
 /// not reproducible cross-environment (a post-checkout hook did not fire on CI),
 /// which is exactly why the deterministic seam exists.
 struct GitManagerTimeoutTests {
@@ -67,5 +68,49 @@ struct GitManagerTimeoutTests {
             #expect(error.exitCode == 3)
             #expect(error.stderr.utf8.count == bytes)
         }
+    }
+
+    @Test func timeoutThrowsPromptlyWhenGrandchildHoldsPipeOpen() async {
+        // Mirrors SubprocessTimeoutTests: the watchdog kills only the DIRECT
+        // child; a backgrounded grandchild inherits the pipe write ends and
+        // keeps them open for 5s, so EOF never arrives before it exits. The
+        // timer path must nil the readability handlers AND finish() both
+        // accumulators (closing the parent read ends) so nothing waits for —
+        // or stays open until — the grandchild's EOF. Shape: parent execs
+        // into a sleep the 1s timeout kills; grandchild sleeps 5s.
+        let git = GitManager(subprocessTimeout: .seconds(1))
+        let start = ContinuousClock.now
+        do {
+            _ = try await git.runForTimeoutTesting(
+                executable: "/bin/sh",
+                arguments: ["-c", "sleep 5 & exec sleep 5"],
+                at: FileManager.default.temporaryDirectory.path
+            )
+            Issue.record("expected runForTimeoutTesting to time out, but it returned")
+        } catch is GitTimeoutError {
+            // expected
+        } catch {
+            Issue.record("expected GitTimeoutError, got \(error)")
+        }
+        // Generous bound (1s timeout vs 5s grandchild): finishing under 4s
+        // proves nothing waited for the grandchild to release the write end.
+        #expect(ContinuousClock.now - start < .seconds(4))
+    }
+
+    @Test func returnsOutputWithoutWaitingForGrandchildEOF() async throws {
+        // Termination-path variant: the direct child exits immediately and
+        // successfully while its backgrounded grandchild holds the pipe write
+        // end for 5s. The call must return the child's output right away — a
+        // drain that waits for pipe EOF stalls until the grandchild exits,
+        // which would surface as a spurious GitTimeoutError here (timeout 3s
+        // < grandchild 5s). Outcome-based: success discriminates old from new
+        // without asserting wall-clock timing.
+        let git = GitManager(subprocessTimeout: .seconds(3))
+        let out = try await git.runForTimeoutTesting(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 5 & echo hi"],
+            at: FileManager.default.temporaryDirectory.path
+        )
+        #expect(out == "hi\n")
     }
 }

@@ -454,6 +454,8 @@ public struct GitManager: Sendable {
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
+            let stdoutAccumulator = PipeDataAccumulator()
+            let stderrAccumulator = PipeDataAccumulator()
 
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
@@ -468,8 +470,15 @@ public struct GitManager: Sendable {
             timer.setEventHandler {
                 guard state.claim() else { return }
                 timer.cancel()
+                // Stop draining and close the parent read ends NOW (mirrors
+                // TmuxManager.runExternalCommand). The kill below reaches only
+                // the DIRECT child; grandchildren it forked inherit the pipe
+                // write ends, so EOF may never come — waiting for it would
+                // leak the FDs and handler closures for their lifetime.
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
+                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
                 let pid = process.processIdentifier
                 if pid > 0 {
                     kill(pid, SIGTERM)
@@ -484,8 +493,6 @@ public struct GitManager: Sendable {
             // Drain pipes incrementally to prevent deadlock when output exceeds the
             // OS pipe buffer (~64KB). Without this, the child process blocks on
             // write and `terminationHandler` never fires.
-            let stdoutAccumulator = PipeDataAccumulator()
-            let stderrAccumulator = PipeDataAccumulator()
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 if !stdoutAccumulator.readAvailable(from: handle) {
                     handle.readabilityHandler = nil
@@ -526,6 +533,12 @@ public struct GitManager: Sendable {
                 try process.run()
                 timer.resume()
             } catch {
+                // Spawn failed: no child will ever write — detach the drain
+                // handlers and close the read ends so nothing lingers.
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
                 guard state.claim() else { return }
                 timer.cancel()
                 continuation.resume(throwing: error)
@@ -618,8 +631,12 @@ final class PipeDataAccumulator: @unchecked Sendable {
 
     /// Drains whatever is already buffered in the pipe WITHOUT blocking,
     /// closes the parent's read end, and returns the full accumulated buffer.
-    /// Everything the (now dead or killed) direct child wrote is already in
-    /// the kernel pipe buffer, so a non-blocking read loop loses nothing.
+    /// On the termination path the direct child is dead, so everything it
+    /// wrote is already in the kernel pipe buffer and the non-blocking read
+    /// loop loses nothing. On the timeout and spawn-failure paths the child
+    /// may still be alive (or wedged, SIGKILL-immune); anything it writes
+    /// after this snapshot is intentionally dropped — the call is already
+    /// failing, and waiting for EOF is exactly the leak this exists to avoid.
     /// Acquiring the lock blocks until any in-flight `readAvailable` call has
     /// completed its append (and prevents it from touching the closed handle
     /// afterwards). Idempotent: later calls return the buffer untouched.
