@@ -67,6 +67,19 @@ jobs:
         # killed or timed out before writing its own, sail through the gate.
         run: rm -f "$GITHUB_WORKSPACE/claude-verdict.txt"
 
+      - name: Restore review hooks from the base branch
+        if: steps.trust.outputs.trusted == 'true'
+        # The Stop hook + its settings.json must come from the BASE branch, not the PR
+        # head. Two reasons: (1) a PR branch created before the hooks existed doesn't
+        # contain them, and the action then hard-errors on a missing `settings:` file
+        # (ENOENT) — this blocked pre-existing fork PRs; (2) a PR must not be able to
+        # neuter the gate that reviews it. github.event.pull_request.base.ref is the
+        # base branch under pull_request_target; FETCH_HEAD is its tip after the fetch.
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.event.pull_request.base.ref }}"
+          rm -rf "$GITHUB_WORKSPACE/.github/workflows/claude-review-hooks"
+          git checkout FETCH_HEAD -- .github/workflows/claude-review-hooks
+
       - name: Run Claude Code Review
         if: steps.trust.outputs.trusted == 'true'
         id: claude-review
