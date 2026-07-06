@@ -23,7 +23,6 @@ jobs:
       contents: read
       pull-requests: write
       issues: read
-      id-token: write
       actions: read
       checks: read
 
@@ -66,6 +65,10 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Use the Actions token for GitHub ops (sticky comment, gh CLI) instead of
+          # the OIDC->GitHub-App exchange, which 401s under pull_request_target
+          # (anthropics/claude-code-action#1017). Comments post as github-actions[bot].
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           show_full_output: true
           use_sticky_comment: true
           track_progress: true
