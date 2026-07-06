@@ -757,6 +757,14 @@ actor DaemonClient {
         )
     }
 
+    /// Set the global session-limit auto-resume gate.
+    func setAutoResumeOnLimitReset(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoResumeOnLimitReset,
+            params: ConfigSetAutoResumeOnLimitResetParams(enabled: enabled)
+        )
+    }
+
     /// Set the global scratch-space system-prompt override. Nil or blank resets to the built-in default.
     func setScratchInstructions(_ instructions: String?) async throws {
         try await callVoidAsync(
@@ -909,6 +917,14 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.configSetAutoHibernate,
             params: ConfigSetAutoHibernateParams(enabled: enabled, idleMinutes: idleMinutes)
+        )
+    }
+
+    /// Cancel a terminal's pending session-limit auto-resume.
+    func cancelScheduledResume(terminalID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalCancelScheduledResume,
+            params: CancelScheduledResumeParams(terminalID: terminalID)
         )
     }
 

@@ -27,6 +27,9 @@ public final class RPCRouter: Sendable {
     /// post-construction by Daemon.swift (mirrors `claudeUsagePoller`); `nil`
     /// in unit tests that don't exercise the foreground RPC.
     public nonisolated(unsafe) var appForegroundState: AppForegroundState?
+    /// Session-limit auto-resume scheduler. `nil` in mock mode / tests that
+    /// don't need it; set post-construction like `claudeUsagePoller`.
+    public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
     /// Live connected-client count, supplied by the SocketServer after it is
     /// constructed (the router is built first in Daemon.swift, so it cannot
     /// take the server as an init dependency). Mirrors `claudeUsagePoller`
@@ -203,6 +206,10 @@ public final class RPCRouter: Sendable {
                 return try await handlePRRefresh(request.paramsData)
             case RPCMethod.claudeSetSpawnPreferences:
                 return try await handleSetClaudeSpawnPreferences(request.paramsData)
+            case RPCMethod.claudeRateLimitDetected:
+                return try await handleRateLimitDetected(request.paramsData)
+            case RPCMethod.terminalCancelScheduledResume:
+                return try await handleCancelScheduledResume(request.paramsData)
             case RPCMethod.attachRequest:
                 return try await handleAttachRequest(request.paramsData)
             case RPCMethod.attachReady:
@@ -308,6 +315,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigGet()
             case RPCMethod.configSetAutoArchiveOnMergeDefault:
                 return try await handleConfigSetAutoArchiveDefault(request.paramsData)
+            case RPCMethod.configSetAutoResumeOnLimitReset:
+                return try await handleConfigSetAutoResumeOnLimitReset(request.paramsData)
             case RPCMethod.configSetScratchInstructions:
                 return try await handleConfigSetScratchInstructions(request.paramsData)
             case RPCMethod.configSetScratchRenamePrompt:

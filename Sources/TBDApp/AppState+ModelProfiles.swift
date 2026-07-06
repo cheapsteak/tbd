@@ -35,6 +35,9 @@ extension AppState {
             if result.nightwatchMode != nightwatchMode {
                 nightwatchMode = result.nightwatchMode
             }
+            if result.autoResumeOnLimitReset != autoResumeOnLimitReset {
+                autoResumeOnLimitReset = result.autoResumeOnLimitReset
+            }
         } catch {
             logger.error("Failed to list model profiles: \(error, privacy: .public)")
             handleConnectionError(error)
@@ -168,6 +171,18 @@ extension AppState {
         } catch {
             logger.error("Failed to set auto-archive default: \(error, privacy: .public)")
             showAlert("Failed to set default: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set the global session-limit auto-resume gate. Turning it OFF also
+    /// cancels all pending scheduled resumes daemon-side.
+    func setAutoResumeOnLimitReset(_ enabled: Bool) async {
+        do {
+            try await daemonClient.setAutoResumeOnLimitReset(enabled)
+            autoResumeOnLimitReset = enabled
+        } catch {
+            logger.error("Failed to set auto-resume gate: \(error, privacy: .public)")
+            showAlert("Failed to set auto-resume: \(error.localizedDescription)", isError: true)
         }
     }
 

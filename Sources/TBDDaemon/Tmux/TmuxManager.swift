@@ -230,6 +230,11 @@ public struct TmuxManager: Sendable {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_current_path}"]
     }
 
+    /// "1" when the pane is in a mode (copy-mode/scrollback), else "0".
+    public static func paneInModeQuery(server: String, paneID: String) -> [String] {
+        ["-L", server, "display-message", "-p", "-t", paneID, "#{pane_in_mode}"]
+    }
+
     public static func serverPIDQuery(server: String) -> [String] {
         ["-L", server, "display-message", "-p", "#{pid}"]
     }
@@ -454,6 +459,14 @@ public struct TmuxManager: Sendable {
         if dryRun { return "" }
         let args = Self.paneCurrentPathQuery(server: server, paneID: paneID)
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// True when the pane is in copy-mode/scrollback — keystrokes would go
+    /// to the mode, not the application (spec §Actuation 4).
+    public func paneInMode(server: String, paneID: String) async throws -> Bool {
+        if dryRun { return false }
+        let args = Self.paneInModeQuery(server: server, paneID: paneID)
+        return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines) == "1"
     }
 
     /// The tmux server's own process pid (the parent of every pane process),

@@ -23,6 +23,7 @@ public final class TBDDatabase: Sendable {
     public let forgottenWorktrees: ForgottenWorktreeStore
     public let clearance: ClearanceStore
     public let audit: AuditStore
+    public let scheduledResumes: ScheduledResumeStore
 
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "migrations")
 
@@ -54,6 +55,7 @@ public final class TBDDatabase: Sendable {
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: pool)
         self.clearance = ClearanceStore(writer: pool)
         self.audit = AuditStore(writer: pool)
+        self.scheduledResumes = ScheduledResumeStore(writer: pool)
 
         let migrator = Self.buildMigrator()
         if fileExisted {
@@ -85,6 +87,7 @@ public final class TBDDatabase: Sendable {
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: queue)
         self.clearance = ClearanceStore(writer: queue)
         self.audit = AuditStore(writer: queue)
+        self.scheduledResumes = ScheduledResumeStore(writer: queue)
         try Self.buildMigrator().migrate(queue)
     }
 
@@ -719,6 +722,34 @@ public final class TBDDatabase: Sendable {
             try db.addIndexIfMissing("idx_audit_log_ts", on: "audit_log", columns: ["ts"])
         }
         // swiftlint:enable migration_use_helpers
+
+        // Session-limit auto-resume (spec 2026-07-03). `scheduled_resumes`
+        // rows are the double-send latch (at most one `pending` row per
+        // terminal, enforced by the partial unique index below).
+        // `terminal.pendingResumeAt` mirrors the pending row for UI badges;
+        // `config.auto_resume_on_limit_reset` is the global gate (default OFF).
+        migrator.registerMigration("v43_scheduled_resumes") { db in
+            try db.createTableIfNotExists("scheduled_resumes") { t in
+                t.column("id", .text).primaryKey()
+                t.column("terminalID", .text).notNull()
+                t.column("worktreeID", .text).notNull()
+                t.column("claudeSessionID", .text)
+                t.column("resetsAt", .datetime).notNull()
+                t.column("fireAt", .datetime).notNull()
+                t.column("limitType", .text).notNull()
+                t.column("rawMessage", .text).notNull()
+                t.column("createdAt", .datetime).notNull()
+                t.column("status", .text).notNull()
+                t.column("attemptCount", .integer).notNull().defaults(to: 0)
+            }
+            try db.addIndexIfMissing(
+                "idx_scheduled_resumes_one_pending", on: "scheduled_resumes",
+                columns: ["terminalID"], unique: true, where: "status = 'pending'")
+            try db.addColumnIfMissing(table: "terminal", column: "pendingResumeAt", type: .datetime)
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_resume_on_limit_reset",
+                type: .boolean, defaults: false)
+        }
 
         return migrator
     }

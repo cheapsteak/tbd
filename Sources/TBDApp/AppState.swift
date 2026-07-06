@@ -406,6 +406,10 @@ final class AppState: ObservableObject {
     @Published var autoHibernateEnabled: Bool = true
     /// Auto-hibernate idle timeout in minutes. Loaded from `Config`.
     @Published var hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes
+    /// Daemon-persisted gate for session-limit auto-resume (default OFF).
+    /// Daemon-side (not @AppStorage) because the daemon must act while the
+    /// app is closed.
+    @Published var autoResumeOnLimitReset: Bool = false
     /// Terminals where the user has dismissed the proxy-unreachable banner.
     /// Cleared on app relaunch (in-memory only — banners are advisory).
     @Published var dismissedProxyWarnings: Set<UUID> = []

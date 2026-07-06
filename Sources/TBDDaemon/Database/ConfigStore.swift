@@ -17,6 +17,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// JSON-encoded `[String: String]` free-form env overrides (global scope).
     var env_overrides: String?
     var auto_archive_on_merge_default: Bool?
+    var auto_resume_on_limit_reset: Bool?
     var scratch_instructions: String?
     var scratch_rename_prompt: String?
     var scratch_profile_override_id: String?
@@ -33,6 +34,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings),
             envOverrides: EnvOverridesCoding.decode(env_overrides),
             autoArchiveOnMergeDefault: auto_archive_on_merge_default ?? false,
+            autoResumeOnLimitReset: auto_resume_on_limit_reset ?? false,
             scratchInstructions: scratch_instructions,
             scratchRenamePrompt: scratch_rename_prompt,
             scratchProfileOverrideID: scratch_profile_override_id.flatMap(UUID.init(uuidString:)),
@@ -123,6 +125,16 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET auto_archive_on_merge_default = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the session-limit auto-resume gate (default OFF).
+    public func setAutoResumeOnLimitReset(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_resume_on_limit_reset = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

@@ -13,6 +13,9 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
     var childrenByServer: [Int32: [Int32]] = [:]
     var cmdlines: [Int32: String] = [:]
     var behaviors: [Int32: Behavior] = [:]
+    /// Scriptable `ps -o stat=` result per pid; a missing entry means the
+    /// pid reports no stat (as if gone) — mirrors `ProcessSignaller.stat`.
+    var stats: [Int32: String] = [:]
     private(set) var terminated: [Int32] = []
     private(set) var killed: [Int32] = []
     private var terminatedSet: Set<Int32> = []
@@ -30,6 +33,7 @@ final class FakeProcessSignaller: ProcessSignaller, @unchecked Sendable {
     func forceKill(_ pid: Int32) { lock.withLock { killed.append(pid); killedSet.insert(pid) } }
     func children(ofServerPID serverPID: Int32) -> [Int32] { lock.withLock { childrenByServer[serverPID] ?? [] } }
     func commandLine(_ pid: Int32) -> String? { lock.withLock { cmdlines[pid] } }
+    func stat(_ pid: Int32) -> String? { lock.withLock { stats[pid] } }
 }
 
 final class FakeTmuxQuerier: TmuxProcessQuerying, @unchecked Sendable {

@@ -104,6 +104,7 @@ public enum RPCMethod {
     public static let prRefresh = "pr.refresh"
     public static let cleanup = "cleanup"
     public static let claudeSetSpawnPreferences = "claude.setSpawnPreferences"
+    public static let claudeRateLimitDetected = "claude.rateLimitDetected"
     public static let terminalSuspend = "terminal.suspend"
     public static let terminalResume = "terminal.resume"
     public static let worktreeSuspend = "worktree.suspend"
@@ -163,6 +164,7 @@ public enum RPCMethod {
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
+    public static let configSetAutoResumeOnLimitReset = "config.setAutoResumeOnLimitReset"
     public static let configSetScratchInstructions = "config.setScratchInstructions"
     public static let configSetScratchRenamePrompt = "config.setScratchRenamePrompt"
     public static let configSetScratchProfileOverride = "config.setScratchProfileOverride"
@@ -177,6 +179,7 @@ public enum RPCMethod {
     public static let scratchRevive = "scratch.revive"
     public static let nightwatchSetMode = "nightwatch.setMode"
     public static let nightwatchReport = "nightwatch.report"
+    public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
 }
 
 // MARK: - Branch Listing
@@ -494,13 +497,15 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let globalEnvOverrides: [String: String]
     public let autoArchiveOnMergeDefault: Bool
     public let nightwatchMode: NightwatchMode
+    public let autoResumeOnLimitReset: Bool
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
         primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
         globalEnvOverrides: [String: String] = [:],
         autoArchiveOnMergeDefault: Bool = false,
-        nightwatchMode: NightwatchMode = .off
+        nightwatchMode: NightwatchMode = .off,
+        autoResumeOnLimitReset: Bool = false
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -508,6 +513,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.globalEnvOverrides = globalEnvOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
         self.nightwatchMode = nightwatchMode
+        self.autoResumeOnLimitReset = autoResumeOnLimitReset
     }
 
     public init(from decoder: Decoder) throws {
@@ -526,6 +532,8 @@ public struct ModelProfileListResult: Codable, Sendable {
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
         nightwatchMode = try c.decodeIfPresent(
             NightwatchMode.self, forKey: .nightwatchMode) ?? .off
+        autoResumeOnLimitReset = try c.decodeIfPresent(
+            Bool.self, forKey: .autoResumeOnLimitReset) ?? false
     }
 }
 
@@ -1018,6 +1026,13 @@ public struct ConfigSetAutoArchiveDefaultParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setAutoResumeOnLimitReset` — the session-limit
+/// auto-resume gate (default OFF). Disabling cancels all pending resumes.
+public struct ConfigSetAutoResumeOnLimitResetParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setScratchInstructions` — the global scratch-space
 /// system-prompt override. `nil` (or blank) resets to the built-in default.
 public struct ConfigSetScratchInstructionsParams: Codable, Sendable {
@@ -1399,6 +1414,29 @@ public struct TerminalActivityEventParams: Codable, Sendable {
         self.terminalID = terminalID
         self.activityState = activityState
     }
+}
+
+/// Params for `claude.rateLimitDetected` — sent by `tbd hooks stop-failure`
+/// when the transcript's last API error is a HARD usage limit. `resetsAt`
+/// is absolute: parsed once CLI-side, never re-derived from display text.
+public struct RateLimitDetectedParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let resetsAt: Date
+    public let limitType: String
+    public let rawMessage: String
+    public init(terminalID: UUID, resetsAt: Date, limitType: String, rawMessage: String) {
+        self.terminalID = terminalID
+        self.resetsAt = resetsAt
+        self.limitType = limitType
+        self.rawMessage = rawMessage
+    }
+}
+
+/// Params for `terminal.cancelScheduledResume` — explicit user cancel from
+/// the tab context menu / notification.
+public struct CancelScheduledResumeParams: Codable, Sendable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
 }
 
 /// PreToolUse:AskUserQuestion hook bridge — fires when Claude is about to

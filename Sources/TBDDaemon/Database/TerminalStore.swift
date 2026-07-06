@@ -22,6 +22,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var activityState: String?
     var hibernatedAt: Date?
     var keepWarm: Bool?
+    var pendingResumeAt: Date?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -40,6 +41,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.activityState = terminal.activityState.rawValue
         self.hibernatedAt = terminal.hibernatedAt
         self.keepWarm = terminal.keepWarm
+        self.pendingResumeAt = terminal.pendingResumeAt
     }
 
     func toModel() -> Terminal {
@@ -59,7 +61,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             kind: kind.flatMap(TerminalKind.init(rawValue:)),
             activityState: activityState.flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown,
             hibernatedAt: hibernatedAt,
-            keepWarm: keepWarm ?? false
+            keepWarm: keepWarm ?? false,
+            pendingResumeAt: pendingResumeAt
         )
     }
 }

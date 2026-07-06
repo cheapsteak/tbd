@@ -589,6 +589,16 @@ private struct TabBarItem: View {
                             .fixedSize()
                             .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
                     }
+
+                    if let resumeAt = terminal?.pendingResumeAt {
+                        Text("⏳ resumes \(ResumeTimeFormatter.string(from: resumeAt))")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .padding(.leading, 4)
+                            .help("Session limit hit — TBD will type \"continue\" at this time. Right-click to cancel.")
+                    }
                 }
                 .padding(.leading, 8)
                 .frame(minHeight: 28, alignment: .leading)
@@ -778,6 +788,15 @@ private struct TabBarItem: View {
                     isSuspended ? "Resume Claude" : "Suspend Claude",
                     systemImage: isSuspended ? "play.circle" : "pause.circle"
                 )
+            }
+
+            if terminal?.pendingResumeAt != nil {
+                Button {
+                    guard let terminalID = terminal?.id else { return }
+                    Task { await appState.cancelScheduledResume(terminalID: terminalID) }
+                } label: {
+                    Label("Cancel Scheduled Resume", systemImage: "clock.badge.xmark")
+                }
             }
 
             Divider()

@@ -70,4 +70,48 @@ struct StopFailureMessageTests {
         )
         #expect(result == nil)
     }
+
+    // MARK: - computeOutcome (auto-resume detection)
+
+    @Test func hardLimitProducesDetectedLimitAndMessage() {
+        let text = "You've hit your session limit · resets 3pm (UTC)"
+        let outcome = StopFailureMessage.computeOutcome(
+            stdinData: Self.stdin(errorType: "rate_limit", transcriptPath: "/x.jsonl"),
+            readFile: { _ in Self.transcript(text: text) },
+            now: Date(timeIntervalSince1970: 1_783_173_600),  // 14:00 UTC
+            timeZone: TimeZone(identifier: "UTC")!)
+        #expect(outcome.message == text)
+        #expect(outcome.detectedLimit != nil)
+        #expect(outcome.detectedLimit!.rawMessage == text)
+        #expect(outcome.detectedLimit!.resetsAt > Date(timeIntervalSince1970: 1_783_173_600))
+    }
+
+    @Test func transientProducesMessageButNoDetection() {
+        let text = "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited"
+        let outcome = StopFailureMessage.computeOutcome(
+            stdinData: Self.stdin(errorType: "rate_limit", transcriptPath: "/x.jsonl"),
+            readFile: { _ in Self.transcript(text: text) },
+            now: Date(), timeZone: TimeZone(identifier: "UTC")!)
+        #expect(outcome.message == text)         // existing behavior preserved
+        #expect(outcome.detectedLimit == nil)
+    }
+
+    @Test func unparseableResetKeepsErrorNotificationPath() {
+        let text = "You've hit your session limit"
+        let outcome = StopFailureMessage.computeOutcome(
+            stdinData: Self.stdin(errorType: "rate_limit", transcriptPath: "/x.jsonl"),
+            readFile: { _ in Self.transcript(text: text) },
+            now: Date(), timeZone: TimeZone(identifier: "UTC")!)
+        #expect(outcome.message == text)          // notify only, never schedule
+        #expect(outcome.detectedLimit == nil)
+    }
+
+    @Test func missingTranscriptHasFallbackMessageNoDetection() {
+        let outcome = StopFailureMessage.computeOutcome(
+            stdinData: Self.stdin(errorType: "rate_limit", transcriptPath: "/missing.jsonl"),
+            readFile: { _ in nil },
+            now: Date(), timeZone: TimeZone(identifier: "UTC")!)
+        #expect(outcome.message == "Claude stopped: API error (rate_limit)")
+        #expect(outcome.detectedLimit == nil)
+    }
 }

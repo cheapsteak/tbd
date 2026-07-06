@@ -82,7 +82,7 @@ enum RowStatusIndicator {
     /// they stay consistent.
     static func shouldBoldName(_ notification: NotificationType?) -> Bool {
         switch notification {
-        case .responseComplete, .attentionNeeded, .focusRequest:
+        case .responseComplete, .attentionNeeded, .focusRequest, .limitReached:
             return true
         case .error, .taskComplete, .none:
             return false
