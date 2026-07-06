@@ -22,6 +22,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var scratch_profile_override_id: String?
     /// Nightwatch mode: 'off', 'daywatch', or 'nightwatch'. Nil/absent defaults to 'off'.
     var nightwatch_mode: String?
+    var auto_hibernate_enabled: Bool?
+    var hibernate_idle_minutes: Int?
 
     func toModel() -> Config {
         Config(
@@ -35,7 +37,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             scratchRenamePrompt: scratch_rename_prompt,
             scratchProfileOverrideID: scratch_profile_override_id.flatMap(UUID.init(uuidString:)),
             nightwatchMode: nightwatch_mode
-                .flatMap(NightwatchMode.init(rawValue:)) ?? .off
+                .flatMap(NightwatchMode.init(rawValue:)) ?? .off,
+            autoHibernateEnabled: auto_hibernate_enabled ?? true,
+            hibernateIdleMinutes: hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes
         )
     }
 }
@@ -169,6 +173,19 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET nightwatch_mode = ? WHERE id = ?",
                 arguments: [mode.rawValue, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the auto-hibernate master switch + idle-timeout (minutes). The
+    /// minutes value is floored at 1 so a zero/negative can't make the idle
+    /// timer hibernate everything on the next sweep.
+    public func setAutoHibernate(enabled: Bool, idleMinutes: Int) async throws {
+        let minutes = max(1, idleMinutes)
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_hibernate_enabled = ?, hibernate_idle_minutes = ? WHERE id = ?",
+                arguments: [enabled, minutes, Self.singletonID]
             )
         }
     }

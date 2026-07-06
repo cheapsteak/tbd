@@ -15,15 +15,20 @@ enum SuffixRowIndicator: Equatable {
     case attention
     case working
     case suspended
+    /// Session hibernated (claude process killed to reclaim memory; tmux window
+    /// kept alive). A calm, whisper-quiet moon — deliberately NOT alarming: the
+    /// session is safe and wakes automatically on focus.
+    case hibernated
 
     /// SF Symbol for glyph-based suffixes. `.working` is `nil` because it is
     /// rendered as an animated `TypingDotsView`, not a static symbol.
     var systemImage: String? {
         switch self {
-        case .error:     return "exclamationmark.octagon.fill"
-        case .attention: return "hand.raised.fill"
-        case .working:   return nil
-        case .suspended: return "pause.circle.fill"
+        case .error:      return "exclamationmark.octagon.fill"
+        case .attention:  return "hand.raised.fill"
+        case .working:    return nil
+        case .suspended:  return "pause.circle.fill"
+        case .hibernated: return "moon.zzz.fill"
         }
     }
 
@@ -44,6 +49,10 @@ enum SuffixRowIndicator: Equatable {
             return .secondary
         case .suspended:
             return .secondary
+        case .hibernated:
+            // Tertiary — quieter than suspended, so it reads as "resting", not
+            // "stopped". A whisper, not a flag.
+            return Color.secondary.opacity(0.55)
         }
     }
 }
@@ -81,12 +90,15 @@ enum RowStatusIndicator {
     }
 
     /// Suffix slot. Priority (highest first): error > attention > working >
-    /// suspended. `taskComplete` produces no suffix; `responseComplete` is
-    /// surfaced as a bold name in the view, not as a suffix.
+    /// suspended > hibernated. `taskComplete` produces no suffix;
+    /// `responseComplete` is surfaced as a bold name in the view, not as a
+    /// suffix. Hibernated is lowest — it's the calmest, safest state, so any
+    /// louder signal wins the slot.
     static func suffix(
         notification: NotificationType?,
         isWorking: Bool,
-        isSuspended: Bool
+        isSuspended: Bool,
+        isHibernated: Bool = false
     ) -> SuffixRowIndicator? {
         if notification == .error {
             return .error
@@ -96,6 +108,8 @@ enum RowStatusIndicator {
             return .working
         } else if isSuspended {
             return .suspended
+        } else if isHibernated {
+            return .hibernated
         }
         return nil
     }

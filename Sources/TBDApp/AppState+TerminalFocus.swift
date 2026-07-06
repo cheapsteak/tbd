@@ -59,6 +59,11 @@ extension AppState {
     }
 
     func focusTerminalAfterSelectionChange(worktreeID: UUID) {
+        // Auto-wake: focusing a worktree with hibernated Claude sessions
+        // respawns them (`claude --resume`) in their kept-alive windows.
+        // Idempotent + singleflighted, so a double-focus won't double-spawn.
+        wakeHibernatedTerminalsOnFocus(worktreeID: worktreeID)
+
         guard let terminalID = terminalIDForAutofocus(worktreeID: worktreeID) else { return }
 
         DispatchQueue.main.async { [weak self] in

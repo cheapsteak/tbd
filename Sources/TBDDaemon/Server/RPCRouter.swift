@@ -15,6 +15,7 @@ public final class RPCRouter: Sendable {
     public let subscriptions: StateSubscriptionManager
     public let prManager: PRStatusManager
     public let suspendResumeCoordinator: SuspendResumeCoordinator
+    public let hibernationCoordinator: HibernationCoordinator
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
@@ -87,6 +88,10 @@ public final class RPCRouter: Sendable {
         self.modelProfileResolver = resolvedModelProfileResolver
         self.suspendResumeCoordinator = SuspendResumeCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver
+        )
+        self.hibernationCoordinator = HibernationCoordinator(
+            db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
+            subscriptions: subscriptions
         )
         self.usageFetcher = usageFetcher
         self.pendingQuestions = pendingQuestions
@@ -308,6 +313,14 @@ public final class RPCRouter: Sendable {
                 return try await handleSetNightwatchMode(request.paramsData)
             case RPCMethod.nightwatchReport:
                 return try await handleNightwatchReport(request.paramsData)
+            case RPCMethod.terminalHibernate:
+                return try await handleTerminalHibernate(request.paramsData)
+            case RPCMethod.terminalWake:
+                return try await handleTerminalWake(request.paramsData)
+            case RPCMethod.terminalSetKeepWarm:
+                return try await handleTerminalSetKeepWarm(request.paramsData)
+            case RPCMethod.configSetAutoHibernate:
+                return try await handleConfigSetAutoHibernate(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

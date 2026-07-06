@@ -213,6 +213,54 @@ struct RowActionMenuForkTests {
     }
 }
 
+// MARK: - Hibernation actions
+
+@Suite("RowActionMenu — hibernation")
+struct RowActionMenuHibernationTests {
+    @Test func hibernateNowShownOnlyWhenHibernatableClaudePresent() {
+        let ctx = RowActionMenu.Context(hasHibernatableClaude: true, hasRepoID: true, branch: "b")
+        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.hibernateNow))
+        // Absent when nothing is hibernatable.
+        let none = RowActionMenu.Context(hasRepoID: true, branch: "b")
+        #expect(!kinds(RowActionMenu.items(context: none)).contains(.hibernateNow))
+    }
+
+    @Test func wakeShownOnlyWhenHibernatedClaudePresent() {
+        let ctx = RowActionMenu.Context(hasHibernatedClaude: true, hasRepoID: true, branch: "b")
+        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.wakeHibernated))
+        let none = RowActionMenu.Context(hasRepoID: true, branch: "b")
+        #expect(!kinds(RowActionMenu.items(context: none)).contains(.wakeHibernated))
+    }
+
+    @Test func keepWarmToggleEnableShownWhenUnpinned() {
+        let ctx = RowActionMenu.Context(hasUnpinnedClaude: true, hasRepoID: true, branch: "b")
+        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.toggleKeepWarm(enable: true)))
+        #expect(!kinds(RowActionMenu.items(context: ctx)).contains(.toggleKeepWarm(enable: false)))
+    }
+
+    @Test func keepWarmToggleDisableShownWhenPinned() {
+        let ctx = RowActionMenu.Context(hasKeepWarmClaude: true, hasRepoID: true, branch: "b")
+        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.toggleKeepWarm(enable: false)))
+        #expect(!kinds(RowActionMenu.items(context: ctx)).contains(.toggleKeepWarm(enable: true)))
+    }
+
+    @Test func noHibernationEntriesInDefaultContext() {
+        // A worktree with no Claude sessions shows none of the hibernation
+        // actions — they don't clutter the common case.
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b")
+        let ks = kinds(RowActionMenu.items(context: ctx))
+        #expect(!ks.contains(.hibernateNow))
+        #expect(!ks.contains(.wakeHibernated))
+        #expect(!ks.contains(.toggleKeepWarm(enable: true)))
+        #expect(!ks.contains(.toggleKeepWarm(enable: false)))
+    }
+
+    @Test func hibernationActionsAppearInScratchToo() {
+        let ctx = RowActionMenu.Context(hasHibernatedClaude: true, isScratch: true)
+        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.wakeHibernated))
+    }
+}
+
 // MARK: - Shared-list invariant across surfaces
 
 @Suite("RowActionMenu — shared surfaces")

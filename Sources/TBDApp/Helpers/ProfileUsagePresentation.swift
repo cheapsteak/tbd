@@ -78,6 +78,39 @@ enum ProfileUsagePresentation {
         return String(first).uppercased()
     }
 
+    /// Full family name for the roomier two-line menu secondary line, e.g.
+    /// "Fable". Falls back to "?" when the daemon reported no display name.
+    static func familyName(_ displayName: String?) -> String {
+        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "?" : trimmed
+    }
+
+    /// Relative "how long until" a reset, at day/hour granularity: "in 2d 5h",
+    /// "in 5h", "in 43m", "now". The weekly window shows this (rather than an
+    /// absolute clock time like the 5h window) because at week scale the useful
+    /// planning question is time-remaining, not the wall-clock instant. nil
+    /// when there's no reset date to format.
+    ///
+    /// Granularity rules: >= 1 day → "Nd Nh" (hours dropped when zero: "2d");
+    /// >= 1 hour but < 1 day → "Nh"; < 1 hour → "Nm"; already past / <1 min →
+    /// "now". `now` is injectable for deterministic tests.
+    static func relativeResetText(_ date: Date?, now: Date = Date()) -> String? {
+        guard let date else { return nil }
+        let seconds = date.timeIntervalSince(now)
+        guard seconds >= 60 else { return "now" }
+        let totalMinutes = Int(seconds / 60)
+        let days = totalMinutes / (60 * 24)
+        let hours = (totalMinutes % (60 * 24)) / 60
+        let minutes = totalMinutes % 60
+        if days >= 1 {
+            return hours > 0 ? "in \(days)d \(hours)h" : "in \(days)d"
+        }
+        if hours >= 1 {
+            return "in \(hours)h"
+        }
+        return "in \(minutes)m"
+    }
+
     /// Compact usage summary without a leading separator:
     /// "5h 0% ↺23:10 · wk 76% · F 100%". nil when there is no snapshot or it
     /// has no buckets (never logged in / poller hasn't fetched yet).
@@ -118,6 +151,99 @@ enum ProfileUsagePresentation {
                               timeZone: TimeZone = .current) -> String {
         ProfileLoginPresentation.menuItemTitle(for: entry)
             + usageSuffix(for: entry.usageSnapshot, timeZone: timeZone)
+    }
+
+    // MARK: - Two-line menu composition
+
+    /// A menu row rendered on two lines: an identity `primary` ("Name — email")
+    /// and an optional `secondary` usage line drawn smaller and indented
+    /// underneath. `secondary` is nil for profiles with no snapshot (never
+    /// logged in / poller hasn't fetched yet), which keeps their single-line
+    /// identity treatment. All surfaces (the "+" NSMenu, the switch-account
+    /// SwiftUI submenu) compose from `menuLine` so the two-line rules live in
+    /// one place; `menuItemTitle`/`usageSuffix` remain for anything still
+    /// single-line.
+    struct MenuLineModel: Equatable {
+        let primary: String
+        let secondary: String?
+    }
+
+    /// Spelled-out usage line for the roomier second row: "5h 16% used ·
+    /// resets 23:09 · week 79% · resets in 2d 5h · Fable 100%". Unlike
+    /// `usageSummary` this drops the ↺ glyph in favor of "resets " and uses
+    /// full family names instead of the single-letter abbreviation — the
+    /// second line has the width. nil when there is no snapshot or it has no
+    /// buckets.
+    static func usageDetailLine(for snapshot: ProfileUsageSnapshot?,
+                                timeZone: TimeZone = .current,
+                                now: Date = Date()) -> String? {
+        guard let snapshot, !snapshot.buckets.isEmpty else { return nil }
+        var parts: [String] = []
+        // Percentages are UTILIZATION ("% used", matching claude.ai's
+        // phrasing). The word rides the FIRST percentage only — it establishes
+        // the reading for the whole line without per-segment repetition.
+        var usedLabelPending = true
+        func percentPart(_ prefix: String, _ percent: Double) -> String {
+            let label = usedLabelPending ? " used" : ""
+            usedLabelPending = false
+            return "\(prefix) \(percentText(percent))\(label)"
+        }
+        if let session = sessionBucket(snapshot) {
+            var part = percentPart("5h", session.percent)
+            // Reset granularity matches window scale: the 5h window resets
+            // today, so absolute clock time reads best.
+            if let resets = session.resetsAt {
+                part += " · resets \(resetTimeText(resets, timeZone: timeZone))"
+            }
+            parts.append(part)
+        }
+        if let weekly = weeklyAllBucket(snapshot) {
+            var part = percentPart("week", weekly.percent)
+            // The weekly window is a planning horizon — "how long until the
+            // week ends" — so it shows a relative countdown. Weekly buckets
+            // share one reset instant, so it appears once, here.
+            if let resets = weekly.resetsAt,
+               let relative = relativeResetText(resets, now: now) {
+                part += " · resets in \(relative)"
+            }
+            parts.append(part)
+        }
+        for scoped in scopedBuckets(snapshot) {
+            parts.append(percentPart(familyName(scoped.modelDisplayName), scoped.percent))
+        }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Compact relative countdown for planning-scale resets: "2d 5h", "3h",
+    /// "48m". nil when the instant is not in the future (a stale snapshot
+    /// shouldn't render a nonsense countdown). Minutes appear only under an
+    /// hour; hour-scale drops minutes; day-scale carries the hour remainder.
+    static func relativeResetText(_ resetsAt: Date, now: Date = Date()) -> String? {
+        let interval = resetsAt.timeIntervalSince(now)
+        guard interval > 0 else { return nil }
+        let totalMinutes = Int((interval / 60).rounded(.up))
+        let days = totalMinutes / (24 * 60)
+        let hours = (totalMinutes % (24 * 60)) / 60
+        if days > 0 {
+            return hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
+        }
+        if hours > 0 {
+            return "\(hours)h"
+        }
+        return "\(max(totalMinutes % 60, 1))m"
+    }
+
+    /// Two-line menu-row model for a profile: identity on the primary line,
+    /// spelled-out usage on the secondary line (nil when there's no snapshot).
+    static func menuLine(for entry: ModelProfileWithUsage,
+                         timeZone: TimeZone = .current,
+                         now: Date = Date()) -> MenuLineModel {
+        MenuLineModel(
+            primary: ProfileLoginPresentation.menuItemTitle(for: entry),
+            secondary: usageDetailLine(for: entry.usageSnapshot,
+                                       timeZone: timeZone, now: now)
+        )
     }
 
     // MARK: - Picker ordering & row state

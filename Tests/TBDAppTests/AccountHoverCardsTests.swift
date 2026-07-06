@@ -57,71 +57,6 @@ private let gmailSnapshot = snapshot(buckets: [
     bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable"),
 ])
 
-// MARK: - Worktree row card
-
-@Suite("AccountHoverCards — worktree row")
-struct WorktreeCardTests {
-    @Test func noClaudeSessionsMeansNoCard() {
-        let shell = claudeTerminal(kind: .shell)
-        #expect(AccountHoverCards.worktreeCard(terminals: [shell], profiles: []) == nil)
-        #expect(AccountHoverCards.worktreeCard(terminals: [], profiles: []) == nil)
-    }
-
-    @Test func titleAndOneRowPerAccount() {
-        let work = entry(name: "Work", loginIdentity: "a@b.co")
-        let personal = entry(name: "Personal", loginIdentity: "p@q.io")
-        let terminals = [
-            claudeTerminal(profileID: work.profile.id),
-            claudeTerminal(profileID: personal.profile.id),
-        ]
-        let card = AccountHoverCards.worktreeCard(terminals: terminals,
-                                                  profiles: [work, personal])
-        #expect(card?.title == "Claude accounts")
-        #expect(card?.rows.count == 2)
-        #expect(card?.rows[0] == HoverCardRow(value: "a@b.co", chip: "Work"))
-        #expect(card?.rows[1] == HoverCardRow(value: "p@q.io", chip: "Personal"))
-    }
-
-    @Test func duplicateAccountsAreDedupedInTabOrder() {
-        let work = entry(name: "Work", loginIdentity: "a@b.co")
-        let terminals = [
-            claudeTerminal(profileID: work.profile.id),
-            claudeTerminal(profileID: work.profile.id),
-            claudeTerminal(profileID: nil),
-            claudeTerminal(profileID: nil),
-        ]
-        let card = AccountHoverCards.worktreeCard(terminals: terminals, profiles: [work])
-        #expect(card?.rows.count == 2)
-        #expect(card?.rows[0].value == "a@b.co")
-        #expect(card?.rows[1].value == AccountHoverCards.ambientAccountLabel)
-    }
-
-    @Test func ambientRowIsMutedItalicWithDriftCaption() {
-        let row = AccountHoverCards.accountRow(profileID: nil, profiles: [])
-        #expect(row.value == "ambient (terminal login)")
-        #expect(row.valueStyle == .mutedItalic)
-        #expect(row.caption == AccountHoverCards.ambientDriftCaption)
-        #expect(row.chip == nil)
-    }
-
-    @Test func removedProfileRowIsMutedItalicWithCaption() {
-        let row = AccountHoverCards.accountRow(profileID: UUID(), profiles: [])
-        #expect(row.value == AccountHoverCards.removedProfileLabel)
-        #expect(row.valueStyle == .mutedItalic)
-        #expect(row.caption == AccountHoverCards.removedProfileCaption)
-    }
-
-    @Test func notLoggedInProfileRowShowsNameWithCaption() {
-        let pending = entry(name: "Staging", loginIdentity: nil)
-        let row = AccountHoverCards.accountRow(profileID: pending.profile.id,
-                                               profiles: [pending])
-        #expect(row.value == "Staging")
-        #expect(row.chip == nil)
-        #expect(row.caption == AccountHoverCards.notLoggedInCaption)
-        #expect(row.valueStyle == .plain)
-    }
-}
-
 // MARK: - Claude tab card
 
 @Suite("AccountHoverCards — Claude tab")
@@ -244,39 +179,175 @@ struct UsageRowsTests {
     }
 }
 
-// MARK: - Hover timing
+// MARK: - Dwell reducer (show-gate state machine)
 
-@Suite("HoverCardTiming — warm-state show delay")
-struct HoverCardTimingTests {
-    private let timing = HoverCardTiming(showDelay: 0.35, warmGrace: 0.35,
-                                         fadeOutDuration: 0.12)
-    private let now = Date(timeIntervalSinceReferenceDate: 1_000)
+@Suite("HoverDwellReducer — dwell-gated show")
+struct HoverDwellReducerTests {
+    // Deliberately round numbers so the arithmetic in each test reads clearly.
+    private let timing = HoverCardTiming(
+        showDelay: 0.50, restWindow: 0.20, movementThreshold: 3,
+        warmDwell: 0.15, warmGrace: 0.40, fadeOutDuration: 0.12
+    )
+    private let t0 = Date(timeIntervalSinceReferenceDate: 1_000)
 
-    @Test func coldHoverWaitsTheFullShowDelay() {
-        #expect(timing.effectiveShowDelay(now: now, lastDismissedAt: nil,
-                                          isCardVisible: false) == 0.35)
+    private func fresh() -> HoverDwellReducer { HoverDwellReducer(timing: timing) }
+    private func at(_ dt: TimeInterval) -> Date { t0.addingTimeInterval(dt) }
+
+    /// Convenience: cold-hover evaluation (no card up, never dismissed).
+    private func cold(_ r: inout HoverDwellReducer, _ dt: TimeInterval) -> Bool {
+        r.shouldShow(now: at(dt), lastDismissedAt: nil, isCardVisible: false)
     }
 
-    @Test func visibleCardSwapsInstantly() {
-        #expect(timing.effectiveShowDelay(now: now, lastDismissedAt: nil,
-                                          isCardVisible: true) == 0)
+    // MARK: Cold path — floor AND rest must both pass
+
+    @Test func coldHoverDoesNotShowBeforeFloorEvenWhenAtRest() {
+        var r = fresh()
+        r.entered(now: t0)
+        // Rest window (0.20) satisfied but floor (0.50) not yet.
+        #expect(cold(&r, 0.30) == false)
     }
 
-    @Test func recentDismissalIsWarmAndSkipsTheDelay() {
-        let justDismissed = now.addingTimeInterval(-0.2)
-        #expect(timing.effectiveShowDelay(now: now, lastDismissedAt: justDismissed,
-                                          isCardVisible: false) == 0)
+    @Test func coldHoverDoesNotShowBeforeRestEvenAfterFloor() {
+        var r = fresh()
+        r.entered(now: t0)
+        // Keep moving right up to just before evaluation: never at rest.
+        r.moved(distance: 10, now: at(0.55))
+        #expect(cold(&r, 0.60) == false) // only 0.05s at rest < 0.20
+    }
+
+    @Test func coldHoverShowsOnceFloorAndRestBothPass() {
+        var r = fresh()
+        r.entered(now: t0)
+        // No movement: resting since entry. At 0.50, floor met and rest (0.50) met.
+        #expect(cold(&r, 0.50) == true)
+    }
+
+    @Test func showLatchesAndFiresExactlyOnce() {
+        var r = fresh()
+        r.entered(now: t0)
+        #expect(cold(&r, 0.50) == true)
+        // Subsequent ticks must not re-fire.
+        #expect(cold(&r, 0.60) == false)
+        #expect(cold(&r, 1.00) == false)
+    }
+
+    // MARK: Movement resets the rest clock (hover intent)
+
+    @Test func aboveThresholdMoveResetsTheRestClock() {
+        var r = fresh()
+        r.entered(now: t0)
+        // A big move at 0.45 (past the floor) restarts rest; at 0.55 only
+        // 0.10s at rest < 0.20 → still hidden.
+        r.moved(distance: 20, now: at(0.45))
+        #expect(cold(&r, 0.55) == false)
+        // By 0.66, >0.20s at rest → shows. (Evaluate a hair past the boundary
+        // so the assertion doesn't hinge on exact Double equality.)
+        #expect(cold(&r, 0.66) == true)
+    }
+
+    @Test func subThresholdJitterDoesNotResetRest() {
+        var r = fresh()
+        r.entered(now: t0)
+        // Tiny jitter below the 3pt threshold must not push the rest clock.
+        r.moved(distance: 1, now: at(0.40))
+        r.moved(distance: 2, now: at(0.48))
+        #expect(cold(&r, 0.50) == true) // rest still measured from entry
+    }
+
+    @Test func sweepThroughNeverShows() {
+        // Cursor crosses the anchor moving the whole time, then leaves before
+        // ever settling — the drive-by case the user complained about.
+        var r = fresh()
+        r.entered(now: t0)
+        for step in stride(from: 0.02, through: 0.30, by: 0.02) {
+            r.moved(distance: 15, now: at(step))
+            #expect(cold(&r, step) == false)
+        }
+        r.exited()
+        #expect(r.enteredAt == nil)
+    }
+
+    // MARK: Warm swap — reduced floor, short dwell, still gated
+
+    @Test func warmSwapNeedsWarmDwellNotInstant() {
+        var r = fresh()
+        r.entered(now: t0)
+        // Card already visible (sibling swap): floor collapses to 0, but the
+        // warm dwell (0.15) still applies. At 0.10 at rest → hidden.
+        #expect(r.shouldShow(now: at(0.10), lastDismissedAt: nil, isCardVisible: true) == false)
+        // Just past 0.15 at rest → shows (a hair past the boundary to avoid
+        // hinging on exact Double equality).
+        #expect(r.shouldShow(now: at(0.16), lastDismissedAt: nil, isCardVisible: true) == true)
+    }
+
+    @Test func warmSweepDoesNotSwap() {
+        var r = fresh()
+        r.entered(now: t0)
+        // Moving the whole time through a sibling while a card is up: never
+        // settles for the warm dwell, so no chase.
+        r.moved(distance: 12, now: at(0.05))
+        r.moved(distance: 12, now: at(0.12))
+        #expect(r.shouldShow(now: at(0.13), lastDismissedAt: nil, isCardVisible: true) == false)
+    }
+
+    @Test func recentDismissalIsWarmAndUsesWarmDwell() {
+        var r = fresh()
+        r.entered(now: t0)
+        let justDismissed = t0.addingTimeInterval(-0.10) // within 0.40 grace
+        // Warm: floor 0, needs only 0.15 at rest.
+        #expect(r.shouldShow(now: at(0.10), lastDismissedAt: justDismissed,
+                             isCardVisible: false) == false)
+        #expect(r.shouldShow(now: at(0.16), lastDismissedAt: justDismissed,
+                             isCardVisible: false) == true)
     }
 
     @Test func staleDismissalIsColdAgain() {
-        let longAgo = now.addingTimeInterval(-1.0)
-        #expect(timing.effectiveShowDelay(now: now, lastDismissedAt: longAgo,
-                                          isCardVisible: false) == 0.35)
+        var r = fresh()
+        r.entered(now: t0)
+        let longAgo = t0.addingTimeInterval(-1.0) // past the 0.40 grace
+        // Cold: still needs the full 0.50 floor.
+        #expect(r.shouldShow(now: at(0.20), lastDismissedAt: longAgo,
+                             isCardVisible: false) == false)
+        #expect(r.shouldShow(now: at(0.50), lastDismissedAt: longAgo,
+                             isCardVisible: false) == true)
     }
 
-    @Test func standardTimingIsFastButNotFlickery() {
-        #expect(HoverCardTiming.standard.showDelay > 0.1)
-        #expect(HoverCardTiming.standard.showDelay <= 0.5)
+    // MARK: Exit clears state
+
+    @Test func exitClearsAndRequiresReentry() {
+        var r = fresh()
+        r.entered(now: t0)
+        r.exited()
+        // No entry → never shows regardless of clock.
+        #expect(cold(&r, 5.0) == false)
+        // Re-entry restarts the cold gate cleanly.
+        r.entered(now: at(5.0))
+        #expect(r.shouldShow(now: at(5.30), lastDismissedAt: nil, isCardVisible: false) == false)
+        #expect(r.shouldShow(now: at(5.50), lastDismissedAt: nil, isCardVisible: false) == true)
+    }
+}
+
+@Suite("HoverCardTiming — standard constants")
+struct HoverCardTimingTests {
+    @Test func coldFloorIsInTheResearchedRange() {
+        // Upper end of the 300–500ms consensus, raised for the "just passing
+        // through" complaint — kept sane (< 1s HIG default).
+        #expect(HoverCardTiming.standard.showDelay >= 0.5)
+        #expect(HoverCardTiming.standard.showDelay < 1.0)
+    }
+
+    @Test func restWindowIsAShortDwell() {
+        #expect(HoverCardTiming.standard.restWindow >= 0.12)
+        #expect(HoverCardTiming.standard.restWindow <= 0.25)
+    }
+
+    @Test func warmDwellIsShorterThanColdFloorButNonZero() {
+        // Responsive swap, but never an instant cursor-chase.
+        #expect(HoverCardTiming.standard.warmDwell > 0)
+        #expect(HoverCardTiming.standard.warmDwell < HoverCardTiming.standard.showDelay)
+    }
+
+    @Test func fadeOutIsQuickerThanShow() {
         #expect(HoverCardTiming.standard.fadeOutDuration < HoverCardTiming.standard.showDelay)
     }
 }

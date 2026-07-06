@@ -64,11 +64,29 @@ struct SuffixRowIndicatorTests {
         #expect(RowStatusIndicator.suffix(notification: nil, isWorking: false, isSuspended: false) == nil)
     }
 
+    @Test func hibernatedWhenIdleAndHibernated() {
+        #expect(RowStatusIndicator.suffix(
+            notification: nil, isWorking: false, isSuspended: false, isHibernated: true) == .hibernated)
+    }
+
+    @Test func hibernatedIsLowestPriority() {
+        // Any louder signal wins the slot over hibernated — it's the calmest state.
+        #expect(RowStatusIndicator.suffix(
+            notification: nil, isWorking: true, isSuspended: false, isHibernated: true) == .working)
+        #expect(RowStatusIndicator.suffix(
+            notification: nil, isWorking: false, isSuspended: true, isHibernated: true) == .suspended)
+        #expect(RowStatusIndicator.suffix(
+            notification: .error, isWorking: false, isSuspended: false, isHibernated: true) == .error)
+        #expect(RowStatusIndicator.suffix(
+            notification: .attentionNeeded, isWorking: false, isSuspended: false, isHibernated: true) == .attention)
+    }
+
     @Test func glyphMapping() {
         #expect(SuffixRowIndicator.error.systemImage == "exclamationmark.octagon.fill")
         #expect(SuffixRowIndicator.attention.systemImage == "hand.raised.fill")
         #expect(SuffixRowIndicator.suspended.systemImage == "pause.circle.fill")
         #expect(SuffixRowIndicator.working.systemImage == nil)
+        #expect(SuffixRowIndicator.hibernated.systemImage == "moon.zzz.fill")
     }
 }
 

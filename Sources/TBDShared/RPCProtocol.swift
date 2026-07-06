@@ -166,6 +166,10 @@ public enum RPCMethod {
     public static let configSetScratchInstructions = "config.setScratchInstructions"
     public static let configSetScratchRenamePrompt = "config.setScratchRenamePrompt"
     public static let configSetScratchProfileOverride = "config.setScratchProfileOverride"
+    public static let terminalHibernate = "terminal.hibernate"
+    public static let terminalWake = "terminal.wake"
+    public static let terminalSetKeepWarm = "terminal.setKeepWarm"
+    public static let configSetAutoHibernate = "config.setAutoHibernate"
     public static let scratchCreate = "scratch.create"
     public static let scratchDelete = "scratch.delete"
     public static let scratchPromote = "scratch.promote"
@@ -283,18 +287,47 @@ public struct NightwatchReportParams: Codable, Sendable {
 
 // MARK: - Terminal Swap Profile
 
+/// How `terminal.swapProfile` reshapes the session.
+///
+/// - `inPlace`: SEAMLESS account switch — interrupt the pane's current Claude,
+///   respawn `claude --resume <id>` under the new profile IN THE SAME tmux
+///   window, and update the existing terminal row in place. One tab, no new
+///   row/tab. This is the "Switch account" action.
+/// - `fork`: duplicate the conversation into a NEW tab/terminal row (the old
+///   fork-into-new-tab behavior), leaving the source session untouched. This
+///   is the explicit "Fork session" action.
+public enum TerminalSwapMode: String, Codable, Sendable, Equatable {
+    case inPlace
+    case fork
+}
+
 public struct TerminalSwapProfileParams: Codable, Sendable {
     public let terminalID: UUID
     public let newProfileID: UUID?
     /// Initial tmux window size in cells (see WorktreeCreateParams).
     public let cols: Int?
     public let rows: Int?
-    public init(terminalID: UUID, newProfileID: UUID?, cols: Int? = nil, rows: Int? = nil) {
+    /// Swap reshaping mode. Optional + `decodeIfPresent` so payloads from older
+    /// clients still decode; a missing value defaults to `.inPlace` (seamless
+    /// same-tab switch) — the common "Switch account" path.
+    public let mode: TerminalSwapMode?
+    public init(
+        terminalID: UUID,
+        newProfileID: UUID?,
+        cols: Int? = nil,
+        rows: Int? = nil,
+        mode: TerminalSwapMode? = nil
+    ) {
         self.terminalID = terminalID
         self.newProfileID = newProfileID
         self.cols = cols
         self.rows = rows
+        self.mode = mode
     }
+
+    /// Resolved mode with the default applied — `.inPlace` when the field is
+    /// absent (older clients / the common switch-account path).
+    public var resolvedMode: TerminalSwapMode { mode ?? .inPlace }
 }
 
 // MARK: - Model Profile RPC
@@ -1004,6 +1037,53 @@ public struct ConfigSetScratchRenamePromptParams: Codable, Sendable {
 public struct ConfigSetScratchProfileOverrideParams: Codable, Sendable {
     public let profileID: UUID?
     public init(profileID: UUID?) { self.profileID = profileID }
+}
+
+// MARK: - Session Hibernation
+
+/// Params for `terminal.hibernate` — manually hibernate one Claude terminal
+/// (kill its process, keep the tmux window). Subject to the running/permission
+/// rails but not keep-warm or idle-time.
+public struct TerminalHibernateParams: Codable, Sendable {
+    public let terminalID: UUID
+    public init(terminalID: UUID) { self.terminalID = terminalID }
+}
+
+/// Params for `terminal.wake` — respawn `claude --resume <id>` in the
+/// hibernated terminal's kept-alive tmux window. Idempotent: waking a
+/// non-hibernated terminal is a no-op.
+public struct TerminalWakeParams: Codable, Sendable {
+    public let terminalID: UUID
+    /// Initial tmux window size in cells (see TerminalSwapProfileParams).
+    public let cols: Int?
+    public let rows: Int?
+    public init(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) {
+        self.terminalID = terminalID
+        self.cols = cols
+        self.rows = rows
+    }
+}
+
+/// Params for `terminal.setKeepWarm` — pin/unpin a terminal against
+/// auto-hibernation.
+public struct TerminalSetKeepWarmParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let keepWarm: Bool
+    public init(terminalID: UUID, keepWarm: Bool) {
+        self.terminalID = terminalID
+        self.keepWarm = keepWarm
+    }
+}
+
+/// Params for `config.setAutoHibernate` — master enable + idle-timeout minutes
+/// for the auto-hibernate idle timer.
+public struct ConfigSetAutoHibernateParams: Codable, Sendable {
+    public let enabled: Bool
+    public let idleMinutes: Int
+    public init(enabled: Bool, idleMinutes: Int) {
+        self.enabled = enabled
+        self.idleMinutes = idleMinutes
+    }
 }
 
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.

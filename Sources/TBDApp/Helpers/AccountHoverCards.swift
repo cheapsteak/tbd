@@ -1,61 +1,24 @@
 import Foundation
 import TBDShared
 
-/// Structured hover-card content for the two account/usage hover sites: the
-/// sidebar worktree row (which accounts this worktree's Claude sessions run
-/// on) and the Claude tab (account + live usage + spawn time).
+/// Structured hover-card content for the Claude tab hover site: account + live
+/// usage + spawn time. Pure `HoverCardModel` composition on top of
+/// `ProfileUsagePresentation`'s formatting fragments — unit-testable without
+/// any panel/AppKit machinery. The flat-string
+/// `ProfileUsagePresentation.sessionTooltip` helper remains as the plain-text
+/// form; this structured card supersedes it in the UI.
 ///
-/// Pure `HoverCardModel` composition on top of `ProfileUsagePresentation`'s
-/// formatting fragments — unit-testable without any panel/AppKit machinery.
-/// The flat-string `ProfileUsagePresentation.sessionTooltip` /
-/// `worktreeAccountsTooltip` helpers remain as the plain-text form; these
-/// structured cards supersede them in the UI.
+/// NOTE: The sidebar worktree ROW no longer carries an account hover card —
+/// per-session account facts now live in that row's "…" menu (its info header +
+/// "Switch account"), where they're actionable rather than just informational
+/// (see `RowAccountMenu`). The account-descriptor composition strings below are
+/// shared with the tab card and kept here.
 enum AccountHoverCards {
-    static let worktreeCardTitle = "Claude accounts"
     static let ambientAccountLabel = "ambient (terminal login)"
     static let ambientDriftCaption = "May drift to a different account on token refresh"
     static let removedProfileLabel = "Profile removed"
     static let removedProfileCaption = "Session keeps its spawn account"
     static let notLoggedInCaption = "Not logged in"
-
-    // MARK: - Worktree row card
-
-    /// Sidebar worktree-row card aggregating the accounts of its Claude
-    /// sessions, deduped in tab order. nil when the worktree has no Claude
-    /// sessions (no card).
-    static func worktreeCard(terminals: [Terminal],
-                             profiles: [ModelProfileWithUsage]) -> HoverCardModel? {
-        var rows: [HoverCardRow] = []
-        for terminal in terminals where terminal.kind == .claude || terminal.isClaudeResumable {
-            let row = accountRow(profileID: terminal.profileID, profiles: profiles)
-            if !rows.contains(row) {
-                rows.append(row)
-            }
-        }
-        guard !rows.isEmpty else { return nil }
-        return HoverCardModel(title: worktreeCardTitle, rows: rows)
-    }
-
-    /// One account line: email with a profile-name chip for pinned +
-    /// logged-in sessions; muted-italic "ambient (terminal login)" with the
-    /// drift warning as a caption for NULL-profile legacy sessions.
-    static func accountRow(profileID: UUID?,
-                           profiles: [ModelProfileWithUsage]) -> HoverCardRow {
-        guard let profileID else {
-            return HoverCardRow(value: ambientAccountLabel,
-                                valueStyle: .mutedItalic,
-                                caption: ambientDriftCaption)
-        }
-        guard let entry = profiles.first(where: { $0.profile.id == profileID }) else {
-            return HoverCardRow(value: removedProfileLabel,
-                                valueStyle: .mutedItalic,
-                                caption: removedProfileCaption)
-        }
-        if let identity = ProfileLoginPresentation.normalizedIdentity(entry.loginIdentity) {
-            return HoverCardRow(value: identity, chip: entry.profile.name)
-        }
-        return HoverCardRow(value: entry.profile.name, caption: notLoggedInCaption)
-    }
 
     // MARK: - Claude tab card
 

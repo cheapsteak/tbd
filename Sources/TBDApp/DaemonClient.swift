@@ -878,6 +878,40 @@ actor DaemonClient {
         )
     }
 
+    /// Manually hibernate one Claude terminal (kill its process, keep the
+    /// tmux window). Honors the running/permission rails.
+    func terminalHibernate(terminalID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalHibernate,
+            params: TerminalHibernateParams(terminalID: terminalID)
+        )
+    }
+
+    /// Wake a hibernated terminal: respawn `claude --resume` in its window.
+    /// Idempotent — a double-call collapses to one respawn daemon-side.
+    func terminalWake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: terminalID, cols: cols, rows: rows)
+        )
+    }
+
+    /// Pin/unpin a terminal against auto-hibernation.
+    func terminalSetKeepWarm(terminalID: UUID, keepWarm: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalSetKeepWarm,
+            params: TerminalSetKeepWarmParams(terminalID: terminalID, keepWarm: keepWarm)
+        )
+    }
+
+    /// Set the auto-hibernate master switch + idle-timeout (minutes).
+    func setAutoHibernate(enabled: Bool, idleMinutes: Int) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoHibernate,
+            params: ConfigSetAutoHibernateParams(enabled: enabled, idleMinutes: idleMinutes)
+        )
+    }
+
     /// Suspend all Claude terminals in a worktree.
     func worktreeSuspend(worktreeID: UUID) async throws {
         try await callVoidAsync(
@@ -1191,11 +1225,24 @@ actor DaemonClient {
     }
 
     /// Swap the model profile associated with a running terminal.
-    /// Returns the newly created Terminal (the daemon forks a new tab).
-    func swapTerminalProfile(terminalID: UUID, newProfileID: UUID?, cols: Int? = nil, rows: Int? = nil) async throws -> Terminal {
+    ///
+    /// `.inPlace` (default) — seamless "Switch account": the daemon respawns the
+    /// SAME tmux window/terminal row under the new profile and returns that
+    /// (unchanged-id) row. `.fork` — the daemon forks the conversation into a
+    /// NEW tab/terminal row and returns the new one.
+    func swapTerminalProfile(
+        terminalID: UUID,
+        newProfileID: UUID?,
+        mode: TerminalSwapMode = .inPlace,
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) async throws -> Terminal {
         return try await callAsync(
             method: RPCMethod.terminalSwapProfile,
-            params: TerminalSwapProfileParams(terminalID: terminalID, newProfileID: newProfileID, cols: cols, rows: rows),
+            params: TerminalSwapProfileParams(
+                terminalID: terminalID, newProfileID: newProfileID,
+                cols: cols, rows: rows, mode: mode
+            ),
             resultType: Terminal.self
         )
     }

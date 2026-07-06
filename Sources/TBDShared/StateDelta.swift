@@ -23,7 +23,45 @@ public enum StateDelta: Codable, Sendable {
     case modelProfilesChanged
     case terminalSessionUpdated(TerminalSessionDelta)
     case terminalActivityUpdated(TerminalActivityDelta)
+    case terminalProfileChanged(TerminalProfileDelta)
     case worktreeMoved(WorktreeMovedDelta)
+    case terminalHibernationChanged(TerminalHibernationDelta)
+}
+
+/// Delta payload for a terminal's hibernation state change (hibernate / wake)
+/// or a keep-warm pin toggle. Keeps the SAME terminal row — the app updates
+/// `hibernatedAt`/`keepWarm` in place so the row's whisper indicator and the
+/// action menu re-render without a full terminal refetch.
+public struct TerminalHibernationDelta: Codable, Sendable {
+    public let terminalID: UUID
+    public let worktreeID: UUID
+    /// True when the terminal is now hibernated; false when it was woken.
+    public let hibernated: Bool
+    /// Current keep-warm pin state (carried on every hibernation delta so a
+    /// keep-warm toggle can reuse this same channel).
+    public let keepWarm: Bool
+    public init(terminalID: UUID, worktreeID: UUID, hibernated: Bool, keepWarm: Bool) {
+        self.terminalID = terminalID
+        self.worktreeID = worktreeID
+        self.hibernated = hibernated
+        self.keepWarm = keepWarm
+    }
+}
+
+/// Delta payload for a terminal's model-profile change that keeps the SAME
+/// terminal row (the seamless in-place "Switch account" swap). The app updates
+/// the row's `profileID` in place so its account chip re-renders without a full
+/// terminal refetch. `newProfileID == nil` means the session switched to the
+/// ambient (keychain/host) login.
+public struct TerminalProfileDelta: Codable, Sendable {
+    public let terminalID: UUID
+    public let worktreeID: UUID
+    public let newProfileID: UUID?
+    public init(terminalID: UUID, worktreeID: UUID, newProfileID: UUID?) {
+        self.terminalID = terminalID
+        self.worktreeID = worktreeID
+        self.newProfileID = newProfileID
+    }
 }
 
 /// Delta payload for Claude session ID/transcript path rollover, fired when

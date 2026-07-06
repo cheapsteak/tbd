@@ -225,6 +225,12 @@ final class AppState: ObservableObject {
     /// dedupe path in `openLoginSession` focuses it instead of spawning again.
     var loginSessionSpawnsInFlight: Set<UUID> = []
 
+    /// Terminal IDs with a wake RPC in flight, so a rapid re-focus (or a menu
+    /// "Wake" racing the auto-wake-on-focus) doesn't fire a second `terminal.wake`
+    /// while the first is still respawning. The daemon singleflights too; this
+    /// is the app-side first line so we don't even round-trip twice.
+    var wakeInFlight: Set<UUID> = []
+
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
         guard let id = selectedWorktreeIDs.first else { return nil }
@@ -395,6 +401,11 @@ final class AppState: ObservableObject {
     /// alongside `globalEnvOverrides` via `loadModelProfiles()`.
     @Published var autoArchiveOnMergeDefault: Bool = false
     @Published var nightwatchMode: NightwatchMode = .off
+    /// Auto-hibernate master switch. Loaded from the daemon `Config` via
+    /// `loadHibernationConfig()`.
+    @Published var autoHibernateEnabled: Bool = true
+    /// Auto-hibernate idle timeout in minutes. Loaded from `Config`.
+    @Published var hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes
     /// Terminals where the user has dismissed the proxy-unreachable banner.
     /// Cleared on app relaunch (in-memory only — banners are advisory).
     @Published var dismissedProxyWarnings: Set<UUID> = []
@@ -842,13 +853,20 @@ final class AppState: ObservableObject {
         case .modelProfileUsageUpdated(let usage):
             applyModelProfileUsageDelta(usage)
         case .modelProfilesChanged:
-            Task { [weak self] in await self?.loadModelProfiles() }
+            Task { [weak self] in
+                await self?.loadModelProfiles()
+                await self?.loadHibernationConfig()
+            }
         case .terminalSessionUpdated(let d):
             applyTerminalSessionDelta(d)
         case .terminalCreated(let d):
             applyTerminalCreatedDelta(d)
         case .terminalActivityUpdated(let d):
             applyTerminalActivityDelta(d)
+        case .terminalProfileChanged(let d):
+            applyTerminalProfileDelta(d)
+        case .terminalHibernationChanged(let d):
+            applyTerminalHibernationDelta(d)
         case .worktreeMoved(let d):
             applyWorktreeMovedDelta(d)
         case .worktreeArchived(let d):
@@ -908,6 +926,26 @@ final class AppState: ObservableObject {
             return
         }
         terminals[delta.worktreeID]?[idx].activityState = delta.activityState
+    }
+
+    /// Seamless in-place "Switch account": the terminal row is unchanged except
+    /// its `profileID`, so update it in place and the account chip re-renders.
+    private func applyTerminalProfileDelta(_ delta: TerminalProfileDelta) {
+        guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
+            return
+        }
+        terminals[delta.worktreeID]?[idx].profileID = delta.newProfileID
+    }
+
+    /// Hibernate / wake / keep-warm change: update `hibernatedAt` + `keepWarm`
+    /// on the row in place so the whisper indicator and action menu re-render
+    /// without a full terminal refetch.
+    private func applyTerminalHibernationDelta(_ delta: TerminalHibernationDelta) {
+        guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
+            return
+        }
+        terminals[delta.worktreeID]?[idx].hibernatedAt = delta.hibernated ? Date() : nil
+        terminals[delta.worktreeID]?[idx].keepWarm = delta.keepWarm
     }
 
     /// Update the in-place usage entry for a single profile. If no match,
@@ -1131,6 +1169,7 @@ final class AppState: ObservableObject {
                 }
             }
             await loadModelProfiles()
+            await loadHibernationConfig()
             startSubscription()
             await refreshPRStatuses()
             pushClaudeSpawnPreferences()

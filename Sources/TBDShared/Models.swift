@@ -246,6 +246,17 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var transcriptPath: String?
     public var kind: TerminalKind?
     public var activityState: TerminalActivityState
+    /// When set, the terminal is HIBERNATED: its `claude` process was
+    /// gracefully terminated to reclaim memory, but the tmux window (and its
+    /// shell) is kept alive. `claudeSessionID` still points at the session to
+    /// resume via `claude --resume` on wake. `nil` = not hibernated. Distinct
+    /// from `suspendedAt` (which kills the tmux window's program entirely and
+    /// snapshots the pane); a hibernated terminal keeps its live window.
+    public var hibernatedAt: Date?
+    /// User pin that exempts this terminal from auto-hibernation. `false` =
+    /// eligible for the idle timer; `true` = the daemon never auto-hibernates
+    /// it (manual "Hibernate now" still works). Persisted per-terminal.
+    public var keepWarm: Bool
 
     public init(id: UUID = UUID(), worktreeID: UUID, tmuxWindowID: String,
                 tmuxPaneID: String, label: String? = nil, createdAt: Date = Date(),
@@ -254,7 +265,9 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 profileID: UUID? = nil,
                 transcriptPath: String? = nil,
                 kind: TerminalKind? = nil,
-                activityState: TerminalActivityState = .unknown) {
+                activityState: TerminalActivityState = .unknown,
+                hibernatedAt: Date? = nil,
+                keepWarm: Bool = false) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -269,12 +282,15 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.transcriptPath = transcriptPath
         self.kind = kind
         self.activityState = activityState
+        self.hibernatedAt = hibernatedAt
+        self.keepWarm = keepWarm
     }
 
     enum CodingKeys: String, CodingKey {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
         case activityState
+        case hibernatedAt, keepWarm
     }
 
     public init(from decoder: Decoder) throws {
@@ -293,6 +309,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
         kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
+        hibernatedAt = try c.decodeIfPresent(Date.self, forKey: .hibernatedAt)
+        keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
     }
 }
 
@@ -307,6 +325,41 @@ public extension Terminal {
     var isClaudeResumable: Bool {
         guard claudeSessionID != nil, !isCodexTerminal else { return false }
         return kind == .claude || kind == nil
+    }
+
+    /// True when the terminal is currently hibernated (claude process killed,
+    /// tmux window kept alive). See `hibernatedAt`.
+    var isHibernated: Bool { hibernatedAt != nil }
+
+    /// Whether this terminal may be AUTO-hibernated by the idle timer right
+    /// now. Encodes the hard safety rails (see `HibernationGate` for the
+    /// idle-duration check, which needs the timeout + clock this pure property
+    /// can't see):
+    ///   - must be a resumable Claude session,
+    ///   - not already hibernated or suspended,
+    ///   - not pinned keep-warm,
+    ///   - not actively running a turn (`.working`),
+    ///   - not waiting on a permission prompt (`.waitingForUser` — a raised
+    ///     hand; hibernating would eat it).
+    /// Manual "Hibernate now" bypasses the keep-warm and idle checks but keeps
+    /// the running/permission rails (see `isManuallyHibernatable`).
+    var isAutoHibernationEligible: Bool {
+        isManuallyHibernatable && !keepWarm
+    }
+
+    /// Whether a MANUAL "Hibernate now" may act on this terminal. Same rails as
+    /// auto except keep-warm and idle-time don't apply — the user asked
+    /// explicitly. Still refuses to hibernate an in-flight turn or a raised
+    /// permission hand.
+    var isManuallyHibernatable: Bool {
+        guard isClaudeResumable else { return false }
+        guard hibernatedAt == nil, suspendedAt == nil else { return false }
+        switch activityState {
+        case .working, .waitingForUser:
+            return false
+        case .idle, .unknown:
+            return true
+        }
     }
 }
 
@@ -552,6 +605,17 @@ public struct Config: Codable, Sendable, Equatable {
     public var scratchProfileOverrideID: UUID?
     /// Nightwatch mode flag: off, daywatch, or nightwatch.
     public var nightwatchMode: NightwatchMode
+    /// Master switch for the daemon-side auto-hibernate idle timer. Default
+    /// ON: idle Claude sessions are auto-hibernated to reclaim memory (their
+    /// prompt cache has already expired, so resume is cheap). When false, only
+    /// manual "Hibernate now" hibernates.
+    public var autoHibernateEnabled: Bool
+    /// Minutes a Claude session must sit idle-at-rest before the auto-hibernate
+    /// timer terminates its process. Clamped to a sane floor by the daemon.
+    public var hibernateIdleMinutes: Int
+
+    /// Default idle-timeout for auto-hibernation, in minutes.
+    public static let defaultHibernateIdleMinutes = 30
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -561,7 +625,9 @@ public struct Config: Codable, Sendable, Equatable {
                 scratchInstructions: String? = nil,
                 scratchRenamePrompt: String? = nil,
                 scratchProfileOverrideID: UUID? = nil,
-                nightwatchMode: NightwatchMode = .off) {
+                nightwatchMode: NightwatchMode = .off,
+                autoHibernateEnabled: Bool = true,
+                hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -571,6 +637,8 @@ public struct Config: Codable, Sendable, Equatable {
         self.scratchRenamePrompt = scratchRenamePrompt
         self.scratchProfileOverrideID = scratchProfileOverrideID
         self.nightwatchMode = nightwatchMode
+        self.autoHibernateEnabled = autoHibernateEnabled
+        self.hibernateIdleMinutes = hibernateIdleMinutes
     }
 
     public init(from decoder: Decoder) throws {
@@ -591,6 +659,9 @@ public struct Config: Codable, Sendable, Equatable {
         scratchProfileOverrideID = try c.decodeIfPresent(UUID.self, forKey: .scratchProfileOverrideID)
         nightwatchMode = try c.decodeIfPresent(
             NightwatchMode.self, forKey: .nightwatchMode) ?? .off
+        autoHibernateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateEnabled) ?? true
+        hibernateIdleMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateIdleMinutes)
+            ?? Config.defaultHibernateIdleMinutes
     }
 }
 

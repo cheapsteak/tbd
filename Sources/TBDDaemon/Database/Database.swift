@@ -669,6 +669,22 @@ public final class TBDDatabase: Sendable {
             try db.addColumnIfMissing(table: "config", column: "nightwatch_mode", type: .text, defaults: "off")
         }
 
+        // Session hibernation: per-terminal hibernated timestamp + keep-warm
+        // pin, and the global auto-hibernate master switch + idle-timeout.
+        // `hibernatedAt` nullable (nil = not hibernated); `keepWarm` defaults
+        // false; `auto_hibernate_enabled` defaults true (feature ON) and
+        // `hibernate_idle_minutes` defaults 30. All additive/nullable-or-
+        // defaulted so pre-v39 rows decode unchanged.
+        migrator.registerMigration("v39_session_hibernation") { db in
+            try db.addColumnIfMissing(table: "terminal", column: "hibernatedAt", type: .datetime)
+            try db.addColumnIfMissing(
+                table: "terminal", column: "keepWarm", type: .boolean, defaults: false)
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_hibernate_enabled", type: .boolean, defaults: true)
+            try db.addColumnIfMissing(
+                table: "config", column: "hibernate_idle_minutes", type: .integer, defaults: 30)
+        }
+
         migrator.registerMigration("v41_clearance_ledger") { db in
             try db.create(table: "clearance") { t in
                 t.primaryKey("id", .text).notNull()

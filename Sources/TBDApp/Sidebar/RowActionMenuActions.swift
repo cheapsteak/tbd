@@ -48,6 +48,14 @@ struct RowActionMenuActions {
             hasSuspendedClaude: terminals.contains {
                 $0.isClaudeResumable && $0.suspendedAt != nil
             },
+            hasHibernatableClaude: terminals.contains { $0.isManuallyHibernatable },
+            hasHibernatedClaude: terminals.contains { $0.isHibernated },
+            hasUnpinnedClaude: terminals.contains {
+                $0.isClaudeResumable && !$0.keepWarm && !$0.isHibernated
+            },
+            hasKeepWarmClaude: terminals.contains {
+                $0.isClaudeResumable && $0.keepWarm
+            },
             hasActiveChildren: !appState.children(of: worktree.id).isEmpty,
             pathIsEmpty: worktree.path.isEmpty,
             hasRepoID: worktree.repoID != nil,
@@ -115,6 +123,36 @@ struct RowActionMenuActions {
                 await appState.refreshTerminals(worktreeID: wtID)
             }
 
+        case .hibernateNow:
+            let wtID = worktree.id
+            let ids = terminals.filter { $0.isManuallyHibernatable }.map { $0.id }
+            Task {
+                for id in ids {
+                    await appState.hibernateTerminal(terminalID: id, worktreeID: wtID)
+                }
+            }
+
+        case .wakeHibernated:
+            let wtID = worktree.id
+            let ids = terminals.filter { $0.isHibernated }.map { $0.id }
+            Task {
+                for id in ids {
+                    await appState.wakeTerminal(terminalID: id, worktreeID: wtID)
+                }
+            }
+
+        case let .toggleKeepWarm(enable):
+            let wtID = worktree.id
+            // Only flip terminals not already in the requested state.
+            let ids = terminals
+                .filter { $0.isClaudeResumable && $0.keepWarm != enable && !$0.isHibernated }
+                .map { $0.id }
+            Task {
+                for id in ids {
+                    await appState.setTerminalKeepWarm(terminalID: id, keepWarm: enable, worktreeID: wtID)
+                }
+            }
+
         case .createNestedWorktree:
             guard let repoID = worktree.repoID else { return }
             appState.createWorktree(repoID: repoID, parentWorktreeID: worktree.id)
@@ -134,10 +172,11 @@ struct RowActionMenuActions {
             Task { await appState.archiveWorktree(id: wtID) }
 
         case let .forkSession(terminalID, profileID):
-            // Duplicate the conversation into a new tab on the SAME account —
+            // Duplicate the conversation into a NEW tab on the SAME account —
             // swapTerminalProfile with the session's own profileID (nil = same
-            // ambient login). The daemon resumes/forks the session.
-            Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: profileID) }
+            // ambient login), in `.fork` mode so the daemon forks into a new
+            // tab rather than switching in place.
+            Task { await appState.swapTerminalProfile(terminalID: terminalID, newProfileID: profileID, mode: .fork) }
         }
     }
 

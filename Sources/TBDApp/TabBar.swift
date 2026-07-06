@@ -343,20 +343,29 @@ enum AddTabMenu {
             claudeItem.target = coordinator
             menu.addItem(claudeItem)
 
-            // One item per profile, titled with the profile's display name plus
-            // a short login-identity suffix (" — email" / " — needs /login" for
-            // oauth profiles) and a compact usage suffix when the daemon has a
-            // snapshot (" · 5h 0% ↺23:10 · wk 76% · F 100%"). Each gets a
+            // One item per profile. The primary line is the profile's display
+            // name plus a short login-identity suffix (" — email" / " — needs
+            // /login" for oauth profiles); when the daemon has a usage snapshot,
+            // a smaller, indented secondary line underneath spells out the
+            // usage ("5h 0% · resets 23:10 · wk 76% · Fable 100%"). Each gets a
             // transparent placeholder icon the same size as the Claude asterisk
             // so its title lines up in the same title column as "Claude" — the
             // empty icon slot is the visual nesting cue. The profile id rides
             // along in `representedObject` for MenuCoordinator.addClaudeProfile.
             for entry in profiles {
+                let line = ProfileUsagePresentation.menuLine(for: entry)
                 let item = NSMenuItem(
-                    title: ProfileUsagePresentation.menuItemTitle(for: entry),
+                    title: line.primary,
                     action: #selector(MenuCoordinator.addClaudeProfile(_:)),
                     keyEquivalent: ""
                 )
+                if let attributed = twoLineAttributedTitle(line) {
+                    item.attributedTitle = attributed
+                    // Setting attributedTitle syncs `title` to its flattened
+                    // string; restore the identity-only plain title (used by
+                    // accessibility and any title-based lookups).
+                    item.title = line.primary
+                }
                 item.image = blankIcon(size: claudeIcon.size)
                 item.representedObject = entry.profile.id
                 item.target = coordinator
@@ -419,6 +428,37 @@ enum AddTabMenu {
         image.lockFocus()   // empty draw pass — produces a transparent representation
         image.unlockFocus()
         return image
+    }
+
+    /// NSMenu counterpart of `RowAccountMenuView.twoLineLabel`: an attributed
+    /// two-line NSMenuItem title — identity at menu size, the usage line
+    /// smaller, secondary-colored, and indented underneath. nil when there is
+    /// no secondary line, so snapshotless profiles keep the plain single-line
+    /// title set at item creation.
+    static func twoLineAttributedTitle(
+        _ line: ProfileUsagePresentation.MenuLineModel
+    ) -> NSAttributedString? {
+    guard let secondary = line.secondary, !secondary.isEmpty else { return nil }
+    let title = NSMutableAttributedString(
+        string: line.primary,
+        attributes: [
+            .font: NSFont.menuFont(ofSize: 13),
+            .foregroundColor: NSColor.labelColor,
+        ]
+    )
+    let secondaryStyle = NSMutableParagraphStyle()
+    secondaryStyle.firstLineHeadIndent = 10
+    secondaryStyle.headIndent = 10
+    secondaryStyle.paragraphSpacingBefore = 1
+    title.append(NSAttributedString(
+        string: "\n\(secondary)",
+        attributes: [
+            .font: NSFont.menuFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: secondaryStyle,
+        ]
+    ))
+        return title
     }
 }
 
