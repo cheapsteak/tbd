@@ -10,6 +10,10 @@ import TBDShared
 /// is answerable at a glance without opening the menu.
 struct NightwatchStatusItem: Commands {
     @ObservedObject var appState: AppState
+    /// Gated behind the same Settings → Experimental opt-in as the sidebar
+    /// control, so the whole Nightwatch feature (both entry points) is off by
+    /// default. Fail-closed to hidden when the user has never opted in.
+    @AppStorage(AppState.nightwatchExperimentalKey) private var experimentalEnabled: Bool = false
 
     private var title: String {
         switch appState.nightwatchMode {
@@ -20,9 +24,11 @@ struct NightwatchStatusItem: Commands {
     }
 
     var body: some Commands {
-        CommandMenu(title) {
-            NightwatchStatusContent()
-                .environmentObject(appState)
+        if experimentalEnabled {
+            CommandMenu(title) {
+                NightwatchStatusContent()
+                    .environmentObject(appState)
+            }
         }
     }
 }

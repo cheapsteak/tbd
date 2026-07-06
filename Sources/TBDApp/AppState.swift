@@ -1670,6 +1670,20 @@ final class AppState: ObservableObject {
         defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? false
     }
 
+    /// UserDefaults key mirroring the `@AppStorage` toggle in
+    /// Settings → Experimental that gates the Nightwatch / Daywatch feature.
+    /// When off (the default), the sidebar mode control is hidden entirely —
+    /// the feature is unfinished and evaluate-only, so it stays opt-in.
+    static let nightwatchExperimentalKey = "nightwatchExperimentalEnabled"
+
+    /// Whether the experimental Nightwatch / Daywatch UI is enabled. Fails
+    /// closed: defaults to false so the sidebar control only appears once the
+    /// user opts in from Settings → Experimental. Tests pass a private
+    /// `UserDefaults(suiteName:)` so they never touch live app preferences.
+    static func nightwatchExperimentalEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: nightwatchExperimentalKey) as? Bool ?? false
+    }
+
     /// Pure target-selection for the pre-sleep suspend hook. Returns the
     /// worktree IDs to best-effort suspend before the machine sleeps:
     /// `[]` when auto-suspend is disabled, otherwise every worktree ID
