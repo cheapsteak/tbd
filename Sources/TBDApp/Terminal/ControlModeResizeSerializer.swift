@@ -52,4 +52,17 @@ struct ControlModeResizeSerializer {
         inFlight = false
         return nil
     }
+
+    /// Whether the drain loop may issue its next send (R6-M6). The loop
+    /// deliberately ignores `Task.isCancelled` (a newer tick's cancel only
+    /// means "your size was replaced — deliver my stash"), so without this
+    /// check `cleanup()` could not stop a sender already past the debounce
+    /// guard: it would keep firing `pane.resize` RPCs for a dead view. A
+    /// torn-down coordinator stops draining outright — the stashed size is
+    /// irrelevant post-teardown (the pane is detached or detaching; the next
+    /// live view sends its own initial resize). Mirrors
+    /// `ControlModeAttachAbort.shouldStartFallback`'s pure-gate shape.
+    static func shouldContinueDraining(tornDown: Bool) -> Bool {
+        !tornDown
+    }
 }

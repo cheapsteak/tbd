@@ -52,4 +52,16 @@ struct ControlModeResizeSerializerTests {
         #expect(serializer.sizeToSend(cols: 90, rows: 28)
                 == ControlModeResizeSerializer.Size(cols: 90, rows: 28))
     }
+
+    // MARK: - Teardown stops the drain loop (R6-M6)
+
+    @Test("a live view keeps draining; a torn-down view stops before the next send")
+    func teardownStopsDraining() {
+        // The Coordinator's drain loop consults this before EVERY send: a
+        // cleanup() mid-drain must stop the sender — the stashed size is
+        // irrelevant once the view is gone (one branch per gate state,
+        // CLAUDE.md gated-branch rule).
+        #expect(ControlModeResizeSerializer.shouldContinueDraining(tornDown: false) == true)
+        #expect(ControlModeResizeSerializer.shouldContinueDraining(tornDown: true) == false)
+    }
 }

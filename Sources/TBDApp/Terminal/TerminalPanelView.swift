@@ -978,7 +978,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // newer tick that cancelled this wrapper has only STASHED its
                 // size (see above) — this loop is the sole sender left to
                 // deliver it, in order, after the in-flight call completes.
-                while true {
+                // TEARDOWN is different (R6-M6): cleanup()'s cancel cannot
+                // reach a sender already past the guard above, so every
+                // iteration re-checks the torn-down flag BEFORE sending — a
+                // dead view must stop draining (its stash is irrelevant; the
+                // next live view sends its own initial resize).
+                while ControlModeResizeSerializer.shouldContinueDraining(tornDown: self.isTornDown) {
                     try? await daemonClient?.paneResize(
                         worktreeID: attach.worktreeID, windowID: attach.windowID,
                         cols: size.cols, rows: size.rows)
