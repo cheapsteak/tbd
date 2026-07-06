@@ -66,6 +66,7 @@ public final class Daemon: Sendable {
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
     /// on shutdown; `nil` in mock mode.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
+    public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
     /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
     /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
@@ -591,6 +592,7 @@ public final class Daemon: Sendable {
             rpcRouter.oauthUsagePoller = oauthPoller
             await oauthPoller.start()
 
+<<<<<<< HEAD
             // 12d. Session-limit auto-resume scheduler (spec 2026-07-03).
             // Pending rows reload on start; past-due rows fire immediately
             // (covers Mac sleep and multi-day weekly-limit waits).
@@ -633,6 +635,20 @@ public final class Daemon: Sendable {
             // 10s foreground, 60s background (GitPollCadence.statusInterval);
             // per-worktree conflict checks are additionally dirty-gated inside
             // refreshGitStatuses so an unchanged worktree costs no subprocess.
+=======
+            // 12d. Start daywatch runner (autonomous fleet babysitter loop).
+            let skillDir = PluginDirWriter.pluginDirPath + "/skills/nightwatch"
+            let executor = ProcessDaywatchExecutor(skillDir: skillDir)
+            let runner = DaywatchRunner(executor: executor)
+            self.daywatchRunner = runner
+            rpcRouter.daywatchRunner = runner
+            // Boot-reconcile: if nightwatch mode was persisted, restart the loop.
+            if let config = try? await database.config.get() {
+                await runner.apply(mode: config.nightwatchMode)
+            }
+
+            // 13. Periodic git status refresh (branch sync, conflict detection)
+>>>>>>> f4356e5 (feat(nightwatch): daywatch autonomous runner — toggle starts/stops a tick+Sonnet-judge loop)
             self.gitStatusTask = Task {
                 // Run once immediately (cold recovery), then at the gated cadence
                 while !Task.isCancelled {
@@ -697,8 +713,14 @@ public final class Daemon: Sendable {
             await poller.stop()
         }
 
+<<<<<<< HEAD
         if let resumeScheduler = limitResumeScheduler {
             await resumeScheduler.stop()
+=======
+        // Stop daywatch runner.
+        if let runner = daywatchRunner {
+            await runner.apply(mode: .off)
+>>>>>>> f4356e5 (feat(nightwatch): daywatch autonomous runner — toggle starts/stops a tick+Sonnet-judge loop)
         }
 
         // Stop any tmux control-mode connections (no-op when the gate is off).

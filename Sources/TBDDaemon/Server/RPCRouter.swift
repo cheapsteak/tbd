@@ -17,6 +17,7 @@ public final class RPCRouter: Sendable {
     public let hibernationCoordinator: HibernationCoordinator
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
+    public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     /// In-memory per-profile OAuth usage poller. Wired post-construction by
     /// Daemon.swift (mirrors `claudeUsagePoller`); nil in unit tests / mock
