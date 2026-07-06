@@ -430,12 +430,17 @@ final class AppState: ObservableObject {
     /// User dismissed the build-mismatch banner. In-memory only (advisory);
     /// reset whenever the mismatch message changes.
     @Published var daemonBuildMismatchDismissed = false
-    /// Panes currently rendered through a live control-mode attach.
-    /// Maintained by `TerminalPanelRepresentable.Coordinator` (attach success
-    /// inserts; detach/fallback removes). Gates the input-health indicator:
-    /// it must NEVER show on a pane that isn't control-mode attached (#318
-    /// polish), whatever health deltas arrive.
-    @Published private(set) var controlModeAttachedPanes: Set<ControlModePaneKey> = []
+    /// Panes currently rendered through a live control-mode attach, mapped to
+    /// the attach GENERATION the record belongs to (`nil` when the daemon
+    /// vended none). Maintained by `TerminalPanelRepresentable.Coordinator`
+    /// (attach success inserts; detach/fallback removes). Gates the
+    /// input-health indicator: it must NEVER show on a pane that isn't
+    /// control-mode attached (#318 polish), whatever health deltas arrive.
+    /// Generation-scoped (M3 review fix) so a closing pane's stale clear —
+    /// landing after a fresh attach's set for the same pane under adverse
+    /// MainActor scheduling — cannot drop a healthy pane's attached state
+    /// (the app-side twin of the daemon's generation-checked detach).
+    @Published private(set) var controlModeAttachedPanes: [ControlModePaneKey: UInt64?] = [:]
     /// Panes the daemon has flagged input-failing via edge-triggered
     /// `controlModeInputHealthChanged` deltas. A `healthy: true` delta or a
     /// detach clears the flag. Read through `isInputDeliveryFailing(_:)`,
@@ -910,9 +915,13 @@ final class AppState: ObservableObject {
     // MARK: - Control-mode input-delivery health (#318 polish)
 
     /// Record that `paneID` is now rendered through a live control-mode
-    /// attach. Called by the terminal coordinator once `attach.ready` is acked.
-    func controlModePaneAttached(worktreeID: UUID, paneID: String) {
-        controlModeAttachedPanes.insert(ControlModePaneKey(worktreeID: worktreeID, paneID: paneID))
+    /// attach owned by `generation` (from `openAttach`; nil when the daemon
+    /// vended none). Called by the terminal coordinator once `attach.ready`
+    /// is acked. A re-attach for the same pane overwrites the record with its
+    /// own generation.
+    func controlModePaneAttached(worktreeID: UUID, paneID: String, generation: UInt64?) {
+        controlModeAttachedPanes[ControlModePaneKey(worktreeID: worktreeID, paneID: paneID)] =
+            generation
     }
 
     /// Clear a pane's attach record AND any failing flag — the indicator must
@@ -920,9 +929,22 @@ final class AppState: ObservableObject {
     /// (mirrors the daemon router's unregister semantics). Idempotent; also
     /// safe to call from the attach-failure fallback path where the pane was
     /// never marked attached.
-    func controlModePaneDetached(worktreeID: UUID, paneID: String) {
+    ///
+    /// Generation-scoped (M3 review fix): when `generation` is present, the
+    /// clear applies ONLY if it matches the recorded attach's generation — a
+    /// closing pane's stale clear landing after a fresh attach's set for the
+    /// same pane must not drop the successor's attached state. `nil`
+    /// (generation unknown — e.g. an openAttach that failed before vending
+    /// one) clears unconditionally, as before. A record stored WITHOUT a
+    /// generation can't be discriminated, so any detach clears it.
+    func controlModePaneDetached(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
         let key = ControlModePaneKey(worktreeID: worktreeID, paneID: paneID)
-        controlModeAttachedPanes.remove(key)
+        if let generation,
+           let record = controlModeAttachedPanes[key], let recordedGeneration = record,
+           recordedGeneration != generation {
+            return
+        }
+        controlModeAttachedPanes.removeValue(forKey: key)
         controlModeFailingInputPanes.remove(key)
     }
 
@@ -931,7 +953,8 @@ final class AppState: ObservableObject {
     /// failing delta for a non-attached pane (stale, or grouped-sessions
     /// fallback) never surfaces.
     func isInputDeliveryFailing(_ key: ControlModePaneKey) -> Bool {
-        controlModeAttachedPanes.contains(key) && controlModeFailingInputPanes.contains(key)
+        controlModeAttachedPanes.index(forKey: key) != nil
+            && controlModeFailingInputPanes.contains(key)
     }
 
     private func applyControlModeInputHealthDelta(_ delta: ControlModeInputHealthDelta) {

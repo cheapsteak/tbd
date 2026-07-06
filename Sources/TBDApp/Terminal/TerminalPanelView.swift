@@ -568,8 +568,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Task {
                     // Clear the attach record + any failing-input flag first
                     // so the indicator vanishes with the pane (#318 polish).
+                    // Generation-scoped like the daemon-side detach below: a
+                    // closing view's clear racing a new view's attach for the
+                    // same pane must not drop the fresh attach's record.
                     await appState.controlModePaneDetached(
-                        worktreeID: attach.worktreeID, paneID: attach.paneID)
+                        worktreeID: attach.worktreeID, paneID: attach.paneID,
+                        generation: attach.generation)
                     // Order matters: detach first so the daemon closes the
                     // pipe's write end (EOF unblocks the reader thread), then
                     // flag the reader — it closes its own fd on exit. The
@@ -669,8 +673,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 }
                 logger.info("control-mode attach live for pane \(paneID, privacy: .public)")
                 // Gate the input-health indicator open for this pane (#318
-                // polish): failing deltas only surface while attached.
-                appState.controlModePaneAttached(worktreeID: worktreeID, paneID: paneID)
+                // polish): failing deltas only surface while attached. The
+                // generation scopes the record to THIS attach so a stale
+                // clear can't drop it (M3 review fix).
+                appState.controlModePaneAttached(
+                    worktreeID: worktreeID, paneID: paneID, generation: generation)
             } catch {
                 logger.warning("""
                     control-mode attach failed for pane \(paneID, privacy: .public); \
@@ -684,8 +691,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 (terminalView as? TBDTerminalView)?.onControlModePaste = nil
                 // Clear any attach record / stale failing flag for this pane
                 // — the indicator must never show over the grouped-sessions
-                // fallback rendering.
-                appState.controlModePaneDetached(worktreeID: worktreeID, paneID: paneID)
+                // fallback rendering. Scoped to this attach's generation when
+                // known (nil → unconditional): a concurrent fresh attach's
+                // record must survive this stale failure's cleanup.
+                appState.controlModePaneDetached(
+                    worktreeID: worktreeID, paneID: paneID, generation: failedGeneration)
                 // Best-effort teardown of any half-completed attach (e.g. fd
                 // received and reader registered, but attach.ready failed):
                 // detach so the daemon EOFs the pipe, then flag the reader.
