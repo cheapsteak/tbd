@@ -751,6 +751,39 @@ public final class TBDDatabase: Sendable {
                 type: .boolean, defaults: false)
         }
 
+        // Suspend/Hibernate merge: converge every parked row on ONE authoritative
+        // timestamp. Post-merge, `hibernatedAt` is the single source of truth for
+        // "this session is parked" — all new code writes it (via the unified park
+        // path) and never writes `suspendedAt`. `suspendedAt` becomes LEGACY /
+        // read-only: honored when reading old rows, but never set again.
+        //
+        // Backfill: any row parked by the pre-merge Suspend feature has only
+        // `suspendedAt` set. Copy that timestamp into `hibernatedAt` (where NULL)
+        // so those rows read as parked through the authoritative column and wake
+        // (which keys on `hibernatedAt`) can un-park them. We intentionally LEAVE
+        // `suspendedAt` in place — never drop a column — so an older daemon build
+        // sharing this DB still sees its parked state; `isParked` reads either
+        // column, and wake's `clearHibernated` now nils both. No schema change
+        // here, only a data normalization; wrapped so a re-run under a renamed
+        // id is a harmless idempotent UPDATE (rows already backfilled won't match
+        // `hibernatedAt IS NULL`).
+        //
+        // Renumbered v40 -> v44 during the reconcile with main's limit-driven
+        // auto-resume (#341, whose migration is v43_scheduled_resumes above):
+        // this id must register AFTER main's highest migration so it applies
+        // last (append-only). GRDB tolerates an already-applied `v40_...` id on
+        // a DB that ran the pre-reconcile branch — the default migrator does not
+        // fail on unknown applied migrations, and this backfill is an idempotent
+        // UPDATE (guarded by `hibernatedAt IS NULL`), so re-running once under
+        // the new v44 id is a harmless no-op on rows already backfilled.
+        migrator.registerMigration("v44_unify_suspend_hibernate") { db in
+            try db.execute(sql: """
+                UPDATE terminal
+                SET hibernatedAt = suspendedAt
+                WHERE suspendedAt IS NOT NULL AND hibernatedAt IS NULL
+                """)
+        }
+
         return migrator
     }
 }

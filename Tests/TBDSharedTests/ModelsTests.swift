@@ -86,6 +86,67 @@ import Testing
     #expect(decoded.read == false)
 }
 
+// MARK: - Parked-state decode compatibility (suspend/hibernate merge)
+
+/// A legacy row parked by the pre-merge Suspend feature has ONLY `suspendedAt`
+/// set (no `hibernatedAt`). It must still decode AND read as parked, so the UI
+/// shows the moon and wake un-parks it.
+@Test func testTerminalWithOnlySuspendedAtDecodesAsParked() throws {
+    let json = """
+    {
+        "id": "\(UUID().uuidString)",
+        "worktreeID": "\(UUID().uuidString)",
+        "tmuxWindowID": "@1",
+        "tmuxPaneID": "%1",
+        "createdAt": 0,
+        "suspendedAt": 12345,
+        "activityState": "idle"
+    }
+    """
+    let decoded = try JSONDecoder().decode(Terminal.self, from: Data(json.utf8))
+    #expect(decoded.suspendedAt != nil)
+    #expect(decoded.hibernatedAt == nil)
+    #expect(decoded.isParked, "a legacy suspendedAt-only row must read as parked")
+    #expect(decoded.isHibernated == false, "isHibernated is authoritative-only")
+}
+
+/// The authoritative case: a row with ONLY `hibernatedAt` set (no `suspendedAt`)
+/// decodes and reads as parked (and hibernated).
+@Test func testTerminalWithOnlyHibernatedAtDecodesAsParked() throws {
+    let json = """
+    {
+        "id": "\(UUID().uuidString)",
+        "worktreeID": "\(UUID().uuidString)",
+        "tmuxWindowID": "@1",
+        "tmuxPaneID": "%1",
+        "createdAt": 0,
+        "hibernatedAt": 12345,
+        "activityState": "idle"
+    }
+    """
+    let decoded = try JSONDecoder().decode(Terminal.self, from: Data(json.utf8))
+    #expect(decoded.hibernatedAt != nil)
+    #expect(decoded.suspendedAt == nil)
+    #expect(decoded.isParked, "a hibernatedAt-only row must read as parked")
+    #expect(decoded.isHibernated)
+}
+
+/// Neither column set → NOT parked.
+@Test func testTerminalWithNeitherParkedTimestampIsNotParked() throws {
+    let json = """
+    {
+        "id": "\(UUID().uuidString)",
+        "worktreeID": "\(UUID().uuidString)",
+        "tmuxWindowID": "@1",
+        "tmuxPaneID": "%1",
+        "createdAt": 0,
+        "activityState": "idle"
+    }
+    """
+    let decoded = try JSONDecoder().decode(Terminal.self, from: Data(json.utf8))
+    #expect(!decoded.isParked)
+}
+
 // MARK: - Backwards Compatibility (decode with missing fields)
 
 /// Verifies that Worktree can decode from JSON that predates newer fields.

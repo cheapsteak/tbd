@@ -34,14 +34,11 @@ struct WorktreeRowView: View {
         return PRStatusPresentation.make(for: prStatus)
     }
 
-    private var hasSuspendedTerminal: Bool {
+    /// Any PARKED terminal — hibernated (authoritative) or legacy-suspended.
+    /// Suspend merged into hibernate: both now show the calm moon indicator.
+    private var hasParkedTerminal: Bool {
         let terminals = appState.terminals[worktree.id] ?? []
-        return terminals.contains { $0.suspendedAt != nil }
-    }
-
-    private var hasHibernatedTerminal: Bool {
-        let terminals = appState.terminals[worktree.id] ?? []
-        return terminals.contains { $0.isHibernated }
+        return terminals.contains { $0.isParked }
     }
 
     private var hasWorkingTerminal: Bool {
@@ -102,8 +99,9 @@ struct WorktreeRowView: View {
         switch RowStatusIndicator.suffix(
             notification: notification,
             isWorking: hasWorkingTerminal,
-            isSuspended: hasSuspendedTerminal,
-            isHibernated: hasHibernatedTerminal
+            // Suspend retired: every parked session funnels to the moon.
+            isSuspended: false,
+            isHibernated: hasParkedTerminal
         ) {
         case .working:
             TypingDotsView(color: SuffixRowIndicator.working.color)

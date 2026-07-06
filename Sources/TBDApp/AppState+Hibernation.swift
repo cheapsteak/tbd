@@ -77,11 +77,13 @@ extension AppState {
         }
     }
 
-    /// Auto-wake any hibernated Claude terminals in a worktree the user just
-    /// focused/selected. Called from the selection-change hook. Idempotent via
-    /// `wakeTerminal`'s in-flight guard, so double-focus is safe.
+    /// Auto-wake any PARKED Claude terminals in a worktree the user just
+    /// focused/selected. Covers both hibernated (authoritative) and legacy
+    /// suspended rows — wake is the one resume path. Called from the
+    /// selection-change hook. Idempotent via `wakeTerminal`'s in-flight guard,
+    /// so double-focus is safe.
     func wakeHibernatedTerminalsOnFocus(worktreeID: UUID) {
-        let hibernated = (terminals[worktreeID] ?? []).filter { $0.isHibernated }
+        let hibernated = (terminals[worktreeID] ?? []).filter { $0.isParked }
         guard !hibernated.isEmpty else { return }
         for terminal in hibernated {
             Task { await wakeTerminal(terminalID: terminal.id, worktreeID: worktreeID) }

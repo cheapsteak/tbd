@@ -178,20 +178,9 @@ struct SingleWorktreeView: View {
                         guard let terminalID = terminalID(for: tabID) else { return nil }
                         return appState.terminals[worktreeID]?.first { $0.id == terminalID }
                     },
-                    onSuspendTab: { tabID in
-                        guard let terminalID = terminalID(for: tabID) else { return }
-                        Task {
-                            try? await appState.daemonClient.terminalSuspend(terminalID: terminalID)
-                            await appState.refreshTerminals(worktreeID: worktreeID)
-                        }
-                    },
-                    onResumeTab: { tabID in
-                        guard let terminalID = terminalID(for: tabID) else { return }
-                        Task {
-                            try? await appState.daemonClient.terminalResume(terminalID: terminalID)
-                            await appState.refreshTerminals(worktreeID: worktreeID)
-                        }
-                    },
+                    // Tab-level suspend/resume and fork closures are gone:
+                    // park is a row-level action, and fork moved to the
+                    // in-menu "Fork Session" profile picker (#361).
                     isHistorySelected: appState.historyActiveWorktrees.contains(worktreeID),
                     onHistoryTab: {
                         appState.toggleHistory(worktreeID: worktreeID)

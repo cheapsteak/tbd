@@ -29,8 +29,6 @@ enum RowActionMenu {
         case copyPath
         case archiveScratch
         case deleteScratch
-        case suspendClaude
-        case resumeClaude
         /// Manually hibernate all idle Claude sessions in this worktree.
         case hibernateNow
         /// Wake all hibernated Claude sessions in this worktree.
@@ -100,10 +98,6 @@ enum RowActionMenu {
     /// The small set of live inputs the current `SidebarContextMenu` reads from
     /// `AppState`, lifted into a value type so `items(...)` is a pure function.
     struct Context: Equatable {
-        /// Has at least one resumable Claude terminal that is NOT suspended.
-        var hasUnsuspendedClaude: Bool
-        /// Has at least one resumable Claude terminal that IS suspended.
-        var hasSuspendedClaude: Bool
         /// Has at least one Claude terminal eligible for a manual "Hibernate
         /// now" right now (idle-at-rest, not running/waiting/hibernated).
         var hasHibernatableClaude: Bool
@@ -133,9 +127,7 @@ enum RowActionMenu {
         /// "Fork session" entries (empty → none).
         var claudeSessions: [ClaudeSessionRef]
 
-        init(hasUnsuspendedClaude: Bool = false,
-             hasSuspendedClaude: Bool = false,
-             hasHibernatableClaude: Bool = false,
+        init(hasHibernatableClaude: Bool = false,
              hasHibernatedClaude: Bool = false,
              hasUnpinnedClaude: Bool = false,
              hasKeepWarmClaude: Bool = false,
@@ -147,8 +139,6 @@ enum RowActionMenu {
              isPromoted: Bool = false,
              branch: String = "",
              claudeSessions: [ClaudeSessionRef] = []) {
-            self.hasUnsuspendedClaude = hasUnsuspendedClaude
-            self.hasSuspendedClaude = hasSuspendedClaude
             self.hasHibernatableClaude = hasHibernatableClaude
             self.hasHibernatedClaude = hasHibernatedClaude
             self.hasUnpinnedClaude = hasUnpinnedClaude
@@ -290,12 +280,6 @@ enum RowActionMenu {
         var items: [Item] = [
             .action(Action(kind: .rename, title: "Rename...")),
         ]
-        if context.hasUnsuspendedClaude {
-            items.append(.action(Action(kind: .suspendClaude, title: "Suspend Claude")))
-        }
-        if context.hasSuspendedClaude {
-            items.append(.action(Action(kind: .resumeClaude, title: "Resume Claude")))
-        }
         items.append(contentsOf: hibernationActions(context: context).map(Item.action))
         // Per-session fork — only in surfaces without an account section (the
         // right-click menu). The "…" menu renders fork in its account section.

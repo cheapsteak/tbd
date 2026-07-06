@@ -347,17 +347,23 @@ struct PanePlaceholder: View {
                         Task { await appState.recreateTerminalWindow(terminalID: terminalID) }
                     },
                     initialSnapshot: terminal.suspendedSnapshot,
-                    isSuspendedSnapshot: terminal.suspendedAt != nil,
+                    // Show the frozen snapshot backdrop while PARKED — hibernated
+                    // (authoritative) or legacy-suspended. The unified park path
+                    // captures a snapshot into `suspendedSnapshot`, so hibernated
+                    // rows have one too.
+                    isSuspendedSnapshot: terminal.isParked,
                     shouldSuppressEvents: { [overlayCoordinator] in
                         shouldSuppressEvents(in: overlayCoordinator, forTerminalID: terminalID)
                     }
                 )
-                .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.suspendedAt != nil)")
+                .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.isParked)")
                 .overlay(alignment: .topTrailing) {
-                    if terminal.suspendedAt != nil {
+                    if terminal.isParked {
                         Button {
                             Task {
-                                try? await appState.daemonClient.terminalResume(terminalID: terminal.id)
+                                // Wake is the single resume path for parked
+                                // sessions (hibernated or legacy-suspended).
+                                try? await appState.daemonClient.terminalWake(terminalID: terminal.id)
                                 await appState.refreshTerminals(worktreeID: worktree.id)
                             }
                         } label: {

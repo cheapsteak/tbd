@@ -455,8 +455,9 @@ public final class Daemon: Sendable {
         try await http.start()
 
         if mockMode == nil {
-            // 11. Reconcile suspend/resume state for all worktrees
-            await rpcRouter.suspendResumeCoordinator.reconcileOnStartup()
+            // 11. Reconcile parked (hibernated / legacy-suspended) state: clear a
+            // stale parked timestamp for any terminal whose Claude is still alive.
+            await rpcRouter.hibernationCoordinator.reconcileOnStartup()
         }
 
         // 11. Perform DB-mutating reconciliation (skipped in mock mode so fixtures render as authored)
