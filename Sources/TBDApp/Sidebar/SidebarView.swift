@@ -54,6 +54,10 @@ struct SidebarView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 Divider()
+                NightwatchModeToggle()
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 6)
                 HStack(spacing: 4) {
                     Button(action: addRepo) {
                         Label("Add Repository", systemImage: "plus.rectangle")
@@ -65,7 +69,7 @@ struct SidebarView: View {
                     filterMenu
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.bottom, 8)
             }
             .background(.bar)
         }
