@@ -98,7 +98,6 @@ struct ModelProfileRow: View {
     @State private var showEditClaudeDirect = false
 
     private var profile: ModelProfile { entry.profile }
-    private var usage: ModelProfileUsage? { entry.usage }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -146,6 +145,11 @@ struct ModelProfileRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            if let usageLine {
+                Text(usageLine)
+                    .font(.caption)
+                    .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+            }
         }
         .contentShape(Rectangle())
         .confirmationDialog("Delete profile?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
@@ -176,6 +180,16 @@ struct ModelProfileRow: View {
     /// "Open login session" affordance next to the caption.
     private var needsLogin: Bool {
         ProfileLoginPresentation.needsLogin(kind: profile.kind, loginIdentity: entry.loginIdentity)
+    }
+
+    /// Per-account usage summary shown under the identity/endpoint caption,
+    /// reusing `ProfileUsagePresentation.secondaryLine` over the daemon poller's
+    /// `usageSnapshot` — the SAME source and honest-state handling the account
+    /// menus render, so a rate-limited / needs-re-login / stale profile shows an
+    /// explicit note rather than a silent blank. `nil` (no line) only when there
+    /// is genuinely no snapshot (Bedrock/proxy profiles, or not yet polled).
+    private var usageLine: String? {
+        ProfileUsagePresentation.secondaryLine(for: entry.usageSnapshot)
     }
 
     @ViewBuilder
