@@ -7,9 +7,9 @@ import TBDShared
 ///
 /// Pure composition on top of a small `Context` of live inputs the surfaces read
 /// from `AppState`. No AppKit, no SwiftUI: `role` is our own `ActionRole` and the
-/// view maps it to SwiftUI's `.destructive`. `items(worktree:context:)` is a pure
-/// function of its inputs, so the ordered structure both surfaces render is
-/// directly unit-testable without any `AppState`.
+/// view maps it to SwiftUI's `.destructive`. `items(context:includeSessionForks:)`
+/// is a pure function of its inputs, so the ordered structure both surfaces
+/// render is directly unit-testable without any `AppState`.
 ///
 /// The account section (per-session info + "Switch account") is intentionally
 /// NOT modeled here — it is contributed separately by `RowAccountMenu` and shown
@@ -21,9 +21,6 @@ enum RowActionMenu {
     /// Stable typed identity for each action, so the view can dispatch to the
     /// right side effect without stringly-typed matching on titles.
     enum Kind: Equatable {
-        case newClaudeTerminal
-        case newCodexTerminal
-        case newShellTerminal
         case rename
         case openInFinder
         case copyPath
@@ -159,6 +156,10 @@ enum RowActionMenu {
     static let promoteHint =
         "To promote: run `tbd scratch promote <dest>` from a session here"
     static let archiveNeedsChildrenGoneHelp = "Archive nested worktrees first"
+    /// Archive title when the row still has active nested children: the action
+    /// stays visible (and destructive-styled) but is disabled, and the title
+    /// itself explains why, since menu tooltips are easy to miss.
+    static let archiveHasChildrenLabel = "Archive (has children)"
     static let forkSessionLabel = "Fork session"
     static let newWorktreeFromBranchLabel = "New worktree from this branch…"
     static let hibernateNowLabel = "Hibernate now"
@@ -174,9 +175,21 @@ enum RowActionMenu {
 
     // MARK: - Composition
 
-    /// The ordered action list for a worktree row. Pure function of `context`;
-    /// the three branches map exactly to today's `SidebarContextMenu` branches
-    /// (scratch / main-or-creating / regular), preserving item order within each.
+    /// The ordered action list for a worktree row. Pure function of `context`,
+    /// with three branches (scratch / main-or-creating / regular). The regular
+    /// and scratch branches share a sectioned layout, top to bottom:
+    ///
+    /// 1. Identity — Rename, then Archive (destructive; disabled + retitled
+    ///    "Archive (has children)" for a regular row with active children).
+    /// 2. Hibernation — Wake / Hibernate now / keep-warm toggle (conditional).
+    /// 3. Sessions & spawning — per-session Fork entries, plus (regular only)
+    ///    Create Nested Worktree / New worktree from this branch.
+    /// 4. Filesystem — Open in Finder, Copy Path.
+    /// 5. (scratch only) Delete Scratch Space, with the promote-hint caption
+    ///    beneath it.
+    ///
+    /// Sections are joined with a single divider each; empty sections collapse,
+    /// so the list never renders doubled or dangling dividers.
     ///
     /// `includeSessionForks` controls whether per-session "Fork session" entries
     /// are part of this list. The right-click menu passes `true` (it has no
@@ -233,37 +246,42 @@ enum RowActionMenu {
         }
     }
 
+    /// Join non-empty sections with a single `.divider` between them. Empty
+    /// sections (e.g. no hibernation-eligible sessions, or forks excluded with
+    /// nothing else in that section) collapse entirely, so the rendered list
+    /// never shows doubled dividers or a leading/trailing one.
+    private static func joined(_ sections: [[Item]]) -> [Item] {
+        Array(sections.filter { !$0.isEmpty }.joined(separator: [Item.divider]))
+    }
+
     private static func scratchItems(context: Context, includeSessionForks: Bool) -> [Item] {
-        var items: [Item] = [
-            .action(Action(kind: .newClaudeTerminal, title: "New Claude Terminal")),
-            .action(Action(kind: .newCodexTerminal, title: "New Codex Terminal")),
-            .action(Action(kind: .newShellTerminal, title: "New Shell Terminal")),
-        ]
-        // Scratch spaces host Claude sessions too — same fork parity as the
-        // regular branch (right-click carries fork; the "…" menu's account
-        // section renders it instead).
-        if includeSessionForks {
-            items.append(contentsOf: forkActions(context: context).map(Item.action))
-        }
-        items.append(contentsOf: hibernationActions(context: context).map(Item.action))
-        items.append(contentsOf: [
-            .divider,
-            .action(Action(kind: .rename, title: "Rename...")),
-        ])
-        if !context.isPromoted {
-            items.append(.caption(promoteHint))
-        }
-        items.append(contentsOf: [
-            .divider,
-            .action(Action(kind: .openInFinder, title: "Open in Finder")),
-            .action(Action(kind: .copyPath, title: "Copy Path")),
-            .divider,
-            // `.destructive` for consistency with the repo-worktree Archive even
-            // though scratch archive is recoverable and leaves the folder on disk.
-            .action(Action(kind: .archiveScratch, title: "Archive", role: .destructive)),
+        // Trailing section: Delete stays last among the actions; the
+        // promote-hint caption sits beneath it as the menu's footnote.
+        var trailing: [Item] = [
             .action(Action(kind: .deleteScratch, title: "Delete Scratch Space", role: .destructive)),
+        ]
+        if !context.isPromoted {
+            trailing.append(.caption(promoteHint))
+        }
+        return joined([
+            [
+                .action(Action(kind: .rename, title: "Rename...")),
+                // `.destructive` for consistency with the repo-worktree Archive
+                // even though scratch archive is recoverable and leaves the
+                // folder on disk.
+                .action(Action(kind: .archiveScratch, title: "Archive", role: .destructive)),
+            ],
+            hibernationActions(context: context).map(Item.action),
+            // Scratch spaces host Claude sessions too — same fork parity as the
+            // regular branch (right-click carries fork; the "…" menu's account
+            // section renders it instead).
+            includeSessionForks ? forkActions(context: context).map(Item.action) : [],
+            [
+                .action(Action(kind: .openInFinder, title: "Open in Finder")),
+                .action(Action(kind: .copyPath, title: "Copy Path")),
+            ],
+            trailing,
         ])
-        return items
     }
 
     private static func mainItems(context: Context) -> [Item] {
@@ -277,36 +295,42 @@ enum RowActionMenu {
     }
 
     private static func regularItems(context: Context, includeSessionForks: Bool) -> [Item] {
-        var items: [Item] = [
-            .action(Action(kind: .rename, title: "Rename...")),
-        ]
-        items.append(contentsOf: hibernationActions(context: context).map(Item.action))
-        // Per-session fork — only in surfaces without an account section (the
-        // right-click menu). The "…" menu renders fork in its account section.
+        let archiveBlocked = context.hasActiveChildren
+
+        // Sessions & spawning: per-session fork (only in surfaces without an
+        // account section — the right-click menu; the "…" menu renders fork in
+        // its account section), then the nested-worktree creators.
+        var spawning: [Item] = []
         if includeSessionForks {
-            items.append(contentsOf: forkActions(context: context).map(Item.action))
+            spawning.append(contentsOf: forkActions(context: context).map(Item.action))
         }
-        // Scratch spaces have no repo, so nesting isn't offered for them.
+        // Nested-worktree creation is repo-only.
         if context.hasRepoID {
-            items.append(.action(Action(kind: .createNestedWorktree, title: "Create Nested Worktree")))
+            spawning.append(.action(Action(kind: .createNestedWorktree, title: "Create Nested Worktree")))
             // Base a child worktree on this worktree's current branch. Needs a
             // branch to check out — omitted when empty.
             if !context.branch.isEmpty {
-                items.append(.action(Action(kind: .newWorktreeFromBranch, title: newWorktreeFromBranchLabel)))
+                spawning.append(.action(Action(kind: .newWorktreeFromBranch, title: newWorktreeFromBranchLabel)))
             }
         }
-        items.append(.action(Action(
-            kind: .archive,
-            title: "Archive",
-            role: .destructive,
-            isEnabled: !context.hasActiveChildren,
-            disabledHelp: context.hasActiveChildren ? archiveNeedsChildrenGoneHelp : nil
-        )))
-        items.append(contentsOf: [
-            .divider,
-            .action(Action(kind: .openInFinder, title: "Open in Finder")),
-            .action(Action(kind: .copyPath, title: "Copy Path")),
+
+        return joined([
+            [
+                .action(Action(kind: .rename, title: "Rename...")),
+                .action(Action(
+                    kind: .archive,
+                    title: archiveBlocked ? archiveHasChildrenLabel : "Archive",
+                    role: .destructive,
+                    isEnabled: !archiveBlocked,
+                    disabledHelp: archiveBlocked ? archiveNeedsChildrenGoneHelp : nil
+                )),
+            ],
+            hibernationActions(context: context).map(Item.action),
+            spawning,
+            [
+                .action(Action(kind: .openInFinder, title: "Open in Finder")),
+                .action(Action(kind: .copyPath, title: "Copy Path")),
+            ],
         ])
-        return items
     }
 }
