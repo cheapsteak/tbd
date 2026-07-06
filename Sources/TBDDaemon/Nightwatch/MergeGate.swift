@@ -161,10 +161,10 @@ public struct NightwatchPolicy: Sendable, Equatable {
 
 extension NightwatchPolicy: Codable {
     enum CodingKeys: String, CodingKey {
-        case impactMapGlobs = "impactMapGlobs"
-        case compiledSizeCeiling = "compiledSizeCeiling"
-        case testHoldList = "testHoldList"
-        case allowRebaseReclearance = "allowRebaseReclearance"
+        case impactMapGlobs
+        case compiledSizeCeiling
+        case testHoldList
+        case allowRebaseReclearance
     }
 
     public init(from decoder: Decoder) throws {
