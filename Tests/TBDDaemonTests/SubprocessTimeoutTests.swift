@@ -55,18 +55,20 @@ struct SubprocessTimeoutTests {
         // old blocking `readDataToEndOfFile` drain leaked two parked
         // global-queue threads + two pipe FDs (+ retained closures) per
         // timed-out call. Shape: the parent execs into a sleep that the 1s
-        // timeout kills (SIGTERM→SIGKILL), while a backgrounded grandchild
-        // keeps the write end open for 30s. The call must throw .timedOut
-        // around the timeout, not wait anywhere near the grandchild's EOF.
+        // timeout kills (SIGTERM→SIGKILL; the SIGKILLed direct child dies at
+        // ~timeout+500ms), while a backgrounded grandchild keeps the write end
+        // open for 120s. The call must throw .timedOut around the timeout, not
+        // wait anywhere near the grandchild's EOF.
         //
-        // The plain `sleep 30 &` grandchild is NOT killed by the watchdog and
-        // may linger up to 30s after the suite — tolerable orphanage; it holds
-        // no resources beyond a PID.
+        // The plain `sleep 120 &` grandchild is NOT killed by the watchdog and
+        // may linger up to 120s after the suite — harmless orphanage locally
+        // (it holds no resources beyond a PID), irrelevant on ephemeral CI
+        // runners.
         let start = ContinuousClock.now
         do {
             _ = try await TmuxManager.runExternalCommand(
                 executable: "/bin/sh",
-                arguments: ["-c", "sleep 30 & echo hi; exec sleep 30"],
+                arguments: ["-c", "sleep 120 & echo hi; exec sleep 120"],
                 label: "grandchild-pipe-timeout-test",
                 timeout: .seconds(1)
             )
@@ -79,12 +81,14 @@ struct SubprocessTimeoutTests {
         } catch {
             Issue.record("expected TmuxError.timedOut, got \(error)")
         }
-        // Generous bound (1s timeout vs 30s grandchild): finishing under 15s
-        // proves nothing waited for the grandchild to release the write end,
-        // with ample headroom for scheduler contention under full-suite
-        // parallel load (15s is this repo's established parallel-load
-        // deadline; the old 4s bound was measured breached at 4.676s).
-        #expect(ContinuousClock.now - start < .seconds(15))
+        // Generous bound (1s timeout vs 120s grandchild): finishing under 60s
+        // proves nothing waited for the grandchild to release the write end.
+        // Sized from measured breaches under contention: 4.676s locally (old
+        // 4s bound), then 19.249s on a 2-core CI runner under full-suite
+        // parallel load (old 15s bound). 60s gives ~3x headroom over the CI
+        // worst case, while a regressed EOF-waiting implementation would take
+        // the full 120s and fail unambiguously.
+        #expect(ContinuousClock.now - start < .seconds(60))
     }
 
     @Test func runExternalCommandReturnsWithoutWaitingForGrandchildEOF() async throws {

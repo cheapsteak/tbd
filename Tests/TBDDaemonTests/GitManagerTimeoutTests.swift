@@ -73,19 +73,21 @@ struct GitManagerTimeoutTests {
     @Test func timeoutThrowsPromptlyWhenGrandchildHoldsPipeOpen() async {
         // Mirrors SubprocessTimeoutTests: the watchdog kills only the DIRECT
         // child (SIGTERM→SIGKILL); a backgrounded grandchild inherits the pipe
-        // write ends and keeps them open for 30s, so EOF never arrives before
+        // write ends and keeps them open for 120s, so EOF never arrives before
         // it exits. The timer path must nil the readability handlers AND
         // finish() both accumulators (closing the parent read ends) so nothing
         // waits for — or stays open until — the grandchild's EOF. Shape:
-        // parent execs into a sleep the 1s timeout kills; grandchild sleeps
-        // 30s. The plain `sleep 30 &` grandchild is NOT killed and may linger
-        // up to 30s after the suite — tolerable orphanage.
+        // parent execs into a sleep the 1s timeout kills (the SIGKILLed direct
+        // child dies at ~timeout+500ms); grandchild sleeps 120s. The plain
+        // `sleep 120 &` grandchild is NOT killed and may linger up to 120s
+        // after the suite — harmless orphanage locally, irrelevant on
+        // ephemeral CI runners.
         let git = GitManager(subprocessTimeout: .seconds(1))
         let start = ContinuousClock.now
         do {
             _ = try await git.runForTimeoutTesting(
                 executable: "/bin/sh",
-                arguments: ["-c", "sleep 30 & exec sleep 30"],
+                arguments: ["-c", "sleep 120 & exec sleep 120"],
                 at: FileManager.default.temporaryDirectory.path
             )
             Issue.record("expected runForTimeoutTesting to time out, but it returned")
@@ -94,12 +96,14 @@ struct GitManagerTimeoutTests {
         } catch {
             Issue.record("expected GitTimeoutError, got \(error)")
         }
-        // Generous bound (1s timeout vs 30s grandchild): finishing under 15s
-        // proves nothing waited for the grandchild to release the write end,
-        // with ample headroom for scheduler contention under full-suite
-        // parallel load (15s is this repo's established parallel-load
-        // deadline; the old 4s bound was measured breached at 4.676s).
-        #expect(ContinuousClock.now - start < .seconds(15))
+        // Generous bound (1s timeout vs 120s grandchild): finishing under 60s
+        // proves nothing waited for the grandchild to release the write end.
+        // Sized from measured breaches under contention: 4.676s locally (old
+        // 4s bound), then 19.446s on a 2-core CI runner under full-suite
+        // parallel load (old 15s bound). 60s gives ~3x headroom over the CI
+        // worst case, while a regressed EOF-waiting implementation would take
+        // the full 120s and fail unambiguously.
+        #expect(ContinuousClock.now - start < .seconds(60))
     }
 
     @Test func returnsOutputWithoutWaitingForGrandchildEOF() async throws {
