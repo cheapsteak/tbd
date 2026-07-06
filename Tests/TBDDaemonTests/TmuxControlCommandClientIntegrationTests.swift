@@ -115,6 +115,42 @@ struct TmuxControlCommandClientIntegrationTests {
         await supervisor.stopAll()
     }
 
+    @Test("a >8KB command-list batch is written fully and correlation stays intact (R5-5)")
+    func largeBatchWritesFully() async throws {
+        guard let version = await TmuxVersion.detect(),
+              version >= TmuxVersion.controlModeMinimum else {
+            return
+        }
+
+        let server = "tbd-cmd-\(UUID().uuidString.prefix(8))"
+        defer { tmux(["-L", server, "kill-server"]) }
+        try #require(tmux(["-L", server, "new-session", "-d", "-s", "main", "-x", "80", "-y", "24"]),
+                     "failed to bootstrap test tmux server")
+
+        let supervisor = TmuxControlSupervisor()
+        await supervisor.ensureConnection(serverName: server)
+        let client = try await awaitClient(supervisor, server: server)
+
+        // 200 commands ≈ 15 KB joined into ONE pty write — well past 8 KB, so
+        // the kernel cannot take it in a single short-write-free gulp; the
+        // full-write loop in sendCommand is what keeps the tail from being
+        // silently truncated (which would desync the FIFO for every later
+        // command). Every reply must come back, in order, with its own marker.
+        let count = 200
+        let padding = String(repeating: "x", count: 40)
+        let markers = (0..<count).map { String(format: "tbd-batch-%03d-\(padding)", $0) }
+        let box = OrderedResults()
+        await client.sendList(markers.map { marker in
+            TmuxCommand(text: "display-message -p \(marker)") { box.record($0) }
+        })
+
+        try await box.waitForCount(count, timeout: .seconds(60))
+        #expect(box.lines == markers.map { [$0] },
+                "all \(count) replies must arrive in submission order")
+
+        await supervisor.stopAll()
+    }
+
     @Test("a connection re-established immediately after stopAll survives the old drain's cleanup")
     func reconnectSurvivesStaleDrainCleanup() async throws {
         guard let version = await TmuxVersion.detect(),

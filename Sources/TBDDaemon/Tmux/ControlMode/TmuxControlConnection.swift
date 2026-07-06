@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TBDShared
 import os
 
 /// Owns a single `tmux -CC attach` control-mode connection to one tmux server.
@@ -148,15 +149,41 @@ final class TmuxControlConnection: @unchecked Sendable {
         if fd >= 0 { Darwin.close(fd) }
     }
 
-    /// Write a raw tmux command line to the control client's stdin.
-    /// Phase 1 has no production callers; exercising the path here keeps later
-    /// phases (resize, send-keys) on a working writer.
+    /// Write a raw tmux command line to the control client's stdin, in full.
+    ///
+    /// The write is load-bearing for the FIFO correlator (R5-5): a short pty
+    /// write that silently dropped the tail would truncate the command —
+    /// tmux would see garbage (or half a command fused with the next one) and
+    /// every later reply block would be matched to the wrong caller. So the
+    /// bytes go through `FDChannel.sendData`'s full-write loop (partial
+    /// writes resumed, `EINTR` retried), under `ioLock` like every other
+    /// `primaryFD` access.
+    ///
+    /// On an unrecoverable write error the stream is desynced-by-truncation —
+    /// route into the EXISTING connection-failure path rather than limp
+    /// along: terminating the child releases the pty replica, the reader
+    /// observes EOF and finishes the event stream, and the supervisor's drain
+    /// performs the usual cleanup (maps + `connectionClosed`, failing every
+    /// pending command). No new teardown semantics.
     func sendCommand(_ command: String) {
-        let bytes = Array((command.hasSuffix("\n") ? command : command + "\n").utf8)
+        let data = Data((command.hasSuffix("\n") ? command : command + "\n").utf8)
         ioLock.lock()
-        defer { ioLock.unlock() }
-        guard primaryFD >= 0 else { return }
-        _ = bytes.withUnsafeBytes { Darwin.write(primaryFD, $0.baseAddress, $0.count) }
+        guard primaryFD >= 0 else {
+            ioLock.unlock()
+            return
+        }
+        do {
+            try FDChannel.sendData(data, over: primaryFD)
+            ioLock.unlock()
+        } catch {
+            ioLock.unlock()
+            logger.error("""
+                control stream write failed for \(self.serverName, privacy: .public): \
+                \(String(describing: error), privacy: .public) — terminating the connection \
+                (a truncated command would desync the FIFO)
+                """)
+            if process.isRunning { process.terminate() }
+        }
     }
 
     private func readLoop(_ fd: Int32) {
