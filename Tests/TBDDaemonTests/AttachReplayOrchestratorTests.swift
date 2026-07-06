@@ -56,7 +56,7 @@ struct AttachReplayOrchestratorTests {
     /// Poll until `condition`, failing after `deadline` (async work — the
     /// orchestrator's batch write — lands on other tasks).
     private func waitFor(
-        _ what: String, deadline: Duration = .seconds(15),
+        _ what: String, deadline: Duration = .seconds(60),
         sourceLocation: SourceLocation = #_sourceLocation,
         _ condition: @Sendable () async -> Bool
     ) async throws {

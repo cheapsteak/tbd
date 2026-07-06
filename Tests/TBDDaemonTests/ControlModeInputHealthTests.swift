@@ -43,7 +43,7 @@ struct ControlModeInputHealthTests {
     /// post-deadline re-check; see ControlModeInputRouterTests.waitForWrites for
     /// why the budget is generous under parallel-suite load).
     private func waitForEvents(_ recorder: HealthRecorder, count: Int,
-                               timeout: Duration = .seconds(15)) async throws {
+                               timeout: Duration = .seconds(60)) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if recorder.events.count >= count { return }
@@ -54,7 +54,7 @@ struct ControlModeInputHealthTests {
     }
 
     private func waitForWrites(_ recorder: Recorder, count: Int,
-                               timeout: Duration = .seconds(15)) async throws {
+                               timeout: Duration = .seconds(60)) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if recorder.writes.count >= count { return }

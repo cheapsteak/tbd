@@ -40,7 +40,7 @@ struct ControlModeInputRouterTests {
     /// (observed live as `timedOut(got: N, want: N)` at loadavg ~40), and the
     /// old 2 s budget starved outright (`got: 2, want: 4`).
     private func waitForWrites(_ recorder: Recorder, count: Int,
-                              timeout: Duration = .seconds(15)) async throws {
+                               timeout: Duration = .seconds(60)) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
             if recorder.writes.count >= count { return }

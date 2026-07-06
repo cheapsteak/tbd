@@ -177,7 +177,7 @@ struct AttachRPCOrchestrationTests {
     }
 
     private func waitFor(
-        _ what: String, deadline: Duration = .seconds(15),
+        _ what: String, deadline: Duration = .seconds(60),
         sourceLocation: SourceLocation = #_sourceLocation,
         _ condition: @Sendable () async -> Bool
     ) async throws {
@@ -676,7 +676,7 @@ struct AttachRPCOrchestrationTests {
             method: RPCMethod.paneDetach,
             params: PaneDetachParams(worktreeID: worktreeID, paneID: "%3", generation: gen2))
         #expect((await router.handle(currentDetach)).success)
-        #expect(try await eofObserved(on: fd2, within: .seconds(5)) == true,
+        #expect(try await eofObserved(on: fd2, within: .seconds(60)) == true,
                 "matching-generation pane.detach must detach (EOF)")
     }
 
@@ -722,7 +722,7 @@ struct AttachRPCOrchestrationTests {
         #expect((await router.handle(detach)).success)
         let flags = fcntl(fd, F_GETFL)
         _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
-        #expect(try await eofObserved(on: fd, within: .seconds(5)) == true,
+        #expect(try await eofObserved(on: fd, within: .seconds(60)) == true,
                 "generation-less pane.detach must still detach (EOF)")
     }
 
