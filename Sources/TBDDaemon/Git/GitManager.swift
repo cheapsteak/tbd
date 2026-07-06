@@ -454,6 +454,8 @@ public struct GitManager: Sendable {
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
+            let stdoutAccumulator = PipeDataAccumulator()
+            let stderrAccumulator = PipeDataAccumulator()
 
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
@@ -468,8 +470,15 @@ public struct GitManager: Sendable {
             timer.setEventHandler {
                 guard state.claim() else { return }
                 timer.cancel()
+                // Stop draining and close the parent read ends NOW (mirrors
+                // TmuxManager.runExternalCommand). The kill below reaches only
+                // the DIRECT child; grandchildren it forked inherit the pipe
+                // write ends, so EOF may never come — waiting for it would
+                // leak the FDs and handler closures for their lifetime.
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
+                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
                 let pid = process.processIdentifier
                 if pid > 0 {
                     kill(pid, SIGTERM)
@@ -484,8 +493,6 @@ public struct GitManager: Sendable {
             // Drain pipes incrementally to prevent deadlock when output exceeds the
             // OS pipe buffer (~64KB). Without this, the child process blocks on
             // write and `terminationHandler` never fires.
-            let stdoutAccumulator = PipeDataAccumulator()
-            let stderrAccumulator = PipeDataAccumulator()
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 if !stdoutAccumulator.readAvailable(from: handle) {
                     handle.readabilityHandler = nil
@@ -526,6 +533,12 @@ public struct GitManager: Sendable {
                 try process.run()
                 timer.resume()
             } catch {
+                // Spawn failed: no child will ever write — detach the drain
+                // handlers and close the read ends so nothing lingers.
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
                 guard state.claim() else { return }
                 timer.cancel()
                 continuation.resume(throwing: error)
@@ -580,19 +593,34 @@ public struct GitManager: Sendable {
 
 /// Thread-safe accumulator for incremental pipe reads.
 ///
-/// Invariant: `availableData`/`readToEnd` and the corresponding append happen
-/// under the same lock as `finish`. This prevents `terminationHandler` from
-/// snapshotting between a readability handler's read and its append, which
-/// would silently drop the in-flight chunk.
-private final class PipeDataAccumulator: @unchecked Sendable {
+/// Invariant: the readability handler's read and the corresponding append
+/// happen under the same lock as `finish`. This prevents `terminationHandler`
+/// from snapshotting between a readability handler's read and its append,
+/// which would silently drop the in-flight chunk.
+///
+/// `finish` deliberately never blocks waiting for EOF: if the child forked
+/// background grandchildren (a login shell's rc files often do), they inherit
+/// the pipe write end and EOF never arrives after the direct child dies. A
+/// blocking read-to-EOF would park a thread — and retain the pipe FD and every
+/// captured closure — for the grandchildren's lifetime. Instead `finish`
+/// drains only what is already buffered in the kernel pipe (non-blocking) and
+/// closes the parent's read end, so nothing outlives the call.
+///
+/// Package-internal (not `private`) so `TmuxManager.runExternalCommand` shares
+/// it — same >64KB drain deadlock, same grandchild-holds-write-end leak, same
+/// fix (mirrors the shared `ContinuationGuard`).
+final class PipeDataAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
+    private var finished = false
 
     /// Reads any available data from `handle` and appends it atomically.
-    /// Returns `false` on EOF (empty read), `true` otherwise.
+    /// Returns `false` on EOF or after `finish` closed the handle (so the
+    /// caller detaches the readability handler), `true` otherwise.
     func readAvailable(from handle: FileHandle) -> Bool {
         lock.lock()
         defer { lock.unlock() }
+        guard !finished else { return false }
         let chunk = handle.availableData
         if chunk.isEmpty {
             return false
@@ -601,15 +629,41 @@ private final class PipeDataAccumulator: @unchecked Sendable {
         return true
     }
 
-    /// Drains any remaining buffered data from `handle` and returns the full
-    /// accumulated buffer. Acquiring the lock blocks until any in-flight
-    /// `readAvailable` call has completed its append.
+    /// Drains whatever is already buffered in the pipe WITHOUT blocking,
+    /// closes the parent's read end, and returns the full accumulated buffer.
+    /// On the termination path the direct child is dead, so everything it
+    /// wrote is already in the kernel pipe buffer and the non-blocking read
+    /// loop loses nothing. On the timeout and spawn-failure paths the child
+    /// may still be alive (or wedged, SIGKILL-immune); anything it writes
+    /// after this snapshot is intentionally dropped — the call is already
+    /// failing, and waiting for EOF is exactly the leak this exists to avoid.
+    /// Acquiring the lock blocks until any in-flight `readAvailable` call has
+    /// completed its append (and prevents it from touching the closed handle
+    /// afterwards). Idempotent: later calls return the buffer untouched.
     func finish(handle: FileHandle) -> Data {
         lock.lock()
         defer { lock.unlock() }
-        if let tail = try? handle.readToEnd(), !tail.isEmpty {
-            data.append(tail)
+        guard !finished else { return data }
+        finished = true
+        let fd = handle.fileDescriptor
+        let flags = fcntl(fd, F_GETFL)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
         }
+        var chunk = [UInt8](repeating: 0, count: 65_536)
+        while true {
+            let count = read(fd, &chunk, chunk.count)
+            if count > 0 {
+                data.append(contentsOf: chunk.prefix(count))
+            } else if count < 0 && errno == EINTR {
+                continue
+            } else {
+                // 0 = EOF; -1/EAGAIN = drained all buffered data. Either way
+                // the writer can add nothing we are obliged to wait for.
+                break
+            }
+        }
+        try? handle.close()
         return data
     }
 }

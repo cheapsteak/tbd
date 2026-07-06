@@ -258,23 +258,34 @@ public actor HibernationCoordinator {
         }
         // Detect orphaned claude descendants (children reparented to launchd
         // after the parent died) so they're observable via `log stream`.
-        if let orphans = detectOrphanedClaudeProcesses(), !orphans.isEmpty {
+        if let orphans = await Self.detectOrphanedClaudeProcesses(), !orphans.isEmpty {
             logger.warning("hibernate: \(orphans.count, privacy: .public) orphaned claude-descendant process(es) survived hibernation of terminal \(terminalID, privacy: .public): PIDs \(orphans.map(String.init).joined(separator: ","), privacy: .public)")
         }
     }
 
     /// Enumerate claude processes now parented to PID 1 (launchd) — a rough
     /// signal of orphaned children left by a killed claude. Log-only in v1.
-    private func detectOrphanedClaudeProcesses() -> [Int]? {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-Ao", "pid=,ppid=,comm="]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        process.waitUntilExit()
-        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    ///
+    /// Runs through the shared bounded runner (`TmuxManager.runExternalCommand`)
+    /// which drains stdout concurrently with the child. The naive
+    /// `waitUntilExit()`-then-read shape deadlocked forever once `ps -Ao`
+    /// output exceeded the 64KB kernel pipe buffer (~900+ processes), hanging
+    /// every hibernation. This is a best-effort diagnostic: any failure —
+    /// including timeout — returns nil and must never block hibernation.
+    ///
+    /// Package-internal + parameterized so tests can substitute a fake `ps`
+    /// that deterministically emits more than 64KB.
+    static func detectOrphanedClaudeProcesses(
+        psExecutable: String = "/bin/ps",
+        arguments: [String] = ["-Ao", "pid=,ppid=,comm="],
+        timeout: Duration = .seconds(5)
+    ) async -> [Int]? {
+        guard let out = try? await TmuxManager.runExternalCommand(
+            executable: psExecutable,
+            arguments: arguments,
+            label: "ps",
+            timeout: timeout
+        ) else { return nil }
         var orphans: [Int] = []
         for line in out.split(separator: "\n") {
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)

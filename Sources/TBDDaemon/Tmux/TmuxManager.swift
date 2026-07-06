@@ -588,6 +588,18 @@ public struct TmuxManager: Sendable {
     /// timeout, spawn-failure} resumes it, satisfying the single-resume
     /// contract even when the process exits concurrently with the timer.
     ///
+    /// Both pipes are drained incrementally via `readabilityHandler` while the
+    /// child runs: a macOS pipe buffer is 64KB, so a child emitting more (e.g.
+    /// `ps -Ao` on a busy machine, ~72KB) would otherwise block writing to the
+    /// full pipe while we wait for it to exit — a mutual deadlock resolved only
+    /// by the timeout, turning every large-output call into a spurious failure.
+    /// The drain never waits for pipe EOF: real call sites run
+    /// `[shell, "-ic", cmd]`, and rc files can fork background grandchildren
+    /// that inherit the write ends, so EOF may never arrive after the direct
+    /// child dies. Termination and timeout both snapshot what has already
+    /// arrived and close the parent read ends — no thread, FD, or closure
+    /// outlives the call.
+    ///
     /// Package-internal (not `private`) so timeout tests can drive it directly
     /// against a real slow binary (`/bin/sleep`) without a tmux server.
     @discardableResult
@@ -608,11 +620,28 @@ public struct TmuxManager: Sendable {
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
+            let stdoutAccumulator = PipeDataAccumulator()
+            let stderrAccumulator = PipeDataAccumulator()
 
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
+
+            // Drain both pipes incrementally as chunks arrive (mirrors
+            // GitManager.run): no thread parks for the subprocess's lifetime,
+            // and a child emitting more than the 64KB pipe buffer never
+            // deadlocks against an undrained pipe.
+            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                if !stdoutAccumulator.readAvailable(from: handle) {
+                    handle.readabilityHandler = nil
+                }
+            }
+            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                if !stderrAccumulator.readAvailable(from: handle) {
+                    handle.readabilityHandler = nil
+                }
+            }
 
             // Watchdog timer: on fire, escalate SIGTERM → SIGKILL and resume
             // with a timeout error (if the process hasn't already exited).
@@ -621,6 +650,15 @@ public struct TmuxManager: Sendable {
             timer.setEventHandler {
                 guard state.claim() else { return }
                 timer.cancel()
+                // Stop draining and close the parent read ends NOW. The kill
+                // below reaches only the DIRECT child; grandchildren forked by
+                // the shell's rc files inherit the pipe write ends, so EOF may
+                // never come — waiting for it would leak the FDs and handler
+                // closures for the grandchildren's lifetime.
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
                 let pid = process.processIdentifier
                 if pid > 0 {
                     kill(pid, SIGTERM)
@@ -634,8 +672,15 @@ public struct TmuxManager: Sendable {
             }
 
             process.terminationHandler = { _ in
-                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                // The direct child exited; everything it wrote is already in
+                // the kernel pipe buffers. `finish` snapshots that WITHOUT
+                // waiting for EOF — EOF is NOT guaranteed here, because
+                // grandchildren may still hold the write ends open — and
+                // closes the parent read ends.
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                let stdoutData = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                let stderrData = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
                 let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
                 let stderr = String(data: stderrData, encoding: .utf8) ?? ""
                 let output = stdout.isEmpty ? stderr : stdout
@@ -658,6 +703,12 @@ public struct TmuxManager: Sendable {
                 try process.run()
                 timer.resume()
             } catch {
+                // Spawn failed: no child will ever write — detach the drain
+                // handlers and close the read ends so nothing lingers.
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
                 guard state.claim() else { return }
                 timer.cancel()
                 continuation.resume(throwing: error)
