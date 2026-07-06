@@ -50,4 +50,28 @@ struct PasteInterceptionTests {
         #expect(PasteInterception.decide(
             controlModeAttached: true, byteCount: 100_000_000) == .refuseOversize)
     }
+
+    @Test("refusal message: \\r\\n-framed status line with human-unit size + cap, says not sent")
+    func refusalMessageFormat() {
+        let message = PasteInterception.refusalMessage(
+            byteCount: 12 * 1024 * 1024, cap: SidecarFrameCodec.maxPasteBytes)
+        // Same status-line discipline as the panel's other user-visible
+        // feeds: "\r\n[...]\r\n".
+        #expect(message.hasPrefix("\r\n["))
+        #expect(message.hasSuffix("]\r\n"))
+        // Human units for both the offending size and the cap
+        // (maxPasteBytes = 4 MiB - 64 KiB = 3.9 MB).
+        #expect(message.contains("12.0 MB"))
+        #expect(message.contains("3.9 MB"))
+        #expect(message.lowercased().contains("not sent"))
+    }
+
+    @Test("refusal message scales units: KB payloads never print as 0.0 MB")
+    func refusalMessageSmallUnits() {
+        // Not reachable through `decide` today (the cap is MB-scale), but the
+        // formatter must not lie if the cap ever shrinks.
+        let message = PasteInterception.refusalMessage(byteCount: 8 * 1024, cap: 4 * 1024)
+        #expect(message.contains("8.0 KB"))
+        #expect(message.contains("4.0 KB"))
+    }
 }

@@ -654,6 +654,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                             exceeds the \(SidecarFrameCodec.maxPasteBytes, privacy: .public)-byte \
                             cap; paste dropped — split the content into smaller pastes
                             """)
+                        // The log alone is invisible to the user — surface the
+                        // refusal in the pane itself, same "\r\n[...]\r\n"
+                        // status-line style as processTerminated's messages.
+                        self.terminalView?.feed(
+                            text: PasteInterception.refusalMessage(byteCount: data.count))
                         return true
                     }
                 }

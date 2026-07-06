@@ -35,4 +35,24 @@ enum PasteInterception {
         guard controlModeAttached else { return .passthrough }
         return byteCount > SidecarFrameCodec.maxPasteBytes ? .refuseOversize : .interceptAsPaste
     }
+
+    /// User-visible status line for a `.refuseOversize` paste, fed into the
+    /// terminal view by the caller — a log entry alone is invisible to the
+    /// user, who otherwise sees the paste silently vanish. Framed
+    /// `"\r\n[...]\r\n"` to match the panel's other in-pane status feeds
+    /// (view-detached / session-expired messages in `TerminalPanelView`).
+    static func refusalMessage(byteCount: Int, cap: Int = SidecarFrameCodec.maxPasteBytes) -> String {
+        "\r\n[Paste too large: \(humanBytes(byteCount)) exceeds the \(humanBytes(cap)) "
+            + "control-mode limit — the paste was not sent. Split it into smaller pastes.]\r\n"
+    }
+
+    /// Binary-unit human formatting (one decimal), floored at whole bytes so
+    /// small counts never render as "0.0 KB".
+    private static func humanBytes(_ count: Int) -> String {
+        let mb = Double(count) / (1024 * 1024)
+        if mb >= 1 { return String(format: "%.1f MB", mb) }
+        let kb = Double(count) / 1024
+        if kb >= 1 { return String(format: "%.1f KB", kb) }
+        return "\(count) bytes"
+    }
 }
