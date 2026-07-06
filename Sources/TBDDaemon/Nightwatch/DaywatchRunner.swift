@@ -42,40 +42,45 @@ public struct ProcessDaywatchExecutor: DaywatchExecuting {
     }
 
     /// Wake the judge: spawn `claude --model claude-sonnet-5 <prompt>`.
+    /// Sets up working directory to the skill dir and provides absolute queue paths.
     /// Safe no-op if `claude` binary is not found.
     public func wakeJudge(act: Bool) async {
         let prompt = act
-            ? "Run the nightwatch judge: process queue/decisions.jsonl and fire approved actions."
-            : "Run the nightwatch judge: process queue/decisions.jsonl and batch to for-adam.md (act=false)."
+            ? "Run the nightwatch judge: process \(skillDir)/queue/decisions.jsonl and fire approved actions."
+            : "Run the nightwatch judge: process \(skillDir)/queue/decisions.jsonl and batch to \(skillDir)/queue/for-adam.md (act=false)."
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = ["claude"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
+        // Find claude binary in standard locations
+        let claudePath = findExecutable("claude")
+        guard !claudePath.isEmpty && claudePath != "/usr/bin/env" else {
+            logger.warning("claude binary not found; judge wake is a no-op")
+            return
+        }
+
+        let judge = Process()
+        judge.executableURL = URL(fileURLWithPath: claudePath)
+        judge.arguments = ["-p", prompt, "--model", "claude-sonnet-5"]
+        judge.currentDirectoryURL = URL(fileURLWithPath: skillDir)
+        judge.standardOutput = FileHandle.nullDevice
+        judge.standardError = FileHandle.nullDevice
 
         do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            guard let claudePath = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !claudePath.isEmpty else {
-                logger.debug("claude binary not found; judge wake is a no-op")
-                return
-            }
-
-            let judge = Process()
-            judge.executableURL = URL(fileURLWithPath: claudePath)
-            judge.arguments = ["-p", prompt, "--model", "claude-sonnet-5"]
-            judge.standardOutput = FileHandle.nullDevice
-            judge.standardError = FileHandle.nullDevice
-
             try judge.run()
             // Don't wait — let it run detached.
         } catch {
-            logger.debug("Failed to wake judge: \(error.localizedDescription, privacy: .public)")
+            logger.warning("Failed to wake judge: \(error.localizedDescription, privacy: .public)")
             // Best-effort; don't crash.
         }
+    }
+
+    /// Helper: find an executable in standard locations.
+    /// Returns the full path if found, or an empty string otherwise.
+    private func findExecutable(_ name: String) -> String {
+        for path in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"] {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        return ""
     }
 }
 
@@ -92,7 +97,6 @@ public actor DaywatchRunner {
 
     private let executor: DaywatchExecuting
     private let interval: TimeInterval
-    private let now: @Sendable () -> Date
 
     // MARK: - State
 
@@ -103,12 +107,10 @@ public actor DaywatchRunner {
 
     public init(
         executor: DaywatchExecuting,
-        interval: TimeInterval = 15 * 60,
-        now: @escaping @Sendable () -> Date = { Date() }
+        interval: TimeInterval = 15 * 60
     ) {
         self.executor = executor
         self.interval = interval
-        self.now = now
     }
 
     // MARK: - Public API
@@ -136,9 +138,39 @@ public actor DaywatchRunner {
         // else: no-op (already in desired state)
     }
 
+    // MARK: - Testable single tick
+
+    /// Run one tick cycle: execute tick.py and conditionally wake the judge.
+    /// This method contains the core logic that the background loop drives repeatedly.
+    /// - Parameter mode: If provided, use this mode instead of the actor's currentMode.
+    ///   Useful for testing without starting the background loop.
+    public func runOnce(mode: NightwatchMode? = nil) async {
+        let effectiveMode = mode ?? currentMode
+
+        // Run one tick
+        let exitCode = await executor.runTick()
+
+        // If exit code is 10, judgment is queued — wake the judge
+        if exitCode == 10 {
+            let act = (effectiveMode == .nightwatch)
+            await executor.wakeJudge(act: act)
+            logger.debug("Tick queued judgment; woke judge (act=\(act))")
+        } else if exitCode == 0 {
+            logger.debug("Tick completed (no judgment queued)")
+        } else {
+            logger.warning("Tick failed with exit code \(exitCode, privacy: .public)")
+        }
+    }
+
     // MARK: - Private loop
 
     private func runLoop() async {
+        // Run one tick immediately on start (don't wait for the first interval)
+        if !Task.isCancelled {
+            await runOnce()
+        }
+
+        // Then sleep and loop
         while !Task.isCancelled {
             do {
                 try await Task.sleep(for: .seconds(interval))
@@ -149,19 +181,7 @@ public actor DaywatchRunner {
 
             if Task.isCancelled { return }
 
-            // Run one tick
-            let exitCode = await executor.runTick()
-
-            // If exit code is 10, judgment is queued — wake the judge
-            if exitCode == 10 {
-                let act = (currentMode == .nightwatch)
-                await executor.wakeJudge(act: act)
-                logger.debug("Tick queued judgment; woke judge (act=\(act))")
-            } else if exitCode == 0 {
-                logger.debug("Tick completed (no judgment queued)")
-            } else {
-                logger.warning("Tick failed with exit code \(exitCode, privacy: .public)")
-            }
+            await runOnce()
         }
     }
 }

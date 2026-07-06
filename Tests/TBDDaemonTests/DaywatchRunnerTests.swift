@@ -13,18 +13,13 @@ actor FakeDaywatchExecutor: DaywatchExecuting {
 
     private(set) var tickCallCount: Int = 0
     private(set) var judgeWakeCalls: [JudgeWakeCall] = []
-    private var tickExitCode: Int32 = 0
-    private var shouldDelayTick: Bool = false
+    private(set) var tickExitCode: Int32 = 0
 
-    init(tickExitCode: Int32 = 0, shouldDelayTick: Bool = false) {
+    init(tickExitCode: Int32 = 0) {
         self.tickExitCode = tickExitCode
-        self.shouldDelayTick = shouldDelayTick
     }
 
     func runTick() async -> Int32 {
-        if shouldDelayTick {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
         tickCallCount += 1
         return tickExitCode
     }
@@ -33,9 +28,8 @@ actor FakeDaywatchExecutor: DaywatchExecuting {
         judgeWakeCalls.append(JudgeWakeCall(act: act))
     }
 
-    nonisolated func setTickExitCode(_ code: Int32) {
-        // Note: in real code we'd use a mutable reference or a separate state holder,
-        // but for tests we'll just reinit the executor or accept this limitation.
+    func setTickExitCode(_ code: Int32) {
+        self.tickExitCode = code
     }
 }
 
@@ -43,47 +37,60 @@ actor FakeDaywatchExecutor: DaywatchExecuting {
 
 struct DaywatchRunnerTests {
 
-    // MARK: - Test: apply(.daywatch) starts the loop
+    // MARK: - Test: runOnce() with exit code 0 does not wake judge
 
-    @Test("apply(.daywatch) starts the loop")
-    func testApplyDaywatchStartsLoop() async {
+    @Test("runOnce with exit code 0 → tick counted, judge not woken")
+    func testRunOnceExitCode0() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        let runner = DaywatchRunner(executor: executor, interval: 0.01)
+        let runner = DaywatchRunner(executor: executor, interval: 60)
 
-        // Initially no ticks
-        #expect(await executor.tickCallCount == 0)
+        await runner.runOnce(mode: .daywatch)
 
-        // Apply daywatch mode
-        await runner.apply(mode: .daywatch)
-
-        // Wait for at least one tick
-        try? await Task.sleep(for: .milliseconds(50))
-
-        // Tick should have been called at least once
-        #expect(await executor.tickCallCount >= 1)
+        #expect(await executor.tickCallCount == 1)
+        #expect(await executor.judgeWakeCalls.isEmpty)
     }
 
-    // MARK: - Test: apply(.off) stops the loop
+    // MARK: - Test: runOnce() with exit code 10 in daywatch mode wakes judge with act=false
 
-    @Test("apply(.off) stops the loop")
-    func testApplyOffStopsLoop() async {
-        let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        let runner = DaywatchRunner(executor: executor, interval: 0.01)
+    @Test("runOnce with exit code 10 in daywatch → wakeJudge(act: false)")
+    func testRunOnceExitCode10Daywatch() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 10)
+        let runner = DaywatchRunner(executor: executor, interval: 60)
 
-        // Start the loop
-        await runner.apply(mode: .daywatch)
-        try? await Task.sleep(for: .milliseconds(40))
+        await runner.runOnce(mode: .daywatch)
 
-        let countBefore = await executor.tickCallCount
-        #expect(countBefore >= 1)
+        #expect(await executor.tickCallCount == 1)
+        let wakeCalls = await executor.judgeWakeCalls
+        #expect(wakeCalls.count == 1)
+        #expect(wakeCalls[0].act == false)
+    }
 
-        // Stop the loop
-        await runner.apply(mode: .off)
-        try? await Task.sleep(for: .milliseconds(40))
+    // MARK: - Test: runOnce() with exit code 10 in nightwatch mode wakes judge with act=true
 
-        let countAfter = await executor.tickCallCount
-        // Should not have increased (or increased minimally)
-        #expect(countAfter <= countBefore + 1)
+    @Test("runOnce with exit code 10 in nightwatch → wakeJudge(act: true)")
+    func testRunOnceExitCode10Nightwatch() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 10)
+        let runner = DaywatchRunner(executor: executor, interval: 60)
+
+        await runner.runOnce(mode: .nightwatch)
+
+        #expect(await executor.tickCallCount == 1)
+        let wakeCalls = await executor.judgeWakeCalls
+        #expect(wakeCalls.count == 1)
+        #expect(wakeCalls[0].act == true)
+    }
+
+    // MARK: - Test: runOnce() with other exit codes does not wake judge
+
+    @Test("runOnce with non-zero, non-10 exit code → tick counted, judge not woken")
+    func testRunOnceOtherExitCode() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 1)
+        let runner = DaywatchRunner(executor: executor, interval: 60)
+
+        await runner.runOnce(mode: .daywatch)
+
+        #expect(await executor.tickCallCount == 1)
+        #expect(await executor.judgeWakeCalls.isEmpty)
     }
 
     // MARK: - Test: apply(.off) when never started is idempotent
@@ -91,118 +98,95 @@ struct DaywatchRunnerTests {
     @Test("apply(.off) when never started is idempotent")
     func testApplyOffWhenNeverStartedIsIdempotent() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        let runner = DaywatchRunner(executor: executor, interval: 0.01)
+        let runner = DaywatchRunner(executor: executor, interval: 60)
 
         // Apply off immediately (never started)
         await runner.apply(mode: .off)
-
-        try? await Task.sleep(for: .milliseconds(30))
 
         // No ticks should have been called
         #expect(await executor.tickCallCount == 0)
         #expect(await executor.judgeWakeCalls.isEmpty)
     }
 
-    // MARK: - Test: apply idempotency (calling apply(.daywatch) twice = one loop)
+    // MARK: - Test: apply(.daywatch) twice is idempotent (one loop)
 
     @Test("apply(.daywatch) twice is idempotent (one loop)")
     func testApplyIdempotency() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        let runner = DaywatchRunner(executor: executor, interval: 0.01)
+        let runner = DaywatchRunner(executor: executor, interval: 1000)
 
-        // Apply daywatch twice
+        // Apply daywatch twice — should not start two loops
         await runner.apply(mode: .daywatch)
         await runner.apply(mode: .daywatch)
 
-        try? await Task.sleep(for: .milliseconds(40))
+        // Give a tiny bit of time for the loop to run its first tick
+        try? await Task.sleep(for: .milliseconds(50))
 
-        // Should still have ticks (loop is running)
-        #expect(await executor.tickCallCount >= 1)
+        // Should have exactly one tick from the initial immediate tick
+        let count = await executor.tickCallCount
+        #expect(count == 1)
     }
 
-    // MARK: - Test: tick returns 10 → wakeJudge called with act=false in daywatch
+    // MARK: - Test: loop runs first tick immediately (no wait)
 
-    @Test("tick returns 10 in daywatch mode → wakeJudge(act: false)")
-    func testTickReturns10InDaywatch() async {
-        let executor = FakeDaywatchExecutor(tickExitCode: 10)
-        let runner = DaywatchRunner(executor: executor, interval: 0.01)
-
-        await runner.apply(mode: .daywatch)
-        try? await Task.sleep(for: .milliseconds(40))
-
-        // Judge should have been woken with act=false
-        let wakeCalls = await executor.judgeWakeCalls
-        #expect(wakeCalls.count >= 1)
-        #expect(wakeCalls.last?.act == false)
-    }
-
-    // MARK: - Test: tick returns 10 → wakeJudge called with act=true in nightwatch
-
-    @Test("tick returns 10 in nightwatch mode → wakeJudge(act: true)")
-    func testTickReturns10InNightwatch() async {
-        let executor = FakeDaywatchExecutor(tickExitCode: 10)
-        let runner = DaywatchRunner(executor: executor, interval: 0.01)
-
-        await runner.apply(mode: .nightwatch)
-        try? await Task.sleep(for: .milliseconds(40))
-
-        // Judge should have been woken with act=true
-        let wakeCalls = await executor.judgeWakeCalls
-        #expect(wakeCalls.count >= 1)
-        #expect(wakeCalls.last?.act == true)
-    }
-
-    // MARK: - Test: tick returns 0 → judge NOT woken
-
-    @Test("tick returns 0 → judge NOT woken")
-    func testTickReturns0NoJudgeWake() async {
+    @Test("loop runs first tick immediately (no wait for full interval)")
+    func testLoopRunsFirstTickImmediately() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 0)
-        let runner = DaywatchRunner(executor: executor, interval: 0.01)
+        // Use a large interval so we can be sure the immediate tick happens before the sleep
+        let runner = DaywatchRunner(executor: executor, interval: 1000)
 
         await runner.apply(mode: .daywatch)
-        try? await Task.sleep(for: .milliseconds(40))
 
-        // Judge should NOT have been woken
-        let wakeCalls = await executor.judgeWakeCalls
-        #expect(wakeCalls.isEmpty)
+        // Small sleep to let the loop start and run first tick
+        try? await Task.sleep(for: .milliseconds(100))
 
-        // But tick should have been called
-        #expect(await executor.tickCallCount >= 1)
+        // First tick should have been called immediately
+        let count = await executor.tickCallCount
+        #expect(count >= 1)
     }
 
-    // MARK: - Test: mode switching (daywatch → nightwatch → off)
+    // MARK: - Test: apply(.off) cancels the loop
 
-    @Test("mode switching: daywatch → nightwatch → off")
+    @Test("apply(.off) cancels the loop")
+    func testApplyOffCancelsLoop() async {
+        let executor = FakeDaywatchExecutor(tickExitCode: 0)
+        let runner = DaywatchRunner(executor: executor, interval: 0.05)
+
+        // Start the loop
+        await runner.apply(mode: .daywatch)
+        try? await Task.sleep(for: .milliseconds(100))
+
+        let countBefore = await executor.tickCallCount
+        #expect(countBefore >= 1)
+
+        // Stop the loop
+        await runner.apply(mode: .off)
+        try? await Task.sleep(for: .milliseconds(50))
+
+        let countAfter = await executor.tickCallCount
+        // Should not have increased much (at most one more tick if one was in progress)
+        #expect(countAfter <= countBefore + 1)
+    }
+
+    // MARK: - Test: mode switching (daywatch → nightwatch)
+
+    @Test("mode switching: daywatch → nightwatch changes judge behavior")
     func testModeSwitching() async {
         let executor = FakeDaywatchExecutor(tickExitCode: 10)
-        let runner = DaywatchRunner(executor: executor, interval: 0.01)
+        let runner = DaywatchRunner(executor: executor, interval: 1000)
 
-        // Start in daywatch
-        await runner.apply(mode: .daywatch)
-        try? await Task.sleep(for: .milliseconds(30))
+        // Run one tick in daywatch mode
+        await runner.runOnce(mode: .daywatch)
 
         var wakeCalls = await executor.judgeWakeCalls
-        let daywatchWakesCount = wakeCalls.filter { !$0.act }.count
-        #expect(daywatchWakesCount >= 1)
+        #expect(wakeCalls.count == 1)
+        #expect(wakeCalls[0].act == false, "daywatch should pass act=false")
 
-        // Clear calls by reiniting executor
-        let executor2 = FakeDaywatchExecutor(tickExitCode: 10)
-        let runner2 = DaywatchRunner(executor: executor2, interval: 0.01)
+        // Run another tick in nightwatch mode
+        await runner.runOnce(mode: .nightwatch)
 
-        // Switch to nightwatch
-        await runner2.apply(mode: .nightwatch)
-        try? await Task.sleep(for: .milliseconds(30))
-
-        wakeCalls = await executor2.judgeWakeCalls
-        let nightwatchWakesCount = wakeCalls.filter { $0.act }.count
-        #expect(nightwatchWakesCount >= 1)
-
-        // Stop
-        await runner2.apply(mode: .off)
-        try? await Task.sleep(for: .milliseconds(30))
-
-        let finalTickCount = await executor2.tickCallCount
-        // Shouldn't increase much after stopping
-        #expect(finalTickCount >= 1)
+        wakeCalls = await executor.judgeWakeCalls
+        #expect(wakeCalls.count == 2)
+        #expect(wakeCalls[1].act == true, "nightwatch should pass act=true")
     }
 }
