@@ -80,16 +80,32 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/.github/workflows/claude-review-hooks"
           git checkout FETCH_HEAD -- .github/workflows/claude-review-hooks
 
+      - name: Mint reviewer app token
+        id: app-token
+        if: steps.trust.outputs.trusted == 'true'
+        # A dedicated GitHub App whose slug contains "claude" (e.g. tbd-claude-reviewer)
+        # so the action's sticky-comment matcher recognizes its own prior comment and
+        # updates it in place instead of posting a new one every run. The matcher keys
+        # on the Claude App id OR a "Bot" login containing "claude"
+        # (create-initial.ts) — github-actions[bot] matches neither, which is why the
+        # OIDC-fallback GITHUB_TOKEN produced duplicate comments. See docs/pr-review-gate.md.
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CLAUDE_REVIEWER_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_REVIEWER_APP_PRIVATE_KEY }}
+
       - name: Run Claude Code Review
         if: steps.trust.outputs.trusted == 'true'
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Use the Actions token for GitHub ops (sticky comment, gh CLI) instead of
-          # the OIDC->GitHub-App exchange, which 401s under pull_request_target
-          # (anthropics/claude-code-action#1017). Comments post as github-actions[bot].
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Post GitHub comments as the dedicated claude-named App (see the mint step
+          # above) so sticky-comment updating works across runs. We can't use the
+          # OIDC->Claude-App token here because that exchange 401s under
+          # pull_request_target (anthropics/claude-code-action#1017), and a plain
+          # GITHUB_TOKEN (github-actions[bot]) isn't recognized by the sticky matcher.
+          github_token: ${{ steps.app-token.outputs.token }}
           show_full_output: true
           use_sticky_comment: true
           track_progress: true

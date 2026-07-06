@@ -41,5 +41,16 @@ merge, after which every subsequent PR is gated normally.
 - The gate is **fail-closed on infrastructure**: if the Anthropic API is down or
   `CLAUDE_CODE_OAUTH_TOKEN` expires, trusted PRs block until it recovers. An admin
   can temporarily drop `claude-review` from the required contexts to override.
-- `github-actions[bot]` approvals do not count toward required reviews, which is
-  why the gate is a **status check** rather than a required-approval count.
+- Reviews post as a **dedicated GitHub App whose slug contains "claude"** (e.g.
+  `tbd-claude-reviewer[bot]`), minted per run via `actions/create-github-app-token`
+  from the `CLAUDE_REVIEWER_APP_ID` / `CLAUDE_REVIEWER_APP_PRIVATE_KEY` secrets. This
+  is required for **sticky comments** to work: the action's sticky-comment matcher
+  (`create-initial.ts`) only recognizes its own prior comment when the author id is
+  the Claude App *or* the author is a `Bot` whose login contains `claude` — and has
+  no config input to change that. A plain `GITHUB_TOKEN` (`github-actions[bot]`)
+  matches neither, so it posts a new comment every run. We can't use the OIDC→Claude
+  App token because that exchange 401s under `pull_request_target`
+  (anthropics/claude-code-action#1017), hence the dedicated App.
+- The gate is a **status check**, not a required-approval count. (The App's approval
+  *could* count toward required reviews if we ever want that, but the verdict-file
+  status check is what enforces High/Medium blocking today.)
