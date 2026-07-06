@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
+
+private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
 /// GRDB Record type for the `terminal` table.
 struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
@@ -42,10 +45,21 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.keepWarm = terminal.keepWarm
     }
 
-    func toModel() -> Terminal {
-        Terminal(
-            id: UUID(uuidString: id)!,
-            worktreeID: UUID(uuidString: worktreeID)!,
+    /// Failable decode: skips (returns nil after a logged warning) rather than
+    /// crashing when a required UUID fails to parse. Optional/enum columns
+    /// (`profile_id`, `kind`, `activityState`) already decode safely.
+    func toModel() -> Terminal? {
+        guard let uuid = UUID(uuidString: id) else {
+            decodeLogger.warning("Skipping terminal row \(id, privacy: .public): malformed id")
+            return nil
+        }
+        guard let wtID = UUID(uuidString: worktreeID) else {
+            decodeLogger.warning("Skipping terminal row \(id, privacy: .public): malformed worktreeID \(worktreeID, privacy: .public)")
+            return nil
+        }
+        return Terminal(
+            id: uuid,
+            worktreeID: wtID,
             tmuxWindowID: tmuxWindowID,
             tmuxPaneID: tmuxPaneID,
             label: label,
@@ -113,7 +127,7 @@ public struct TerminalStore: Sendable {
                 request = request.filter(Column("worktreeID") == worktreeID.uuidString)
             }
             request = request.order(Column("createdAt").asc, Column("id").asc)
-            return try request.fetchAll(db).map { $0.toModel() }
+            return try request.fetchAll(db).compactMap { $0.toModel() }
         }
     }
 

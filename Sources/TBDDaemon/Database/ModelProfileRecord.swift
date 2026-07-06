@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
+
+private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
 struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "model_profiles"
@@ -37,9 +40,16 @@ struct ModelProfileRecord: Codable, FetchableRecord, PersistableRecord, Sendable
         self.last_used_at = profile.lastUsedAt
     }
 
-    func toModel() -> ModelProfile {
-        ModelProfile(
-            id: UUID(uuidString: id)!,
+    /// Failable decode: skips (returns nil after a logged warning) rather than
+    /// crashing when the primary key UUID fails to parse. `kind` already
+    /// decodes safely via `?? .oauth`.
+    func toModel() -> ModelProfile? {
+        guard let uuid = UUID(uuidString: id) else {
+            decodeLogger.warning("Skipping model_profiles row \(id, privacy: .public): malformed id")
+            return nil
+        }
+        return ModelProfile(
+            id: uuid,
             name: name,
             kind: CredentialKind(rawValue: kind) ?? .oauth,
             baseURL: base_url,
@@ -93,7 +103,7 @@ public struct ModelProfileStore: Sendable {
 
     public func list() async throws -> [ModelProfile] {
         try await writer.read { db in
-            try ModelProfileRecord.fetchAll(db).map { $0.toModel() }
+            try ModelProfileRecord.fetchAll(db).compactMap { $0.toModel() }
         }
     }
 

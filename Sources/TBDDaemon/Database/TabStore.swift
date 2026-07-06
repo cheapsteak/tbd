@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
+
+private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
 /// GRDB Record type for the `tab` table.
 struct TabRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
@@ -18,10 +21,20 @@ struct TabRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.createdAt = state.createdAt
     }
 
-    func toModel() -> TabState {
-        TabState(
-            id: UUID(uuidString: id)!,
-            worktreeID: UUID(uuidString: worktreeID)!,
+    /// Failable decode: skips (returns nil after a logged warning) rather than
+    /// crashing when a required UUID fails to parse.
+    func toModel() -> TabState? {
+        guard let uuid = UUID(uuidString: id) else {
+            decodeLogger.warning("Skipping tab row \(id, privacy: .public): malformed id")
+            return nil
+        }
+        guard let wtID = UUID(uuidString: worktreeID) else {
+            decodeLogger.warning("Skipping tab row \(id, privacy: .public): malformed worktreeID \(worktreeID, privacy: .public)")
+            return nil
+        }
+        return TabState(
+            id: uuid,
+            worktreeID: wtID,
             label: label,
             createdAt: createdAt
         )
@@ -74,7 +87,7 @@ public struct TabStore: Sendable {
             try TabRecord
                 .filter(Column("worktreeID") == worktreeID.uuidString)
                 .fetchAll(db)
-                .map { $0.toModel() }
+                .compactMap { $0.toModel() }
         }
     }
 

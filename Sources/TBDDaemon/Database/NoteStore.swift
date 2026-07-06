@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
+
+private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
 /// GRDB Record type for the `note` table.
 struct NoteRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
@@ -22,10 +25,20 @@ struct NoteRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.updatedAt = note.updatedAt
     }
 
-    func toModel() -> Note {
-        Note(
-            id: UUID(uuidString: id)!,
-            worktreeID: UUID(uuidString: worktreeID)!,
+    /// Failable decode: skips (returns nil after a logged warning) rather than
+    /// crashing when a required UUID fails to parse.
+    func toModel() -> Note? {
+        guard let uuid = UUID(uuidString: id) else {
+            decodeLogger.warning("Skipping note row \(id, privacy: .public): malformed id")
+            return nil
+        }
+        guard let wtID = UUID(uuidString: worktreeID) else {
+            decodeLogger.warning("Skipping note row \(id, privacy: .public): malformed worktreeID \(worktreeID, privacy: .public)")
+            return nil
+        }
+        return Note(
+            id: uuid,
+            worktreeID: wtID,
             title: title,
             content: content,
             createdAt: createdAt,
@@ -75,7 +88,7 @@ public struct NoteStore: Sendable {
             if let worktreeID {
                 request = request.filter(Column("worktreeID") == worktreeID.uuidString)
             }
-            return try request.fetchAll(db).map { $0.toModel() }
+            return try request.fetchAll(db).compactMap { $0.toModel() }
         }
     }
 
@@ -89,7 +102,12 @@ public struct NoteStore: Sendable {
             if let content { record.content = content }
             record.updatedAt = Date()
             try record.update(db)
-            return record.toModel()
+            guard let model = record.toModel() else {
+                // The row we just wrote carries a valid UUID by construction;
+                // a nil here means the id column was corrupted out-of-band.
+                throw DatabaseError(message: "Note row has a malformed id after update")
+            }
+            return model
         }
     }
 

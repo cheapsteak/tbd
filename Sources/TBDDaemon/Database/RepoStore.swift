@@ -1,6 +1,9 @@
 import Foundation
 import GRDB
+import os
 import TBDShared
+
+private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
 /// GRDB Record type for the `repo` table.
 struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
@@ -40,9 +43,16 @@ struct RepoRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.env_overrides = EnvOverridesCoding.encode(repo.envOverrides)
     }
 
-    func toModel() -> Repo {
-        Repo(
-            id: UUID(uuidString: id)!,
+    /// Failable decode: skips (returns nil after a logged warning) rather than
+    /// crashing when the primary key UUID fails to parse. `status` already
+    /// decodes safely via `?? .ok`.
+    func toModel() -> Repo? {
+        guard let uuid = UUID(uuidString: id) else {
+            decodeLogger.warning("Skipping repo row \(id, privacy: .public): malformed id")
+            return nil
+        }
+        return Repo(
+            id: uuid,
             path: path,
             remoteURL: remoteURL,
             displayName: displayName,
@@ -116,7 +126,7 @@ public struct RepoStore: Sendable {
         try await writer.read { db in
             try RepoRecord
                 .fetchAll(db)
-                .map { $0.toModel() }
+                .compactMap { $0.toModel() }
         }
     }
 
