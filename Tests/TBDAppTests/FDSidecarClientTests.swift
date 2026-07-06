@@ -157,6 +157,33 @@ struct FDSidecarClientTests {
         #expect(result.bytes == Data("hi\r".utf8))
     }
 
+    @Test("sendPaste writes a decodable paste frame to the daemon side")
+    func sendPasteWritesFrame() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        let payload = Data("pasted content\n".utf8)
+        client.sendPaste(worktreeID: worktreeID, paneID: "%pa", bytes: payload)
+
+        // Read the framed paste on the daemon side and decode it.
+        let scanner = SidecarFrameScanner()
+        var decoded: (header: SidecarInputHeader, bytes: Data)?
+        let deadline = ContinuousClock.now + .seconds(2)
+        while decoded == nil && ContinuousClock.now < deadline {
+            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
+            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.paste.rawValue {
+                decoded = try SidecarFrameCodec.decodeTagged(payload: frame.payload)
+            }
+        }
+        let result = try #require(decoded)
+        #expect(result.header.worktreeID == worktreeID)
+        #expect(result.header.paneID == "%pa")
+        #expect(result.bytes == payload)
+    }
+
     @Test("sendInput while disconnected is dropped without crashing")
     func sendInputWhileDisconnectedDrops() async throws {
         let client = FDSidecarClient()   // never connected

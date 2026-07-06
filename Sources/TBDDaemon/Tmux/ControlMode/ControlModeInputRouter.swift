@@ -90,10 +90,16 @@ final class ControlModeInputRouter: @unchecked Sendable {
     }
 
     /// Register the server that owns `(worktreeID, paneID)` so its input frames
-    /// can be routed. Called after a successful attach.
+    /// can be routed. Called after a successful attach. Also drops any tracked
+    /// failing flag for the pane — SILENTLY, like `unregister` — so a stale
+    /// flag cannot survive into a new attach when the detach's `pane.detach`
+    /// RPC (and thus its unregister) was lost: the fresh attach starts from a
+    /// healthy baseline and its first real failure re-fires the edge.
     func register(worktreeID: UUID, paneID: String, server: String) {
+        let key = InputKey(worktreeID: worktreeID, paneID: paneID)
         lock.lock()
-        servers[InputKey(worktreeID: worktreeID, paneID: paneID)] = server
+        servers[key] = server
+        failingPanes.remove(key)
         lock.unlock()
     }
 

@@ -188,8 +188,10 @@ final class PaneFanout: @unchecked Sendable {
     /// generation) must not kill a fresh attach still inside its own ready
     /// window. Guards on `acknowledged`, not `ready`: since M4.3 the gate
     /// opens only after the replay lands, so an acked attach whose capture is
-    /// still in flight when the timer fires must survive (the timer's purpose
-    /// is "app never acked", and the replay has its own deadlines).
+    /// still in flight when the timer fires must survive. The timer's purpose
+    /// is strictly "app never acked" — post-ack, only the replay WRITE is
+    /// deadline-bounded (`writeReplay`, 5 s); the capture wait has no timeout,
+    /// so a mute-but-alive tmux stalls the attach (Phase B owns that).
     func detachIfNotReady(key: PaneKey, generation: UInt64) {
         lock.lock()
         guard let sink = sinks[key], sink.generation == generation, !sink.acknowledged else {

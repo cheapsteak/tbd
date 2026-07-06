@@ -238,6 +238,27 @@ struct ControlModeInputHealthTests {
         #expect(health.events.map(\.healthy) == [false, false])
         router.shutdown()
     }
+
+    @Test("register alone resets health state: a lost detach cannot leak a stale failing flag into a re-attach")
+    func registerResetsHealthStateWithoutUnregister() async throws {
+        let worktreeID = UUID()
+        let (router, _, health) = makeRouter(shouldFail: Self.failUnlessFF)
+        router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
+        let header = SidecarInputHeader(worktreeID: worktreeID, paneID: "%0")
+
+        router.enqueue(header: header, bytes: Data([0x41]))   // fails → event 1
+        try await waitForEvents(health, count: 1)
+
+        // Re-attach WITHOUT the detach's unregister (the pane.detach RPC was
+        // lost): the fresh attach must still start from a healthy baseline —
+        // silently, no recovery event — so its first failure re-fires.
+        router.register(worktreeID: worktreeID, paneID: "%0", server: "srv")
+
+        router.enqueue(header: header, bytes: Data([0x41]))   // fails → event 2
+        try await waitForEvents(health, count: 2)
+        #expect(health.events.map(\.healthy) == [false, false])
+        router.shutdown()
+    }
 }
 
 private enum HealthTestError: Error { case timedOut(got: Int, want: Int) }
