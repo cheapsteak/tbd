@@ -311,6 +311,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetScratchProfileOverride(request.paramsData)
             case RPCMethod.nightwatchSetMode:
                 return try await handleSetNightwatchMode(request.paramsData)
+            case RPCMethod.nightwatchReport:
+                return try await handleNightwatchReport(request.paramsData)
             case RPCMethod.terminalHibernate:
                 return try await handleTerminalHibernate(request.paramsData)
             case RPCMethod.terminalWake:

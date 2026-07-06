@@ -27,6 +27,8 @@ public actor PRStatusManager {
 
     private var onStatusPersist: (@Sendable (UUID, PRStatus) async -> Void)?
 
+    private var onPRStatusComputed: (@Sendable (UUID, PRStatus, String) async -> Void)?
+
     public init() {}
 
     // MARK: - Public interface
@@ -48,6 +50,12 @@ public actor PRStatusManager {
     /// changes, so the daemon can persist it to the DB.
     public func setOnStatusPersist(_ cb: @escaping @Sendable (UUID, PRStatus) async -> Void) {
         self.onStatusPersist = cb
+    }
+
+    /// Register a callback fired whenever a PR status is computed (for nightwatch evaluation).
+    /// Passes (worktreeID, status, repoPath) so the callback can evaluate the PR.
+    public func setOnPRStatusComputed(_ cb: @escaping @Sendable (UUID, PRStatus, String) async -> Void) {
+        self.onPRStatusComputed = cb
     }
 
     /// Seed the cache from persisted DB state at startup. Writes directly (not via
@@ -182,10 +190,9 @@ public actor PRStatusManager {
                 requiredChecksFailing: signals.failing,
                 requiredChecksPending: signals.pending
             )
-            await apply(
-                PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason),
-                for: match.worktreeID
-            )
+            let status = PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason)
+            await apply(status, for: match.worktreeID)
+            await onPRStatusComputed?(match.worktreeID, status, repoPath)
         }
     }
 
@@ -231,6 +238,7 @@ public actor PRStatusManager {
             let status = PRStatus(number: obj.number, url: obj.url, state: state, reason: reason)
             await apply(status, for: worktreeID)
             lastDirectUpdate[worktreeID] = Date()
+            await onPRStatusComputed?(worktreeID, status, repoPath)
             return status
         }
 

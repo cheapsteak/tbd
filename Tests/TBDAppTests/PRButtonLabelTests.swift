@@ -143,8 +143,12 @@ struct PRButtonLabelTests {
         // url — reason deliberately excluded), so a new field is otherwise
         // silently unkeyed: decide whether the split button renders it and
         // update prSplitButtonID (and this count) accordingly.
+        // 7 = number, state, url, reason + the nightwatch gate metadata
+        // (files, commits, authorWorktreeID), which the split button does NOT
+        // render — deliberately excluded like reason, else every metadata
+        // fetch would force a spurious toolbar-item rebuild.
         let status = Self.makeStatus()
-        #expect(Mirror(reflecting: status).children.count == 4)
+        #expect(Mirror(reflecting: status).children.count == 7)
     }
 
     @Test("id key differs between blocked states, color schemes, and worktrees")

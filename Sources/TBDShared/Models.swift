@@ -789,12 +789,22 @@ public struct PRStatus: Codable, Sendable, Equatable {
     public let url: String
     public let state: PRMergeableState
     public let reason: String?
+    /// List of files changed in the PR (lazy-fetched on demand by the merge gate).
+    public let files: [String]?
+    /// Number of commits in the PR (lazy-fetched on demand by the merge gate).
+    public let commits: Int?
+    /// UUID of the worktree that authored this PR, if known.
+    public let authorWorktreeID: UUID?
 
-    public init(number: Int, url: String, state: PRMergeableState, reason: String? = nil) {
+    public init(number: Int, url: String, state: PRMergeableState, reason: String? = nil,
+                files: [String]? = nil, commits: Int? = nil, authorWorktreeID: UUID? = nil) {
         self.number = number
         self.url = url
         self.state = state
         self.reason = reason
+        self.files = files
+        self.commits = commits
+        self.authorWorktreeID = authorWorktreeID
     }
 }
 

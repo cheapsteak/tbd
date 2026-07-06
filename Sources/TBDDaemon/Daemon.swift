@@ -339,6 +339,62 @@ public final class Daemon: Sendable {
             try? await database.worktrees.setPRStatus(id: worktreeID, status: status)
         }
 
+        // Wire nightwatch evaluation: when a PR status is refreshed, evaluate it through
+        // the merge gate and log the decision to the audit store (evaluate-only, no merging).
+        await prManager.setOnPRStatusComputed { worktreeID, status, repoPath in
+            let config = try? await database.config.get()
+            guard let config, config.nightwatchMode != .off else { return }
+
+            // Load policy from .nightwatch/policy.json (conservative defaults if absent/malformed)
+            let policy = NightwatchPolicy.load(repoPath: repoPath)
+            let gate = MergeGate(policy: policy)
+
+            // Build gate input from PR status. For Phase 1, we make conservative assumptions:
+            // - hasApprovedReview = false (not fetched yet, Phase 1 is evaluate-only)
+            // - checksClean = false (not fetched yet)
+            // - files/commits/author = nil (not fetched yet)
+            // This ensures Phase 1 gates are conservative (most PRs will escalate).
+            let input = GateInput(
+                prNumber: status.number,
+                repo: repoPath,
+                headSHA: "unknown",  // Not available in PRStatus
+                isDraft: status.state == .draft,
+                hasApprovedReview: false,
+                checksClean: status.state == .mergeable || status.state == .merged,
+                files: nil,
+                commits: nil,
+                authorWorktreeID: nil,
+                approvedSHA: nil,
+                touchesCI: false
+            )
+
+            let decision = gate.evaluate(input: input)
+            let action: AuditAction
+            let details: String
+
+            switch decision {
+            case .wouldMerge(clearanceID: let cid):
+                action = .wouldMerge
+                details = "Phase 1: would-merge marker (\(cid))"
+            case .hold(let reason):
+                action = .hold
+                details = "Hold reason: \(reason)"
+            case .escalate(let reason):
+                action = .escalate
+                details = "Escalate reason: \(reason)"
+            }
+
+            let entry = AuditLogEntry(
+                action: action,
+                prNumber: status.number,
+                repo: repoPath,
+                headSHA: "unknown",
+                timestamp: Date(),
+                details: details
+            )
+            try? await database.audit.logAction(entry)
+        }
+
         // 7a. Wire auto-archive-on-merge: when a worktree's cached PR state
         // transitions into `.merged`, the coordinator evaluates the effective
         // setting and archives the worktree (no active children) in the
