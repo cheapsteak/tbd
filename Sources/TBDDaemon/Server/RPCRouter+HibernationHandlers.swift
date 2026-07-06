@@ -9,7 +9,13 @@ extension RPCRouter {
         let params = try decoder.decode(TerminalHibernateParams.self, from: paramsData)
         let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
         switch result {
-        case .ok, .alreadyHibernated:
+        case .ok:
+            // Hibernating cancels any pending auto-resume inside the
+            // coordinator (spec §Cancellation); wake the scheduler so it
+            // re-reads pending rows instead of sleeping until a stale fire time.
+            await limitResumeScheduler?.wake()
+            return .ok()
+        case .alreadyHibernated:
             return .ok()
         case .notEligible(let reason):
             return RPCResponse(error: reason)

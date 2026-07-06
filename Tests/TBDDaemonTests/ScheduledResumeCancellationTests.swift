@@ -88,6 +88,36 @@ import Testing
         try await assertCancelled()
     }
 
+    @Test func terminalHibernateCancels() async throws {
+        // Hibernation is a parking mechanism just like suspend: a parked pane
+        // must not receive a scheduled auto-resume send (spec §Cancellation).
+        // This terminal needs a claudeSessionID + idle state to actually
+        // complete the hibernate transition (unlike terminalSuspendCancels,
+        // the cancel here is wired inside HibernationCoordinator itself, at
+        // the point of the real state transition — not unconditionally
+        // upfront — so the hibernate must actually succeed to observe it).
+        let hibTerminal = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            claudeSessionID: "sess-hib", kind: .claude)
+        try await db.terminals.setActivityState(id: hibTerminal.id, activityState: .idle)
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: hibTerminal.id, worktreeID: worktreeID,
+            resetsAt: Date().addingTimeInterval(3600),
+            fireAt: Date().addingTimeInterval(3660),
+            limitType: "session", rawMessage: "m"))
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalHibernate,
+            params: TerminalHibernateParams(terminalID: hibTerminal.id))
+        let response = await router.handle(request)
+        #expect(response.success)
+
+        #expect(try await db.scheduledResumes.pending(terminalID: hibTerminal.id) == nil)
+        let terminal = try await db.terminals.get(id: hibTerminal.id)
+        #expect(terminal?.pendingResumeAt == nil)
+        #expect(terminal?.isHibernated == true)
+    }
+
     @Test func explicitCancelRPC() async throws {
         let request = try RPCRequest(
             method: RPCMethod.terminalCancelScheduledResume,
