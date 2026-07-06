@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import Testing
 @testable import TBDDaemonLib
 
@@ -117,6 +118,12 @@ struct ControlModeResizeCoordinatorTests {
         let (coordinator, recorder, _) = makeCoordinator()
         await coordinator.resize(server: "srv", windowID: "@0", cols: 10, rows: 9999)
         let write = try #require(recorder.writes.first)
-        #expect(write.hasPrefix("resize-window -t @0 -x 20 -y 300\n"))
+        // The clamp bounds ARE the shared geometry envelope (R6-M5): the
+        // app-side gate refuses to send below the same floor, so app and
+        // daemon can never disagree about the minimum sendable size again.
+        #expect(write.hasPrefix(
+            "resize-window -t @0 -x \(ControlModeGeometry.minCols) -y \(ControlModeGeometry.maxRows)\n"))
+        #expect(ControlModeGeometry.minCols == 20)
+        #expect(ControlModeGeometry.maxRows == 300)
     }
 }

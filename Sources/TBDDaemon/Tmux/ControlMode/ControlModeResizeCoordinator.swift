@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 import os
 
 /// Arbitrates control-mode window resizes with echo suppression (addendum §4).
@@ -41,8 +42,11 @@ final class ControlModeResizeCoordinator: @unchecked Sendable {
     /// Sane geometry bounds. Garbage sizes from a mid-animation view (or a wildly
     /// wrong debounce sample) must not wedge tmux, which historically misbehaves
     /// on absurd dimensions — clamp before it ever reaches `resize-window`.
-    private static let colBounds = 20...500
-    private static let rowBounds = 5...300
+    /// The SHARED `ControlModeGeometry` envelope (R6-M5): the app's resize
+    /// gate refuses to send below the same floor, so this clamp is a backstop
+    /// for other/older clients, not a path our own app exercises.
+    private static let colBounds = ControlModeGeometry.minCols...ControlModeGeometry.maxCols
+    private static let rowBounds = ControlModeGeometry.minRows...ControlModeGeometry.maxRows
 
     init(commandProvider: @escaping @Sendable (String) async -> TmuxControlCommandClient?) {
         self.commandProvider = commandProvider
