@@ -30,7 +30,7 @@ private final class ResponseCapturingDelegate: TerminalDelegate {
         bytes.append(contentsOf: data)
     }
 
-    var text: String { String(decoding: bytes, as: UTF8.self) }
+    var text: String { String(bytes: bytes, encoding: .utf8) ?? "" }
 
     func reset() { bytes.removeAll() }
 }
