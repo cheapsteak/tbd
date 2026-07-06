@@ -1050,6 +1050,133 @@ extension ModelProfile {
     public var tabDisplayName: String { name }
 }
 
+// MARK: - ModelProfileUsage display
+
+extension ModelProfileUsage {
+    /// Age past which a cached usage reading is considered stale and we
+    /// annotate the line with how old it is rather than presenting it as live.
+    /// Slightly above the poller's 30-min cadence so a single skipped poll
+    /// doesn't flip every row to "stale".
+    static let staleAfter: TimeInterval = 45 * 60
+
+    /// Single-line usage summary for a profile row, e.g.
+    /// `5h 27% · resets 20:20 · week 84% · resets in 2d 5h`.
+    ///
+    /// Returns `nil` when there is nothing honest to show — i.e. we have never
+    /// fetched anything (no `fetchedAt`) and hold no cached percentages. Callers
+    /// render nothing in that case rather than a fake zero or an empty line.
+    ///
+    /// Honest fallback states (from the poller's `lastStatus`):
+    /// - `http_401` → "usage unavailable — needs re-login"
+    /// - `http_429` → cached numbers (if any) suffixed with "· rate-limited",
+    ///   else "usage unavailable — rate-limited, retrying"
+    /// - `network_error` → cached numbers suffixed with "· retrying", else
+    ///   "usage unavailable — retrying"
+    /// A successful-but-stale reading is suffixed with the age, e.g.
+    /// "· 52m ago".
+    public func usageLine(now: Date = Date()) -> String? {
+        // Nothing ever fetched and nothing cached: caller shows nothing.
+        if fetchedAt == nil && fiveHourPct == nil && sevenDayPct == nil {
+            return nil
+        }
+
+        switch lastStatus {
+        case "http_401":
+            return "usage unavailable — needs re-login"
+
+        case "http_429":
+            if let core = Self.coreUsageText(
+                fiveHourPct: fiveHourPct, sevenDayPct: sevenDayPct,
+                fiveHourResetsAt: fiveHourResetsAt, sevenDayResetsAt: sevenDayResetsAt,
+                now: now
+            ) {
+                return core + " · rate-limited"
+            }
+            return "usage unavailable — rate-limited, retrying"
+
+        case "network_error":
+            if let core = Self.coreUsageText(
+                fiveHourPct: fiveHourPct, sevenDayPct: sevenDayPct,
+                fiveHourResetsAt: fiveHourResetsAt, sevenDayResetsAt: sevenDayResetsAt,
+                now: now
+            ) {
+                return core + " · retrying"
+            }
+            return "usage unavailable — retrying"
+
+        default:
+            // "ok" or any unknown status: present cached numbers, annotating age
+            // if the reading is stale.
+            guard let core = Self.coreUsageText(
+                fiveHourPct: fiveHourPct, sevenDayPct: sevenDayPct,
+                fiveHourResetsAt: fiveHourResetsAt, sevenDayResetsAt: sevenDayResetsAt,
+                now: now
+            ) else {
+                return "usage unavailable — retrying"
+            }
+            if let fetchedAt, now.timeIntervalSince(fetchedAt) > Self.staleAfter {
+                return core + " · \(Self.compactAge(now.timeIntervalSince(fetchedAt))) ago"
+            }
+            return core
+        }
+    }
+
+    /// The percentage/reset portion shared by all states. `nil` when neither
+    /// window has a percentage to show.
+    private static func coreUsageText(
+        fiveHourPct: Double?, sevenDayPct: Double?,
+        fiveHourResetsAt: Date?, sevenDayResetsAt: Date?,
+        now: Date
+    ) -> String? {
+        var parts: [String] = []
+        if let five = fiveHourPct {
+            parts.append("5h \(Int(five.rounded()))%")
+            if let reset = fiveHourResetsAt {
+                parts.append("resets \(clockText(reset))")
+            }
+        }
+        if let week = sevenDayPct {
+            parts.append("week \(Int(week.rounded()))%")
+            if let reset = sevenDayResetsAt {
+                parts.append("resets in \(relativeText(reset, now: now))")
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// Wall-clock "HH:mm" for a same-day 5h reset.
+    private static func clockText(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f.string(from: date)
+    }
+
+    /// Coarse "in 2d 5h" / "3h" / "40m" text for a weekly reset. Clamps to
+    /// "soon" once the reset is in the past.
+    private static func relativeText(_ date: Date, now: Date) -> String {
+        let seconds = date.timeIntervalSince(now)
+        if seconds <= 0 { return "soon" }
+        let days = Int(seconds) / 86_400
+        let hours = (Int(seconds) % 86_400) / 3_600
+        let minutes = (Int(seconds) % 3_600) / 60
+        if days > 0 {
+            return hours > 0 ? "\(days)d \(hours)h" : "\(days)d"
+        }
+        if hours > 0 {
+            return "\(hours)h"
+        }
+        return "\(minutes)m"
+    }
+
+    /// Compact age string for a stale reading: "52m", "3h", "2d".
+    private static func compactAge(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds)
+        if s >= 86_400 { return "\(s / 86_400)d" }
+        if s >= 3_600 { return "\(s / 3_600)h" }
+        return "\(max(1, s / 60))m"
+    }
+}
+
 // MARK: - Tab Metadata
 
 /// Per-tab metadata persisted in the daemon DB. A row exists only when
