@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self]
     )
 }
 
@@ -312,6 +312,77 @@ struct TerminalConversation: AsyncParsableCommand {
                     print(msg.content)
                     print()
                 }
+            }
+        }
+    }
+}
+
+// MARK: - terminal swap-profile
+
+struct TerminalSwapProfile: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "swap-profile",
+        abstract: "Reassign a terminal's Claude session to a different account/profile",
+        discussion: """
+            The daemon decides how to apply the swap based on the session's state:
+
+              • PARKED session (hibernated) → COLD swap: the profile is reassigned
+                but the session is NOT woken. Memory stays reclaimed; the session
+                resumes under the new profile on its next wake/focus. Ideal for
+                bulk-rebalancing many parked sessions onto an underused account.
+
+              • AWAKE session → the running Claude is respawned in place under the
+                new profile (a brief interruption).
+
+            Pass --profile ambient (or omit it) to clear the profile (use ambient
+            keychain credentials).
+            """
+    )
+
+    @Option(name: .long, help: "Terminal ID (UUID)")
+    var terminal: String
+
+    @Option(name: .long, help: "Target profile name or UUID, or 'ambient' to clear (defaults to ambient)")
+    var profile: String?
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+
+        // Resolve the target profile. Omitted or "ambient" → nil (clear profile).
+        var newProfileID: UUID? = nil
+        var targetLabel = "ambient"
+        if let profile, profile.lowercased() != "ambient" {
+            let list = try client.call(
+                method: RPCMethod.modelProfileList,
+                resultType: ModelProfileListResult.self
+            )
+            let entry = try resolveProfile(named: profile, in: list.profiles)
+            newProfileID = entry.profile.id
+            targetLabel = entry.profile.name
+        }
+
+        let updated: Terminal = try client.call(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: terminalID, newProfileID: newProfileID),
+            resultType: Terminal.self
+        )
+
+        if json {
+            printJSON(updated)
+        } else {
+            // A cold-swapped (parked) session stays parked in the returned row;
+            // a respawned one is no longer parked.
+            if updated.isParked {
+                print("Cold swap: session parked, will resume under '\(targetLabel)' on wake.")
+            } else {
+                print("Respawned under '\(targetLabel)'.")
             }
         }
     }

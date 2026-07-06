@@ -71,8 +71,10 @@ import Testing
     }
 
     @Test func terminalSuspendCancels() async throws {
-        // manualSuspend returns .notClaudeTerminal for a session-less terminal,
-        // but the cancel must happen regardless of the coordinator's verdict.
+        // terminal.suspend is now a backward-compat shim routing to
+        // manualHibernate, which refuses a session-less terminal — but the
+        // handler cancels any pending resume up-front and unconditionally, so
+        // the cancel must happen regardless of the coordinator's verdict.
         let request = try RPCRequest(
             method: RPCMethod.terminalSuspend,
             params: TerminalSuspendParams(terminalID: terminalID))

@@ -48,16 +48,17 @@ struct RowActionMenuRegularTests {
         #expect(items.contains(.divider))
     }
 
-    @Test func suspendShownOnlyWhenUnsuspendedClaudePresent() {
-        let ctx = RowActionMenu.Context(hasUnsuspendedClaude: true, hasRepoID: true, branch: "b")
-        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.suspendClaude))
-        #expect(!kinds(RowActionMenu.items(context: ctx)).contains(.resumeClaude))
+    @Test func hibernateShownWhenHibernatableClaudePresent() {
+        // Suspend/Resume retired: the unified park verb is "Hibernate now".
+        let ctx = RowActionMenu.Context(hasHibernatableClaude: true, hasRepoID: true, branch: "b")
+        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.hibernateNow))
     }
 
-    @Test func resumeShownOnlyWhenSuspendedClaudePresent() {
-        let ctx = RowActionMenu.Context(hasSuspendedClaude: true, hasRepoID: true, branch: "b")
-        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.resumeClaude))
-        #expect(!kinds(RowActionMenu.items(context: ctx)).contains(.suspendClaude))
+    @Test func wakeShownWhenHibernatedClaudePresent() {
+        // A parked session (hibernated or legacy-suspended, folded to the same
+        // `hasHibernatedClaude` context flag) drives the single "Wake" verb.
+        let ctx = RowActionMenu.Context(hasHibernatedClaude: true, hasRepoID: true, branch: "b")
+        #expect(kinds(RowActionMenu.items(context: ctx)).contains(.wakeHibernated))
     }
 
     @Test func nestedWorktreeOnlyWhenRepoPresent() {

@@ -213,9 +213,9 @@ extension WorktreeLifecycle {
         // Reconcile terminals whose tmux window is gone. A window can vanish two
         // ways: its specific window died while the server is still up, or the
         // whole server is gone after a reboot/long sleep. BOTH are handled the
-        // same way — park resumable Claude sessions as suspended and let the
-        // user bring them back on demand via the Resume button (which bootstraps
-        // a dead server, see SuspendResumeCoordinator.resumeTerminal / #285).
+        // same way — park resumable Claude sessions and let the user bring them
+        // back on demand via wake (HibernationCoordinator.wake, the single
+        // unified resume path; see #285 for the dead-server bootstrap history).
         //
         // We deliberately do NOT eagerly recreate terminals on reboot: on a
         // machine with many worktrees that spawned N simultaneous `claude
@@ -237,12 +237,13 @@ extension WorktreeLifecycle {
                 guard !windowAlive else { continue }
 
                 if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
-                    // Resumable Claude session: park it. The suspend/resume
+                    // Resumable Claude session: park it. The unified park/wake
                     // machinery rebuilds a window from the session ID on demand.
                     // Deleting here would orphan the transcript and the session
-                    // would vanish from TBD.
-                    try? await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID)
-                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) as suspended — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
+                    // would vanish from TBD. Write the authoritative `hibernatedAt`
+                    // column so `wake()` (which un-parks any parked row) can resume it.
+                    try? await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
+                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
                     // Plain shell / Codex: nothing resumable to preserve, delete.
                     try? await db.terminals.delete(id: terminal.id)
