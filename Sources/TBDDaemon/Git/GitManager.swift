@@ -427,7 +427,21 @@ public struct GitManager: Sendable {
 
     /// Runs a git command with the given arguments at the given directory and returns stdout.
     /// Throws `GitError` on non-zero exit.
-    private func run(arguments: [String], at directory: String) async throws -> String {
+    /// Package-internal test seam: drives `run()`'s timeout/kill wrapper against
+    /// an arbitrary executable so the SIGTERM→SIGKILL path (and `GitTimeoutError`)
+    /// is unit-testable deterministically, without relying on a real git operation
+    /// hanging (which it does not reliably do across environments).
+    func runForTimeoutTesting(executable: String, arguments: [String], at directory: String) async throws -> String {
+        try await run(arguments: arguments, at: directory, executable: executable)
+    }
+
+    /// `executable` defaults to git; it is overridable ONLY so the package-internal
+    /// `runForTimeoutTesting` seam can drive this exact timeout/kill wrapper against
+    /// a slow binary (`/bin/sleep`) deterministically — real git has no reliable
+    /// cross-environment hang to exercise the kill path (a post-checkout hook did
+    /// not fire on CI). Production callers never pass `executable`.
+    private func run(arguments: [String], at directory: String,
+                     executable: String = "/usr/bin/git") async throws -> String {
         let timeout = subprocessTimeout
         let commandDescription = "git " + arguments.joined(separator: " ")
         // Single-resume guard shared by the termination handler, the timeout
@@ -441,7 +455,7 @@ public struct GitManager: Sendable {
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
 
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
             process.standardOutput = stdoutPipe
