@@ -57,6 +57,14 @@ struct PaneState: Equatable, Sendable {
     /// input inside the one atomic capture batch (M4.3).
     let width: Int
     let height: Int
+    /// Lines currently in the pane's PRIMARY-screen scrollback
+    /// (`history_size`, present at the 3.2 floor). The replay orchestrator
+    /// needs it to know whether the pure-scrollback capture leg
+    /// (`-S -<depth> -E -1`) is trustworthy: live-probed on tmux 3.6a, that
+    /// leg CLAMPS on a history-less pane and returns the first visible screen
+    /// row instead of nothing — so it must be discarded when `historySize`
+    /// is 0 or the replay would paint that row twice.
+    let historySize: Int
 }
 
 /// A capture that can't be trusted must abort the replay, not degrade it —
@@ -90,7 +98,7 @@ enum PaneStateCaptureError: Error, Equatable {
 /// format, there is no tab-vs-`\t` escaping ambiguity to work around.
 enum PaneStateCapture {
     /// Number of space-separated fields in `format` (and in every valid line).
-    static let fieldCount = 21
+    static let fieldCount = 22
 
     /// Field order is load-bearing: `parse` consumes positionally.
     static let format = [
@@ -115,6 +123,7 @@ enum PaneStateCapture {
         "#{pane_in_mode}",
         "#{pane_width}",
         "#{pane_height}",
+        "#{history_size}",
     ].joined(separator: " ")
 
     /// tmux reports `alternate_saved_x`/`_y` as UINT_MAX when the pane has no
@@ -195,6 +204,7 @@ enum PaneStateCapture {
             originMode: try flag(17, "origin_flag"),
             paneInMode: try int(18, "pane_in_mode"),
             width: try int(19, "pane_width"),
-            height: try int(20, "pane_height"))
+            height: try int(20, "pane_height"),
+            historySize: try int(21, "history_size"))
     }
 }

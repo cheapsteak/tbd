@@ -119,6 +119,10 @@ struct PaneStateCaptureIntegrationTests {
         // window; height is window height minus any status line.
         #expect(state.width == 120)
         #expect((30...40).contains(state.height))
+        // history_size (review H1): the pane has printed nothing, so its
+        // primary scrollback is empty — and the variable must EXIST on this
+        // tmux (an unknown variable expands empty and the parser throws).
+        #expect(state.historySize == 0)
 
         await supervisor.stopAll()
     }

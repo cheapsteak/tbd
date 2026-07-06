@@ -14,7 +14,7 @@ enum ReplayWriterError: Error, Equatable {
 }
 
 /// Pure byte assembler for the attach replay (addendum §3, base spec
-/// §Scrollback). Consumes the 4-command capture's decoded responses and a
+/// §Scrollback). Consumes the 5-command capture's decoded responses and a
 /// `PaneState` (M4.1) and produces the exact byte sequence the orchestrator
 /// (M4.3) writes into the pane's pipe via `PaneFanout.writeReplay`.
 ///
@@ -76,11 +76,11 @@ enum ReplayWriter {
     ///
     /// - Parameters:
     ///   - history: lines painted onto the PRIMARY screen (SGR escapes + text
-    ///     only, `-J` joined wraps): the `-S -<N>` capture (screen +
-    ///     scrollback) for a primary-screen pane, or the `-a` saved-primary
-    ///     snapshot when the pane is in alt mode (capture legs invert with
-    ///     `alternate_on` — see the orchestrator; alt panes have no
-    ///     reachable primary scrollback).
+    ///     only, `-J` joined wraps): the pure-scrollback leg (`-S -<N> -E -1`,
+    ///     discarded by the orchestrator when `history_size` is 0) followed
+    ///     by the current-screen leg for a primary-screen pane, or by the
+    ///     `-a` saved-primary viewport when the pane is in alt mode (see the
+    ///     orchestrator's leg recombination, review H1).
     ///   - altScreen: lines painted onto the ALT screen after `1049h` — the
     ///     pane's current-screen capture when `state.alternateOn`, else nil.
     ///     `state.alternateOn` alone decides whether the alt screen is

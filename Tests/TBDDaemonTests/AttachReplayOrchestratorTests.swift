@@ -47,10 +47,17 @@ struct AttachReplayOrchestratorTests {
         return (supervisor, orchestrator, recorder, client)
     }
 
-    /// A 21-field primary-screen state line for `paneID` at 80x24 with the
-    /// cursor at (x=2, y=1) — final CUP must be `ESC[2;3H`.
-    private func stateLine(paneID: String) -> String {
-        "\(paneID) 2 1 0 4294967295 4294967295 0 23 1 0 0 0 1 0 0 0 0 0 0 80 24"
+    /// A 22-field primary-screen state line for `paneID` at 80x24 with the
+    /// cursor at (x=2, y=1) — final CUP must be `ESC[2;3H`. `historySize`
+    /// gates the pure-scrollback leg (review H1): > 0 keeps it, 0 discards.
+    private func stateLine(paneID: String, historySize: Int = 1) -> String {
+        "\(paneID) 2 1 0 4294967295 4294967295 0 23 1 0 0 0 1 0 0 0 0 0 0 80 24 \(historySize)"
+    }
+
+    /// A 22-field ALT-SCREEN state line for `paneID` at 80x24 (saved cursor
+    /// 0,0; current cursor x=2, y=1).
+    private func altStateLine(paneID: String, historySize: Int = 1) -> String {
+        "\(paneID) 2 1 1 0 0 0 23 1 0 0 0 1 0 0 0 0 0 0 80 24 \(historySize)"
     }
 
     /// Poll until `condition`, failing after `deadline` (async work — the
@@ -127,12 +134,14 @@ struct AttachReplayOrchestratorTests {
         }
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
 
-        // ONE atomic stream write: pause FIRST, then the 4-command capture.
+        // ONE atomic stream write: pause FIRST, then the 5-command capture
+        // (three legs: pure scrollback / current screen / saved primary).
         #expect(recorder.writes.count == 1)
         let batch = try #require(recorder.writes.first)
         #expect(batch == """
             refresh-client -A '%1:pause'
-            capture-pane -peqJN -S -50000 -t %1
+            capture-pane -peqJN -S -50000 -E -1 -q -t %1
+            capture-pane -peqJN -t %1
             capture-pane -peqJN -a -q -t %1
             list-panes -t %1 -F '\(PaneStateCapture.format)'
             capture-pane -p -P -C -t %1
@@ -144,8 +153,10 @@ struct AttachReplayOrchestratorTests {
         supervisor.fanout.route(
             server: server, event: .output(paneID: paneID, bytes: Data("MID-SEQUENCE".utf8)))
 
-        // Reply blocks in FIFO order: pause, history, alt, state, pending.
-        await succeed(client, [[], ["hist-one", "hist-two"], [], [stateLine(paneID: paneID)], []])
+        // Reply blocks in FIFO order: pause, scrollback, screen, saved,
+        // state, pending. Scrollback + screen recombine in order.
+        await succeed(client, [[], ["hist-one"], ["hist-two"], [],
+                               [stateLine(paneID: paneID)], []])
 
         let outcome = try await task.value
         #expect(outcome == .ready)
@@ -185,7 +196,7 @@ struct AttachReplayOrchestratorTests {
         let (read2, _) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(read2) }
 
-        await succeed(client, [[], ["hist"], [], [stateLine(paneID: paneID)], []])
+        await succeed(client, [[], ["hist"], [], [], [stateLine(paneID: paneID)], []])
         let outcome = try await task.value
         #expect(outcome == .superseded)
 
@@ -240,15 +251,15 @@ struct AttachReplayOrchestratorTests {
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
 
-        // pause OK, main-history capture returns %error (tolerated at the
+        // pause OK, scrollback capture returns %error (tolerated at the
         // correlator level so the connection survives), rest succeed.
         await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
-        await succeed(client, [[], [stateLine(paneID: paneID)], []])
+        await succeed(client, [[], [], [stateLine(paneID: paneID)], []])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying as? AttachReplayError == .captureFailed(
-            command: "capture-pane -peqJN -S -50000 -t %3"))
+            command: "capture-pane -peqJN -S -50000 -E -1 -q -t %3"))
         #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
         try await waitFor("unpause write") { recorder.writes.count >= 2 }
         #expect(recorder.writes.last == "refresh-client -A '%3:continue'")
@@ -265,7 +276,7 @@ struct AttachReplayOrchestratorTests {
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
 
         // Pending line with `\` not followed by three octal digits.
-        await succeed(client, [[], ["hist"], [], [stateLine(paneID: paneID)], ["bad\\9x"]])
+        await succeed(client, [[], ["hist"], [], [], [stateLine(paneID: paneID)], ["bad\\9x"]])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying is ReplayWriterError)
@@ -311,17 +322,103 @@ struct AttachReplayOrchestratorTests {
 
             let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
             try await waitFor("capture batch write") { recorder.writes.count >= 1 }
-            // The injected depth reaches the capture command too.
-            #expect(recorder.writes.first?.contains("capture-pane -peqJN -S -3 -t %9") == true)
+            // The injected depth reaches the scrollback capture command too.
+            #expect(recorder.writes.first?.contains("capture-pane -peqJN -S -3 -E -1 -q -t %9") == true)
 
             let history = (0..<lineCount).map { "line-\($0)" }
-            await succeed(client, [[], history, [], [stateLine(paneID: paneID)], []])
+            await succeed(client, [[], history, ["screen"], [],
+                                   [stateLine(paneID: paneID, historySize: lineCount)], []])
             let outcome = try await task.value
             #expect(outcome == .ready)
             #expect(truncations.counts == (expectFire ? [lineCount] : []),
                     "depth 3, \(lineCount) lines")
             _ = drain(readFD)
         }
+    }
+
+    @Test("history_size == 0 discards the scrollback leg (clamping quirk: it returns a screen row)")
+    func historyLegDiscardedWhenHistorySizeZero() async throws {
+        let (supervisor, orchestrator, recorder, client) = makeHarness()
+        let paneID = "%12"
+        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+
+        let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        // QUIRK (live-probed, tmux 3.6a): on a pane with history_size == 0
+        // the `-S -N -E -1` leg does NOT return empty — it clamps and returns
+        // the first visible screen row. Feeding that duplicate here must NOT
+        // reach the replay when the state says the scrollback is empty.
+        await succeed(client, [[], ["screen-row-one"], ["screen-row-one", "screen-row-two"], [],
+                               [stateLine(paneID: paneID, historySize: 0)], []])
+
+        let outcome = try await task.value
+        #expect(outcome == .ready)
+        let text = (String(bytes: drain(readFD), encoding: .utf8) ?? "")
+        #expect(text.contains("screen-row-one\r\nscreen-row-two"))
+        // Exactly ONE paint of the clamped row — the discarded leg's copy is gone.
+        #expect(text.components(separatedBy: "screen-row-one").count == 2,
+                "history-less pane painted the clamped scrollback leg twice")
+    }
+
+    @Test("non-alt replay is byte-identical to the legacy single -S capture (scrollback+screen concat)")
+    func nonAltReplayByteIdenticalToLegacyConcatenation() async throws {
+        let (supervisor, orchestrator, recorder, client) = makeHarness()
+        let paneID = "%13"
+        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+
+        let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        let scrollback = ["h1", "h2"]
+        let screen = ["s1", "s2"]
+        await succeed(client, [[], scrollback, screen, [],
+                               [stateLine(paneID: paneID, historySize: 2)], []])
+        let outcome = try await task.value
+        #expect(outcome == .ready)
+
+        // The old single `-S -N` capture returned scrollback rows followed by
+        // screen rows in one leg; the three-leg split must reassemble the
+        // exact same bytes for a non-alt pane.
+        let state = try #require(try PaneStateCapture.state(
+            forPane: paneID, in: [stateLine(paneID: paneID, historySize: 2)]))
+        let legacy = try ReplayWriter.assemble(
+            history: scrollback + screen, altScreen: nil, pending: [],
+            state: state, cols: state.width, rows: state.height)
+        #expect(drain(readFD) == legacy,
+                "three-leg reassembly diverged from the legacy single-capture bytes")
+    }
+
+    @Test("alt pane: scrollback + saved primary paint the primary screen; current screen paints the alt")
+    func altPaneThreeLegMapping() async throws {
+        let (supervisor, orchestrator, recorder, client) = makeHarness()
+        let paneID = "%14"
+        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+
+        let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        // While alternate_on: historyLeg reaches the PRIMARY scrollback,
+        // screenLeg returns the ALT content, savedLeg the saved primary
+        // viewport (the H1 regression: historyLeg used to be dropped).
+        await succeed(client, [[], ["OLD-SCROLLBACK"], ["ALT-NOW"], ["SAVED-VIEWPORT"],
+                               [altStateLine(paneID: paneID)], []])
+        let outcome = try await task.value
+        #expect(outcome == .ready)
+
+        let text = (String(bytes: drain(readFD), encoding: .utf8) ?? "")
+        let altOn = try #require(text.range(of: "\u{1b}[?1049h"))
+        let scrollbackRange = try #require(text.range(of: "OLD-SCROLLBACK"),
+                                           "primary scrollback lost on an alt-screen attach (H1)")
+        let savedRange = try #require(text.range(of: "SAVED-VIEWPORT"))
+        let altRange = try #require(text.range(of: "ALT-NOW"))
+        // Primary paint (scrollback then saved viewport) precedes 1049h; the
+        // alt content follows it.
+        #expect(scrollbackRange.upperBound <= savedRange.lowerBound)
+        #expect(savedRange.upperBound <= altOn.lowerBound)
+        #expect(altOn.upperBound <= altRange.lowerBound)
+        // The primary rows are contiguous lines (scrollback \r\n viewport).
+        #expect(text.contains("OLD-SCROLLBACK\r\nSAVED-VIEWPORT"))
     }
 
     @Test("list-panes reply missing the pane fails the attach")
@@ -334,7 +431,7 @@ struct AttachReplayOrchestratorTests {
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
         // The state reply describes a DIFFERENT pane.
-        await succeed(client, [[], ["hist"], [], [stateLine(paneID: "%99")], []])
+        await succeed(client, [[], ["hist"], [], [], [stateLine(paneID: "%99")], []])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying as? AttachReplayError == .paneStateMissing)

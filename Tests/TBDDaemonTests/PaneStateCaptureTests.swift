@@ -9,10 +9,10 @@ struct PaneStateCaptureTests {
 
     /// A fabricated response line in the canonical field order. Field values
     /// are deliberately all-distinct so a transposed field can't pass.
-    private let primaryLine = "%3 17 42 0 4294967295 4294967295 2 48 1 0 1 1 1 0 1 0 1 0 0 120 49"
+    private let primaryLine = "%3 17 42 0 4294967295 4294967295 2 48 1 0 1 1 1 0 1 0 1 0 0 120 49 137"
 
     /// An alt-screen pane: `alternate_on` = 1 and a real saved cursor.
-    private let altLine = "%7 0 0 1 5 9 0 23 0 0 0 0 1 0 0 1 1 1 1 80 24"
+    private let altLine = "%7 0 0 1 5 9 0 23 0 0 0 0 1 0 0 1 1 1 1 80 24 0"
 
     @Test("format has exactly as many fields as the parser expects, space-separated")
     func formatFieldCountMatchesParser() {
@@ -61,6 +61,8 @@ struct PaneStateCaptureTests {
         // pane_width/pane_height (M4.3): the replay assembler's cols/rows.
         #expect(state.width == 120)
         #expect(state.height == 49)
+        // history_size (review H1): gates the pure-scrollback capture leg.
+        #expect(state.historySize == 137)
     }
 
     @Test("round-trips an alt-screen line: alternate_on and saved cursor present")
@@ -76,6 +78,7 @@ struct PaneStateCaptureTests {
         #expect(state.paneInMode == 1)
         #expect(state.width == 80)
         #expect(state.height == 24)
+        #expect(state.historySize == 0)
     }
 
     @Test("multiple panes parse in order and filter by pane ID")
@@ -105,7 +108,7 @@ struct PaneStateCaptureTests {
         // Simulates a format variable that doesn't exist on the running tmux:
         // it expands to empty, leaving two adjacent spaces. Field count is
         // preserved but the field itself is unparseable — must throw, not skip.
-        let line = "%3 17 42 0 4294967295 4294967295 2 48 1 0 1 1 1 0 1 0 1 0 0 120 "
+        let line = "%3 17 42 0 4294967295 4294967295 2 48 1 0 1 1 1 0 1 0 1 0 0 120 49 "
         #expect(throws: PaneStateCaptureError.self) {
             try PaneStateCapture.parse([line])
         }
@@ -113,7 +116,7 @@ struct PaneStateCaptureTests {
 
     @Test("a non-numeric field throws invalidField")
     func nonNumericFieldThrows() {
-        let line = "%3 17 abc 0 4294967295 4294967295 2 48 1 0 1 1 1 0 1 0 1 0 0 120 49"
+        let line = "%3 17 abc 0 4294967295 4294967295 2 48 1 0 1 1 1 0 1 0 1 0 0 120 49 0"
         #expect(throws: PaneStateCaptureError.invalidField(name: "cursor_y", value: "abc")) {
             try PaneStateCapture.parse([line])
         }
@@ -121,7 +124,7 @@ struct PaneStateCaptureTests {
 
     @Test("a bogus pane id (no % prefix) throws invalidField")
     func bogusPaneIDThrows() {
-        let line = "3 17 42 0 4294967295 4294967295 2 48 1 0 1 1 1 0 1 0 1 0 0 120 49"
+        let line = "3 17 42 0 4294967295 4294967295 2 48 1 0 1 1 1 0 1 0 1 0 0 120 49 0"
         #expect(throws: PaneStateCaptureError.invalidField(name: "pane_id", value: "3")) {
             try PaneStateCapture.parse([line])
         }

@@ -282,18 +282,35 @@ struct ReplayLiveIntegrationMatrixTests {
 
     // MARK: - Scenario 2: alt-screen pane
 
-    @Test("alt-screen pane replays 1049h + content, full-clear-first, CUP at alt cursor")
+    @Test("alt-screen pane replays 1049h + content, full-clear-first, primary SCROLLBACK preserved, CUP at alt cursor")
     func altScreenPane() async throws {
         guard await controlModeTmuxAvailable() else { return }
         let server = "tbd-replay-\(UUID().uuidString.prefix(8))"
         defer { tmux(["-L", server, "kill-server"]) }
 
-        // Primary content BEFORE entering the alt screen: the replay must
-        // paint it pre-1049h (it comes from the `-a` saved-primary leg —
-        // capture legs invert with alternate_on) and the alt content after.
-        let script = "printf 'PRIMARY-M4-BEFORE\\n'; "
-            + "printf '\\033[?1049h\\033[2J\\033[HALT-M4-CONTENT one'; sleep 60"
-        let paneID = try bootstrap(server: server, script: script)
+        // MORE primary lines than the pane is tall (40 on a 24-row pane)
+        // BEFORE entering the alt screen: the early lines scroll into the
+        // primary HISTORY, which the `-a` saved-viewport leg alone cannot
+        // reach — replaying every one of them proves the dedicated
+        // scrollback leg (`-S -N -E -1`, review H1). The loop lives in a
+        // temp SCRIPT FILE, not an inline `sh -c` body: `$i` does not
+        // survive the layered quoting contexts reliably (live-test
+        // discipline).
+        let primaryLineCount = 40
+        let scriptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-replay-alt-\(UUID().uuidString.prefix(8)).sh")
+        let scriptBody = """
+            i=1
+            while [ $i -le \(primaryLineCount) ]; do
+              printf 'PRIMARY-M4-%03d\\n' $i
+              i=$((i+1))
+            done
+            printf '\\033[?1049h\\033[2J\\033[HALT-M4-CONTENT one'
+            sleep 60
+            """
+        try scriptBody.write(to: scriptURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: scriptURL) }
+        let paneID = try bootstrap(server: server, script: "/bin/sh '\(scriptURL.path)'")
         try await poll("pane entered alt screen with content") {
             tmuxCapture(["-L", server, "display-message", "-t", "main", "-p",
                          "#{alternate_on}"]) == "1"
@@ -341,12 +358,21 @@ struct ReplayLiveIntegrationMatrixTests {
             #expect(altOn.upperBound <= content.lowerBound,
                     "alt content must be painted after entering the alt screen")
         }
-        // The saved primary snapshot paints the PRIMARY screen, before 1049h.
-        let primary = text.range(of: "PRIMARY-M4-BEFORE")
-        #expect(primary != nil, "replay missing the saved primary content")
-        if let altOn, let primary {
-            #expect(primary.upperBound <= altOn.lowerBound,
-                    "primary content must be painted before entering the alt screen")
+        // EVERY primary line — including the ones that scrolled out of the
+        // saved viewport into the primary HISTORY — must be replayed, in
+        // order, before the 1049h switch (the H1 regression: the old
+        // two-leg capture dropped the scrollback entirely for alt panes).
+        var cursor = text.startIndex
+        for lineNumber in 1...primaryLineCount {
+            let needle = String(format: "PRIMARY-M4-%03d", lineNumber)
+            let found = text.range(of: needle, range: cursor..<text.endIndex)
+            #expect(found != nil, "replay missing or out-of-order primary line \(needle)")
+            guard let found else { break }
+            cursor = found.upperBound
+        }
+        if let altOn {
+            #expect(cursor <= altOn.lowerBound,
+                    "primary content (scrollback + viewport) must be painted before entering the alt screen")
         }
 
         // Cursor-last invariant, and it must target the ALT screen's cursor.

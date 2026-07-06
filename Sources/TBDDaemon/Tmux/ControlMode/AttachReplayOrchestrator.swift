@@ -51,7 +51,8 @@ struct AttachReplayFailure: Error {
 ///     the whole sequence is tagged with it, and the ready-timeout stops
 ///     threatening the attach (its purpose is "app never acked").
 ///  2. ONE atomic command list down the `-CC` stream: pause, then the
-///     4-command capture (main history, alt screen, pane state, pending).
+///     5-command capture (pure scrollback, current screen, saved primary,
+///     pane state, pending).
 ///  3. Assemble the replay (`ReplayWriter`) and write it into the pane's
 ///     pipe behind the still-closed gate (`writeReplay`, generation-checked).
 ///  4. Open the gate (`markReady`) — ONLY after the replay bytes landed.
@@ -163,10 +164,25 @@ struct AttachReplayOrchestrator: Sendable {
         // %error (pane died mid-attach) must fail THIS attach, not tear down
         // the server's connection and every other pane on it. The orchestrator
         // turns any capture failure into `AttachReplayError.captureFailed`.
+        // THREE capture legs (review H1): `-a` reaches only the saved primary
+        // VIEWPORT while the pane is on the alt screen — the primary
+        // SCROLLBACK is reachable only through the history portion of a
+        // no-`-a` capture (adding `-S` to the `-a` leg is a no-op; live-probed
+        // on tmux 3.6a). So the scrollback is captured on its own leg
+        // (`-E -1` = end before the visible screen), which works during alt
+        // mode too, and the assembler recombines the legs by `alternate_on`.
         let pause = "refresh-client -A '\(paneID):pause'"
         let captureCommands = [
-            "capture-pane -peqJN -S -\(historyDepth) -t \(paneID)",
-            // -a: alt screen; -q: an alt-less pane yields empty, not %error.
+            // Pure primary scrollback, NO screen rows. QUIRK (live-probed):
+            // on a history-less pane this clamps and returns the first
+            // visible screen row — the assembler discards this leg when
+            // `history_size` == 0. -q guards %error.
+            "capture-pane -peqJN -S -\(historyDepth) -E -1 -q -t \(paneID)",
+            // Current screen only — the PRIMARY screen normally, the ALT
+            // screen while `alternate_on`.
+            "capture-pane -peqJN -t \(paneID)",
+            // -a: the SAVED primary viewport while `alternate_on`;
+            // -q: empty (not %error) when there is no saved screen.
             "capture-pane -peqJN -a -q -t \(paneID)",
             PaneStateCapture.listPanesCommand(target: paneID),
             "capture-pane -p -P -C -t \(paneID)",
@@ -221,31 +237,38 @@ struct AttachReplayOrchestrator: Sendable {
                 throw AttachReplayError.captureFailed(command: command)
             }
         }
-        let (currentScreen, savedScreen, stateLines, pending) = (captured[0], captured[1], captured[2], captured[3])
+        let (historyLeg, screenLeg, savedLeg, stateLines, pending) =
+            (captured[0], captured[1], captured[2], captured[3], captured[4])
 
         // Truncation telemetry (plan M4.4 fold-in): at >= depth lines the
-        // capture almost certainly hit the history ceiling and older
-        // scrollback was lost to this replay.
-        if currentScreen.count >= historyDepth {
+        // scrollback capture almost certainly hit the history ceiling and
+        // older scrollback was lost to this replay.
+        if historyLeg.count >= historyDepth {
             Self.logger.info("""
                 capture hit history ceiling for \(server, privacy: .public)/\(paneID, privacy: .public): \
-                \(currentScreen.count) lines >= depth \(self.historyDepth)
+                \(historyLeg.count) lines >= depth \(self.historyDepth)
                 """)
-            onHistoryTruncation?(currentScreen.count)
+            onHistoryTruncation?(historyLeg.count)
         }
 
         guard let state = try PaneStateCapture.state(forPane: paneID, in: stateLines) else {
             throw AttachReplayError.paneStateMissing
         }
-        // capture-pane's two legs INVERT meaning with `alternate_on` (verified
-        // live against tmux 3.6a by the M4 integration matrix): without `-a`
-        // it returns the pane's CURRENT screen — the ALT content when the pane
-        // is in alt mode (primary history is inaccessible there) — while `-a`
-        // returns the SAVED grid, i.e. the pre-1049h primary snapshot. Map
-        // legs by what each screen must be painted with, not by flag.
+        // Leg recombination (review H1, verified live against tmux 3.6a):
+        // - historyLeg is the primary SCROLLBACK, reachable even during alt
+        //   mode — but it CLAMPS to the first screen row on a history-less
+        //   pane, so it is discarded when `history_size` == 0 (painting that
+        //   row twice otherwise).
+        // - screenLeg is the CURRENT screen: the primary screen normally
+        //   (appended after the scrollback — identical bytes to the old
+        //   single `-S` capture), the ALT content while `alternate_on`.
+        // - savedLeg is the `-a` saved primary VIEWPORT, meaningful only
+        //   while `alternate_on` (empty otherwise): it replaces screenLeg as
+        //   the primary screen's bottom rows in that case.
+        let scrollback = state.historySize > 0 ? historyLeg : []
         let replay = try ReplayWriter.assemble(
-            history: state.alternateOn ? savedScreen : currentScreen,
-            altScreen: state.alternateOn ? currentScreen : nil,
+            history: scrollback + (state.alternateOn ? savedLeg : screenLeg),
+            altScreen: state.alternateOn ? screenLeg : nil,
             pending: pending,
             state: state,
             cols: state.width,

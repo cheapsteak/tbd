@@ -162,16 +162,18 @@ struct AttachRPCOrchestrationTests {
         return (client, recorder)
     }
 
-    /// A 21-field state line for `paneID` (80x24, primary screen, cursor 0,0).
+    /// A 22-field state line for `paneID` (80x24, primary screen, cursor 0,0,
+    /// one scrollback line so the history leg is kept — review H1).
     private func stateLine(paneID: String) -> String {
-        "\(paneID) 0 0 0 4294967295 4294967295 0 23 1 0 0 0 1 0 0 0 0 0 0 80 24"
+        "\(paneID) 0 0 0 4294967295 4294967295 0 23 1 0 0 0 1 0 0 0 0 0 0 80 24 1"
     }
 
-    /// Feed the full happy-path reply set: pause, history, alt, state, pending.
+    /// Feed the full happy-path reply set: pause, scrollback, screen, saved,
+    /// state, pending.
     private func feedCaptureReplies(
         _ client: TmuxControlCommandClient, paneID: String, history: [String]
     ) async {
-        for lines in [[], history, [], [stateLine(paneID: paneID)], [] as [String]] {
+        for lines in [[], history, [], [], [stateLine(paneID: paneID)], [] as [String]] {
             await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: lines))
         }
     }
@@ -328,7 +330,7 @@ struct AttachRPCOrchestrationTests {
         // The ack triggers ONE atomic stream write: pause then the captures.
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
         let batch = try #require(recorder.writes.first)
-        #expect(batch.hasPrefix("refresh-client -A '%7:pause'\ncapture-pane -peqJN -S -50000 -t %7\n"))
+        #expect(batch.hasPrefix("refresh-client -A '%7:pause'\ncapture-pane -peqJN -S -50000 -E -1 -q -t %7\n"))
         // The gate stays CLOSED while the capture is in flight.
         #expect(await supervisor.isReady(server: "tbd-gate-test", paneID: "%7") == false)
 
@@ -611,10 +613,10 @@ struct AttachRPCOrchestrationTests {
         #expect((String(bytes: drain(fd2), encoding: .utf8) ?? "").contains("fresh-history"))
 
         // Gen 1's DELAYED capture reply is a %error → its sequence fails.
-        // (pause OK, main-history %error, remaining three OK.)
+        // (pause OK, scrollback %error, remaining four OK.)
         await clientA.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         await clientA.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
-        for _ in 0..<3 {
+        for _ in 0..<4 {
             await clientA.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         }
         let response1 = await ready1.value
@@ -753,10 +755,10 @@ struct AttachRPCOrchestrationTests {
         let readyTask = Task { await router.handle(ready) }
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
 
-        // pause OK, then the main-history capture %errors (dead pane).
+        // pause OK, then the scrollback capture %errors (dead pane).
         await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
-        for _ in 0..<3 {
+        for _ in 0..<4 {
             await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         }
 
