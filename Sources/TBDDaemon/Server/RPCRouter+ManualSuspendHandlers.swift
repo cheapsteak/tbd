@@ -1,16 +1,27 @@
 import Foundation
 import TBDShared
 
+/// Backward-compat shims for the retired Suspend/Resume RPCs.
+///
+/// The Suspend feature merged into Hibernation (one unified "park" state). We
+/// KEEP these RPC methods alive so old CLI/app builds that still call
+/// `terminal.suspend` / `terminal.resume` / `worktree.suspend` /
+/// `worktree.resume` keep working — but they now route to the unified
+/// `HibernationCoordinator`:
+///   - `terminal.suspend`  → `manualHibernate`
+///   - `terminal.resume`   → `wake`
+///   - `worktree.suspend`  → hibernate every eligible Claude terminal
+///   - `worktree.resume`   → wake every parked Claude terminal
 extension RPCRouter {
 
     func handleTerminalSuspend(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSuspendParams.self, from: paramsData)
-        let result = await suspendResumeCoordinator.manualSuspend(terminalID: params.terminalID)
+        let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
         switch result {
-        case .ok, .alreadySuspended:
+        case .ok, .alreadyHibernated:
             return .ok()
-        case .notClaudeTerminal:
-            return RPCResponse(error: "Not a Claude terminal")
+        case .notEligible(let reason):
+            return RPCResponse(error: reason)
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         }
@@ -18,9 +29,10 @@ extension RPCRouter {
 
     func handleTerminalResume(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalResumeParams.self, from: paramsData)
-        let result = await suspendResumeCoordinator.manualResume(terminalID: params.terminalID)
+        let result = await hibernationCoordinator.wake(terminalID: params.terminalID)
         switch result {
-        case .ok, .notSuspended:
+        case .ok, .notHibernated, .inFlight:
+            // notHibernated / inFlight are benign no-ops for an idempotent wake.
             return .ok()
         case .notFound:
             return RPCResponse(error: "Terminal not found")
@@ -35,13 +47,13 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found")
         }
 
-        let claudeTerminals = terminals.filter { $0.isClaudeResumable && $0.suspendedAt == nil }
+        let eligible = terminals.filter { $0.isManuallyHibernatable }
 
         // Fire in background — RPC returns immediately so the app can show
-        // the suspending overlay while the daemon does its work.
-        Task {
-            for terminal in claudeTerminals {
-                _ = await suspendResumeCoordinator.manualSuspend(terminalID: terminal.id)
+        // the parking overlay while the daemon does its work.
+        Task { [hibernationCoordinator] in
+            for terminal in eligible {
+                _ = await hibernationCoordinator.manualHibernate(terminalID: terminal.id)
             }
         }
 
@@ -54,11 +66,11 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found")
         }
 
-        let suspendedTerminals = terminals.filter { $0.isClaudeResumable && $0.suspendedAt != nil }
-
-        // Sequential — the coordinator is an actor so calls serialize anyway
-        for terminal in suspendedTerminals {
-            _ = await suspendResumeCoordinator.manualResume(terminalID: terminal.id)
+        // Wake every parked terminal (authoritative or legacy). The coordinator
+        // is an actor so calls serialize anyway.
+        let parked = terminals.filter { $0.isParked && $0.isClaudeResumable }
+        for terminal in parked {
+            _ = await hibernationCoordinator.wake(terminalID: terminal.id)
         }
 
         return .ok()

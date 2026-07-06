@@ -94,8 +94,6 @@ struct TabBar: View {
     var onAddNote: () -> Void = {}
     var onCloseTab: (Int) -> Void
     var terminalForTab: (UUID) -> Terminal? = { _ in nil }
-    var onSuspendTab: (UUID) -> Void = { _ in }
-    var onResumeTab: (UUID) -> Void = { _ in }
     var onForkTab: (UUID) -> Void = { _ in }
     var isHistorySelected: Bool = false
     var onHistoryTab: () -> Void = {}
@@ -118,8 +116,6 @@ struct TabBar: View {
                     terminal: terminalForTab(tab.id),
                     onSelect: { activeTabIndex = index },
                     onClose: { onCloseTab(index) },
-                    onSuspend: { onSuspendTab(tab.id) },
-                    onResume: { onResumeTab(tab.id) },
                     onFork: { onForkTab(tab.id) }
                 )
             }
@@ -472,8 +468,6 @@ private struct TabBarItem: View {
     let terminal: Terminal?
     let onSelect: () -> Void
     let onClose: () -> Void
-    let onSuspend: () -> Void
-    let onResume: () -> Void
     let onFork: () -> Void
 
     @State private var isHovering = false
@@ -506,8 +500,11 @@ private struct TabBarItem: View {
         terminal?.isCodexTerminal == true
     }
 
-    private var isSuspended: Bool {
-        terminal?.suspendedAt != nil
+    /// Whether this tab's session is PARKED — hibernated (authoritative) or
+    /// legacy-suspended. Drives the calm moon icon + dimmed label. Suspend
+    /// merged into hibernate; the play/pause suspend button was retired.
+    private var isParked: Bool {
+        terminal?.hibernatedAt != nil || terminal?.suspendedAt != nil
     }
 
     /// Hover card describing which account this session runs on: pinned
@@ -576,7 +573,7 @@ private struct TabBarItem: View {
                                     .fontWeight(hasUnreadCompletion ? .bold : .regular)
                                     .lineLimit(1)
                                     .fixedSize()
-                                    .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
+                                    .foregroundStyle(isParked ? .tertiary : (isSelected ? .primary : .secondary))
                             }
                         )
                         .font(.system(size: 11))
@@ -587,7 +584,7 @@ private struct TabBarItem: View {
                             .fontWeight(hasUnreadCompletion ? .bold : .regular)
                             .lineLimit(1)
                             .fixedSize()
-                            .foregroundStyle(isSuspended ? .tertiary : (isSelected ? .primary : .secondary))
+                            .foregroundStyle(isParked ? .tertiary : (isSelected ? .primary : .secondary))
                     }
                 }
                 .padding(.leading, 8)
@@ -773,13 +770,6 @@ private struct TabBarItem: View {
                 Label("Fork Session", systemImage: "arrow.triangle.branch")
             }
 
-            Button(action: isSuspended ? onResume : onSuspend) {
-                Label(
-                    isSuspended ? "Resume Claude" : "Suspend Claude",
-                    systemImage: isSuspended ? "play.circle" : "pause.circle"
-                )
-            }
-
             Divider()
         }
 
@@ -801,7 +791,7 @@ private struct TabBarItem: View {
         let style = isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary)
         switch tab.content {
         case .terminal:
-            if isSuspended {
+            if isParked {
                 Image(systemName: "moon.zzz")
                     .font(.system(size: 10))
                     .foregroundStyle(style)

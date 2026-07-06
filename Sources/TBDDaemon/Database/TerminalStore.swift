@@ -266,26 +266,42 @@ public struct TerminalStore: Sendable {
     /// Mark a terminal hibernated (claude process killed, tmux window kept
     /// alive), recording the wake session ID and timestamp. `sessionID` is the
     /// session to `claude --resume` on wake.
-    public func setHibernated(id: UUID, sessionID: String, at date: Date = Date()) async throws {
+    ///
+    /// `hibernatedAt` is the authoritative parked timestamp (post suspend/hibernate
+    /// merge). The optional `snapshot` is the ANSI pane capture taken just before
+    /// the kill, persisted into the legacy `suspendedSnapshot` column (reused,
+    /// orthogonal to which timestamp wins) so the app can show the frozen pane as
+    /// the backdrop while the session is parked / waking. Pass `nil` to leave any
+    /// existing snapshot untouched.
+    public func setHibernated(id: UUID, sessionID: String, snapshot: String? = nil, at date: Date = Date()) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = sessionID
             record.hibernatedAt = date
+            if let snapshot {
+                record.suspendedSnapshot = snapshot
+            }
             record.activityState = TerminalActivityState.idle.rawValue
             try record.update(db)
         }
     }
 
-    /// Clear a terminal's hibernated state (on wake). Leaves `claudeSessionID`
-    /// intact — the wake respawn re-captures a fresh id afterward.
+    /// Clear a terminal's parked state (on wake). Nils BOTH the authoritative
+    /// `hibernatedAt` AND the legacy `suspendedAt` so a row parked by either the
+    /// unified path or the pre-merge Suspend feature fully un-parks. Leaves
+    /// `claudeSessionID` intact — the wake respawn re-captures a fresh id
+    /// afterward — and keeps `suspendedSnapshot` so the app can feed it into the
+    /// terminal view as initial content while the live tmux client reconnects
+    /// (matches the old Suspend behavior; overwritten on the next park).
     public func clearHibernated(id: UUID) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.hibernatedAt = nil
+            record.suspendedAt = nil
             try record.update(db)
         }
     }

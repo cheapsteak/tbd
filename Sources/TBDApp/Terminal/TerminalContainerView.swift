@@ -178,20 +178,6 @@ struct SingleWorktreeView: View {
                         guard let terminalID = terminalID(for: tabID) else { return nil }
                         return appState.terminals[worktreeID]?.first { $0.id == terminalID }
                     },
-                    onSuspendTab: { tabID in
-                        guard let terminalID = terminalID(for: tabID) else { return }
-                        Task {
-                            try? await appState.daemonClient.terminalSuspend(terminalID: terminalID)
-                            await appState.refreshTerminals(worktreeID: worktreeID)
-                        }
-                    },
-                    onResumeTab: { tabID in
-                        guard let terminalID = terminalID(for: tabID) else { return }
-                        Task {
-                            try? await appState.daemonClient.terminalResume(terminalID: terminalID)
-                            await appState.refreshTerminals(worktreeID: worktreeID)
-                        }
-                    },
                     onForkTab: { tabID in
                         guard let tID = terminalID(for: tabID) else { return }
                         let terminal = appState.terminals[worktreeID]?.first { $0.id == tID }

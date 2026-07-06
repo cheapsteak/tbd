@@ -815,6 +815,67 @@ extension RPCRouter {
             resolved = nil
         }
 
+        // COLD SWAP: the target session is PARKED (hibernated or legacy
+        // suspended). Rebalancing a parked session onto a different account must
+        // NOT wake it — the whole point is to re-home ~dozens of parked sessions
+        // without re-inflating the memory hibernation just reclaimed. So we do
+        // everything EXCEPT any interrupt / respawn / spawn:
+        //   1. Carry the session transcript into the DESTINATION profile's config
+        //      dir (best-effort) so the LATER wake's `claude --resume` finds the
+        //      conversation under the new CLAUDE_CONFIG_DIR. Blank sessions have
+        //      no transcript to carry — wake will just start fresh.
+        //   2. Update the row's profile_id (nil = ambient).
+        //   3. Broadcast the profile delta so the account chip updates.
+        // We leave hibernatedAt / suspendedAt / suspendedSnapshot untouched — the
+        // parked state and its backdrop survive. Wake needs NO change: it already
+        // loads the row's profile via loadByID and resolves that profile's config
+        // dir, so a wake after this resumes under the new account automatically.
+        if oldTerminal.isParked {
+            let blank = ClaudeSessionScanner.isSessionBlank(
+                sessionID: sessionID,
+                worktreePath: worktree.path,
+                transcriptFilePath: oldTerminal.transcriptPath
+            )
+            if !blank {
+                let sourceConfigDir: URL
+                if let oldProfileID = oldTerminal.profileID {
+                    sourceConfigDir = configDirManager.configDirectory(forProfileID: oldProfileID)
+                } else {
+                    sourceConfigDir = configDirManager.ambientConfigDirectory
+                }
+                let destConfigDir: URL
+                if let newProfileID = resolved?.profileID {
+                    destConfigDir = configDirManager.configDirectory(forProfileID: newProfileID)
+                } else {
+                    destConfigDir = configDirManager.ambientConfigDirectory
+                }
+                if let sourceTranscript = Self.resolveSwapSourceTranscript(
+                    transcriptPath: oldTerminal.transcriptPath,
+                    sessionID: sessionID,
+                    worktreePath: worktree.path,
+                    sourceConfigDir: sourceConfigDir
+                ) {
+                    Self.ensureTranscriptReachable(from: sourceTranscript, inConfigDir: destConfigDir)
+                } else {
+                    logger.warning("cold swap: no source transcript for parked session \(sessionID, privacy: .public) — wake will start fresh")
+                }
+            }
+
+            let destProfileID: UUID? = resolved?.profileID
+            try await db.terminals.setProfileID(id: oldTerminal.id, profileID: destProfileID)
+            subscriptions.broadcast(delta: .terminalProfileChanged(TerminalProfileDelta(
+                terminalID: oldTerminal.id,
+                worktreeID: worktree.id,
+                newProfileID: destProfileID
+            )))
+            logger.info("cold swap: re-homed parked terminal \(oldTerminal.id, privacy: .public) to profile \(destProfileID?.uuidString ?? "ambient", privacy: .public) — not woken")
+
+            guard let updated = try await db.terminals.get(id: oldTerminal.id) else {
+                return RPCResponse(error: "Terminal vanished after cold swap")
+            }
+            return try RPCResponse(result: updated)
+        }
+
         // Two reshaping modes (see `TerminalSwapMode`):
         //   .inPlace (default) — SEAMLESS "Switch account": interrupt the
         //     pane's Claude, respawn `claude --resume <id>` under the new
@@ -1149,8 +1210,8 @@ extension RPCRouter {
 
     /// Schedule the post-resume session-id recapture. `claude --resume <id>`
     /// forks the conversation into a NEW session file with a fresh UUID; mirror
-    /// SuspendResumeCoordinator's pattern — wait ~5s for Claude to settle, then
-    /// capture the new id from the pane and persist it against `terminalID`.
+    /// the wake path's pattern — wait ~5s for Claude to settle, then capture the
+    /// new id from the pane and persist it against `terminalID`.
     private func scheduleSessionRecapture(terminalID: UUID, paneID: String, server: String) {
         let tmuxRef = self.tmux
         let dbRef = self.db
@@ -1250,11 +1311,6 @@ extension RPCRouter {
             type: notification.type, message: notification.message,
             terminalID: notification.terminalID
         )))
-
-        // Signal the suspend/resume coordinator that Claude finished a response
-        if params.type == .responseComplete {
-            await suspendResumeCoordinator.responseCompleted(worktreeID: worktreeID)
-        }
 
         return try RPCResponse(result: notification)
     }

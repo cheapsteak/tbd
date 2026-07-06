@@ -175,9 +175,9 @@ extension WorktreeLifecycle {
         // Reconcile terminals whose tmux window is gone. A window can vanish two
         // ways: its specific window died while the server is still up, or the
         // whole server is gone after a reboot/long sleep. BOTH are handled the
-        // same way — park resumable Claude sessions as suspended and let the
-        // user bring them back on demand via the Resume button (which bootstraps
-        // a dead server, see SuspendResumeCoordinator.resumeTerminal / #285).
+        // same way — park resumable Claude sessions and let the user bring them
+        // back on demand via wake (HibernationCoordinator.wake, the single
+        // unified resume path; see #285 for the dead-server bootstrap history).
         //
         // We deliberately do NOT eagerly recreate terminals on reboot: on a
         // machine with many worktrees that spawned N simultaneous `claude

@@ -14,7 +14,6 @@ public final class RPCRouter: Sendable {
     public let startTime: Date
     public let subscriptions: StateSubscriptionManager
     public let prManager: PRStatusManager
-    public let suspendResumeCoordinator: SuspendResumeCoordinator
     public let hibernationCoordinator: HibernationCoordinator
     public let usageFetcher: ClaudeUsageFetcher
     public let modelProfileResolver: ModelProfileResolver
@@ -86,9 +85,6 @@ public final class RPCRouter: Sendable {
             config: db.config
         )
         self.modelProfileResolver = resolvedModelProfileResolver
-        self.suspendResumeCoordinator = SuspendResumeCoordinator(
-            db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver
-        )
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions

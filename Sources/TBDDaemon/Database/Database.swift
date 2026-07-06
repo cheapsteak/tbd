@@ -720,6 +720,35 @@ public final class TBDDatabase: Sendable {
             """)
         }
 
+        // Suspend/Hibernate merge: converge every parked row on ONE authoritative
+        // timestamp. Post-merge, `hibernatedAt` is the single source of truth for
+        // "this session is parked" — all new code writes it (via the unified park
+        // path) and never writes `suspendedAt`. `suspendedAt` becomes LEGACY /
+        // read-only: honored when reading old rows, but never set again.
+        //
+        // Backfill: any row parked by the pre-merge Suspend feature has only
+        // `suspendedAt` set. Copy that timestamp into `hibernatedAt` (where NULL)
+        // so those rows read as parked through the authoritative column and wake
+        // (which keys on `hibernatedAt`) can un-park them. We intentionally LEAVE
+        // `suspendedAt` in place — never drop a column — so an older daemon build
+        // sharing this DB still sees its parked state; `isParked` reads either
+        // column, and wake's `clearHibernated` now nils both. No schema change
+        // here, only a data normalization; wrapped so a re-run under a renamed
+        // id is a harmless idempotent UPDATE (rows already backfilled won't match
+        // `hibernatedAt IS NULL`).
+        //
+        // Registers after v41/v42 (nightwatch, #342) though numbered v40: GRDB
+        // applies in registration order and tolerates out-of-order numeric names
+        // (precedent: v35_forgotten_worktree registers after v37). Renumbering to
+        // v43 would be cleaner but this id already shipped on Adam's live DB.
+        migrator.registerMigration("v40_unify_suspend_hibernate") { db in
+            try db.execute(sql: """
+                UPDATE terminal
+                SET hibernatedAt = suspendedAt
+                WHERE suspendedAt IS NOT NULL AND hibernatedAt IS NULL
+                """)
+        }
+
         return migrator
     }
 }

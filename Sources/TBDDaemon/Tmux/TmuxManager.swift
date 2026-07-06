@@ -25,6 +25,12 @@ public struct TmuxManager: Sendable {
     /// dryRun reports no windows, which makes reconcile's orphan-window
     /// cleanup pass untestable.
     public let dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])?
+    /// Optional test hook consulted by `paneCurrentCommand` in dryRun mode:
+    /// `(server, paneID)` → the command string to report. Without it, dryRun
+    /// always reports "zsh" (no claude), which makes the park path's verify-exit
+    /// poll always see an immediate polite `/exit` — untestable for the
+    /// SIGTERM-fallback branch where claude is still running after the poll.
+    public let dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)?
 
     // Thread-safe counter for generating unique mock IDs
     private final class Counter: Sendable {
@@ -39,13 +45,14 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil) {
         self.dryRun = dryRun
         self.counter = Counter()
         self.dryRunRecorder = dryRunRecorder
         self.dryRunWindowIsDead = dryRunWindowIsDead
         self.dryRunListWindows = dryRunListWindows
         self.dryRunCapturePane = dryRunCapturePane
+        self.dryRunPaneCurrentCommand = dryRunPaneCurrentCommand
     }
 
     // MARK: - Static Command Builders
@@ -436,7 +443,7 @@ public struct TmuxManager: Sendable {
     }
 
     public func paneCurrentCommand(server: String, paneID: String) async throws -> String {
-        if dryRun { return "zsh" }
+        if dryRun { return dryRunPaneCurrentCommand?(server, paneID) ?? "zsh" }
         let args = Self.paneCurrentCommandQuery(server: server, paneID: paneID)
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
     }

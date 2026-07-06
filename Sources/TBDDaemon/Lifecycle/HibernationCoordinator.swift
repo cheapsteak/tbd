@@ -19,20 +19,37 @@ public enum WakeResult: Equatable, Sendable {
     case inFlight        // a wake for this terminal is already respawning
 }
 
-/// Owns session hibernation: gracefully terminating an idle Claude process
-/// while KEEPING its tmux window alive (the shell stays), and waking it later
-/// by respawning `claude --resume <id>` in that same window.
+/// Owns session PARKING — the single unified "park a Claude session" feature
+/// (the former Suspend and Hibernate features merged into one). It gracefully
+/// terminates a Claude process while KEEPING its tmux window alive (the shell
+/// stays), and wakes it later by respawning `claude --resume <id>` in that same
+/// window.
 ///
-/// Mirrors `SuspendResumeCoordinator`'s structure, but the two are distinct:
-///   - Suspend/resume kills the tmux WINDOW's program and snapshots the pane;
-///     resume creates a fresh window.
-///   - Hibernate uses `respawn-window` to swap the pane's program to a bare
-///     shell (window survives, freeing the claude process + its RSS); wake
-///     `respawn-window`s the same pane back to `claude --resume`.
+/// The park sequence combines the strengths of both predecessors:
+///   1. Capture an ANSI pane snapshot FIRST (from the old Suspend feature) so
+///      the app can show the frozen pane as a backdrop while parked / waking.
+///   2. Enforce the live rails the DB row can't express (typed-but-unsent
+///      input, transcript-tail validity) — from Hibernate.
+///   3. Try a polite in-band `/exit` (from Suspend) so Claude flushes its
+///      transcript, shuts down MCP children, and fires Stop hooks; poll up to
+///      ~3s for the process to actually leave.
+///   4. If `/exit` didn't take, fall back to a graceful interrupt
+///      (Escape → C-c C-c → SIGTERM) — from Hibernate.
+///   5. Either way, `respawn-window` the pane to a bare shell (Hibernate's
+///      mechanic: the window/pane and its scrollback survive, freeing the
+///      claude process + its RSS). We do NOT kill the window (Suspend's old
+///      mechanic).
+///   6. Verify the shell survived + log orphaned claude children.
+///   7. Mark parked via `hibernatedAt` (the authoritative timestamp) and
+///      persist the snapshot.
+///
+/// Wake `respawn-window`s the same pane back to `claude --resume`. It is the ONE
+/// resume path for auto-parked, manually-parked, and (via reconcile) died
+/// sessions; it clears BOTH `hibernatedAt` and any legacy `suspendedAt`.
 ///
 /// The prompt cache expires after ~5 min idle, so a session past the TTL pays
 /// full uncached input on its next message whether or not the process stayed
-/// alive — hibernating an idle session is therefore nearly free.
+/// alive — parking an idle session is therefore nearly free.
 public actor HibernationCoordinator {
     private let db: TBDDatabase
     private let tmux: TmuxManager
@@ -65,6 +82,13 @@ public actor HibernationCoordinator {
 
     /// Settle window between crossing the idle threshold and the actual kill.
     static let killDebounce: TimeInterval = 20
+
+    /// Verify-exit poll after the polite in-band `/exit`: how many times we
+    /// re-check the pane's current command, and how long we wait between checks.
+    /// 15 × 200ms ≈ 3s — ported from the old Suspend feature. If claude is still
+    /// the pane's program after the whole window, we fall back to SIGTERM.
+    static let exitPollAttempts = 15
+    static let exitPollInterval: Duration = .milliseconds(200)
 
     private var defaultShell: String {
         ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -144,18 +168,27 @@ public actor HibernationCoordinator {
         let paneID = terminal.tmuxPaneID
         let windowID = terminal.tmuxWindowID
 
-        // Rail: typed-but-unsent input. Chrome's single biggest tab-discard
-        // backlash was lost typed text — never hibernate a pane with a
-        // half-composed prompt. Best-effort: if capture fails we proceed (the
-        // DB rails already cleared it as idle-at-rest).
-        if let capture = try? await tmux.capturePaneWithAnsi(server: server, paneID: paneID),
-           HibernationSafetyChecks.hasPendingInput(paneCapture: capture) {
-            logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
-            return .notEligible(reason: "Terminal has unsent typed input")
+        // Capture the ANSI pane snapshot FIRST (ported from the old Suspend
+        // feature), before any interrupt disturbs the pane. Doubles as the
+        // input for the typed-but-unsent rail below, so we capture once. If
+        // capture fails we proceed with no snapshot (the DB rails already
+        // cleared it as idle-at-rest); parked-view falls back to a blank pane.
+        let capturedSnapshot: String?
+        if let capture = try? await tmux.capturePaneWithAnsi(server: server, paneID: paneID) {
+            // Rail: typed-but-unsent input. Chrome's single biggest tab-discard
+            // backlash was lost typed text — never park a pane with a
+            // half-composed prompt.
+            if HibernationSafetyChecks.hasPendingInput(paneCapture: capture) {
+                logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
+                return .notEligible(reason: "Terminal has unsent typed input")
+            }
+            capturedSnapshot = capture.isEmpty ? nil : capture
+        } else {
+            capturedSnapshot = nil
         }
 
         // Rail: transcript-tail validity. Killing mid-write can leave an
-        // unresumable jsonl (#18880). Only hibernate when the last line is
+        // unresumable jsonl (#18880). Only park when the last line is
         // complete JSON. Missing/empty transcript is allowed (nothing to
         // corrupt); the resume will just find no prior turns.
         if let transcriptPath = terminal.transcriptPath,
@@ -165,9 +198,17 @@ public actor HibernationCoordinator {
             return .notEligible(reason: "Transcript is mid-write; try again shortly")
         }
 
-        // Best-effort graceful interrupt so Claude flushes before respawn-window
-        // -k forcibly replaces it. Mirrors the swap path's sequence.
-        await gracefullyInterruptPane(server: server, paneID: paneID)
+        // Polite park: try an in-band `/exit` first (ported from Suspend) so
+        // Claude flushes its transcript, shuts down MCP children, and fires Stop
+        // hooks, then poll up to ~3s for the process to actually leave. Only if
+        // it's still a claude process after the poll window do we escalate to
+        // the graceful-interrupt SIGTERM fallback. Either way, `respawn-window
+        // -k` below guarantees termination.
+        let exited = await politeExitThenPoll(server: server, paneID: paneID, terminalID: terminal.id)
+        if !exited {
+            logger.debug("hibernate: /exit did not terminate \(terminal.id, privacy: .public) within poll window — falling back to graceful interrupt")
+            await gracefullyInterruptPane(server: server, paneID: paneID)
+        }
 
         // Respawn the SAME window to a bare login shell: the claude process (and
         // its RSS) is gone, but the tmux window/pane and its scrollback stay.
@@ -191,7 +232,9 @@ public actor HibernationCoordinator {
         await verifyHibernationTookEffect(server: server, paneID: paneID, terminalID: terminal.id)
 
         do {
-            try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID, at: now())
+            try await db.terminals.setHibernated(
+                id: terminal.id, sessionID: sessionID, snapshot: capturedSnapshot, at: now()
+            )
         } catch {
             logger.warning("hibernate: failed to mark hibernated for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
@@ -438,7 +481,57 @@ public actor HibernationCoordinator {
         }
     }
 
+    // MARK: - Startup Reconciliation
+
+    /// Clear a stale parked timestamp for any terminal whose Claude process is
+    /// actually still alive (e.g. the daemon crashed mid-park before `/exit`
+    /// landed, or before `respawn-window` ran). Ported from the old Suspend
+    /// feature's `reconcileOnStartup`, generalized to the unified state: it
+    /// checks BOTH the authoritative `hibernatedAt` and the legacy `suspendedAt`
+    /// so a row parked by either path is reconciled, and `clearHibernated` nils
+    /// both. Called once on daemon startup.
+    public func reconcileOnStartup() async {
+        guard let allTerminals = try? await db.terminals.list() else { return }
+
+        for terminal in allTerminals where terminal.isParked {
+            guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else { continue }
+            let server = worktree.tmuxServer
+            let alive = await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID)
+            if alive,
+               let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: terminal.tmuxPaneID),
+               ClaudeStateDetector.isClaudeProcess(cmd) {
+                try? await db.terminals.clearHibernated(id: terminal.id)
+                logger.info("startup: cleared stale parked state for still-running terminal \(terminal.id, privacy: .public)")
+            }
+        }
+    }
+
     // MARK: - Helpers
+
+    /// Send an in-band `/exit` (ported from the old Suspend feature) and poll
+    /// the pane's current command up to `exitPollAttempts` × `exitPollInterval`
+    /// (~3s) for the claude process to leave. Returns `true` if the pane is no
+    /// longer running a claude process by the end of the window (polite exit
+    /// succeeded), `false` if it's still claude (caller escalates to SIGTERM).
+    ///
+    /// If we can't even send `/exit`, we return `false` so the caller falls back
+    /// — `respawn-window -k` still guarantees the process dies either way.
+    private func politeExitThenPoll(server: String, paneID: String, terminalID: UUID) async -> Bool {
+        do {
+            try await tmux.sendCommand(server: server, paneID: paneID, command: "/exit")
+        } catch {
+            logger.debug("hibernate: /exit send failed for \(terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+        for _ in 0..<Self.exitPollAttempts {
+            try? await Task.sleep(for: Self.exitPollInterval)
+            if let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: paneID),
+               !ClaudeStateDetector.isClaudeProcess(cmd) {
+                return true
+            }
+        }
+        return false
+    }
 
     /// Escape → settle → C-c C-c → settle → SIGTERM. Best-effort; the
     /// subsequent `respawn-window -k` guarantees termination. Copied from the
