@@ -444,7 +444,8 @@ extension RPCRouter {
         if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
             // Clean up any lingering (almost always already-dead) window to avoid orphans.
             try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
-            try await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID)
+            // Authoritative `hibernatedAt` column so the unified `wake()` can resume it.
+            try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
             // Drop any stale pending-question entry — the window the question
             // belonged to is gone. Mirrors reconcile()/handleTerminalDelete.
             await pendingQuestions.clear(terminalID: terminal.id)

@@ -241,6 +241,33 @@ struct HibernationCoordinatorTests {
         #expect(after?.suspendedAt == nil, "wake must also clear legacy suspendedAt")
     }
 
+    /// Regression: a row parked with ONLY `suspendedAt` (the reconcile /
+    /// recreate-window paths, or a pre-merge Suspend row) must still wake. The
+    /// guard checks `isParked`, not `hibernatedAt` alone — otherwise these rows
+    /// show a Wake button that silently no-ops and the pane is stuck forever.
+    @Test func wakeUnparksLegacySuspendedOnlyRow() async throws {
+        let (db, _, terminalID) = try await setup()
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+
+        // Legacy park: only suspendedAt set, hibernatedAt nil.
+        try await db.terminals.setSuspended(id: terminalID, sessionID: "sess-1")
+        let before = try await db.terminals.get(id: terminalID)
+        #expect(before?.hibernatedAt == nil)
+        #expect(before?.suspendedAt != nil)
+        #expect(before?.isParked == true)
+
+        let wake = await coord.wake(terminalID: terminalID)
+        #expect(wake == .ok, "wake must un-park a suspendedAt-only row, not no-op it")
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == false, "row fully un-parked (both columns nil)")
+
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(joined.contains { $0.contains("respawn-window") && $0.contains("claude --resume sess-1") },
+                "expected a respawn-window carrying claude --resume; got: \(joined)")
+    }
+
     // MARK: - Startup reconciliation
 
     /// `reconcileOnStartup` clears a stale parked timestamp for a terminal whose

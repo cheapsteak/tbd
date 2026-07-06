@@ -259,7 +259,7 @@ func testHandleTerminalRecreateWindowParksClaudeAsSuspended() async throws {
     #expect(response.success, "expected success; error: \(response.error ?? "nil")")
 
     let updated = try #require(try await db.terminals.get(id: terminal.id))
-    #expect(updated.suspendedAt != nil, "claude terminal must be parked as suspended, not recreated as shell")
+    #expect(updated.isParked, "claude terminal must be parked (resumable), not recreated as shell")
     #expect(updated.kind == .claude, "kind must stay .claude, not flip to .shell")
     #expect(updated.claudeSessionID == sessionID, "claudeSessionID must be preserved")
     #expect(updated.transcriptPath == transcriptPath, "transcriptPath must be preserved")

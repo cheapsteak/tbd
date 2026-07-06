@@ -294,7 +294,10 @@ public actor HibernationCoordinator {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
-        guard terminal.hibernatedAt != nil else { return .notHibernated }
+        // Wake ANY parked row, not just `hibernatedAt`-marked ones: legacy rows
+        // and the reconcile / recreate-window paths may carry only `suspendedAt`.
+        // `clearHibernated` nils both columns, so this fully un-parks either.
+        guard terminal.isParked else { return .notHibernated }
         guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
         guard !wakesInFlight.contains(terminalID) else { return .inFlight }
         guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {

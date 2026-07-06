@@ -891,7 +891,7 @@ import Testing
 
     // Resumable Claude session: parked, not recreated, not deleted.
     #expect(claudeAfter != nil, "claude terminal must NOT be deleted on reboot")
-    #expect(claudeAfter?.suspendedAt != nil, "claude terminal must be parked as suspended")
+    #expect(claudeAfter?.isParked == true, "claude terminal must be parked (resumable via wake)")
     #expect(claudeAfter?.claudeSessionID == sessionID, "session ID must be preserved for on-demand resume")
     // The window/pane IDs must NOT have been replaced — reconcile does not spawn
     // a new window on the reboot path anymore.
@@ -952,7 +952,7 @@ import Testing
     try? await realTmux.killServer(server: serverName)
 
     #expect(after != nil, "claude terminal must NOT be deleted on dead window")
-    #expect(after?.suspendedAt != nil, "claude terminal must be marked suspended")
+    #expect(after?.isParked == true, "claude terminal must be parked (resumable via wake)")
     #expect(after?.claudeSessionID == sessionID, "session ID must be preserved")
 }
 

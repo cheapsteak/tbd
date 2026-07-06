@@ -237,12 +237,13 @@ extension WorktreeLifecycle {
                 guard !windowAlive else { continue }
 
                 if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
-                    // Resumable Claude session: park it. The suspend/resume
+                    // Resumable Claude session: park it. The unified park/wake
                     // machinery rebuilds a window from the session ID on demand.
                     // Deleting here would orphan the transcript and the session
-                    // would vanish from TBD.
-                    try? await db.terminals.setSuspended(id: terminal.id, sessionID: sessionID)
-                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) as suspended — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
+                    // would vanish from TBD. Write the authoritative `hibernatedAt`
+                    // column so `wake()` (which un-parks any parked row) can resume it.
+                    try? await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
+                    logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
                     // Plain shell / Codex: nothing resumable to preserve, delete.
                     try? await db.terminals.delete(id: terminal.id)
