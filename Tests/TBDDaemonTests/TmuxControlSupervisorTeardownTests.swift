@@ -66,17 +66,76 @@ struct TmuxControlSupervisorTeardownTests {
         // remaining assertions (and cleanup) can run instead of hanging.
         if !unrelatedCompleted { stopGate.signal() }
 
-        // State left the maps BEFORE stop() ran, so a successor connection can
-        // be created while the old one is still stopping — no fd reuse hazard:
-        // the successor opens its own fresh pty, and the old connection's
-        // primary fd is closed only inside its own (still-running) stop().
+        // State left the maps BEFORE stop() ran (that is what un-wedges the
+        // actor above), so the eviction is observable now — but a successor
+        // may NOT go live until the old stop completes (R6-M4):
+        // `ensureConnection` for the same server suspends instead (covered by
+        // `ensureConnectionWaitsForInFlightStop` below).
         #expect(await supervisor.command(server: "srv-slow") == nil,
                 "faulted connection's client must be evicted before stop()")
-        await supervisor.ensureConnection(serverName: "srv-slow")
-        #expect(await supervisor.command(server: "srv-slow") != nil,
-                "a successor connection must be creatable while the old stop is in flight")
 
         stopGate.signal()   // release the held stop; it stops the stub process
+        await supervisor.ensureConnection(serverName: "srv-slow")
+        #expect(await supervisor.command(server: "srv-slow") != nil,
+                "a successor connection must be creatable once the stop completed")
+        await supervisor.stopAll()
+    }
+
+    @Test("ensureConnection cannot race an in-flight teardown into two live connections (R6-M4)")
+    func ensureConnectionWaitsForInFlightStop() async throws {
+        let stub = try makeStubBinary()
+        defer { try? FileManager.default.removeItem(atPath: (stub as NSString).deletingLastPathComponent) }
+
+        let created = EventCounter()
+        let stopStarted = EventCounter()
+        let stopFinished = EventCounter()
+        let stopGate = DispatchSemaphore(value: 0)
+        let supervisor = TmuxControlSupervisor(
+            makeConnection: { server in
+                created.increment()
+                return TmuxControlConnection(serverName: server, tmuxBinary: stub)
+            },
+            stopConnection: { connection in
+                stopStarted.increment()
+                stopGate.wait()  // held open until the test signals
+                connection.stop()
+                stopFinished.increment()
+            })
+        defer { stopGate.signal() }  // never leave the stop thread parked on failure
+
+        await supervisor.ensureConnection(serverName: "srv-race")
+        #expect(created.count == 1)
+        let client = try #require(await supervisor.command(server: "srv-race"))
+
+        // Fatal correlator violation → teardown; eviction runs, stop is held.
+        await client.handle(.commandSucceeded(number: 1, fromClient: true, lines: []))
+        #expect(await waitUntil(
+            { stopStarted.count == 1 }, timeout: .seconds(15)), "teardown never reached stop()")
+
+        // A re-attach's ensureConnection lands while the old tmux client
+        // process is still dying. It must SUSPEND: `PaneFanout.route` keys by
+        // (server, paneID) only, so a successor started now would leave two
+        // live -CC connections routing duplicate %output into one pane pipe.
+        let ensured = EventCounter()
+        Task.detached {
+            await supervisor.ensureConnection(serverName: "srv-race")
+            ensured.increment()
+        }
+        // Bounded negative check: give the racing ensureConnection ample time
+        // to (incorrectly) create a successor — pre-fix `created` hits 2 here.
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(created.count == 1,
+                "no successor may be created while the old connection is still stopping")
+        #expect(ensured.count == 0, "ensureConnection must still be suspended mid-stop")
+
+        // The held stop completes → the parked ensureConnection resumes and
+        // creates exactly one successor.
+        stopGate.signal()
+        #expect(await waitUntil({ ensured.count == 1 }, timeout: .seconds(60)),
+                "ensureConnection must resume once the stop completed")
+        #expect(stopFinished.count == 1)
+        #expect(created.count == 2, "exactly one successor after the teardown finished")
+        #expect(await supervisor.command(server: "srv-race") != nil)
         await supervisor.stopAll()
     }
 }

@@ -33,6 +33,19 @@ actor TmuxControlSupervisor {
     /// One FIFO command correlator per connection, keyed by server. Fed the
     /// connection's `.commandSucceeded`/`.commandFailed` events by `drain`.
     private var commandClients: [String: TmuxControlCommandClient] = [:]
+    /// Servers whose faulted connection is still inside its (off-actor,
+    /// blocking) `stop()` (R6-M4). `evictForTeardown` inserts the name before
+    /// handing ownership to the nonisolated teardown; `finishTeardown` removes
+    /// it AFTER `stop()` returns. `ensureConnection` suspends while its server
+    /// is here: eviction-before-stop (R5-M1) empties the maps while the old
+    /// tmux client process is still dying, and `PaneFanout.route` keys by
+    /// (server, paneID) only — a successor started in that window would leave
+    /// TWO live `-CC` connections routing duplicate `%output` into the same
+    /// pane pipes.
+    private var stoppingServers: Set<String> = []
+    /// Continuations parked by `ensureConnection` on a stopping server,
+    /// resumed (and re-checked) by `finishTeardown` once the stop returns.
+    private var stopWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     /// Shared per-daemon fanout. Reader threads call `route` directly (it is
     /// internally locked), so this is honestly `nonisolated`; the actor only
     /// mediates attach/ready/detach. Test-visible so orchestration tests can
@@ -56,8 +69,19 @@ actor TmuxControlSupervisor {
     }
 
     /// Idempotently ensure a control connection exists for `serverName`.
-    /// A no-op if one is already running.
-    func ensureConnection(serverName: String) {
+    /// A no-op if one is already running. If the server's previous connection
+    /// is mid-teardown (evicted from the maps but its blocking `stop()` still
+    /// running), this SUSPENDS until the stop completes rather than starting
+    /// a successor early (R6-M4) — suspension, not blocking: the actor stays
+    /// free, and every caller already awaits this actor method.
+    func ensureConnection(serverName: String) async {
+        // Loop, not `if`: a fresh teardown can begin between a waiter's
+        // resume and this task re-entering the actor.
+        while stoppingServers.contains(serverName) {
+            await withCheckedContinuation { continuation in
+                stopWaiters[serverName, default: []].append(continuation)
+            }
+        }
         guard connections[serverName] == nil else { return }
         let connection = makeConnection(serverName)
         let fanout = self.fanout
@@ -118,16 +142,29 @@ actor TmuxControlSupervisor {
     /// the SIGTERM → SIGKILL escalation, and that wait must run on the caller's
     /// task — never on this actor, where it would stall every supervisor call
     /// for every worktree. The actor-isolated half (`evictForTeardown`) is
-    /// bookkeeping only and runs first: state leaves the maps BEFORE `stop()`,
-    /// so a concurrent `ensureConnection` can create a successor safely — the
-    /// successor opens its own fresh pty, and the old connection's primary fd
-    /// is owned by (and closed only inside) its own still-running `stop()`, so
-    /// no fd can be reused through the connection object mid-teardown.
+    /// bookkeeping only and runs first: state leaves the maps BEFORE `stop()`
+    /// so pending sends fail immediately — but the server is marked
+    /// `stopping` for the same window, so a concurrent `ensureConnection`
+    /// waits for `stop()` to return instead of racing a successor into a
+    /// second live `-CC` connection (R6-M4). No fd-reuse hazard either way:
+    /// the successor opens its own fresh pty, and the old connection's
+    /// primary fd is owned by (and closed only inside) its own `stop()`.
     private nonisolated func teardownConnection(
         serverName: String, connection: TmuxControlConnection
     ) async {
         guard await evictForTeardown(serverName: serverName, connection: connection) else { return }
         stopConnection(connection)
+        await finishTeardown(serverName: serverName)
+    }
+
+    /// Post-`stop()` half of the teardown: the old tmux client process is
+    /// gone, so a successor may now go live. Clears the `stopping` mark and
+    /// resumes every `ensureConnection` parked on it (each re-checks the set).
+    private func finishTeardown(serverName: String) {
+        stoppingServers.remove(serverName)
+        for waiter in stopWaiters.removeValue(forKey: serverName) ?? [] {
+            waiter.resume()
+        }
     }
 
     /// Bookkeeping half of the fatal-error teardown. Guarded on identity so a
@@ -145,6 +182,9 @@ actor TmuxControlSupervisor {
         guard connections[serverName] === connection else { return false }
         logger.error("tearing down tmux -CC connection for \(serverName, privacy: .public) after correlator fault")
         connections[serverName] = nil
+        // Mark the server stopping BEFORE ownership leaves the actor: from
+        // here until `finishTeardown`, `ensureConnection` must wait (R6-M4).
+        stoppingServers.insert(serverName)
         let client = commandClients.removeValue(forKey: serverName)
         await client?.connectionClosed()  // fail pending sends without waiting for stop()
         return true
