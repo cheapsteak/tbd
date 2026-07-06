@@ -48,25 +48,3 @@ struct NightwatchModePresentationTests {
         #expect(active == [current])
     }
 }
-
-@Suite("NightwatchModeToggle tap -> setNightwatchMode(mode)")
-@MainActor
-struct NightwatchModeToggleTapTargetTests {
-    /// The toggle wires each segment's tap to `setNightwatchMode(mode)` where
-    /// `mode` is that segment's own `NightwatchMode`. `DaemonClient` is a
-    /// concrete actor with no injection seam (see ModelProfileAppStateTests), so
-    /// we can't observe the RPC directly; instead we lock in the tap-target
-    /// mapping the button closure forwards — segment i taps `ordered[i]`, and
-    /// the active-highlight (verified above) reflects that same mode afterward.
-    @Test func eachSegmentTapTargetsItsOwnMode() {
-        for mode in NightwatchModePresentation.ordered {
-            // The value the segment's button hands to setNightwatchMode is the
-            // segment's mode itself; after that call succeeds, isActive(current:)
-            // for that same mode must read true and no sibling may.
-            let active = NightwatchModePresentation.ordered.filter {
-                NightwatchModePresentation.isActive(segment: $0, current: mode)
-            }
-            #expect(active == [mode])
-        }
-    }
-}

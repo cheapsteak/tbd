@@ -201,8 +201,9 @@ struct GeneralSettingsTab: View {
                     keyboard; Nightwatch (🌙) is the fuller autonomous mode for when \
                     you're away. Evaluate-only for now — it records what it would do \
                     without acting, and its behavior and safety rules are still \
-                    changing. Turning this on shows a mode control in the sidebar; off \
-                    hides it. You still merge PRs and make prod/access calls yourself.
+                    changing. Turning this on reveals the mode controls (sidebar \
+                    footer and menu bar); off hides both. You still merge PRs and \
+                    make prod/access calls yourself.
                     """)
             }
         }
