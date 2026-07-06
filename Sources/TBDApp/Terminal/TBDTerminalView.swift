@@ -298,10 +298,26 @@ class TBDTerminalView: TerminalView {
             return false
         }
         let quoted = urls.map { shellQuote($0.path) }
-        let text = quoted.joined(separator: " ")
-        let bytes = Array(text.utf8)
-        send(bytes)
+        deliverDroppedText(quoted.joined(separator: " "))
         return true
+    }
+
+    /// Route drag-drop-synthesized text (the shell-quoted dropped paths).
+    /// While a control-mode attach is live, a drop is a paste-shaped bulk
+    /// insert and MUST ride the same decision path as a pasteboard paste
+    /// (R6-H3): `send()` would ship it as ONE `.input` sidecar frame, and an
+    /// oversize drop would exceed the sidecar scanner's frame cap — desyncing
+    /// (and tearing down) the app-wide shared sidecar connection. The handler
+    /// consumes it (ships a `.paste` frame, or refuses oversize with the
+    /// in-pane message); a nil handler or `false` (not attached) falls to the
+    /// local keystroke path, exactly the pre-control-mode behavior. Split
+    /// from `performDragOperation` so the routing branch is headlessly
+    /// testable (`NSDraggingInfo` is not constructible in tests).
+    func deliverDroppedText(_ text: String) {
+        if let handler = onControlModePaste, handler(Data(text.utf8)) {
+            return
+        }
+        send(Array(text.utf8))
     }
 
     /// Shell-quotes a path using single quotes, escaping embedded single quotes.

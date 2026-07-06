@@ -99,6 +99,20 @@ final class FDSidecarClient: @unchecked Sendable {
     /// logged and dropped; the receive loop's EOF path handles daemon death and
     /// Phase B owns reconnect.
     func sendInput(worktreeID: UUID, paneID: String, bytes: Data) {
+        // Defense-in-depth cap (R6-H3), mirroring `sendPaste`'s guard: a
+        // single `.input` frame that couldn't fit the daemon scanner's 4 MiB
+        // hard cap would desync the ONE app-wide sidecar connection and kill
+        // control-mode input everywhere (no Phase A reconnect). Keystrokes
+        // are tiny — anything near the cap is a bug or abuse upstream (the
+        // drag-drop and paste paths both route through PasteInterception),
+        // so refusing is strictly safer than writing.
+        guard bytes.count <= SidecarFrameCodec.maxPasteBytes else {
+            logger.fault("""
+                sidecar: sendInput payload \(bytes.count, privacy: .public) bytes exceeds cap \
+                \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping (input this large is a routing bug)
+                """)
+            return
+        }
         let frame: Data
         do {
             frame = try SidecarFrameCodec.encodeInput(

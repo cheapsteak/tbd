@@ -184,6 +184,40 @@ struct FDSidecarClientTests {
         #expect(result.bytes == payload)
     }
 
+    @Test("sendInput refuses an oversize payload — the frame is never written (R6-H3)")
+    func sendInputOversizeRefused() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        // One byte past the cap: had this been encoded and written, the
+        // daemon-side scanner would desync and the whole shared sidecar
+        // connection would tear down.
+        let oversize = Data(repeating: 0x41, count: SidecarFrameCodec.maxPasteBytes + 1)
+        client.sendInput(worktreeID: worktreeID, paneID: "%big", bytes: oversize)
+        // A small frame follows on the SAME serial send queue: the first
+        // frame the daemon side sees must be this one — proof the oversize
+        // frame was refused, not merely delayed.
+        client.sendInput(worktreeID: worktreeID, paneID: "%ok", bytes: Data("k".utf8))
+
+        let scanner = SidecarFrameScanner()
+        var decoded: (header: SidecarInputHeader, bytes: Data)?
+        let deadline = ContinuousClock.now + .seconds(2)
+        while decoded == nil && ContinuousClock.now < deadline {
+            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
+            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.input.rawValue {
+                decoded = try SidecarFrameCodec.decodeInput(payload: frame.payload)
+                break
+            }
+        }
+        let result = try #require(decoded)
+        #expect(result.header.paneID == "%ok", "the oversize frame must never hit the wire")
+        #expect(result.bytes == Data("k".utf8))
+        #expect(!scanner.isDesynced)
+    }
+
     @Test("sendInput while disconnected is dropped without crashing")
     func sendInputWhileDisconnectedDrops() async throws {
         let client = FDSidecarClient()   // never connected
