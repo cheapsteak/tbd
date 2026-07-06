@@ -632,7 +632,8 @@ final class AppState: ObservableObject {
     // nonisolated deinit, and the leak is bounded by app lifetime.
 
     /// Forward macOS app focus changes to the daemon. The daemon uses this to
-    /// pause/resume the Claude usage poller while the app is in the background.
+    /// pause/resume the Claude usage poller and to pick the git polling
+    /// cadence (fast foreground / slow background) while the app is inactive.
     /// `NotificationCenter.addObserver` does not require a bundle ID, so this
     /// is safe to call from an unbundled SPM executable.
     private func registerFocusObservers() {
@@ -1104,6 +1105,7 @@ final class AppState: ObservableObject {
                         self.isConnected = didConnect
                         if didConnect {
                             self.pushClaudeSpawnPreferences()
+                            self.pushForegroundState()
                         } else if !AppState.pidFilePointsAtLiveDaemon() {
                             // The socket file exists but nothing accepted the
                             // connection, and the pid file doesn't name a live
@@ -1173,6 +1175,7 @@ final class AppState: ObservableObject {
             startSubscription()
             await refreshPRStatuses()
             pushClaudeSpawnPreferences()
+            pushForegroundState()
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }
@@ -1788,6 +1791,21 @@ final class AppState: ObservableObject {
         Task { [daemonClient] in
             try? await daemonClient.setClaudeSpawnPreferences(
                 ClaudeSpawnPreferences(settingOverrides: overrides))
+        }
+    }
+
+    /// Push the app's current foreground state to the daemon. Called on every
+    /// (re)connect: the daemon defaults to background git-polling cadence at
+    /// startup, and only the focus notifications would otherwise correct it —
+    /// which never fire if the app was already active when the daemon started.
+    func pushForegroundState() {
+        let isForeground = NSApp?.isActive ?? false
+        Task { [daemonClient] in
+            do {
+                try await daemonClient.setAppForegroundState(isForeground: isForeground)
+            } catch {
+                logger.warning("pushForegroundState(\(isForeground)) failed: \(error)")
+            }
         }
     }
 

@@ -141,6 +141,37 @@ public struct GitManager: Sendable {
         return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Returns a map of short ref name → tip SHA covering all local branches
+    /// and `origin/*` remote-tracking branches, in a single subprocess.
+    ///
+    /// Used by the periodic conflict sweep's dirty gate: one `for-each-ref`
+    /// per repo resolves every worktree branch tip plus the
+    /// `origin/<defaultBranch>` tip, replacing per-worktree probes.
+    public func refTips(repoPath: String) async throws -> [String: String] {
+        let output = try await run(
+            arguments: [
+                "for-each-ref",
+                "--format=%(objectname) %(refname:short)",
+                "refs/heads",
+                "refs/remotes/origin",
+            ],
+            at: repoPath
+        )
+        var tips: [String: String] = [:]
+        for line in output.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            // "<sha> <short-name>" — the SHA can't contain spaces, so split on
+            // the first space and keep the remainder as the name.
+            guard let sep = trimmed.firstIndex(of: " ") else { continue }
+            let sha = String(trimmed[..<sep])
+            let name = String(trimmed[trimmed.index(after: sep)...])
+            guard !sha.isEmpty, !name.isEmpty else { continue }
+            tips[name] = sha
+        }
+        return tips
+    }
+
     /// Returns true if `base` is an ancestor of `branch` (i.e., branch is ahead or equal, no divergence).
     /// Returns nil if the git command fails for reasons other than "not an ancestor" (e.g., unknown ref).
     public func isMergeBaseAncestor(repoPath: String, base: String, branch: String) async -> Bool? {

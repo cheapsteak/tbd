@@ -420,6 +420,15 @@ public final class Daemon: Sendable {
         rpcRouter.controlMode = controlModeBridge
         self.router = rpcRouter
 
+        // Shared foreground gate: the app reports its active/inactive state via
+        // `app.setForegroundState`; the periodic git tasks below slow their
+        // cadence when no app is foreground (see GitPollCadence). MUST be wired
+        // before the socket starts serving — the app pushes its state once per
+        // (re)connect, and a push landing on a nil gate would be silently
+        // dropped, leaving a foreground app at background cadence.
+        let appForeground = AppForegroundState()
+        rpcRouter.appForegroundState = appForeground
+
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock
@@ -477,10 +486,25 @@ public final class Daemon: Sendable {
                 daemonLogger.warning("Failed to prune orphaned per-session overlays: \(error.localizedDescription, privacy: .public)")
             }
 
-            // 12. Start periodic git fetch for all repos (every 60s)
+            // Effective foreground for the git cadence gates: the app-reported
+            // state AND at least one live client connection, so a crashed or
+            // force-quit app (which never reports `false`) can't pin the fast
+            // cadence forever. See GitPollCadence.isEffectivelyForeground.
+            let connectedClients = rpcRouter.connectedClientsProvider
+            let effectivelyForeground: @Sendable () async -> Bool = {
+                GitPollCadence.isEffectivelyForeground(
+                    reportedForeground: await appForeground.isForeground,
+                    connectedClients: connectedClients?() ?? 0
+                )
+            }
+
+            // 12. Start periodic git fetch for all repos (60s foreground,
+            // 5min background — GitPollCadence.fetchInterval).
             self.gitFetchTask = Task {
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(60))
+                    await Daemon.sleepThroughGatedInterval {
+                        GitPollCadence.fetchInterval(isForeground: await effectivelyForeground())
+                    }
                     guard !Task.isCancelled else { break }
                     let allRepos = (try? await database.repos.list()) ?? []
                     // Skip .missing repos so we don't spam errors against stale paths
@@ -522,9 +546,12 @@ public final class Daemon: Sendable {
             rpcRouter.oauthUsagePoller = oauthPoller
             await oauthPoller.start()
 
-            // 13. Periodic git status refresh (branch sync, conflict detection)
+            // 13. Periodic git status refresh (branch sync, conflict detection).
+            // 10s foreground, 60s background (GitPollCadence.statusInterval);
+            // per-worktree conflict checks are additionally dirty-gated inside
+            // refreshGitStatuses so an unchanged worktree costs no subprocess.
             self.gitStatusTask = Task {
-                // Run once immediately (cold recovery), then every 10s
+                // Run once immediately (cold recovery), then at the gated cadence
                 while !Task.isCancelled {
                     let allRepos = (try? await database.repos.list()) ?? []
                     // Skip .missing repos to match gitFetchTask — running git
@@ -532,8 +559,9 @@ public final class Daemon: Sendable {
                     for repo in allRepos where repo.status != .missing {
                         await lifecycle.refreshGitStatuses(repoID: repo.id)
                     }
-                    try? await Task.sleep(for: .seconds(10))
-                    guard !Task.isCancelled else { break }
+                    await Daemon.sleepThroughGatedInterval {
+                        GitPollCadence.statusInterval(isForeground: await effectivelyForeground())
+                    }
                 }
             }
 
@@ -555,6 +583,23 @@ public final class Daemon: Sendable {
         }
 
         daemonLogger.info("Started successfully (PID \(ProcessInfo.processInfo.processIdentifier, privacy: .public))")
+    }
+
+    /// Sleep in `GitPollCadence.pollTick` ticks until the gated interval has
+    /// elapsed. `interval` is re-evaluated every tick, so a foreground
+    /// transition or app disconnect changes the effective cadence within one
+    /// tick instead of one full background interval (e.g. after a daemon
+    /// restart under a foregrounded app, the first fetch still lands at ~60s
+    /// rather than the 5min sampled before the app reconnected). Returns
+    /// promptly on task cancellation.
+    static func sleepThroughGatedInterval(_ interval: @Sendable () async -> Duration) async {
+        var waited = Duration.zero
+        while !Task.isCancelled {
+            try? await Task.sleep(for: GitPollCadence.pollTick)
+            waited += GitPollCadence.pollTick
+            let due = await interval()
+            if waited >= due { return }
+        }
     }
 
     /// Stop the daemon: shut down servers, remove PID and socket files.
