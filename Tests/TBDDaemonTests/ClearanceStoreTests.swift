@@ -89,12 +89,15 @@ struct ClearanceStoreTests {
         try await db.clearance.insert(c2)
         try await db.clearance.insert(c3)
 
-        try await db.clearance.voidBySHA(pr: 42, repo: "test/repo", newSHA: "new999", reason: "rebased")
+        // Head is now def456: clearances pinned to abc123 void; the clearance
+        // granted on the current head (id3) survives — design §7.3.
+        try await db.clearance.voidBySHA(pr: 42, repo: "test/repo", newSHA: "def456", reason: "rebased")
 
         let current = try await db.clearance.listByPR(42, repo: "test/repo")
         let voided = current.filter { $0.voidReason != nil }
 
-        #expect(voided.count == 2, "Expected 2 voided (matching old SHA)")
-        #expect(current.first(where: { $0.id == "id3" })?.voidReason == nil)
+        #expect(voided.count == 2, "Expected 2 voided (pinned to the old SHA)")
+        #expect(current.first(where: { $0.id == "id3" })?.voidReason == nil,
+                "Clearance granted on the current head must survive")
     }
 }

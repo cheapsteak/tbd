@@ -289,10 +289,12 @@ public struct MergeGate: Sendable {
             return true
         }
 
-        // Check if any runtime files changed.
-        let runtimeFiles = files.filter { !isTestFile($0) }
+        // Check if any runtime files changed. Documentation and other
+        // non-executable files don't demand test coverage (a docs-only PR
+        // must not hold on "inadequate tests" — design §7.1).
+        let runtimeFiles = files.filter { !isTestFile($0) && !isNonExecutableFile($0) }
         guard !runtimeFiles.isEmpty else {
-            // Only test files changed → adequate coverage.
+            // Only test/doc files changed → adequate coverage.
             return true
         }
 
@@ -310,6 +312,17 @@ public struct MergeGate: Sendable {
             "Tests.swift"
         ]
         return testPatterns.contains { path.contains($0) }
+    }
+
+    /// Files that carry no runtime behavior and therefore don't demand test
+    /// coverage. Deliberately narrow (fail closed): anything not clearly
+    /// non-executable counts as runtime.
+    private func isNonExecutableFile(_ path: String) -> Bool {
+        let docExtensions = [".md", ".txt", ".rst"]
+        if docExtensions.contains(where: { path.hasSuffix($0) }) { return true }
+        if path.hasPrefix("docs/") || path.contains("/docs/") { return true }
+        if path == "LICENSE" || path.hasSuffix("/LICENSE") { return true }
+        return false
     }
 
     private func fileMatchesGlob(files: [String], glob: String) -> Bool {
