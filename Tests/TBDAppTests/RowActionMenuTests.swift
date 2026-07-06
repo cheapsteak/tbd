@@ -27,25 +27,81 @@ private func session(_ label: String, profileID: UUID? = nil) -> RowActionMenu.C
     RowActionMenu.ClaudeSessionRef(terminalID: UUID(), profileID: profileID, label: label)
 }
 
+/// Indices of the dividers in `items` — for asserting section boundaries.
+private func dividerIndices(_ items: [RowActionMenu.Item]) -> [Int] {
+    items.enumerated().filter { $0.element == .divider }.map(\.offset)
+}
+
+/// Empty sections must collapse: no leading/trailing divider and never two in a row.
+private func expectWellFormedDividers(_ items: [RowActionMenu.Item]) {
+    #expect(items.first != .divider)
+    #expect(items.last != .divider)
+    for (a, b) in zip(items, items.dropFirst()) {
+        #expect(!(a == .divider && b == .divider))
+    }
+}
+
 // MARK: - Regular worktree branch
 
 @Suite("RowActionMenu — regular worktree")
 struct RowActionMenuRegularTests {
-    @Test func baseOrderMatchesLegacyContextMenu() {
-        // No Claude sessions, has repo, non-empty branch: rename → nested →
-        // fromBranch → archive → divider → finder → copy.
+    @Test func fullShapeWithAllSectionsPresent() {
+        // Every conditional on: rename/archive | hibernation | fork/nested |
+        // finder/copy — four sections, three dividers.
+        let s = session("Claude 1")
+        let ctx = RowActionMenu.Context(hasHibernatableClaude: true,
+                                        hasHibernatedClaude: true,
+                                        hasUnpinnedClaude: true,
+                                        hasKeepWarmClaude: true,
+                                        hasRepoID: true,
+                                        branch: "tbd/x",
+                                        claudeSessions: [s])
+        let items = RowActionMenu.items(context: ctx)
+        #expect(kinds(items) == [
+            .rename,
+            .archive,
+            .wakeHibernated,
+            .hibernateNow,
+            .toggleKeepWarm(enable: true),
+            .toggleKeepWarm(enable: false),
+            .forkSession(terminalID: s.terminalID, profileID: s.profileID),
+            .createNestedWorktree,
+            .newWorktreeFromBranch,
+            .openInFinder,
+            .copyPath,
+        ])
+        // Section boundaries: after archive, after the hibernation block, and
+        // after the fork/nested block.
+        #expect(dividerIndices(items) == [2, 7, 11])
+        expectWellFormedDividers(items)
+    }
+
+    @Test func emptyHibernationSectionCollapses() {
+        // No Claude sessions at all: the hibernation and fork sections are
+        // empty, so exactly two dividers remain — rename/archive | nested |
+        // finder/copy — with no doubled or dangling dividers.
         let ctx = RowActionMenu.Context(hasRepoID: true, branch: "tbd/x")
         let items = RowActionMenu.items(context: ctx)
         #expect(kinds(items) == [
             .rename,
+            .archive,
             .createNestedWorktree,
             .newWorktreeFromBranch,
-            .archive,
             .openInFinder,
             .copyPath,
         ])
-        // Divider sits between archive and Open in Finder.
-        #expect(items.contains(.divider))
+        #expect(dividerIndices(items) == [2, 5])
+        expectWellFormedDividers(items)
+    }
+
+    @Test func emptySpawningSectionCollapses() {
+        // No repo, no sessions, no hibernation: only the identity and
+        // filesystem sections remain, joined by a single divider.
+        let ctx = RowActionMenu.Context(hasRepoID: false, branch: "")
+        let items = RowActionMenu.items(context: ctx)
+        #expect(kinds(items) == [.rename, .archive, .openInFinder, .copyPath])
+        #expect(dividerIndices(items) == [2])
+        expectWellFormedDividers(items)
     }
 
     @Test func hibernateShownWhenHibernatableClaudePresent() {
@@ -74,21 +130,31 @@ struct RowActionMenuRegularTests {
         #expect(!ks.contains(.newWorktreeFromBranch))
     }
 
-    @Test func archiveDisabledWithHelpAndDestructiveWhenChildrenActive() {
+    @Test func archiveDisabledRetitledWithHelpWhenChildrenActive() {
         let ctx = RowActionMenu.Context(hasActiveChildren: true, hasRepoID: true, branch: "b")
         let archive = RowActionMenu.items(context: ctx)
             .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == RowActionMenu.archiveHasChildrenLabel)
+        #expect(archive?.title == "Archive (has children)")
         #expect(archive?.isEnabled == false)
         #expect(archive?.role == .destructive)
         #expect(archive?.disabledHelp == RowActionMenu.archiveNeedsChildrenGoneHelp)
     }
 
-    @Test func archiveEnabledWithNoHelpWhenNoChildren() {
+    @Test func archiveEnabledPlainTitleWhenNoChildren() {
         let ctx = RowActionMenu.Context(hasActiveChildren: false, hasRepoID: true, branch: "b")
         let archive = RowActionMenu.items(context: ctx)
             .compactMap(\.action).first { $0.kind == .archive }
+        #expect(archive?.title == "Archive")
         #expect(archive?.isEnabled == true)
         #expect(archive?.disabledHelp == nil)
+    }
+
+    @Test func includeSessionForksFalseExcludesForks() {
+        let s = session("Claude 1")
+        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b", claudeSessions: [s])
+        let ks = kinds(RowActionMenu.items(context: ctx, includeSessionForks: false))
+        #expect(!ks.contains { if case .forkSession = $0 { return true }; return false })
     }
 }
 
@@ -96,41 +162,83 @@ struct RowActionMenuRegularTests {
 
 @Suite("RowActionMenu — scratch")
 struct RowActionMenuScratchTests {
-    @Test func scratchOrderWithPromoteHint() {
+    @Test func fullShapeWithAllSectionsPresent() {
+        // Every conditional on: rename/archive | hibernation | fork |
+        // finder/copy | delete + promote hint — five sections, four dividers,
+        // Delete last among the actions and the caption at the very bottom.
+        let s = session("Claude 1")
+        let ctx = RowActionMenu.Context(hasHibernatableClaude: true,
+                                        hasHibernatedClaude: true,
+                                        hasUnpinnedClaude: true,
+                                        hasKeepWarmClaude: true,
+                                        isScratch: true,
+                                        isPromoted: false,
+                                        claudeSessions: [s])
+        let items = RowActionMenu.items(context: ctx)
+        #expect(kinds(items) == [
+            .rename,
+            .archiveScratch,
+            .wakeHibernated,
+            .hibernateNow,
+            .toggleKeepWarm(enable: true),
+            .toggleKeepWarm(enable: false),
+            .forkSession(terminalID: s.terminalID, profileID: s.profileID),
+            .openInFinder,
+            .copyPath,
+            .deleteScratch,
+        ])
+        #expect(dividerIndices(items) == [2, 7, 9, 12])
+        // Promote hint caption is the very last item, under Delete.
+        #expect(items.last == .caption(RowActionMenu.promoteHint))
+        #expect(kinds(items).last == .deleteScratch)
+        expectWellFormedDividers(items)
+    }
+
+    @Test func emptyMiddleSectionsCollapse() {
+        // No Claude sessions at all: hibernation and fork sections vanish, so
+        // the menu is rename/archive | finder/copy | delete(+caption) with
+        // exactly two dividers — never doubled.
         let ctx = RowActionMenu.Context(isScratch: true, isPromoted: false)
         let items = RowActionMenu.items(context: ctx)
         #expect(kinds(items) == [
-            .newClaudeTerminal,
-            .newCodexTerminal,
-            .newShellTerminal,
             .rename,
+            .archiveScratch,
             .openInFinder,
             .copyPath,
-            .archiveScratch,
             .deleteScratch,
         ])
-        // Promote hint caption present when not yet promoted.
-        #expect(items.contains(.caption(RowActionMenu.promoteHint)))
+        #expect(dividerIndices(items) == [2, 5])
+        #expect(items.last == .caption(RowActionMenu.promoteHint))
+        expectWellFormedDividers(items)
     }
 
     @Test func promoteHintOmittedWhenAlreadyPromoted() {
         let ctx = RowActionMenu.Context(isScratch: true, isPromoted: true)
-        #expect(!RowActionMenu.items(context: ctx).contains(.caption(RowActionMenu.promoteHint)))
+        let items = RowActionMenu.items(context: ctx)
+        #expect(!items.contains(.caption(RowActionMenu.promoteHint)))
+        // Delete then becomes the literal last item.
+        #expect(items.last?.actionKind == .deleteScratch)
     }
 
     @Test func scratchWithClaudeSessionGetsForkParityOnRightClickOnly() {
         // Scratch spaces host Claude sessions too: right-click carries the fork
-        // entries (after the New-Terminal trio); the "…" action block does not
-        // (its account section renders fork instead).
+        // entries (in the middle section); the "…" action block does not (its
+        // account section renders fork instead) — and the emptied fork section
+        // collapses without leaving doubled dividers.
         let s = session("Claude 1")
         let ctx = RowActionMenu.Context(isScratch: true, claudeSessions: [s])
         let rightClick = kinds(RowActionMenu.items(context: ctx, includeSessionForks: true))
-        #expect(rightClick.contains(.forkSession(terminalID: s.terminalID,
-                                                 profileID: s.profileID)))
-        #expect(rightClick[3] == .forkSession(terminalID: s.terminalID,
-                                              profileID: s.profileID))
-        let ellipsis = kinds(RowActionMenu.items(context: ctx, includeSessionForks: false))
-        #expect(!ellipsis.contains { if case .forkSession = $0 { return true }; return false })
+        #expect(rightClick == [
+            .rename,
+            .archiveScratch,
+            .forkSession(terminalID: s.terminalID, profileID: s.profileID),
+            .openInFinder,
+            .copyPath,
+            .deleteScratch,
+        ])
+        let ellipsisItems = RowActionMenu.items(context: ctx, includeSessionForks: false)
+        #expect(!kinds(ellipsisItems).contains { if case .forkSession = $0 { return true }; return false })
+        expectWellFormedDividers(ellipsisItems)
     }
 
     @Test func scratchArchiveAndDeleteAreDestructive() {

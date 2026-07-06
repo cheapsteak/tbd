@@ -79,18 +79,6 @@ struct RowActionMenuActions {
     /// for row-action behavior.
     func run(_ kind: RowActionMenu.Kind) {
         switch kind {
-        case .newClaudeTerminal:
-            let wtID = worktree.id
-            Task { await appState.createClaudeTerminal(worktreeID: wtID) }
-
-        case .newCodexTerminal:
-            let wtID = worktree.id
-            Task { await appState.createCodexTerminal(worktreeID: wtID) }
-
-        case .newShellTerminal:
-            let wtID = worktree.id
-            Task { await appState.createTerminal(worktreeID: wtID) }
-
         case .rename:
             onRename()
 
