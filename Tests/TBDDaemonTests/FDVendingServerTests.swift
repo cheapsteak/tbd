@@ -267,6 +267,58 @@ struct FDVendingServerTests {
         await server.stop()
     }
 
+    @Test("a superseded receive thread cannot deliver stale frames after a new adoption")
+    func staleThreadFramesDroppedAfterAdopt() async throws {
+        let (oldServerFD, oldClientFD) = try makeSocketPair()
+        let (newServerFD, newClientFD) = try makeSocketPair()
+        defer { Darwin.close(oldClientFD); Darwin.close(newClientFD) }
+
+        // The sink BLOCKS on the old connection's first frame until released,
+        // holding the OLD receive thread mid-loop (past its read, second frame
+        // decoded but undelivered) while the NEW connection is adopted — the
+        // exact interleave that would break wire order == stream order.
+        let sequence = TaggedFrameSequence()
+        let releaseSink = DispatchSemaphore(value: 0)
+        let exits = TaggedFrameSequence()
+        let server = FDVendingServer()
+        await server.setOnInput { header, _ in
+            sequence.record(kind: "input", pane: header.paneID)
+            if header.paneID == "%old-1" { releaseSink.wait() }
+        }
+        await server.setOnReceiveLoopExit { exits.record(kind: "exit", pane: "") }
+        await server.adoptConnection(fd: oldServerFD)
+
+        // Two frames in ONE write: the old thread reads both in one burst,
+        // delivers the first, and is held with the second still pending.
+        let worktreeID = UUID()
+        var burst = Data()
+        burst.append(try SidecarFrameCodec.encodeInput(
+            header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%old-1"), bytes: Data("a".utf8)))
+        burst.append(try SidecarFrameCodec.encodeInput(
+            header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%old-2"), bytes: Data("b".utf8)))
+        try FDChannel.sendData(burst, over: oldClientFD)
+        #expect(await waitUntil { sequence.count == 1 })
+
+        // Reconnect: the app's new socket replaces the old one.
+        await server.adoptConnection(fd: newServerFD)
+
+        // Release the old thread — its buffered second frame is now stale and
+        // must be dropped, not delivered into the shared sinks.
+        releaseSink.signal()
+        #expect(await waitUntil { exits.count == 1 }, "superseded thread must exit")
+
+        // The NEW connection's frames still flow.
+        let newFrame = try SidecarFrameCodec.encodeInput(
+            header: SidecarInputHeader(worktreeID: worktreeID, paneID: "%new-1"), bytes: Data("c".utf8))
+        try FDChannel.sendData(newFrame, over: newClientFD)
+        #expect(await waitUntil { sequence.count == 2 })
+
+        #expect(sequence.all == ["input:%old-1", "input:%new-1"],
+                "no old-connection frame may reach the sink after adoption")
+
+        await server.stop()
+    }
+
     @Test("the receive loop exits when the client disconnects")
     func receiveLoopExitsOnDisconnect() async throws {
         let (serverSideFD, clientSideFD) = try makeSocketPair()

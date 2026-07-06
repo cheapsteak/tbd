@@ -9,6 +9,30 @@ enum FDVendingServerError: Error, Equatable {
     case listenFailed(Int32)
 }
 
+/// Lock-protected connection-epoch counter, readable off-actor (R5-M2). Each
+/// `adoptConnection` advances the epoch and stamps its receive thread with the
+/// new value; a receive thread checks its stamp against `current()` before
+/// EVERY frame delivery. The sinks run synchronously on the reader thread, so
+/// the check must not hop to the actor — the same lock-boxed nonisolated
+/// pattern as the supervisor's layout-change filter. This closes the reconnect
+/// interleave hole: an old thread past its `read()` and mid-loop over buffered
+/// frames could otherwise keep delivering into the SAME `onInput`/`onPaste`
+/// sinks concurrently with the new thread, breaking wire order == stream order.
+private final class ConnectionEpochBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var epoch: UInt64 = 0
+    /// Advance to (and return) the next epoch — one per adopted connection.
+    func advance() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        epoch += 1
+        return epoch
+    }
+    func current() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return epoch
+    }
+}
+
 /// A tiny per-daemon service that holds the sidecar socket the app connects to.
 /// Phase 2 has exactly one client (the app), so at most one connection is
 /// adopted at a time; a new adoption replaces the old one.
@@ -40,6 +64,10 @@ enum FDVendingServerError: Error, Equatable {
 actor FDVendingServer {
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "fdVending")
     private var clientFD: Int32 = -1
+    /// Per-connection epoch (see `ConnectionEpochBox`): advanced by every
+    /// `adoptConnection`, so a superseded receive thread detects — before each
+    /// frame delivery — that a newer connection owns the sinks, and drops out.
+    private let epochBox = ConnectionEpochBox()
     /// Path of the listening socket, when one is bound. Nil when the server is
     /// running purely off adopted fds (unit tests).
     private var socketPath: String?
@@ -146,8 +174,12 @@ actor FDVendingServer {
         clientFD = fd
         // The old reader will later call `receiveLoopExited(oldFD)`; its
         // `clientFD == fd` guard ensures that stale signal does NOT clear this
-        // freshly-adopted `clientFD` (different fd number).
-        startReceiveThread(fd: fd, inputSink: onInput, pasteSink: onPaste)
+        // freshly-adopted `clientFD` (different fd number). Advancing the epoch
+        // BEFORE the new thread starts supersedes the old thread's deliveries:
+        // even if it is past its read() with frames still buffered, its next
+        // per-frame epoch check fails and it drops out (R5-M2).
+        let epoch = epochBox.advance()
+        startReceiveThread(fd: fd, epoch: epoch, inputSink: onInput, pasteSink: onPaste)
         logger.info("FD vending client connected (fd \(fd, privacy: .public))")
     }
 
@@ -197,16 +229,21 @@ actor FDVendingServer {
 
     /// Spawn the receive thread for one connection. The thread reads framed
     /// bytes, decodes `.input` frames to `inputSink` and `.paste` frames to
-    /// `pasteSink`, and on exit (EOF, read error, or scanner desync) signals
-    /// `receiveLoopExited(fd:)` — it never closes `fd` itself. The actor is the
-    /// sole closer (see the type doc). Both sinks are driven from THIS one
-    /// thread, so `.input`/`.paste` frames reach their sinks in wire order.
+    /// `pasteSink`, and on exit (EOF, read error, scanner desync, or a stale
+    /// epoch) signals `receiveLoopExited(fd:)` — it never closes `fd` itself.
+    /// The actor is the sole closer (see the type doc). Both sinks are driven
+    /// from THIS one thread, so `.input`/`.paste` frames reach their sinks in
+    /// wire order — and the per-frame epoch check guarantees at most one
+    /// LIVE thread ever delivers, so a reconnect cannot interleave a
+    /// superseded thread's buffered frames with the successor's (R5-M2).
     private nonisolated func startReceiveThread(
         fd: Int32,
+        epoch: UInt64,
         inputSink: (@Sendable (SidecarInputHeader, Data) -> Void)?,
         pasteSink: (@Sendable (SidecarInputHeader, Data) -> Void)?
     ) {
         let logger = self.logger
+        let epochBox = self.epochBox
         let thread = Thread { [weak self] in
             let scanner = SidecarFrameScanner()
             var buffer = [UInt8](repeating: 0, count: 16 * 1024)
@@ -220,6 +257,12 @@ actor FDVendingServer {
                 // receive loop in FDSidecarClient.receiveLoop, which mirrors
                 // this order.
                 for frame in scanner.append(Data(buffer[0..<count])) {
+                    // Superseded mid-loop by a newer adoption: drop the frame
+                    // and drop out — the successor thread owns the sinks now.
+                    guard epoch == epochBox.current() else {
+                        logger.debug("sidecar: dropping frame from superseded connection (fd \(fd, privacy: .public))")
+                        break readLoop
+                    }
                     guard let type = SidecarFrameType(rawValue: frame.type) else {
                         logger.error("sidecar: unknown frame type \(frame.type, privacy: .public) from app, skipping")
                         continue
