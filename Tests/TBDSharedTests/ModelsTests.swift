@@ -188,6 +188,83 @@ import Testing
     #expect(decoded.activityState == .unknown)
 }
 
+// MARK: - Hibernation fields + gating helpers
+
+@Test func testTerminalDecodesWithoutHibernationFields() throws {
+    // Pre-v39 JSON (no hibernatedAt/keepWarm) must decode with safe defaults.
+    let json = """
+    {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "worktreeID": "22222222-2222-2222-2222-222222222222",
+        "tmuxWindowID": "@1",
+        "tmuxPaneID": "%1",
+        "createdAt": 0
+    }
+    """.data(using: .utf8)!
+    let decoded = try JSONDecoder().decode(Terminal.self, from: json)
+    #expect(decoded.hibernatedAt == nil)
+    #expect(decoded.keepWarm == false)
+    #expect(decoded.isHibernated == false)
+}
+
+@Test func testTerminalHibernationFieldsRoundTrip() throws {
+    let t = Terminal(
+        worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+        claudeSessionID: "s", kind: .claude,
+        hibernatedAt: Date(timeIntervalSince1970: 100), keepWarm: true)
+    let data = try JSONEncoder().encode(t)
+    let decoded = try JSONDecoder().decode(Terminal.self, from: data)
+    #expect(decoded.hibernatedAt == Date(timeIntervalSince1970: 100))
+    #expect(decoded.keepWarm == true)
+    #expect(decoded.isHibernated == true)
+}
+
+@Test func testManuallyHibernatableGating() {
+    func t(_ state: TerminalActivityState, session: String? = "s", kind: TerminalKind? = .claude,
+           hibernatedAt: Date? = nil, suspendedAt: Date? = nil, keepWarm: Bool = false) -> Terminal {
+        Terminal(worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                 claudeSessionID: session, suspendedAt: suspendedAt, kind: kind,
+                 activityState: state, hibernatedAt: hibernatedAt, keepWarm: keepWarm)
+    }
+    // Manual-hibernatable: idle/unknown resumable Claude, not running/waiting/
+    // hibernated/suspended. keep-warm does NOT block manual.
+    #expect(t(.idle).isManuallyHibernatable)
+    #expect(t(.unknown).isManuallyHibernatable)
+    #expect(t(.idle, keepWarm: true).isManuallyHibernatable)          // manual bypasses keep-warm
+    #expect(!t(.working).isManuallyHibernatable)                      // running rail
+    #expect(!t(.waitingForUser).isManuallyHibernatable)              // permission rail
+    #expect(!t(.idle, session: nil, kind: .shell).isManuallyHibernatable)  // not Claude
+    #expect(!t(.idle, kind: .codex).isManuallyHibernatable)          // Codex excluded
+    #expect(!t(.idle, hibernatedAt: Date()).isManuallyHibernatable)  // already hibernated
+    #expect(!t(.idle, suspendedAt: Date()).isManuallyHibernatable)   // suspended
+}
+
+@Test func testAutoHibernationEligibilityAddsKeepWarmRail() {
+    let base = Terminal(worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                        claudeSessionID: "s", kind: .claude, activityState: .idle)
+    #expect(base.isAutoHibernationEligible)
+    var warm = base; warm.keepWarm = true
+    // Auto adds the keep-warm rail that manual bypasses.
+    #expect(!warm.isAutoHibernationEligible)
+    #expect(warm.isManuallyHibernatable)
+}
+
+@Test func testConfigDecodesWithoutHibernationFields() throws {
+    // Config JSON from before v39 must decode with feature ON, 30 min.
+    let json = "{}".data(using: .utf8)!
+    let decoded = try JSONDecoder().decode(Config.self, from: json)
+    #expect(decoded.autoHibernateEnabled == true)
+    #expect(decoded.hibernateIdleMinutes == Config.defaultHibernateIdleMinutes)
+}
+
+@Test func testConfigHibernationRoundTrip() throws {
+    let config = Config(autoHibernateEnabled: false, hibernateIdleMinutes: 42)
+    let data = try JSONEncoder().encode(config)
+    let decoded = try JSONDecoder().decode(Config.self, from: data)
+    #expect(decoded.autoHibernateEnabled == false)
+    #expect(decoded.hibernateIdleMinutes == 42)
+}
+
 // MARK: - NotificationType Severity Ordering
 
 @Test func testNotificationTypeSeverityOrdering() {

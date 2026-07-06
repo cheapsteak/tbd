@@ -39,6 +39,11 @@ struct WorktreeRowView: View {
         return terminals.contains { $0.suspendedAt != nil }
     }
 
+    private var hasHibernatedTerminal: Bool {
+        let terminals = appState.terminals[worktree.id] ?? []
+        return terminals.contains { $0.isHibernated }
+    }
+
     private var hasWorkingTerminal: Bool {
         let terminals = appState.terminals[worktree.id] ?? []
         return terminals.contains { $0.activityState == .working }
@@ -97,7 +102,8 @@ struct WorktreeRowView: View {
         switch RowStatusIndicator.suffix(
             notification: notification,
             isWorking: hasWorkingTerminal,
-            isSuspended: hasSuspendedTerminal
+            isSuspended: hasSuspendedTerminal,
+            isHibernated: hasHibernatedTerminal
         ) {
         case .working:
             TypingDotsView(color: SuffixRowIndicator.working.color)
@@ -122,8 +128,9 @@ struct WorktreeRowView: View {
         switch indicator {
         case .error:     return "Error"
         case .attention: return "Needs your attention"
-        case .working:   return "Agent is working"
-        case .suspended: return "Suspended"
+        case .working:    return "Agent is working"
+        case .suspended:  return "Suspended"
+        case .hibernated: return "Hibernating — wakes on focus"
         }
     }
 

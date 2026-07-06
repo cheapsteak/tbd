@@ -878,6 +878,40 @@ actor DaemonClient {
         )
     }
 
+    /// Manually hibernate one Claude terminal (kill its process, keep the
+    /// tmux window). Honors the running/permission rails.
+    func terminalHibernate(terminalID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalHibernate,
+            params: TerminalHibernateParams(terminalID: terminalID)
+        )
+    }
+
+    /// Wake a hibernated terminal: respawn `claude --resume` in its window.
+    /// Idempotent — a double-call collapses to one respawn daemon-side.
+    func terminalWake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: terminalID, cols: cols, rows: rows)
+        )
+    }
+
+    /// Pin/unpin a terminal against auto-hibernation.
+    func terminalSetKeepWarm(terminalID: UUID, keepWarm: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.terminalSetKeepWarm,
+            params: TerminalSetKeepWarmParams(terminalID: terminalID, keepWarm: keepWarm)
+        )
+    }
+
+    /// Set the auto-hibernate master switch + idle-timeout (minutes).
+    func setAutoHibernate(enabled: Bool, idleMinutes: Int) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoHibernate,
+            params: ConfigSetAutoHibernateParams(enabled: enabled, idleMinutes: idleMinutes)
+        )
+    }
+
     /// Suspend all Claude terminals in a worktree.
     func worktreeSuspend(worktreeID: UUID) async throws {
         try await callVoidAsync(

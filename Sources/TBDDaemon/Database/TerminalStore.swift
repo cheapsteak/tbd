@@ -20,6 +20,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var transcriptPath: String?
     var kind: String?
     var activityState: String?
+    var hibernatedAt: Date?
+    var keepWarm: Bool?
 
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
@@ -36,6 +38,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.transcriptPath = terminal.transcriptPath
         self.kind = terminal.kind?.rawValue
         self.activityState = terminal.activityState.rawValue
+        self.hibernatedAt = terminal.hibernatedAt
+        self.keepWarm = terminal.keepWarm
     }
 
     func toModel() -> Terminal {
@@ -53,7 +57,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             profileID: profile_id.flatMap(UUID.init(uuidString:)),
             transcriptPath: transcriptPath,
             kind: kind.flatMap(TerminalKind.init(rawValue:)),
-            activityState: activityState.flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown
+            activityState: activityState.flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown,
+            hibernatedAt: hibernatedAt,
+            keepWarm: keepWarm ?? false
         )
     }
 }
@@ -216,6 +222,7 @@ public struct TerminalStore: Sendable {
             record.transcriptPath = nil
             record.suspendedAt = nil
             record.suspendedSnapshot = nil
+            record.hibernatedAt = nil
             record.label = TerminalLabel.shell
             record.kind = TerminalKind.shell.rawValue
             record.activityState = TerminalActivityState.unknown.rawValue
@@ -252,6 +259,45 @@ public struct TerminalStore: Sendable {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.activityState = activityState.rawValue
+            try record.update(db)
+        }
+    }
+
+    /// Mark a terminal hibernated (claude process killed, tmux window kept
+    /// alive), recording the wake session ID and timestamp. `sessionID` is the
+    /// session to `claude --resume` on wake.
+    public func setHibernated(id: UUID, sessionID: String, at date: Date = Date()) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.claudeSessionID = sessionID
+            record.hibernatedAt = date
+            record.activityState = TerminalActivityState.idle.rawValue
+            try record.update(db)
+        }
+    }
+
+    /// Clear a terminal's hibernated state (on wake). Leaves `claudeSessionID`
+    /// intact — the wake respawn re-captures a fresh id afterward.
+    public func clearHibernated(id: UUID) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.hibernatedAt = nil
+            try record.update(db)
+        }
+    }
+
+    /// Set or clear a terminal's keep-warm pin (exempts it from
+    /// auto-hibernation).
+    public func setKeepWarm(id: UUID, keepWarm: Bool) async throws {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            record.keepWarm = keepWarm
             try record.update(db)
         }
     }

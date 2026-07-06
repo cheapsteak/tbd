@@ -31,6 +31,13 @@ enum RowActionMenu {
         case deleteScratch
         case suspendClaude
         case resumeClaude
+        /// Manually hibernate all idle Claude sessions in this worktree.
+        case hibernateNow
+        /// Wake all hibernated Claude sessions in this worktree.
+        case wakeHibernated
+        /// Toggle the keep-warm pin (exempt from auto-hibernation) for this
+        /// worktree's Claude sessions. Carries the target state.
+        case toggleKeepWarm(enable: Bool)
         case createNestedWorktree
         /// Create a child worktree based on THIS worktree's current branch.
         case newWorktreeFromBranch
@@ -97,6 +104,17 @@ enum RowActionMenu {
         var hasUnsuspendedClaude: Bool
         /// Has at least one resumable Claude terminal that IS suspended.
         var hasSuspendedClaude: Bool
+        /// Has at least one Claude terminal eligible for a manual "Hibernate
+        /// now" right now (idle-at-rest, not running/waiting/hibernated).
+        var hasHibernatableClaude: Bool
+        /// Has at least one hibernated Claude terminal (drives "Wake").
+        var hasHibernatedClaude: Bool
+        /// Has at least one resumable Claude terminal that is NOT keep-warm
+        /// pinned (drives "Keep warm").
+        var hasUnpinnedClaude: Bool
+        /// Has at least one keep-warm-pinned Claude terminal (drives "Allow
+        /// hibernation").
+        var hasKeepWarmClaude: Bool
         /// Has at least one non-archived child worktree (gates archive).
         var hasActiveChildren: Bool
         /// Worktree path is empty (main/creating rows hide Finder/Copy then).
@@ -117,6 +135,10 @@ enum RowActionMenu {
 
         init(hasUnsuspendedClaude: Bool = false,
              hasSuspendedClaude: Bool = false,
+             hasHibernatableClaude: Bool = false,
+             hasHibernatedClaude: Bool = false,
+             hasUnpinnedClaude: Bool = false,
+             hasKeepWarmClaude: Bool = false,
              hasActiveChildren: Bool = false,
              pathIsEmpty: Bool = false,
              hasRepoID: Bool = true,
@@ -127,6 +149,10 @@ enum RowActionMenu {
              claudeSessions: [ClaudeSessionRef] = []) {
             self.hasUnsuspendedClaude = hasUnsuspendedClaude
             self.hasSuspendedClaude = hasSuspendedClaude
+            self.hasHibernatableClaude = hasHibernatableClaude
+            self.hasHibernatedClaude = hasHibernatedClaude
+            self.hasUnpinnedClaude = hasUnpinnedClaude
+            self.hasKeepWarmClaude = hasKeepWarmClaude
             self.hasActiveChildren = hasActiveChildren
             self.pathIsEmpty = pathIsEmpty
             self.hasRepoID = hasRepoID
@@ -145,6 +171,10 @@ enum RowActionMenu {
     static let archiveNeedsChildrenGoneHelp = "Archive nested worktrees first"
     static let forkSessionLabel = "Fork session"
     static let newWorktreeFromBranchLabel = "New worktree from this branch…"
+    static let hibernateNowLabel = "Hibernate now"
+    static let wakeLabel = "Wake"
+    static let keepWarmLabel = "Keep warm"
+    static let allowHibernationLabel = "Allow hibernation"
 
     /// Title for a fork-session action: plain when the worktree hosts a single
     /// Claude session, suffixed with the session label when there are several.
@@ -179,6 +209,30 @@ enum RowActionMenu {
         forkActions(context: context)
     }
 
+    /// Hibernation actions for a worktree row: Wake (if any session is
+    /// hibernated), Hibernate now (if any is eligible), and the keep-warm
+    /// toggle. Shared by the regular and scratch branches so both surfaces
+    /// (right-click + "…") stay in lockstep.
+    static func hibernationActions(context: Context) -> [Action] {
+        var actions: [Action] = []
+        if context.hasHibernatedClaude {
+            actions.append(Action(kind: .wakeHibernated, title: wakeLabel))
+        }
+        if context.hasHibernatableClaude {
+            actions.append(Action(kind: .hibernateNow, title: hibernateNowLabel))
+        }
+        // Keep-warm toggle: offer "Keep warm" when any session is still
+        // eligible for auto-hibernation, and "Allow hibernation" when any is
+        // pinned. (Both can appear if a worktree hosts a mix.)
+        if context.hasUnpinnedClaude {
+            actions.append(Action(kind: .toggleKeepWarm(enable: true), title: keepWarmLabel))
+        }
+        if context.hasKeepWarmClaude {
+            actions.append(Action(kind: .toggleKeepWarm(enable: false), title: allowHibernationLabel))
+        }
+        return actions
+    }
+
     private static func forkActions(context: Context) -> [Action] {
         let multiple = context.claudeSessions.count > 1
         return context.claudeSessions.map { session in
@@ -201,6 +255,7 @@ enum RowActionMenu {
         if includeSessionForks {
             items.append(contentsOf: forkActions(context: context).map(Item.action))
         }
+        items.append(contentsOf: hibernationActions(context: context).map(Item.action))
         items.append(contentsOf: [
             .divider,
             .action(Action(kind: .rename, title: "Rename...")),
@@ -241,6 +296,7 @@ enum RowActionMenu {
         if context.hasSuspendedClaude {
             items.append(.action(Action(kind: .resumeClaude, title: "Resume Claude")))
         }
+        items.append(contentsOf: hibernationActions(context: context).map(Item.action))
         // Per-session fork — only in surfaces without an account section (the
         // right-click menu). The "…" menu renders fork in its account section.
         if includeSessionForks {
