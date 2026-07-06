@@ -84,6 +84,46 @@ struct SidecarFramingTests {
         #expect(!scanner.isDesynced)
     }
 
+    @Test("frameLength exactly AT the 4 MiB cap is a valid frame, not a desync")
+    func frameLengthAtCapPasses() {
+        let scanner = SidecarFrameScanner()
+        // frameLength covers the type byte: cap-sized frame = type + (cap-1)
+        // payload bytes. The cap is INCLUSIVE — `> cap` desyncs, `== cap`
+        // must scan cleanly (exact-boundary regression test).
+        let cap = 4 * 1024 * 1024
+        var blob = Data()
+        let declared = UInt32(cap)
+        blob.append(UInt8(declared & 0xff))
+        blob.append(UInt8((declared >> 8) & 0xff))
+        blob.append(UInt8((declared >> 16) & 0xff))
+        blob.append(UInt8((declared >> 24) & 0xff))
+        blob.append(7)   // type byte
+        blob.append(Data(count: cap - 1))
+        let frames = scanner.append(blob)
+        #expect(frames.count == 1)
+        #expect(frames.first?.type == 7)
+        #expect(frames.first?.payload.count == cap - 1)
+        #expect(!scanner.isDesynced)
+    }
+
+    @Test("frameLength of cap + 1 desyncs (exact boundary of the corruption check)")
+    func frameLengthJustOverCapDesyncs() {
+        let scanner = SidecarFrameScanner()
+        let cap = 4 * 1024 * 1024
+        var blob = Data()
+        let declared = UInt32(cap + 1)
+        blob.append(UInt8(declared & 0xff))
+        blob.append(UInt8((declared >> 8) & 0xff))
+        blob.append(UInt8((declared >> 16) & 0xff))
+        blob.append(UInt8((declared >> 24) & 0xff))
+        blob.append(contentsOf: [0x01, 0x02])   // a few bytes; length alone must trip it
+        let frames = scanner.append(blob)
+        #expect(frames.isEmpty)
+        #expect(scanner.isDesynced)
+        // Terminal: nothing ever comes back after the corrupt length.
+        #expect(scanner.append(Data([0x00])).isEmpty)
+    }
+
     @Test("an oversized declared length flags desync without allocating or crashing")
     func oversizedLengthDesyncs() {
         let scanner = SidecarFrameScanner()

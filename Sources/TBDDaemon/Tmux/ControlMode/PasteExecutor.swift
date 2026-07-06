@@ -61,9 +61,22 @@ enum PasteExecutor {
             // between the two awaits). The `-d` on paste-buffer would have
             // deleted the buffer on success; since it didn't run, the uniquely
             // named buffer would otherwise accumulate forever in the long-lived
-            // `-CC` server. Best-effort delete before rethrowing (result ignored,
-            // errors tolerated — a failed cleanup must not mask the real error).
-            _ = try? await client.send("delete-buffer -b \(bufferName)", tolerateErrors: true)
+            // `-CC` server. Best-effort delete before rethrowing (errors
+            // tolerated — a failed cleanup must not mask the real error), but
+            // a cleanup failure is at least made VISIBLE: the leaked
+            // tbd-paste-<uuid> buffer is otherwise undiscoverable. Narrow
+            // residual race: if paste-buffer actually ran (its -d deleted the
+            // buffer) and only its REPLY was lost, this delete-buffer fails
+            // on an already-gone buffer — that harmless case logs too.
+            do {
+                _ = try await client.send("delete-buffer -b \(bufferName)", tolerateErrors: true)
+            } catch let cleanupError {
+                Self.logger.debug("""
+                    delete-buffer cleanup failed for \(bufferName, privacy: .public): \
+                    \(String(describing: cleanupError), privacy: .public) — the buffer may \
+                    linger on the tmux server (original paste error is rethrown)
+                    """)
+            }
             throw error
         }
     }
