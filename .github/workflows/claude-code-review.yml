@@ -141,6 +141,7 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           claude_args: |
+            --max-turns 80
             --allowedTools "mcp__github_comment__update_claude_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*),Bash(cat:*),WebSearch,Read,Write,Glob,Grep,Task"
 
       - name: Enforce review verdict (block merge on Reject)
