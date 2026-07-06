@@ -588,12 +588,17 @@ public struct TmuxManager: Sendable {
     /// timeout, spawn-failure} resumes it, satisfying the single-resume
     /// contract even when the process exits concurrently with the timer.
     ///
-    /// Both pipes are drained CONCURRENTLY with the running child, never after
-    /// `terminationHandler` alone: a macOS pipe buffer is 64KB, so a child
-    /// emitting more (e.g. `ps -Ao` on a busy machine, ~72KB) would otherwise
-    /// block writing to the full pipe while we wait for it to exit — a mutual
-    /// deadlock resolved only by the timeout, turning every large-output call
-    /// into a spurious failure.
+    /// Both pipes are drained incrementally via `readabilityHandler` while the
+    /// child runs: a macOS pipe buffer is 64KB, so a child emitting more (e.g.
+    /// `ps -Ao` on a busy machine, ~72KB) would otherwise block writing to the
+    /// full pipe while we wait for it to exit — a mutual deadlock resolved only
+    /// by the timeout, turning every large-output call into a spurious failure.
+    /// The drain never waits for pipe EOF: real call sites run
+    /// `[shell, "-ic", cmd]`, and rc files can fork background grandchildren
+    /// that inherit the write ends, so EOF may never arrive after the direct
+    /// child dies. Termination and timeout both snapshot what has already
+    /// arrived and close the parent read ends — no thread, FD, or closure
+    /// outlives the call.
     ///
     /// Package-internal (not `private`) so timeout tests can drive it directly
     /// against a real slow binary (`/bin/sleep`) without a tmux server.
@@ -615,19 +620,28 @@ public struct TmuxManager: Sendable {
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
-            let stdoutBuffer = PipeDrainBuffer()
-            let stderrBuffer = PipeDrainBuffer()
-            // Balanced strictly before `process.run()` so a child that exits
-            // instantly can't observe an empty group and fire `notify` with
-            // undrained buffers.
-            let drainGroup = DispatchGroup()
-            drainGroup.enter()
-            drainGroup.enter()
+            let stdoutAccumulator = PipeDataAccumulator()
+            let stderrAccumulator = PipeDataAccumulator()
 
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
+
+            // Drain both pipes incrementally as chunks arrive (mirrors
+            // GitManager.run): no thread parks for the subprocess's lifetime,
+            // and a child emitting more than the 64KB pipe buffer never
+            // deadlocks against an undrained pipe.
+            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                if !stdoutAccumulator.readAvailable(from: handle) {
+                    handle.readabilityHandler = nil
+                }
+            }
+            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                if !stderrAccumulator.readAvailable(from: handle) {
+                    handle.readabilityHandler = nil
+                }
+            }
 
             // Watchdog timer: on fire, escalate SIGTERM → SIGKILL and resume
             // with a timeout error (if the process hasn't already exited).
@@ -636,6 +650,15 @@ public struct TmuxManager: Sendable {
             timer.setEventHandler {
                 guard state.claim() else { return }
                 timer.cancel()
+                // Stop draining and close the parent read ends NOW. The kill
+                // below reaches only the DIRECT child; grandchildren forked by
+                // the shell's rc files inherit the pipe write ends, so EOF may
+                // never come — waiting for it would leak the FDs and handler
+                // closures for the grandchildren's lifetime.
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
                 let pid = process.processIdentifier
                 if pid > 0 {
                     kill(pid, SIGTERM)
@@ -649,67 +672,48 @@ public struct TmuxManager: Sendable {
             }
 
             process.terminationHandler = { _ in
-                // The child exited, but its final output may still be in
-                // flight through the drain readers; wait for both to hit EOF
-                // (guaranteed promptly — the writer is gone) before assembling.
-                drainGroup.notify(queue: .global()) {
-                    let stdout = String(data: stdoutBuffer.data, encoding: .utf8) ?? ""
-                    let stderr = String(data: stderrBuffer.data, encoding: .utf8) ?? ""
-                    let output = stdout.isEmpty ? stderr : stdout
+                // The direct child exited; everything it wrote is already in
+                // the kernel pipe buffers. `finish` snapshots that WITHOUT
+                // waiting for EOF — EOF is NOT guaranteed here, because
+                // grandchildren may still hold the write ends open — and
+                // closes the parent read ends.
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                let stdoutData = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                let stderrData = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
+                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+                let output = stdout.isEmpty ? stderr : stdout
 
-                    guard state.claim() else { return }  // timer already won → timed out
-                    timer.cancel()
+                guard state.claim() else { return }  // timer already won → timed out
+                timer.cancel()
 
-                    if process.terminationStatus != 0 {
-                        continuation.resume(throwing: TmuxError.commandFailed(
-                            command: commandDescription,
-                            status: process.terminationStatus,
-                            output: output
-                        ))
-                    } else {
-                        continuation.resume(returning: stdout)
-                    }
+                if process.terminationStatus != 0 {
+                    continuation.resume(throwing: TmuxError.commandFailed(
+                        command: commandDescription,
+                        status: process.terminationStatus,
+                        output: output
+                    ))
+                } else {
+                    continuation.resume(returning: stdout)
                 }
             }
 
             do {
                 try process.run()
-                // Drain both pipes while the child runs. `readDataToEndOfFile`
-                // blocks only its own global-queue thread, keeps the pipe
-                // empty, and returns at EOF when the child exits (or is
-                // killed by the timeout).
-                DispatchQueue.global().async {
-                    stdoutBuffer.append(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
-                    drainGroup.leave()
-                }
-                DispatchQueue.global().async {
-                    stderrBuffer.append(stderrPipe.fileHandleForReading.readDataToEndOfFile())
-                    drainGroup.leave()
-                }
                 timer.resume()
             } catch {
-                // Spawn failed: no child, no termination, no drains — balance
-                // the group so it can deallocate cleanly.
-                drainGroup.leave()
-                drainGroup.leave()
+                // Spawn failed: no child will ever write — detach the drain
+                // handlers and close the read ends so nothing lingers.
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
+                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
                 guard state.claim() else { return }
                 timer.cancel()
                 continuation.resume(throwing: error)
             }
         }
-    }
-}
-
-/// Thread-safe accumulator for a pipe drained on a background queue while the
-/// owning subprocess is still running (see `runExternalCommand`). The drain
-/// thread appends; the termination path reads after the drain group settles.
-final class PipeDrainBuffer: @unchecked Sendable {
-    private let lock = OSAllocatedUnfairLock(initialState: Data())
-    func append(_ chunk: Data) {
-        lock.withLock { $0.append(chunk) }
-    }
-    var data: Data {
-        lock.withLock { $0 }
     }
 }
 

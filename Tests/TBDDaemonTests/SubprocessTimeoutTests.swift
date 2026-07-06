@@ -48,6 +48,55 @@ struct SubprocessTimeoutTests {
         #expect(out.utf8.count == bytes)
     }
 
+    @Test func runExternalCommandTimesOutPromptlyWhenGrandchildHoldsPipeOpen() async {
+        // Real call sites run `[shell, "-ic", cmd]`, and rc files can fork
+        // background children that inherit the pipe write ends. The watchdog
+        // kills only the DIRECT child, so EOF never arrives on the pipes. The
+        // old blocking `readDataToEndOfFile` drain leaked two parked
+        // global-queue threads + two pipe FDs (+ retained closures) per
+        // timed-out call. Shape: the parent execs into a sleep that the 1s
+        // timeout kills, while a backgrounded grandchild keeps the write end
+        // open for 5s. The call must throw .timedOut around the timeout, not
+        // wait anywhere near the grandchild's EOF.
+        let start = ContinuousClock.now
+        do {
+            _ = try await TmuxManager.runExternalCommand(
+                executable: "/bin/sh",
+                arguments: ["-c", "sleep 5 & echo hi; exec sleep 5"],
+                label: "grandchild-pipe-timeout-test",
+                timeout: .seconds(1)
+            )
+            Issue.record("expected runExternalCommand to time out, but it returned")
+        } catch let error as TmuxError {
+            guard case .timedOut = error else {
+                Issue.record("expected TmuxError.timedOut, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("expected TmuxError.timedOut, got \(error)")
+        }
+        // Generous bound (1s timeout vs 5s grandchild): finishing under 4s
+        // proves nothing waited for the grandchild to release the write end.
+        #expect(ContinuousClock.now - start < .seconds(4))
+    }
+
+    @Test func runExternalCommandReturnsWithoutWaitingForGrandchildEOF() async throws {
+        // Termination-path variant: the direct child exits IMMEDIATELY (and
+        // successfully) while its backgrounded grandchild holds the pipe write
+        // end for 5s. The call must return the child's output right away — a
+        // drain that waits for pipe EOF stalls until the grandchild exits,
+        // which with the old shape surfaced as a spurious .timedOut here
+        // (timeout 3s < grandchild 5s). Outcome-based: success discriminates
+        // old from new without asserting wall-clock timing.
+        let out = try await TmuxManager.runExternalCommand(
+            executable: "/bin/sh",
+            arguments: ["-c", "sleep 5 & echo hi"],
+            label: "grandchild-pipe-eof-test",
+            timeout: .seconds(3)
+        )
+        #expect(out == "hi\n")
+    }
+
     @Test func runExternalCommandSucceedsWellWithinTimeout() async throws {
         // A fast binary returns normally — the timeout wrapper must not break the
         // happy path (regression guard for the kill/continuation plumbing).
