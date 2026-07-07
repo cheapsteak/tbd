@@ -2,14 +2,12 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-/// The shared dispatcher behind BOTH worktree-row action surfaces (the
-/// right-click `SidebarContextMenu` and the hover "…" menu in
-/// `RowAccountMenuView`). Holding `appState + worktree + onRename`, it exposes:
+/// The dispatcher behind the worktree-row right-click menu
+/// (`SidebarContextMenu`). Holding `appState + worktree + onRename`, it exposes:
 ///
 /// - `context()` — build the pure `RowActionMenu.Context` from live `AppState`.
 /// - `run(_:)` — the single place every side-effecting closure lives, keyed by
-///   the typed `RowActionMenu.Kind`, so behavior can never drift between the two
-///   surfaces.
+///   the typed `RowActionMenu.Kind`.
 ///
 /// `@MainActor` because it reads/mutates `AppState` and touches AppKit
 /// (`NSWorkspace`, `NSPasteboard`).
@@ -23,8 +21,8 @@ struct RowActionMenuActions {
         appState.terminals[worktree.id] ?? []
     }
 
-    /// Forkable Claude sessions in tab order, labeled with the same helper the
-    /// account section uses so a session's fork entry matches its header.
+    /// Forkable Claude sessions in tab order, labeled with the shared
+    /// session-label helper so a fork entry matches the session's tab label.
     private var claudeSessions: [RowActionMenu.ClaudeSessionRef] {
         let claudeTerminals = terminals.filter { $0.kind == .claude || $0.isClaudeResumable }
         var index = 0
@@ -63,16 +61,9 @@ struct RowActionMenuActions {
         )
     }
 
-    /// The ordered items to render. `includeSessionForks` is `true` for the
-    /// right-click menu (fork lives in the shared list) and `false` for the "…"
-    /// menu (fork lives in its account section, so it isn't duplicated here).
-    func items(includeSessionForks: Bool = true) -> [RowActionMenu.Item] {
-        RowActionMenu.items(context: context(), includeSessionForks: includeSessionForks)
-    }
-
-    /// Per-session fork actions for the "…" menu's account section.
-    func sessionForkActions() -> [RowActionMenu.Action] {
-        RowActionMenu.sessionForkActions(context: context())
+    /// The ordered items to render.
+    func items() -> [RowActionMenu.Item] {
+        RowActionMenu.items(context: context())
     }
 
     /// Run the side effect for a typed action `kind`. The single source of truth
@@ -170,18 +161,14 @@ struct RowActionMenuActions {
 
 // MARK: - Rendering
 
-/// Shared SwiftUI rendering of `RowActionMenu.Item`s into `Button`/`Divider`/
-/// `Text`, dispatching each action through the shared `RowActionMenuActions`.
-/// Used by both the right-click menu and the "…" menu so the two surfaces render
-/// an identical structure.
+/// SwiftUI rendering of `RowActionMenu.Item`s into `Button`/`Divider`/`Text`,
+/// dispatching each action through `RowActionMenuActions`. Used by the
+/// right-click `SidebarContextMenu`.
 struct RowActionMenuItemsView: View {
     let actions: RowActionMenuActions
-    /// See `RowActionMenuActions.items(includeSessionForks:)`. Right-click passes
-    /// `true`; the "…" menu passes `false` (fork lives in its account section).
-    var includeSessionForks: Bool = true
 
     var body: some View {
-        ForEach(Array(actions.items(includeSessionForks: includeSessionForks).enumerated()), id: \.offset) { _, item in
+        ForEach(Array(actions.items().enumerated()), id: \.offset) { _, item in
             switch item {
             case let .action(action):
                 actionButton(action)

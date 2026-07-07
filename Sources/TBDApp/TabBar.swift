@@ -426,11 +426,10 @@ enum AddTabMenu {
         return image
     }
 
-    /// NSMenu counterpart of `RowAccountMenuView.twoLineLabel`: an attributed
-    /// two-line NSMenuItem title — identity at menu size, the usage line
-    /// smaller, secondary-colored, and indented underneath. nil when there is
-    /// no secondary line, so snapshotless profiles keep the plain single-line
-    /// title set at item creation.
+    /// An attributed two-line NSMenuItem title — identity at menu size, the
+    /// usage line smaller, secondary-colored, and indented underneath. nil when
+    /// there is no secondary line, so snapshotless profiles keep the plain
+    /// single-line title set at item creation.
     static func twoLineAttributedTitle(
         _ line: ProfileUsagePresentation.MenuLineModel
     ) -> NSAttributedString? {
@@ -455,6 +454,28 @@ enum AddTabMenu {
         ]
     ))
         return title
+    }
+}
+
+// MARK: - Swap-profile menu composition
+
+/// Testable composition for the tab's swap-profile submenus ("Swap profile" /
+/// "Fork Session"), following the `AddTabMenu` pattern: pure helpers here, the
+/// SwiftUI lowering in `TabBarItem.swapProfileMenuItems(mode:)`.
+enum SwapProfileMenu {
+    /// Footer caption for the in-place "Swap profile" submenu when the session
+    /// is mid-run: the swap resumes in place, so it interrupts the current run.
+    static let interruptsRunCaption =
+        "Resumes in this tab on the new account — interrupts current run"
+
+    /// The warning caption to append to a swap-profile submenu, or nil when no
+    /// warning is needed. Only an `.inPlace` swap of a mid-run session
+    /// (`activityState == .working`) warns — `.fork` duplicates into a new tab
+    /// and leaves the source session untouched, so it never does.
+    static func busyCaption(mode: TerminalSwapMode,
+                            activityState: TerminalActivityState?) -> String? {
+        guard mode == .inPlace, activityState == .working else { return nil }
+        return interruptsRunCaption
     }
 }
 
@@ -741,6 +762,15 @@ private struct TabBarItem: View {
                 let prefix = terminal?.profileID == entry.profile.id ? "● " : "  "
                 Text("\(prefix)\(formatProfileSubmenuLabel(entry))")
             }
+        }
+
+        // Busy-session safeguard: an in-place swap of a mid-run session
+        // interrupts the current run, so warn before the user picks a target.
+        if let caption = SwapProfileMenu.busyCaption(
+            mode: mode, activityState: terminal?.activityState
+        ) {
+            Divider()
+            Text(caption).font(.caption)
         }
     }
 

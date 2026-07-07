@@ -8,11 +8,9 @@ import TBDShared
 /// `ProfileUsagePresentation.sessionTooltip` helper remains as the plain-text
 /// form; this structured card supersedes it in the UI.
 ///
-/// NOTE: The sidebar worktree ROW no longer carries an account hover card —
-/// per-session account facts now live in that row's "…" menu (its info header +
-/// "Switch account"), where they're actionable rather than just informational
-/// (see `RowAccountMenu`). The account-descriptor composition strings below are
-/// shared with the tab card and kept here.
+/// NOTE: The sidebar worktree ROW carries no account hover card — per-session
+/// account facts and switching live in the tab bar (this card + the tab's
+/// account menu).
 enum AccountHoverCards {
     static let ambientAccountLabel = "ambient (terminal login)"
     static let ambientDriftCaption = "May drift to a different account on token refresh"
