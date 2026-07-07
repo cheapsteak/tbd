@@ -171,6 +171,19 @@ struct AttachReplayOrchestrator: Sendable {
             throw AttachReplayFailure(
                 generation: generation, underlying: AttachReplayError.noCommandClient)
         }
+        // Re-check ownership AFTER the provider hop (R10-3, same post-hop
+        // pattern as the R7-M1 resize fix): the acknowledge above and the
+        // sendList below are separated by an await — a stale task preempted
+        // here can otherwise enqueue its PAUSE after the successor's entire
+        // sequence (including its unpause) already completed, re-freezing a
+        // live pane with nothing left to unpause it.
+        guard await supervisor.currentGeneration(server: server, paneID: paneID) == generation else {
+            Self.logger.debug("""
+                attach.ready superseded across the provider hop for \
+                \(server, privacy: .public)/\(paneID, privacy: .public) gen=\(generation) — sending nothing
+                """)
+            return .superseded
+        }
 
         // ONE atomic sendList: pause FIRST, then the capture batch — atomicity
         // in the FIFO guarantees nothing (not even our own commands) slips

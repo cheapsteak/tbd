@@ -291,6 +291,11 @@ actor TmuxControlSupervisor {
         fanout.isReady(key: PaneKey(server: server, paneID: paneID))
     }
 
+    /// Read-only generation lookup (R10-3) — see `PaneFanout.currentGeneration`.
+    func currentGeneration(server: String, paneID: String) -> UInt64? {
+        fanout.currentGeneration(key: PaneKey(server: server, paneID: paneID))
+    }
+
     func detach(server: String, paneID: String) {
         fanout.detach(key: PaneKey(server: server, paneID: paneID))
     }

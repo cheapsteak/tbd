@@ -180,6 +180,15 @@ final class PaneFanout: @unchecked Sendable {
         return sinks[key]?.ready ?? false
     }
 
+    /// Read-only generation lookup (R10-3): lets the orchestrator re-check
+    /// ownership after its provider hop without touching `acknowledged`
+    /// state. `nil` when no sink exists.
+    func currentGeneration(key: PaneKey) -> UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sinks[key]?.generation
+    }
+
     /// Close and forget the write end for `key`; the app-held read end sees
     /// EOF on its next read.
     func detach(key: PaneKey) {

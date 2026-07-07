@@ -22,6 +22,63 @@ struct AttachReplayOrchestratorTests {
         var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
     }
 
+    /// Parks the FIRST `commandProvider` call until `release()`; every later
+    /// call passes straight through. Models a stale attach.ready task
+    /// preempted at the provider hop while a successor's sequence runs.
+    private final class ProviderGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var released = false
+        private var firstCallTaken = false
+        private var parkedArrived = false
+
+        var hasParkedCaller: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return parkedArrived
+        }
+
+        /// Synchronous claim: returns whether the caller is the FIRST (the
+        /// one that must park). NSLock is barred from async contexts, so the
+        /// locking happens in sync helpers.
+        private func claimFirstCall() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if firstCallTaken { return false }
+            firstCallTaken = true
+            return true
+        }
+
+        /// Synchronous park attempt: records arrival and either parks `cont`
+        /// (returns nil) or hands it back for an immediate resume (already
+        /// released).
+        private func parkOrPassThrough(
+            _ cont: CheckedContinuation<Void, Never>
+        ) -> CheckedContinuation<Void, Never>? {
+            lock.lock()
+            defer { lock.unlock() }
+            parkedArrived = true
+            if released { return cont }
+            continuation = cont
+            return nil
+        }
+
+        func parkIfFirstCall() async {
+            guard claimFirstCall() else { return }
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                parkOrPassThrough(cont)?.resume()
+            }
+        }
+
+        func release() {
+            lock.lock()
+            released = true
+            let cont = continuation
+            continuation = nil
+            lock.unlock()
+            cont?.resume()
+        }
+    }
+
     /// Thread-safe truncation-hook recorder.
     private final class TruncationRecorder: @unchecked Sendable {
         private let lock = NSLock()
@@ -546,6 +603,74 @@ struct AttachReplayOrchestratorTests {
         #expect(outcome == .ready)
         #expect(failures.writes.isEmpty)
         _ = drain(readFD)
+    }
+
+    @Test("stale task parked at the provider hop sends ZERO commands once a successor's FULL sequence completed (R10-3)")
+    func staleTaskParkedAtProviderHopSendsNothing() async throws {
+        let gate = ProviderGate()
+        let recorder = Recorder()
+        let client = TmuxControlCommandClient(
+            writeLine: { recorder.record($0) },
+            onFatalError: {})
+        let supervisor = TmuxControlSupervisor()
+        let orchestrator = AttachReplayOrchestrator(
+            supervisor: supervisor,
+            commandProvider: { [server] requested in
+                guard requested == server else { return nil }
+                await gate.parkIfFirstCall()
+                return client
+            })
+        let paneID = "%18"
+        let (read1, gen1) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read1) }
+
+        // The stale sequence acknowledges gen1, then is preempted at the
+        // `await commandProvider(server)` hop (parked in the gate).
+        let staleDone = Recorder()
+        let staleTask = Task { () throws -> AttachReplayOrchestrator.Outcome in
+            defer { staleDone.record("done") }
+            return try await orchestrator.performAttachReady(
+                server: server, paneID: paneID, expectedGeneration: gen1)
+        }
+        try await waitFor("stale task parked at the provider hop") { gate.hasParkedCaller }
+
+        // A successor attaches and runs its ENTIRE pause → captures → replay
+        // → unpause sequence to completion while the stale task is parked.
+        let (read2, gen2) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read2) }
+        let successorTask = Task {
+            try await orchestrator.performAttachReady(
+                server: server, paneID: paneID, expectedGeneration: gen2)
+        }
+        try await waitFor("successor batch write") { recorder.writes.count >= 1 }
+        await succeed(client, [[], ["hist"], ["screen"], [], ["hist", "screen"],
+                               [stateLine(paneID: paneID)], []])
+        #expect(try await successorTask.value == .ready)
+        try await waitFor("successor unpause write") { recorder.writes.count >= 2 }
+        #expect(await supervisor.isReady(server: server, paneID: paneID) == true)
+
+        // Release the stale task. Its pause landing NOW would re-freeze the
+        // live pane with nothing left to unpause it (the supersession rule
+        // skips ITS unpause, and the successor's already ran) — the post-hop
+        // re-check must return .superseded having sent NOTHING.
+        gate.release()
+        try await waitFor("stale sequence resolution") {
+            staleDone.writes.count == 1 || recorder.writes.count > 2
+        }
+        if recorder.writes.count > 2 {
+            // Regression path only: the stale batch WAS sent — feed its
+            // replies so the test fails on the assertions below instead of
+            // hanging on `staleTask.value`.
+            await succeed(client, [[], [], [], [], [],
+                                   [stateLine(paneID: paneID)], []])
+        }
+        #expect(try await staleTask.value == .superseded)
+        // Exactly the successor's writes: one batch + one unpause. The stale
+        // task contributed ZERO commands — in particular no second pause.
+        #expect(recorder.writes.count == 2)
+        #expect(recorder.writes.filter { $0.contains(":pause'") }.count == 1)
+        #expect(await supervisor.isReady(server: server, paneID: paneID) == true)
+        _ = drain(read2)
     }
 
     @Test("list-panes reply missing the pane fails the attach")
