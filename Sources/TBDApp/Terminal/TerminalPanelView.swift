@@ -751,12 +751,39 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // the same pane (the stale-cleanup class of 56029f5b).
                 guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else {
                     logger.info("""
-                        skipping grouped-sessions fallback + teardown for pane \
+                        skipping grouped-sessions fallback for pane \
                         \(paneID, privacy: .public) — the view was torn down while the \
-                        attach was in flight; cleanup() owns the teardown
+                        attach was in flight
                         """)
+                    // cleanup() only tears down an attach that had committed
+                    // into `controlModeAttach` — a failure whose generation
+                    // was minted INSIDE openAttach (AttachFDVendError from
+                    // the fd-vend wait) committed a daemon-side attach that
+                    // cleanup() never saw, and without a detach here that
+                    // attach + its router/health registration leak (R10-1).
+                    // Generation-scoped ONLY: nil means nothing daemon-side
+                    // exists, and an unconditional detach from a dead view
+                    // could kill a successor's fresh attach for the same
+                    // pane (56029f5b class) — send nothing then. No reader
+                    // exists for this attach (registration happens after
+                    // commit), so there is nothing registry-side to remove.
+                    let tornDownGeneration = ControlModeAttachAbort.tornDownTeardownGeneration(
+                        committed: controlModeAttach?.generation, error: error)
                     controlModeAttach = nil
                     (terminalView as? TBDTerminalView)?.onControlModePaste = nil
+                    if let tornDownGeneration {
+                        // Mirrors abortLateAttach's post-await teardown: clear
+                        // any generation-scoped AppState record, then the
+                        // generation-scoped daemon detach (idempotent against
+                        // cleanup()'s own for the same generation).
+                        appState.controlModePaneDetached(
+                            worktreeID: worktreeID, paneID: paneID, generation: tornDownGeneration)
+                        Task {
+                            try? await appState.daemonClient.paneDetach(
+                                worktreeID: worktreeID, paneID: paneID,
+                                generation: tornDownGeneration)
+                        }
+                    }
                     return
                 }
                 // Scope the teardown detach to THIS attach when its generation

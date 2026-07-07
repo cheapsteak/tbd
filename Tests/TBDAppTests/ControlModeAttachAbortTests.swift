@@ -87,4 +87,42 @@ struct ControlModeAttachAbortTests {
         let error = AttachFDVendError(generation: nil, underlying: FDSidecarError.timedOut)
         #expect(ControlModeAttachAbort.teardownGeneration(committed: nil, error: error) == nil)
     }
+
+    // MARK: - Torn-down failure branch (R10-1)
+    //
+    // The catch's torn-down early-return used to send NOTHING — but cleanup()
+    // can only tear down an attach that had committed into `controlModeAttach`,
+    // and a failure whose generation was minted INSIDE openAttach
+    // (AttachFDVendError) committed a daemon-side attach cleanup() never saw.
+    // As with the R6-H2 table above, the Task interleaving itself (teardown
+    // landing while openAttach is in flight) has no headless seam — these pin
+    // the decision the branch consults.
+
+    @Test("torn down, vend error carries a minted generation: the detach still fires, scoped to it")
+    func tornDownVendFailureStillDetaches() {
+        let error = AttachFDVendError(generation: 11, underlying: FDSidecarError.timedOut)
+        #expect(ControlModeAttachAbort.tornDownTeardownGeneration(
+            committed: nil, error: error) == 11)
+    }
+
+    @Test("torn down, no generation anywhere: send NOTHING — never an unconditional detach after teardown")
+    func tornDownWithoutGenerationSendsNothing() {
+        // Unlike the live path, nil here must mean "skip the detach": an
+        // unscoped detach from a dead view could EOF a successor view's
+        // fresh attach for the same pane (the 56029f5b class).
+        #expect(ControlModeAttachAbort.tornDownTeardownGeneration(
+            committed: nil, error: FDSidecarError.timedOut) == nil)
+        let error = AttachFDVendError(generation: nil, underlying: FDSidecarError.timedOut)
+        #expect(ControlModeAttachAbort.tornDownTeardownGeneration(
+            committed: nil, error: error) == nil)
+    }
+
+    @Test("torn down with a committed generation: scoped to it (idempotent with cleanup()'s detach)")
+    func tornDownCommittedGenerationWins() {
+        let error = AttachFDVendError(generation: 9, underlying: FDSidecarError.timedOut)
+        #expect(ControlModeAttachAbort.tornDownTeardownGeneration(
+            committed: 4, error: error) == 4)
+        #expect(ControlModeAttachAbort.tornDownTeardownGeneration(
+            committed: 4, error: FDSidecarError.timedOut) == 4)
+    }
 }

@@ -75,4 +75,21 @@ enum ControlModeAttachAbort {
     static func teardownGeneration(committed: UInt64?, error: any Error) -> UInt64? {
         committed ?? (error as? AttachFDVendError)?.generation
     }
+
+    /// The generation the TORN-DOWN failure branch must detach — nil means
+    /// send NOTHING (R10-1). Resolution is identical to `teardownGeneration`,
+    /// but nil flips meaning after teardown: the live path's nil falls back to
+    /// an UNCONDITIONAL detach, while a dead view must never send one — an
+    /// unscoped detach could EOF a successor view's fresh attach for the same
+    /// pane (the 56029f5b class), and with no generation minted anywhere
+    /// there is no daemon-side attach to unwind in the first place.
+    ///
+    /// A non-nil result is exactly the case `cleanup()` cannot cover: the
+    /// generation was minted INSIDE `openAttach` (`AttachFDVendError`) before
+    /// anything landed in `controlModeAttach`, so the teardown's attach block
+    /// never saw it — without this detach the daemon attach and its
+    /// router/health registration leak for that generation.
+    static func tornDownTeardownGeneration(committed: UInt64?, error: any Error) -> UInt64? {
+        teardownGeneration(committed: committed, error: error)
+    }
 }
