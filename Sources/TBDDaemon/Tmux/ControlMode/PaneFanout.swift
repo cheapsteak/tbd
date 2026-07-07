@@ -126,12 +126,12 @@ final class PaneFanout: @unchecked Sendable {
         /// hard-error diagnostic (or vice versa).
         var lastWriteErrorLog = Date.distantPast
         /// Backpressure queue (Phase B M1): bytes the pipe could not accept
-        /// yet, delivered IN ORDER by the async drain task. Bounded by
+        /// yet, delivered IN ORDER by the GCD drain worker. Bounded by
         /// `PaneFanout.queueCap`; scoped to this (key, generation) — a
         /// superseded sink's queued bytes die with it.
         var queue: [Data] = []
         var queuedBytes = 0
-        /// A drain task is live for this (key, generation).
+        /// A drain worker is live for this (key, generation).
         var drainArmed = false
         /// Chunks dropped whole because the queue was at its cap.
         var overflowEvents = 0
@@ -188,8 +188,8 @@ final class PaneFanout: @unchecked Sendable {
         let (readFD, writeFD) = (fds[0], fds[1])
         // Nonblocking write end: a slow app-side reader must never stall the
         // reader thread. EAGAIN → queue-and-drain (Phase B M1): the unwritten
-        // remainder is queued per pane (cap `queueCap`) and an async drain
-        // task delivers it as the reader catches up.
+        // remainder is queued per pane (cap `queueCap`) and a GCD drain
+        // worker delivers it as the reader catches up.
         let flags = fcntl(writeFD, F_GETFL)
         _ = fcntl(writeFD, F_SETFL, flags | O_NONBLOCK)
 
@@ -572,7 +572,7 @@ final class PaneFanout: @unchecked Sendable {
     /// Phase B M1 backpressure: a chunk the pipe cannot accept whole is no
     /// longer truncated (issue #376 — every dropped byte leaves permanently
     /// wrong cells on a differential renderer). The unwritten remainder is
-    /// queued (bounded by `queueCap`) and an async drain task delivers it in
+    /// queued (bounded by `queueCap`) and a GCD drain worker delivers it in
     /// order; while ANY bytes are queued, new chunks go straight to the queue
     /// so live bytes can never overtake queued ones.
     ///
@@ -760,49 +760,60 @@ final class PaneFanout: @unchecked Sendable {
         return false
     }
 
-    /// Spawn the drain task for `sink` if its queue is non-empty and no drain
-    /// is live yet — MUST be called with `lock` held. The task captures only
-    /// (key, generation): it re-validates the sink on every pass, so a
-    /// superseded or detached sink's queue simply dies with it.
+    /// Spawn the drain worker for `sink` if its queue is non-empty and no
+    /// drain is live yet — MUST be called with `lock` held. The worker
+    /// captures only (key, generation): it re-validates the sink on every
+    /// pass, so a superseded or detached sink's queue simply dies with it.
+    ///
+    /// The drain deliberately runs on GCD, NOT the Swift Concurrency
+    /// cooperative pool: one GCD worker per backpressured pane, blocked at
+    /// most in 10 ms `usleep` slices, and GCD grows its pool to absorb
+    /// blocking — the same discipline as `stopOffPool`/`stopAll` in
+    /// `TmuxControlSupervisor` (R8-M2). A `Task.detached` drain rides the
+    /// fixed-width (CPU-core-count) cooperative executor, so a saturated
+    /// pool — e.g. synchronous consumers busy-waiting on cooperative
+    /// threads — starves the render-path delivery entirely. Observed as a
+    /// real starvation-deadlock on CI's narrow-vCPU runners (PR #379):
+    /// blocking test functions occupied every cooperative thread while
+    /// polling for bytes only the detached drain task could deliver.
     private func armDrainIfNeededLocked(_ sink: inout Sink, key: PaneKey) {
         guard sink.queuedBytes > 0, !sink.drainArmed else { return }
         sink.drainArmed = true
         let generation = sink.generation
-        Task.detached { [weak self] in
-            await self?.drainQueue(key: key, generation: generation)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.drainLoop(key: key, generation: generation)
         }
     }
 
-    /// Async drain for one (key, generation)'s backpressure queue. Writes
-    /// with the same nonblocking write-under-lock discipline as `route()` /
-    /// `writeReplay` (every fd use re-validates the sink under the lock, so
-    /// a write into a closed-and-recycled fd cannot happen). On EAGAIN it
-    /// sleeps OFF the lock (10 ms — the sleep IS the pacing) and retries.
+    /// Drain loop for one (key, generation)'s backpressure queue — runs on a
+    /// GCD worker (see `armDrainIfNeededLocked` for why it must stay off the
+    /// cooperative pool). Writes with the same nonblocking write-under-lock
+    /// discipline as `route()` / `writeReplay` (every fd use re-validates the
+    /// sink under the lock, so a write into a closed-and-recycled fd cannot
+    /// happen). On EAGAIN it sleeps OFF the lock (10 ms — the sleep IS the
+    /// pacing) and retries.
     ///
     /// Generation-scoped, the invariant everything here protects: a
     /// superseded attach's queued bytes must NEVER flush into a successor's
     /// pipe. On generation mismatch or missing sink this exits touching
     /// NOTHING — the successor manages its own `drainArmed`.
-    private func drainQueue(key: PaneKey, generation: UInt64) async {
-        while true {
-            // The pass itself is synchronous (NSLock is `noasync`); this
-            // loop only paces between passes, never holding the lock across
-            // a suspension.
-            if drainPass(key: key, generation: generation) == .finished { return }
-            // Pipe still full: pace OFF the lock, then re-validate and retry.
-            try? await Task.sleep(for: .milliseconds(10))
+    private func drainLoop(key: PaneKey, generation: UInt64) {
+        // Each pass runs and releases the lock; the sleep between passes
+        // (pipe still full) never holds it.
+        while drainPass(key: key, generation: generation) == .pipeFull {
+            usleep(10_000)
         }
     }
 
     private enum DrainPassResult {
-        /// The drain task is done: queue emptied, sink gone/superseded, or a
-        /// hard write error abandoned the queue.
+        /// The drain worker is done: queue emptied, sink gone/superseded, or
+        /// a hard write error abandoned the queue.
         case finished
         /// EAGAIN — the pipe is still full; sleep and run another pass.
         case pipeFull
     }
 
-    /// One locked drain pass — the synchronous half of `drainQueue`.
+    /// One locked drain pass — the body of `drainLoop`'s retry cycle.
     private func drainPass(key: PaneKey, generation: UInt64) -> DrainPassResult {
         lock.lock()
         guard var sink = sinks[key], sink.generation == generation, sink.ready, !sink.fenced,
@@ -810,7 +821,7 @@ final class PaneFanout: @unchecked Sendable {
             // Only a still-live sink at OUR generation gets its flag cleared
             // (`ready` never reverts once set — that arm is defensive only).
             // FENCED stands the drain down too (M3): the repair fence arms on
-            // a READY sink, and a straggler drain task from pre-overflow
+            // a READY sink, and a straggler drain worker from pre-overflow
             // backpressure would otherwise flush fence-parked bytes into the
             // pipe AHEAD of the repair replay. REPAIRING stands it down as
             // well — structurally, not by cross-function invariant: today the
