@@ -598,6 +598,11 @@ final class AppState: ObservableObject {
     /// RPC here. Production default asks the daemon; nil result = fetch failed.
     lazy var daemonCapabilitiesFetcher: @MainActor () async -> DaemonCapabilitiesResult? =
         { [daemonClient] in try? await daemonClient.daemonCapabilities() }
+    /// How `setControlModeEnabled` persists the flag — injectable for the same
+    /// reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no
+    /// protocol), so the Settings-toggle tests can exercise the success branch.
+    lazy var controlModeSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setControlMode(enabled: enabled) }
 
     /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
     /// `.modelProfilesChanged` delta handler so a control-mode toggle from

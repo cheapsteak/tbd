@@ -224,8 +224,12 @@ extension AppState {
     /// Applies to newly created panes only.
     func setControlModeEnabled(_ enabled: Bool) async {
         do {
-            try await daemonClient.setControlMode(enabled: enabled)
-            daemonCapabilities = try? await daemonClient.daemonCapabilities()
+            try await controlModeSetter(enabled)
+            // R8-M1: same keep-last-known-value refresh as the delta handler —
+            // a transient RPC failure right after a SUCCESSFUL set must not nil
+            // the capabilities (the toggle would snap off and show "Requires
+            // tmux 3.2" although the daemon applied the change).
+            await refreshDaemonCapabilities()
         } catch {
             logger.error("Failed to set control mode: \(error, privacy: .public)")
             showAlert("Failed to set control mode: \(error.localizedDescription)", isError: true)
