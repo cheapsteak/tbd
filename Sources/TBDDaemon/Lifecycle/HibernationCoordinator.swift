@@ -466,14 +466,6 @@ public actor HibernationCoordinator {
                     rows: resolvedRows
                 )
                 await onServerCreated?(server)
-                // Clean up the old window if it somehow still exists (a
-                // transient windowExists misclassification must not leak a
-                // live window; usually it's already dead so this no-ops).
-                // Skip when another terminal owns the id — killing it would
-                // tear down THEIR live window.
-                if !claimedByOther {
-                    try? await tmux.killWindow(server: server, windowID: windowID)
-                }
                 let window = try await tmux.createWindow(
                     server: server,
                     session: "main",
@@ -484,6 +476,19 @@ public actor HibernationCoordinator {
                     cols: resolvedCols,
                     rows: resolvedRows
                 )
+                // Clean up the old window if it somehow still exists (a
+                // transient windowExists misclassification must not leak a
+                // live window; usually it's already dead so this no-ops).
+                // Skip when another terminal owns the id — killing it would
+                // tear down THEIR live window. This must happen AFTER
+                // createWindow: if the row ever held the session's only
+                // remaining window (e.g. the bootstrap window id), killing
+                // it first would destroy the session and make createWindow
+                // fail on every retry; killing after the new window exists
+                // can never leave the session windowless.
+                if !claimedByOther {
+                    try? await tmux.killWindow(server: server, windowID: windowID)
+                }
                 // ensureServer returns the untracked bootstrap window id when
                 // it just created the server; kill it now that the real
                 // window exists (mirrors WorktreeLifecycle+PreSession).
