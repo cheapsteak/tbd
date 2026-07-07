@@ -86,15 +86,52 @@ actor PaneRepairCoordinator {
     }
 
     /// Run the repair cycle for `key` unless one is already in flight for it.
+    ///
+    /// One repair per pane stays deliberately serialized — two concurrent
+    /// repairs would both drive the same PANE's pause state on the shared
+    /// correlator. The cost of that serialization is that an overflow signal
+    /// arriving for a key mid-repair is discarded by the guard below — fine
+    /// for a duplicate signal on the SAME sink (the `repairing` flag gates
+    /// re-signaling), but a SUCCESSOR sink's signal (re-attach while gen-N's
+    /// repair was parked on an await, then the gen-M > N sink overflowed)
+    /// used to be swallowed too, leaving the successor `repairing` forever:
+    /// route() drops all its output and `enqueueLocked` never re-signals — a
+    /// permanently blank pane (review round 2, S1).
+    ///
+    /// The exit re-dispatch below heals every such swallow: after each pass,
+    /// if the pane's CURRENT sink is still stuck mid-repair (`repairing` is
+    /// set only by an overflow entry and cleared only by this coordinator),
+    /// run the repair again for the CURRENT generation. Structurally bounded:
+    /// each pass services one distinct overflow entry (one `repairing`
+    /// false→true flip) and either completes it, aborts it, or is superseded
+    /// by a strictly newer generation — never a busy spin, every iteration
+    /// awaits a full repair cycle.
     func repairIfNeeded(key: PaneKey, generation: UInt64) async {
         guard !inFlight.contains(key) else { return }
         inFlight.insert(key)
         defer { inFlight.remove(key) }
-        await repair(key: key, generation: generation)
+        var target = generation
+        while true {
+            await repair(key: key, generation: target)
+            guard supervisor.fanout.flowStats(key: key)?.repairing == true,
+                  let current = supervisor.fanout.currentGeneration(key: key) else { return }
+            target = current
+        }
     }
 
     private func repair(key: PaneKey, generation: UInt64) async {
         let (server, paneID) = (key.server, key.paneID)
+        // Entry guard (review round 2, S1): the exit re-dispatch above can
+        // race a not-yet-run overflow signal Task for the same overflow —
+        // whichever lands second must find the sink already healed (no
+        // longer `repairing`, or replaced by a newer generation) and send
+        // NOTHING: a pause sent for a sink that is not mid-repair would
+        // freeze a healthy pane (`beginRepairFence` refuses non-repairing
+        // sinks, and no later path would unpause). Stale signals from a
+        // superseded generation exit here too, before touching the
+        // correlator.
+        guard supervisor.fanout.currentGeneration(key: key) == generation,
+              supervisor.fanout.flowStats(key: key)?.repairing == true else { return }
         guard let client = await commandProvider(server) else {
             // No correlator (connection torn down): nothing to pause, nothing
             // paused — just unfreeze the sink if we still own it
@@ -184,6 +221,13 @@ actor PaneRepairCoordinator {
         // sink to still be `repairing`). The pane is provably silent — the
         // pause reply is in hand and a paused pane delivers nothing — so no
         // output can race the arming. Refusal → superseded; send nothing.
+        //
+        // TOCTOU residual (accepted): this generation check and the batch
+        // send below are not atomic — a successor can interpose between
+        // them, so this batch can land inside the successor's pause window
+        // in a vanishingly narrow race. Consequence: a torn capture that
+        // differentially self-heals, same class as the accepted
+        // pause-failure tear above.
         guard supervisor.fanout.beginRepairFence(key: key, generation: generation) else { return }
 
         // Step 4 — captures + continue, ONE atomic list with the continue
@@ -192,14 +236,18 @@ actor PaneRepairCoordinator {
         let captureCommands = PaneCaptureReplay.captureCommands(
             paneID: paneID, historyDepth: historyDepth)
         let results = await client.sendBatch(texts: captureCommands + [continueCommand])
-        // A failed batched continue is log-only, as in the attach: a %error
-        // is tolerated, and a connection close fails the captures too, which
-        // aborts the repair below with its own unpause.
+        // A failed batched continue is tolerated here, as in the attach: a
+        // connection close fails the captures too, which aborts the repair
+        // below with its own unpause — but a plain %error leaves the
+        // captures healthy and the pane PAUSED, so the success path below
+        // retries the continue once (review round 2, M3).
+        var continueErrored = false
         if case .failure(let continueError) = results.last {
             Self.logger.error("""
                 repair batched continue failed for \(server, privacy: .public)/\(paneID, privacy: .public): \
                 \(String(describing: continueError), privacy: .public)
                 """)
+            if case .commandFailed = continueError { continueErrored = true }
         }
 
         do {
@@ -223,6 +271,17 @@ actor PaneRepairCoordinator {
                 pane repaired \(server, privacy: .public)/\(paneID, privacy: .public) gen=\(generation) \
                 — replay \(replay.count) bytes, \(fencedBytes) fenced bytes flushed
                 """)
+            // An %error'd batched continue (NOT a connection close — that
+            // fails the captures too) leaves a healthy-looking completed
+            // repair with the pane still PAUSED server-side. Retry ONE
+            // generation-checked, tolerate-errors, fire-and-forget continue
+            // (review round 2, M3) — same still-owner scoping as the error
+            // path below (R11: a successor owns the pane's pause state).
+            if continueErrored, await stillOwner(key, generation) {
+                await client.sendList([
+                    TmuxCommand(text: continueCommand, tolerateErrors: true) { _ in }
+                ])
+            }
         } catch PaneReplayWriteError.superseded {
             // A newer attach owns the pane: its own sequence manages the
             // gate, the fence, and the pause state (R11). Send nothing.
@@ -237,6 +296,13 @@ actor PaneRepairCoordinator {
             // and abort the repair so the stream resumes. A pane frozen
             // forever behind a fence is worse than a hole. A STALE failure
             // sends nothing — the successor owns the pane's pause state.
+            //
+            // TOCTOU residual (accepted): the still-owner check and the
+            // continue send are not atomic — a successor can interpose
+            // between them, so this continue can land inside the successor's
+            // pause window in a vanishingly narrow race. Consequence: a torn
+            // capture that differentially self-heals, same class as the
+            // accepted pause-failure tear.
             Self.logger.error("""
                 repair failed for \(server, privacy: .public)/\(paneID, privacy: .public) \
                 gen=\(generation): \(String(describing: error), privacy: .public)

@@ -418,4 +418,337 @@ struct PaneRepairCoordinatorTests {
             await coordinator.isInFlight(key) == false
         }
     }
+
+    // MARK: - No command client (review round 2, S2)
+
+    @Test("no command client: repair aborts — repairing cleared, stream resumes, nothing sent")
+    func noCommandClientAbortsRepair() async throws {
+        // Bespoke harness: the provider finds no correlator (connection torn
+        // down). There is nothing to pause and nothing paused — the repair
+        // must abort so the sink unfreezes.
+        let supervisor = TmuxControlSupervisor()
+        let coordinator = PaneRepairCoordinator(
+            supervisor: supervisor,
+            commandProvider: { _ in nil },
+            writableCheckInterval: .milliseconds(10),
+            writableSlowInterval: .milliseconds(25),
+            writableEscalationThreshold: .milliseconds(50))
+        supervisor.fanout.onOverflowRepair = { key, generation in
+            Task { await coordinator.repairIfNeeded(key: key, generation: generation) }
+        }
+        let paneID = "%8"
+        let key = PaneKey(server: server, paneID: paneID)
+        let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+        setNonblocking(readFD)
+        supervisor.fanout.markReady(key: key, generation: generation)
+
+        overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
+        try await waitFor("repair aborted") {
+            supervisor.fanout.flowStats(key: key)?.repairing == false
+        }
+        let stats = try #require(supervisor.fanout.flowStats(key: key))
+        #expect(stats.repairs == 0, "a client-less abort must not count as a completed repair")
+        try await waitFor("repair exit (in-flight cleared)") {
+            await coordinator.isInFlight(key) == false
+        }
+
+        // Not frozen: live output streams again once the reader drains.
+        drainPipe(readFD)
+        supervisor.fanout.route(
+            server: server, event: .output(paneID: paneID, bytes: Data("LIVE-NO-CLIENT".utf8)))
+        let live = await readUntil(fd: readFD) { $0.hasSuffix("LIVE-NO-CLIENT") }
+        #expect(live.hasSuffix("LIVE-NO-CLIENT"), "the stream must resume after a client-less abort")
+    }
+
+    // MARK: - Supersession before/at repair start (review round 2, S2)
+
+    @Test("superseded before the repair starts: nothing sent — not even the pause — successor untouched")
+    func supersededBeforeRepairStartSendsNothing() async throws {
+        let (supervisor, coordinator, recorder, _, _) = makeHarness()
+        let paneID = "%9"
+        let key = PaneKey(server: server, paneID: paneID)
+        // Capture-only wiring: the test dispatches the stale signal BY HAND
+        // after superseding the generation, pinning the window between the
+        // overflow signal and the repair start.
+        supervisor.fanout.onOverflowRepair = { _, _ in }
+
+        let (read1, gen1) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read1) }
+        setNonblocking(read1)
+        supervisor.fanout.markReady(key: key, generation: gen1)
+        overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
+
+        // A successor replaces the sink before the (stale) signal's repair
+        // ever runs.
+        let (read2, gen2) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read2) }
+
+        await coordinator.repairIfNeeded(key: key, generation: gen1)
+        #expect(recorder.writes.isEmpty, "a stale repair must send NOTHING — not even the pause")
+        #expect(await coordinator.isInFlight(key) == false)
+        let stats = try #require(supervisor.fanout.flowStats(key: key))
+        #expect(stats.repairing == false, "the successor's sink must not inherit the repair state")
+        #expect(stats.queuedBytes == 0, "the stale repair must not have fenced the successor's sink")
+        #expect(await supervisor.acknowledgeAttach(
+            server: server, paneID: paneID, expectedGeneration: gen2)
+            == .acknowledged(generation: gen2),
+            "successor must still be acknowledgeable — the stale repair touched nothing")
+    }
+
+    /// Thread-safe fd box for the provider-hop test below.
+    private final class FDBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _fd: Int32 = -1
+        func set(_ fd: Int32) { lock.lock(); _fd = fd; lock.unlock() }
+        var fd: Int32 { lock.lock(); defer { lock.unlock() }; return _fd }
+    }
+
+    @Test("superseded across the provider hop: the post-hop checkpoint refuses — nothing sent")
+    func supersededAcrossProviderHopSendsNothing() async throws {
+        // Bespoke harness: the provider ITSELF re-attaches the pane before
+        // returning the client, superseding the repair generation exactly
+        // inside the provider hop — the entry guard has already passed, so
+        // this pins the post-hop ownership re-check (R10-3).
+        let recorder = Recorder()
+        let client = TmuxControlCommandClient(
+            writeLine: { recorder.record($0) },
+            onFatalError: {})
+        let supervisor = TmuxControlSupervisor()
+        let paneID = "%10"
+        let key = PaneKey(server: server, paneID: paneID)
+        let successorRead = FDBox()
+        let coordinator = PaneRepairCoordinator(
+            supervisor: supervisor,
+            commandProvider: { [server] requested in
+                guard requested == server else { return nil }
+                if let (fd, _) = try? await supervisor.attach(server: server, paneID: paneID) {
+                    successorRead.set(fd)
+                }
+                return client
+            },
+            writableCheckInterval: .milliseconds(10),
+            writableSlowInterval: .milliseconds(25),
+            writableEscalationThreshold: .milliseconds(50))
+        supervisor.fanout.onOverflowRepair = { _, _ in }
+        defer { if successorRead.fd >= 0 { Darwin.close(successorRead.fd) } }
+
+        let (read1, gen1) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read1) }
+        setNonblocking(read1)
+        supervisor.fanout.markReady(key: key, generation: gen1)
+        overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
+
+        await coordinator.repairIfNeeded(key: key, generation: gen1)
+        #expect(recorder.writes.isEmpty,
+                "a repair superseded across the provider hop must send NOTHING — not even the pause")
+        #expect(await coordinator.isInFlight(key) == false)
+        let stats = try #require(supervisor.fanout.flowStats(key: key))
+        #expect(stats.repairing == false, "the successor's sink must not inherit the repair state")
+        #expect(stats.queuedBytes == 0)
+    }
+
+    // MARK: - Supersession mid reader-wait (review round 2, S2)
+
+    @Test("superseded mid reader-wait: sink replaced while the pipe is full → silent exit, no continue, successor untouched")
+    func supersededMidReaderWaitExitsSilently() async throws {
+        let (supervisor, coordinator, recorder, client, _) = makeHarness()
+        let paneID = "%11"
+        let key = PaneKey(server: server, paneID: paneID)
+        let (read1, gen1) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read1) }
+        setNonblocking(read1)
+        supervisor.fanout.markReady(key: key, generation: gen1)
+        _ = gen1
+
+        overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
+        try await waitFor("pause write") { recorder.writes.count >= 1 }
+        // The pause reply lands while gen-1 still owns the pane: the repair
+        // enters the reader-wait (the pipe is full — read1 is never drained).
+        await succeed(client, [[]])
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(recorder.writes.count == 1, "still waiting while the pipe is merely full")
+        #expect(await coordinator.isInFlight(key) == true, "the repair must be parked in the reader-wait")
+
+        // A successor replaces the sink mid-wait: isPipeWritable(gen-1) now
+        // returns nil and the repair must exit silently — NO continue (R11:
+        // the successor owns the pane's pause state) and no abortRepair on
+        // the successor.
+        let (read2, gen2) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read2) }
+        try await waitFor("repair exit") {
+            await coordinator.isInFlight(key) == false
+        }
+        try await Task.sleep(for: .milliseconds(200))  // bounded negative check
+        #expect(recorder.writes.count == 1, "a mid-wait supersession must send NOTHING after the pause")
+        #expect(!recorder.writes.contains { $0.contains("capture-pane") })
+        #expect(!recorder.writes.contains { $0.contains(":continue'") })
+        let stats = try #require(supervisor.fanout.flowStats(key: key))
+        #expect(stats.repairing == false, "the successor's sink must not inherit the repair state")
+        #expect(stats.queuedBytes == 0, "the stale repair must not have fenced the successor's sink")
+        #expect(await supervisor.acknowledgeAttach(
+            server: server, paneID: paneID, expectedGeneration: gen2)
+            == .acknowledged(generation: gen2),
+            "successor must still be acknowledgeable — the stale repair touched nothing")
+    }
+
+    // MARK: - Bridge wiring (review round 2, S2)
+
+    @Test("bridge wiring: a route() overflow on a bridge-owned fanout drives the default coordinator end-to-end")
+    func bridgeWiredCoordinatorRunsRepair() async throws {
+        // A REAL TmuxControlModeBridge with its DEFAULT repair coordinator:
+        // only the command provider is faked. This drives the production
+        // `onOverflowRepair` closure installed in the bridge's init.
+        let recorder = Recorder()
+        let client = TmuxControlCommandClient(
+            writeLine: { recorder.record($0) },
+            onFatalError: {})
+        let supervisor = TmuxControlSupervisor()
+        let bridge = TmuxControlModeBridge(
+            supervisor: supervisor,
+            tmuxVersion: TmuxVersion(major: 3, minor: 6),
+            environment: [:],
+            fdVending: FDVendingServer(),
+            commandProvider: { [server] in $0 == server ? client : nil })
+        let paneID = "%12"
+        let key = PaneKey(server: server, paneID: paneID)
+        let (readFD, generation) = try await bridge.supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+        setNonblocking(readFD)
+        bridge.supervisor.fanout.markReady(key: key, generation: generation)
+
+        // Blast past the cap through route(): the bridge-wired signal must
+        // start the repair — the fake client sees the pause.
+        overflowIntoRepair(bridge.supervisor.fanout, paneID: paneID, key: key)
+        try await waitFor("bridge-wired pause write") { recorder.writes.count >= 1 }
+        #expect(recorder.writes.first == "refresh-client -A '%12:pause'",
+                "the bridge's default coordinator must run the repair")
+
+        // Complete the cycle so the repair task doesn't outlive the test.
+        await succeed(client, [[]])
+        drainPipe(readFD)
+        try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
+        await succeed(client, captureAndContinueReplies(paneID: paneID))
+        try await waitFor("repair completion") {
+            let stats = bridge.supervisor.fanout.flowStats(key: key)
+            return stats?.repairing == false && stats?.repairs == 1
+        }
+    }
+
+    // MARK: - Swallowed successor overflow (review round 2, S1)
+
+    @Test("swallowed successor overflow: gen-2's signal deduped while gen-1 is parked → exit re-dispatch heals gen-2")
+    func swallowedSuccessorOverflowIsReDispatched() async throws {
+        let (supervisor, coordinator, recorder, client, _) = makeHarness()
+        let paneID = "%6"
+        let key = PaneKey(server: server, paneID: paneID)
+
+        // Custom wiring — the bridge's shape plus a completion counter: a
+        // SWALLOWED repairIfNeeded returns immediately (dedupe guard), so
+        // `returns` lets the test prove gen-2's signal really was deduped
+        // while gen-1's repair still held the in-flight slot.
+        let returns = SignalCounter()
+        supervisor.fanout.onOverflowRepair = { key, generation in
+            Task {
+                await coordinator.repairIfNeeded(key: key, generation: generation)
+                returns.increment()
+            }
+        }
+
+        // Gen-1 attaches, goes ready, overflows: its repair parks awaiting
+        // the pause reply (held by the test — stands in for ANY long await,
+        // e.g. the indefinite reader-wait).
+        let (read1, gen1) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read1) }
+        setNonblocking(read1)
+        supervisor.fanout.markReady(key: key, generation: gen1)
+        overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
+        try await waitFor("gen-1 pause write") { recorder.writes.count >= 1 }
+        try #require(recorder.writes.first == "refresh-client -A '%6:pause'")
+        _ = gen1
+
+        // The user re-attaches (gen-2 sink), the new sink goes ready and
+        // ALSO overflows: its onOverflowRepair signal lands while gen-1's
+        // repair is still in flight for the same key — deduped (swallowed).
+        let (read2, gen2) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read2) }
+        setNonblocking(read2)
+        supervisor.fanout.markReady(key: key, generation: gen2)
+        overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
+        try await waitFor("gen-2 signal swallowed") {
+            if returns.count != 1 { return false }
+            return await coordinator.isInFlight(key)
+        }
+        #expect(supervisor.fanout.flowStats(key: key)?.repairing == true)
+
+        // Release gen-1: its pause reply lands and the post-pause generation
+        // check supersedes it. WITHOUT the exit re-dispatch, gen-2's sink
+        // would stay `repairing` forever — route() drops all its output and
+        // enqueueLocked never re-signals: a permanently blank pane.
+        await succeed(client, [[]])
+
+        // The coordinator must re-dispatch for the CURRENT generation:
+        // gen-2's repair runs to completion.
+        try await waitFor("gen-2 pause write (re-dispatch)") { recorder.writes.count >= 2 }
+        try #require(recorder.writes.count >= 2, "the swallowed gen-2 repair was never re-dispatched")
+        #expect(recorder.writes[1] == "refresh-client -A '%6:pause'")
+        await succeed(client, [[]])  // gen-2 pause reply
+        drainPipe(read2)             // the reader catches up
+        try await waitFor("gen-2 captures+continue write") { recorder.writes.count >= 3 }
+        try #require(recorder.writes.count >= 3, "gen-2's captures+continue were never sent")
+        #expect(recorder.writes[2].hasSuffix("refresh-client -A '%6:continue'"))
+        await succeed(client, captureAndContinueReplies(paneID: paneID))
+
+        try await waitFor("gen-2 repair completion") {
+            let stats = supervisor.fanout.flowStats(key: key)
+            return stats?.repairing == false && stats?.repairs == 1
+        }
+        // The healed gen-2 sink got the replay and streams again.
+        let replay = await readUntil(fd: read2) { $0.hasSuffix("\u{1b}[2;3H") }
+        #expect(replay.hasPrefix(ReplayWriter.resetPrelude),
+                "gen-2's repair must have written the recapture replay")
+        supervisor.fanout.route(
+            server: server, event: .output(paneID: paneID, bytes: Data("LIVE-GEN2".utf8)))
+        let live = await readUntil(fd: read2) { $0.hasSuffix("LIVE-GEN2") }
+        #expect(live.hasSuffix("LIVE-GEN2"), "streaming must resume on the healed successor")
+        try await waitFor("gen-1 dispatch returns") { returns.count == 2 }
+    }
+
+    // MARK: - %error'd batched continue (review round 2, M3)
+
+    @Test("%error'd batched continue: the repair completes AND retries one tolerate-errors continue")
+    func erroredBatchedContinueRetriesAfterEndRepair() async throws {
+        let (supervisor, coordinator, recorder, client, _) = makeHarness()
+        _ = coordinator
+        let paneID = "%7"
+        let key = PaneKey(server: server, paneID: paneID)
+        let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+        setNonblocking(readFD)
+        supervisor.fanout.markReady(key: key, generation: generation)
+
+        overflowIntoRepair(supervisor.fanout, paneID: paneID, key: key)
+        try await waitFor("pause write") { recorder.writes.count >= 1 }
+        await succeed(client, [[]])  // pause reply
+        drainPipe(readFD)            // reader catches up
+        try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
+
+        // All six captures succeed; the batched continue %errors (tolerated
+        // at the correlator level — NOT a connection close, which would fail
+        // the captures too and abort the repair on its own).
+        await succeed(client, [["hist-one"], ["hist-two"], [], ["hist-one", "hist-two"],
+                               [stateLine(paneID: paneID)], []])
+        await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["unknown flag"]))
+
+        // The repair still completes (replay lands, fence flushes)…
+        try await waitFor("repair completion") {
+            let stats = supervisor.fanout.flowStats(key: key)
+            return stats?.repairing == false && stats?.repairs == 1
+        }
+        // …and a retry continue goes out: without it the pane LOOKS healthy
+        // (repair counted, stream resumed) but stays PAUSED server-side.
+        try await waitFor("retry continue write") { recorder.writes.count >= 3 }
+        #expect(recorder.writes.last == "refresh-client -A '%7:continue'",
+                "an %error'd batched continue must be retried once, tolerate-errors")
+    }
 }

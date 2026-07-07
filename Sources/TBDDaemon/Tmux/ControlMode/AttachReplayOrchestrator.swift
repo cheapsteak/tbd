@@ -264,6 +264,13 @@ struct AttachReplayOrchestrator: Sendable {
         // output can race the arming. Generation-checked: refusal means a
         // newer attach owns the pane, the same benign race as above (R11:
         // no unpause; the successor owns the pause state).
+        //
+        // TOCTOU residual (accepted): this generation check and the batch
+        // send below are not atomic — a successor can interpose between
+        // them, so batch 2 can land inside the successor's pause window in
+        // a vanishingly narrow race. Consequence: a torn capture that
+        // differentially self-heals, same class as the accepted
+        // pause-failure tear above.
         guard await supervisor.armFence(server: server, paneID: paneID, generation: generation) else {
             Self.logger.debug("""
                 attach.ready superseded at the fence for \
@@ -288,16 +295,20 @@ struct AttachReplayOrchestrator: Sendable {
         let continueCommand = "refresh-client -A '\(paneID):continue'"
         let results = await client.sendBatch(texts: captureCommands + [continueCommand])
 
-        // A failed batched continue is log-only: a %error is tolerated (the
-        // failure-path unpause below re-sends one when the captures failed
-        // too), and a connection close fails the captures as well — which
-        // fails the attach on its own. Pause state is per control CLIENT,
-        // so it cannot outlive a closed connection either way.
+        // A failed batched continue is tolerated: a connection close fails
+        // the captures as well — which fails the attach on its own (and
+        // pause state is per control CLIENT, so it cannot outlive a closed
+        // connection) — and the failure-path unpause below covers the error
+        // exits. But a plain %error with healthy captures would otherwise
+        // leave a live-looking attach on a still-PAUSED pane, so the success
+        // path retries the continue once (review round 2, M3).
+        var continueErrored = false
         if case .failure(let continueError) = results.last {
             Self.logger.error("""
                 attach batched continue failed for \(server, privacy: .public)/\(paneID, privacy: .public): \
                 \(String(describing: continueError), privacy: .public)
                 """)
+            if case .commandFailed = continueError { continueErrored = true }
         }
 
         // The pause has been sent — from here, every FAILURE exit unpauses
@@ -309,10 +320,20 @@ struct AttachReplayOrchestrator: Sendable {
             // sends nothing further either — batch 2 (with its continue) was
             // already on the stream BEFORE the successor's own sequence, so
             // FIFO keeps it clear of the successor's pause window (R11).
-            return try await replayAndOpenGate(
+            let outcome = try await replayAndOpenGate(
                 server: server, paneID: paneID, generation: generation,
                 captureResults: Array(results.dropLast()),
                 captureCommands: captureCommands)
+            // An %error'd batched continue (NOT a connection close — that
+            // fails the captures too) leaves a live-looking attach on a
+            // still-PAUSED pane. Retry ONE generation-checked,
+            // tolerate-errors, fire-and-forget continue (review round 2,
+            // M3) — same still-owner scoping as the failure path below.
+            if outcome == .ready, continueErrored,
+               await supervisor.currentGeneration(server: server, paneID: paneID) == generation {
+                await sendUnpause(client, paneID: paneID)
+            }
+            return outcome
         } catch {
             // Generation-checked unpause-on-failure: it covers "the pause
             // executed but batch 2's continue may not have" (e.g. the send
@@ -322,6 +343,13 @@ struct AttachReplayOrchestrator: Sendable {
             // land between a live successor's pause and captures, tearing
             // the successor's capture. The successor's own sequence owns the
             // pane's pause state.
+            //
+            // TOCTOU residual (accepted): the generation check and the
+            // continue send are not atomic — a successor can interpose
+            // between them, so this continue can land inside the successor's
+            // pause window in a vanishingly narrow race. Consequence: a torn
+            // capture that differentially self-heals, same class as the
+            // accepted pause-failure tear.
             if await supervisor.currentGeneration(server: server, paneID: paneID) == generation {
                 await sendUnpause(client, paneID: paneID)
             }

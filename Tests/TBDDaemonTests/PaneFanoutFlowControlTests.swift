@@ -479,7 +479,7 @@ struct PaneFanoutFlowControlTests {
                 "delivered bytes must be an intact prefix — no mid-stream holes")
     }
 
-    @Test("not-ready drop bookkeeping is unchanged: counted, nothing queued")
+    @Test("not-ready drop bookkeeping: events AND bytes counted, nothing queued")
     func notReadyDropUnchanged() throws {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%6")
@@ -493,11 +493,42 @@ struct PaneFanoutFlowControlTests {
 
         let stats = try #require(fanout.flowStats(key: key))
         #expect(stats.droppedEvents == 1)
+        #expect(stats.droppedBytes == 5, "the not-ready drop must count its bytes too")
         #expect(stats.queuedBytes == 0)
         #expect(stats.overflowEvents == 0)
 
         var buffer = [UInt8](repeating: 0, count: 32)
         let n = buffer.withUnsafeMutableBytes { Darwin.read(readFD, $0.baseAddress, $0.count) }
         #expect(n < 0 && errno == EAGAIN, "nothing may reach the pipe before ready")
+    }
+
+    @Test("route hard error (EPIPE): the unwritten remainder is counted dropped, mirroring the drain's accounting")
+    func routeHardErrorCountsDroppedRemainder() throws {
+        // Mirror the daemon's process-wide SIGPIPE stance (main.swift): a
+        // write into a pipe whose read end is closed must return EPIPE, not
+        // kill the test process.
+        signal(SIGPIPE, SIG_IGN)
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%14")
+        let (readFD, gen) = try fanout.attach(key: key)
+        setNonblocking(readFD)
+        #expect(fanout.markReady(key: key, generation: gen))
+        // The viewer dies: the read end closes while the sink stays attached.
+        Darwin.close(readFD)
+
+        let chunk = patterned(count: 1024)
+        fanout.route(server: server, event: .output(paneID: "%14", bytes: chunk))
+        let stats = try #require(fanout.flowStats(key: key))
+        #expect(stats.droppedEvents == 1, "a hard write error must count a dropped event")
+        #expect(stats.droppedBytes == 1024, "the discarded unwritten remainder must be counted")
+        #expect(stats.queuedBytes == 0, "a hard error must not queue the remainder")
+
+        // Counters keep accumulating on further chunks (the log is
+        // rate-limited; the accounting never is).
+        fanout.route(server: server, event: .output(paneID: "%14", bytes: chunk))
+        let after = try #require(fanout.flowStats(key: key))
+        #expect(after.droppedEvents == 2)
+        #expect(after.droppedBytes == 2048)
+        fanout.detach(key: key)
     }
 }

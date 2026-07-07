@@ -337,4 +337,38 @@ struct AttachReplayFenceTests {
         try await waitFor("trailing unpause write") { recorder.writes.count >= 3 }
         #expect(recorder.writes.last == "refresh-client -A '%5:continue'")
     }
+
+    @Test("%error'd batched continue on success: one generation-checked retry continue after the gate opens")
+    func erroredBatchedContinueRetriesAfterReady() async throws {
+        let (supervisor, orchestrator, recorder, client) = makeHarness()
+        let paneID = "%6"
+        let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+
+        let task = Task {
+            try await orchestrator.performAttachReady(
+                server: server, paneID: paneID, expectedGeneration: generation)
+        }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+        await succeed(client, [[]])
+        try await waitFor("capture+continue batch write") { recorder.writes.count >= 2 }
+
+        // All six captures succeed; the batched continue %errors (tolerated
+        // at the correlator level — NOT a connection close, which would fail
+        // the captures too and fail the attach on its own).
+        await succeed(client, [["hist-one"], ["hist-two"], [], ["hist-one", "hist-two"],
+                               [stateLine(paneID: paneID)], []])
+        await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["unknown flag"]))
+
+        // The attach still succeeds (replay landed, gate open)…
+        #expect(try await task.value == .ready)
+
+        // …and a retry continue goes out: without it the attach LOOKS live
+        // but the pane stays PAUSED server-side — a healthy-looking frozen
+        // pane.
+        try await waitFor("retry continue write") { recorder.writes.count >= 3 }
+        #expect(recorder.writes.last == "refresh-client -A '%6:continue'",
+                "an %error'd batched continue must be retried once, tolerate-errors")
+        _ = await readUntil(fd: readFD) { $0.hasSuffix("H") }
+    }
 }

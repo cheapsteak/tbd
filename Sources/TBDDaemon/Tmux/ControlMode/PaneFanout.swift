@@ -33,9 +33,9 @@ enum PaneReplayWriteError: Error, Equatable {
 
 /// Locked snapshot of one pane's flow-control counters (Phase B M1/M3) —
 /// test visibility plus diagnostics. `droppedEvents`/`droppedBytes` count
-/// ONLY fenced-overflow, not-ready, and mid-repair drops; plain EAGAIN no
-/// longer drops (it queues), and a steady-state overflow enters the repair
-/// cycle instead of dropping.
+/// ONLY fenced-overflow, not-ready, mid-repair, and hard-write-error drops;
+/// plain EAGAIN no longer drops (it queues), and a steady-state overflow
+/// enters the repair cycle instead of dropping.
 struct PaneFlowStats: Equatable {
     let queuedBytes: Int
     let droppedBytes: Int
@@ -115,8 +115,9 @@ final class PaneFanout: @unchecked Sendable {
         /// purpose is "app never acked") keys off THIS flag instead: a slow
         /// capture must not let the stale timer kill a live, acked attach.
         var acknowledged = false
-        /// Overflow + not-ready drops only (Phase B M1): plain EAGAIN no
-        /// longer drops — the unwritten remainder is queued instead.
+        /// Overflow, not-ready, mid-repair, and hard-write-error drops only
+        /// (Phase B M1): plain EAGAIN no longer drops — the unwritten
+        /// remainder is queued instead.
         var droppedEvents = 0
         var droppedBytes = 0
         var lastDropLog = Date.distantPast
@@ -625,6 +626,7 @@ final class PaneFanout: @unchecked Sendable {
                 // — those bytes are in the attach's capture, not lost;
                 // delivering them too would duplicate them.
                 sink.droppedEvents += 1
+                sink.droppedBytes += bytes.count
                 sinks[key] = sink
             } else if sink.repairing {
                 // Repair window before the repair fence arms (overflow →
@@ -658,14 +660,29 @@ final class PaneFanout: @unchecked Sendable {
                             offset += written
                             continue
                         }
-                        if written < 0 && errno == EINTR { continue }
-                        if written < 0 && errno == EAGAIN {
+                        // Capture errno at the failing write, before any
+                        // intervening call can clobber it.
+                        let err = errno
+                        if written < 0 && err == EINTR { continue }
+                        if written < 0 && err == EAGAIN {
                             if enqueueLocked(Data(buf[offset...]), into: &sink, key: key) {
                                 repairSignal = sink.generation
                             }
                         } else {
-                            logger.error(
-                                "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) write errno=\(errno)")
+                            // Hard error (e.g. EPIPE after the app closed
+                            // the read end): the unwritten remainder is
+                            // discarded — count it like the drain's
+                            // hard-error path, and rate-limit the log (a
+                            // blast pane with a closed read end would
+                            // otherwise log per chunk).
+                            let remainder = buf.count - offset
+                            sink.droppedEvents += 1
+                            sink.droppedBytes += remainder
+                            if Date().timeIntervalSince(sink.lastDropLog) > 1 {
+                                sink.lastDropLog = Date()
+                                logger.error(
+                                    "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) write errno=\(err) — dropped \(remainder) bytes")
+                            }
                         }
                         break
                     }
@@ -807,6 +824,7 @@ final class PaneFanout: @unchecked Sendable {
         }
 
         var sawHardError = false
+        var hardErrno: Int32 = 0
         var pipeFull = false
         while let head = sink.queue.first, !pipeFull, !sawHardError {
             let buf = [UInt8](head)
@@ -819,11 +837,15 @@ final class PaneFanout: @unchecked Sendable {
                     offset += written
                     continue
                 }
-                if written < 0 && errno == EINTR { continue }
-                if written < 0 && errno == EAGAIN {
+                // Capture errno at the failing write, before any intervening
+                // call can clobber it.
+                let err = errno
+                if written < 0 && err == EINTR { continue }
+                if written < 0 && err == EAGAIN {
                     pipeFull = true
                 } else {
                     sawHardError = true
+                    hardErrno = err
                 }
                 break
             }
@@ -844,7 +866,7 @@ final class PaneFanout: @unchecked Sendable {
             // never deliver; count it dropped and stand down (the detach
             // path closes the fd).
             logger.error(
-                "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) drain write errno=\(errno) — abandoning \(sink.queuedBytes) queued bytes")
+                "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) drain write errno=\(hardErrno) — abandoning \(sink.queuedBytes) queued bytes")
             sink.droppedEvents += sink.queue.count
             sink.droppedBytes += sink.queuedBytes
             sink.queue.removeAll()
