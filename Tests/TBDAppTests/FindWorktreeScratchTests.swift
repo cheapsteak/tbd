@@ -41,8 +41,8 @@ private func withState(_ body: (AppState) -> Void) {
 /// `worktrees`, so a freshly created scratch space resolved to nil and the
 /// detail pane rendered "Worktree not found" on first run.
 ///
-/// The same bug class hit the pinned-terminal dock — see the comment on
-/// `PinnedTerminalCell.worktree` in `PinnedTerminalDock.swift`.
+/// The same bug class hit the pinned-terminal dock — see the comment in
+/// `PinnedTerminalCell.body` in `PinnedTerminalDock.swift`.
 @MainActor
 @Suite("findWorktree resolves scratch spaces")
 struct FindWorktreeScratchTests {
@@ -104,29 +104,32 @@ struct FindWorktreeScratchTests {
     }
 }
 
-/// Cmd+Shift+A routing: scratch spaces must take the scratch-archive path —
-/// the repo-worktree `worktree.archive` RPC rejects them with `repoNotFound`.
-/// `archiveShortcutRoute` takes the caller-resolved selection
-/// (`selectedWorktreeIDs.first.flatMap(findWorktree)`), so a stale/unknown
-/// selected ID resolves to nil and routes nowhere.
+/// Cmd+Shift+A routing: the route seam only decides refuse-vs-proceed —
+/// `archiveWorktree(id:)` is scratch-aware and self-routes scratch rows to
+/// the `scratch.archive` RPC (the repo-worktree `worktree.archive` RPC would
+/// reject them with `repoNotFound`). `archiveShortcutRoute` takes the
+/// caller-resolved selection (`selectedWorktreeIDs.first.flatMap(findWorktree)`),
+/// so a stale/unknown selected ID resolves to nil and routes nowhere.
 @MainActor
-@Suite("archiveSelectedWorktree routes scratch to the scratch path")
+@Suite("archiveSelectedWorktree refuse-vs-proceed routing")
 struct ArchiveShortcutRouteTests {
 
-    @Test func scratchSelectionRoutesToScratchArchive() {
+    @Test func scratchSelectionProceeds() {
+        // Scratch rows always proceed: the daemon creates them `.active`,
+        // never `.main`/`.creating`, so the repo-worktree refusals can't apply.
         let scratchID = UUID()
-        let route = AppState.archiveShortcutRoute(
+        let target = AppState.archiveShortcutRoute(
             selectedWorktree: makeWorktree(id: scratchID, repoID: nil)
         )
-        #expect(route == .scratch(scratchID))
+        #expect(target == scratchID)
     }
 
-    @Test func repoWorktreeSelectionRoutesToWorktreeArchive() {
+    @Test func activeRepoWorktreeSelectionProceeds() {
         let wtID = UUID()
-        let route = AppState.archiveShortcutRoute(
+        let target = AppState.archiveShortcutRoute(
             selectedWorktree: makeWorktree(id: wtID, repoID: UUID())
         )
-        #expect(route == .worktree(wtID))
+        #expect(target == wtID)
     }
 
     @Test func mainAndCreatingRepoWorktreesRefuseArchive() {
@@ -162,39 +165,124 @@ struct ArchiveShortcutRouteTests {
 
 /// `renameWorktree` owns the single optimistic local update (scratch-aware,
 /// applied before its RPC) — callers like `WorktreeRowView` must not
-/// pre-apply. Exercised through the `.creating` branch, which returns before
-/// the daemon RPC so no connection is needed.
+/// pre-apply. The local-only gate keys on `pendingWorktreeIDs` (client-side
+/// creation placeholders the daemon has never heard of), NOT on `.creating`
+/// status: a two-phase create leaves the daemon row `.creating` for as long
+/// as its hooks run, and renames in that window must go through the RPC.
+/// All RPC-path tests inject `renameRPCOverride` — never a live daemon.
 @MainActor
-@Suite("Rename updates scratch spaces locally")
+@Suite("Rename gate, poll-race re-apply, and rollback")
 struct RenameScratchTests {
 
-    @Test func renameCreatingScratchRowUpdatesLocally() async {
+    private func makeState() -> (AppState, () -> Void) {
         let suiteName = "TBDAppTests.RenameScratch.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
         let state = AppState(userDefaults: defaults)
-
-        let scratchID = UUID()
-        state.scratchWorktrees = [makeWorktree(id: scratchID, repoID: nil, status: .creating)]
-
-        await state.renameWorktree(id: scratchID, displayName: "Renamed Scratch")
-
-        #expect(state.scratchWorktrees.first?.displayName == "Renamed Scratch")
+        return (state, { defaults.removePersistentDomain(forName: suiteName) })
     }
 
-    @Test func renameCreatingWorktreeUpdatesLocallyWithoutRPC() async {
-        let suiteName = "TBDAppTests.RenameScratch.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let state = AppState(userDefaults: defaults)
+    @Test func pendingPlaceholderRenamesLocallyWithoutRPC() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
 
+        let repoID = UUID()
+        let placeholderID = UUID()
+        state.worktrees = [repoID: [makeWorktree(id: placeholderID, repoID: repoID, status: .creating)]]
+        state.pendingWorktreeIDs = [placeholderID]
+        var rpcCalls = 0
+        state.renameRPCOverride = { _, _ in rpcCalls += 1 }
+
+        await state.renameWorktree(id: placeholderID, displayName: "Renamed Placeholder")
+
+        #expect(state.worktrees[repoID]?.first?.displayName == "Renamed Placeholder")
+        #expect(rpcCalls == 0)
+    }
+
+    @Test func daemonKnownCreatingRowTakesRPCPath() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+
+        // Daemon-known row, still `.creating` (hooks running) — NOT pending.
         let repoID = UUID()
         let wtID = UUID()
         state.worktrees = [repoID: [makeWorktree(id: wtID, repoID: repoID, status: .creating)]]
+        var renamed: [(UUID, String)] = []
+        state.renameRPCOverride = { id, name in renamed.append((id, name)) }
 
         await state.renameWorktree(id: wtID, displayName: "Renamed Creating")
 
         #expect(state.worktrees[repoID]?.first?.displayName == "Renamed Creating")
+        #expect(renamed.count == 1)
+        #expect(renamed.first?.0 == wtID)
+        #expect(renamed.first?.1 == "Renamed Creating")
+    }
+
+    @Test func renameScratchRowAppliesLocallyAndSendsRPC() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+
+        let scratchID = UUID()
+        state.scratchWorktrees = [makeWorktree(id: scratchID, repoID: nil)]
+        var rpcCalls = 0
+        state.renameRPCOverride = { _, _ in rpcCalls += 1 }
+
+        await state.renameWorktree(id: scratchID, displayName: "Renamed Scratch")
+
+        #expect(state.scratchWorktrees.first?.displayName == "Renamed Scratch")
+        #expect(rpcCalls == 1)
+    }
+
+    @Test func reappliesAfterRPCSuccessToBeatInterleavedPollRevert() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+
+        let repoID = UUID()
+        let wtID = UUID()
+        let original = makeWorktree(id: wtID, repoID: repoID)
+        state.worktrees = [repoID: [original]]
+        // Simulate a poll snapshot captured pre-rename landing while the RPC
+        // is in flight: it reverts the optimistic name, then the RPC succeeds.
+        state.renameRPCOverride = { _, _ in
+            state.worktrees[repoID]?[0].displayName = original.displayName
+        }
+
+        await state.renameWorktree(id: wtID, displayName: "New Name")
+
+        #expect(state.worktrees[repoID]?.first?.displayName == "New Name")
+    }
+
+    @Test func rollsBackAndAlertsOnRPCFailure() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+
+        struct RenameError: Error {}
+        let repoID = UUID()
+        let wtID = UUID()
+        let original = makeWorktree(id: wtID, repoID: repoID)
+        state.worktrees = [repoID: [original]]
+        state.renameRPCOverride = { _, _ in throw RenameError() }
+
+        await state.renameWorktree(id: wtID, displayName: "Doomed Name")
+
+        #expect(state.worktrees[repoID]?.first?.displayName == original.displayName)
+        #expect(state.alertMessage?.hasPrefix("Rename failed:") == true)
+        #expect(state.alertIsError == true)
+    }
+
+    @Test func unresolvableIDIsANoOpWithoutRPC() async {
+        let (state, teardown) = makeState()
+        defer { teardown() }
+
+        // The id resolves nowhere and is not a pending placeholder — e.g.
+        // the placeholder was just swapped away. No doomed RPC, no alert.
+        state.worktrees = [UUID(): [makeWorktree(id: UUID(), repoID: UUID())]]
+        var rpcCalls = 0
+        state.renameRPCOverride = { _, _ in rpcCalls += 1 }
+
+        await state.renameWorktree(id: UUID(), displayName: "Ghost")
+
+        #expect(rpcCalls == 0)
+        #expect(state.alertMessage == nil)
     }
 }
 
@@ -202,7 +290,10 @@ struct RenameScratchTests {
 /// (a different UUID) via `replaceCreationPlaceholder`. A rename the user
 /// typed while creation was in flight lives only on the placeholder, so the
 /// swap must carry it onto the replacement row (and report it back so the
-/// caller can persist it via the rename RPC).
+/// caller can persist it via the rename RPC). The swap also dedupes against
+/// a poll that merged the daemon row alongside the preserved placeholder,
+/// and returns nil — no row inserted, caller must not select/edit — when
+/// both rows are gone (e.g. the repo was removed mid-create).
 @MainActor
 @Suite("Rename typed during creation survives the placeholder swap")
 struct CreationPlaceholderRenameTests {
@@ -218,19 +309,21 @@ struct CreationPlaceholderRenameTests {
         var placeholder = makeWorktree(id: placeholderID, repoID: repoID, status: .creating)
         placeholder.displayName = "delicate-coyote"
         state.worktrees = [repoID: [placeholder]]
+        state.pendingWorktreeIDs = [placeholderID]
 
-        // User renames the row mid-creation (renameWorktree's .creating branch).
+        // User renames the row mid-creation (renameWorktree's placeholder
+        // branch — pending id, applied locally only).
         await state.renameWorktree(id: placeholderID, displayName: "typed-name")
 
         let daemonRow = makeWorktree(id: UUID(), repoID: repoID, status: .creating)
-        let typedName = state.replaceCreationPlaceholder(
+        let swap = state.replaceCreationPlaceholder(
             repoID: repoID,
             placeholderID: placeholderID,
             placeholderName: "delicate-coyote",
             with: daemonRow
         )
 
-        #expect(typedName == "typed-name")
+        #expect(swap?.typedName == "typed-name")
         #expect(state.worktrees[repoID]?.count == 1)
         #expect(state.worktrees[repoID]?.first?.id == daemonRow.id)
         #expect(state.worktrees[repoID]?.first?.displayName == "typed-name")
@@ -245,33 +338,105 @@ struct CreationPlaceholderRenameTests {
             state.worktrees = [repoID: [placeholder]]
 
             let daemonRow = makeWorktree(id: UUID(), repoID: repoID, status: .creating)
-            let typedName = state.replaceCreationPlaceholder(
+            let swap = state.replaceCreationPlaceholder(
                 repoID: repoID,
                 placeholderID: placeholderID,
                 placeholderName: "delicate-coyote",
                 with: daemonRow
             )
 
-            #expect(typedName == nil)
+            #expect(swap != nil)
+            #expect(swap?.typedName == nil)
             #expect(state.worktrees[repoID]?.first?.id == daemonRow.id)
             #expect(state.worktrees[repoID]?.first?.displayName == daemonRow.displayName)
         }
     }
 
-    @Test func missingPlaceholderIsANoOp() {
+    @Test func dedupesPollMergedDaemonRowAgainstPreservedPlaceholder() {
+        withState { state in
+            let repoID = UUID()
+            let placeholderID = UUID()
+            var placeholder = makeWorktree(id: placeholderID, repoID: repoID, status: .creating)
+            placeholder.displayName = "typed-name" // renamed mid-creation
+            let other = makeWorktree(id: UUID(), repoID: repoID)
+            let daemonRow = makeWorktree(id: UUID(), repoID: repoID, status: .creating)
+            // A poll merged the daemon row alongside the preserved placeholder.
+            state.worktrees = [repoID: [placeholder, other, daemonRow]]
+
+            let swap = state.replaceCreationPlaceholder(
+                repoID: repoID,
+                placeholderID: placeholderID,
+                placeholderName: "delicate-coyote",
+                with: daemonRow
+            )
+
+            #expect(swap?.typedName == "typed-name")
+            // Exactly one final row, at the placeholder's position.
+            let rows = state.worktrees[repoID] ?? []
+            #expect(rows.count == 2)
+            #expect(rows.first?.id == daemonRow.id)
+            #expect(rows.first?.displayName == "typed-name")
+            #expect(rows.last?.id == other.id)
+        }
+    }
+
+    @Test func placeholderGoneButPollMergedRowPresentUpdatesInPlace() {
+        withState { state in
+            let repoID = UUID()
+            let other = makeWorktree(id: UUID(), repoID: repoID)
+            var daemonRow = makeWorktree(id: UUID(), repoID: repoID, status: .creating)
+            state.worktrees = [repoID: [other, daemonRow]]
+
+            // The RPC result carries fresher fields than the poll-merged row.
+            daemonRow.displayName = "fresher-name"
+            let swap = state.replaceCreationPlaceholder(
+                repoID: repoID,
+                placeholderID: UUID(),
+                placeholderName: "delicate-coyote",
+                with: daemonRow
+            )
+
+            #expect(swap != nil)
+            #expect(swap?.typedName == nil)
+            let rows = state.worktrees[repoID] ?? []
+            #expect(rows.count == 2)
+            #expect(rows.last?.id == daemonRow.id)
+            #expect(rows.last?.displayName == "fresher-name")
+        }
+    }
+
+    @Test func bothRowsAbsentReturnsNilAndResurrectsNothing() {
         withState { state in
             let repoID = UUID()
             state.worktrees = [repoID: []]
 
-            let typedName = state.replaceCreationPlaceholder(
+            let swap = state.replaceCreationPlaceholder(
                 repoID: repoID,
                 placeholderID: UUID(),
                 placeholderName: "delicate-coyote",
                 with: makeWorktree(id: UUID(), repoID: repoID)
             )
 
-            #expect(typedName == nil)
+            // nil tells createWorktree not to arm selection/editing for the
+            // vanished row.
+            #expect(swap == nil)
             #expect(state.worktrees[repoID]?.isEmpty == true)
+        }
+    }
+
+    @Test func removedRepoReturnsNilAndResurrectsNothing() {
+        withState { state in
+            let repoID = UUID()
+            // Repo removed mid-create: no entry in the dict at all.
+            let swap = state.replaceCreationPlaceholder(
+                repoID: repoID,
+                placeholderID: UUID(),
+                placeholderName: "delicate-coyote",
+                with: makeWorktree(id: UUID(), repoID: repoID)
+            )
+
+            #expect(swap == nil)
+            #expect(state.worktrees[repoID] == nil)
         }
     }
 }

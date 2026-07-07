@@ -55,16 +55,27 @@ extension AppState {
             selectedRepoID: selectedRepoID
         ) else { return }
 
-        // If the target is a worktree, expand its containing repo before scrolling.
-        if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == target }),
-           let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
-           let repoID = worktree.repoID,
-           !repos[repoIdx].expanded {
-            repos[repoIdx].expanded = true
-            Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
-        }
+        // If the target is a worktree, expand its containing repo before
+        // scrolling (a repo-ID target matches no worktree row, so this no-ops).
+        expandRepoContaining(worktreeID: target)
 
         pendingScrollToWorktreeID = target
+    }
+
+    /// Expand the repo containing `worktreeID` (if collapsed) so its row is
+    /// part of the rendered sidebar list. Updates local state synchronously
+    /// (List rerender + scroll), persists via RPC fire-and-forget. No-op for
+    /// unknown IDs. Intentionally repo-scoped (dict-only, not `findWorktree`):
+    /// scratch spaces have no repo row to expand.
+    @MainActor
+    func expandRepoContaining(worktreeID: UUID) {
+        guard let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == worktreeID }),
+              let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
+              let repoID = worktree.repoID,
+              !repos[repoIdx].expanded
+        else { return }
+        repos[repoIdx].expanded = true
+        Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
     }
 }
 

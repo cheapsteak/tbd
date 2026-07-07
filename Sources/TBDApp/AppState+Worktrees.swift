@@ -49,33 +49,48 @@ extension AppState {
             defer { pendingWorktreeIDs.remove(placeholder.id) }
             do {
                 let size = mainAreaTerminalSize()
+                // Pass the placeholder's name so the daemon row starts with
+                // the same displayName: untouched creations don't flip names
+                // at swap time, and replaceCreationPlaceholder's
+                // string-equality rename inference stays sound.
                 let wt = try await daemonClient.createWorktree(
                     repoID: repoID,
                     branch: existingBranch?.name,
+                    displayName: placeholderName,
                     cols: size.cols, rows: size.rows,
                     parentWorktreeID: parentWorktreeID,
                     useExistingBranch: existingBranch != nil
                 )
                 // Replace the placeholder with the real worktree, carrying
-                // over any rename the user typed while creation was in flight.
-                let typedName = replaceCreationPlaceholder(
+                // over any rename the user typed while creation was in
+                // flight. A nil result means neither the placeholder nor a
+                // poll-merged daemon row exists anymore (e.g. the repo was
+                // removed mid-create) — don't arm selection/editing for a
+                // vanished row.
+                if let swap = replaceCreationPlaceholder(
                     repoID: repoID,
                     placeholderID: placeholder.id,
                     placeholderName: placeholderName,
                     with: wt
-                )
-                selectedWorktreeIDs = [wt.id]
-                editingWorktreeID = wt.id
-                // Persist the carried rename now that a daemon-known row
-                // exists (the placeholder's id never reached the daemon, so
-                // renameWorktree's .creating branch could only apply it
-                // locally).
-                if let typedName {
-                    do {
-                        try await daemonClient.renameWorktree(id: wt.id, displayName: typedName)
-                    } catch {
-                        logger.error("Failed to persist rename typed during creation: \(error)")
-                        handleConnectionError(error)
+                ) {
+                    selectedWorktreeIDs = [wt.id]
+                    editingWorktreeID = wt.id
+                    // Persist the carried rename now that a daemon-known row
+                    // exists (the placeholder's id never reached the daemon,
+                    // so renameWorktree's placeholder branch could only apply
+                    // it locally).
+                    if let typedName = swap.typedName {
+                        do {
+                            try await daemonClient.renameWorktree(id: wt.id, displayName: typedName)
+                            // Re-apply after success: a poll snapshot captured
+                            // before the daemon row updated can land while the
+                            // RPC was in flight and revert the name for a full
+                            // poll interval. Idempotent.
+                            applyLocalRename(id: wt.id, displayName: typedName)
+                        } catch {
+                            logger.error("Failed to persist rename typed during creation: \(error)")
+                            handleConnectionError(error)
+                        }
                     }
                 }
             } catch {
@@ -87,35 +102,66 @@ extension AppState {
         }
     }
 
+    /// Result of a successful creation-placeholder swap. `typedName` carries
+    /// the rename the user typed while creation was in flight (nil when the
+    /// placeholder was never renamed).
+    struct PlaceholderSwapResult {
+        let typedName: String?
+    }
+
     /// Swap the optimistic creation placeholder row for the daemon's worktree.
     /// The daemon row has a different UUID, so a wholesale swap would clobber
     /// a rename the user typed while creation was in flight (renameWorktree's
-    /// `.creating` branch applies such renames locally, onto the placeholder).
-    /// Detects that case by comparing the placeholder row's current
-    /// `displayName` against `placeholderName` (the name it was created with);
-    /// when they differ, the typed name is carried onto the replacement row
-    /// and returned so the caller can persist it via the rename RPC.
-    /// Returns nil when the placeholder was never renamed (or is already gone).
+    /// placeholder branch — gated on `pendingWorktreeIDs` — applies such
+    /// renames locally, onto the placeholder). Detects that case by comparing
+    /// the placeholder row's current `displayName` against `placeholderName`
+    /// (the name it was created with, which `createWorktree` also sends in
+    /// the create RPC so the daemon row starts with the same name); when they
+    /// differ, the typed name is carried onto the replacement row and
+    /// returned so the caller can persist it via the rename RPC.
+    ///
+    /// Exactly one final row ends up in the repo's list: a poll can merge the
+    /// daemon row alongside the still-preserved placeholder, so any existing
+    /// `wt.id` row is deduped, preferring the placeholder's position.
+    /// Returns nil when neither the placeholder nor a `wt.id` row exists
+    /// anymore (e.g. the repo was removed mid-create) — the row is NOT
+    /// resurrected, and the caller must not select/edit the vanished row.
     func replaceCreationPlaceholder(
         repoID: UUID,
         placeholderID: UUID,
         placeholderName: String,
         with wt: Worktree
-    ) -> String? {
-        guard let idx = worktrees[repoID]?.firstIndex(where: { $0.id == placeholderID }) else {
-            return nil
-        }
-        let currentName = worktrees[repoID]?[idx].displayName
-        var replacement = wt
+    ) -> PlaceholderSwapResult? {
+        guard var rows = worktrees[repoID] else { return nil }
+        let placeholderIdx = rows.firstIndex { $0.id == placeholderID }
+        let existingIdx = rows.firstIndex { $0.id == wt.id }
+
         let typedName: String?
-        if let currentName, currentName != placeholderName {
-            replacement.displayName = currentName
-            typedName = currentName
+        if let placeholderIdx, rows[placeholderIdx].displayName != placeholderName {
+            typedName = rows[placeholderIdx].displayName
         } else {
             typedName = nil
         }
-        worktrees[repoID]?[idx] = replacement
-        return typedName
+        var replacement = wt
+        if let typedName {
+            replacement.displayName = typedName
+        }
+
+        switch (placeholderIdx, existingIdx) {
+        case (let pIdx?, let eIdx?):
+            // Poll merged the daemon row alongside the preserved placeholder:
+            // keep the placeholder's position, drop the merged duplicate.
+            rows[pIdx] = replacement
+            rows.remove(at: eIdx)
+        case (let pIdx?, nil):
+            rows[pIdx] = replacement
+        case (nil, let eIdx?):
+            rows[eIdx] = replacement
+        case (nil, nil):
+            return nil
+        }
+        worktrees[repoID] = rows
+        return PlaceholderSwapResult(typedName: typedName)
     }
 
     /// Create a repo-less scratch space and select it once the daemon confirms.
@@ -218,11 +264,12 @@ extension AppState {
     /// `worktree.archive` RPC rejects them with `repoNotFound` — so callers
     /// don't have to route per collection.
     func archiveWorktree(id: UUID, force: Bool = false) async {
-        if findWorktree(id: id)?.isScratch == true {
+        let worktree = findWorktree(id: id)
+        if worktree?.isScratch == true {
             await archiveScratch(id: id)
             return
         }
-        let worktreeName = findWorktree(id: id)?.displayName ?? "worktree"
+        let worktreeName = worktree?.displayName ?? "worktree"
         do {
             try await daemonClient.archiveWorktree(id: id, force: force)
             removeArchivedWorktreeFromState(id: id)
@@ -296,28 +343,60 @@ extension AppState {
 
     /// Rename a worktree (repo-grouped or scratch).
     func renameWorktree(id: UUID, displayName: String) async {
+        // Local-only iff the id is a client-side creation placeholder — the
+        // daemon has never heard of it, so there is nothing to persist yet.
+        // `createWorktree` carries the typed name onto the real daemon row
+        // when it swaps the placeholder out (`replaceCreationPlaceholder`)
+        // and issues the rename RPC for that row's id then. Daemon-known rows
+        // take the RPC path regardless of status: a two-phase create leaves
+        // the daemon row `.creating` for as long as its hooks run, and the
+        // daemon rename handler has no status guard — gating on `.creating`
+        // here would silently drop renames for that whole window.
+        if pendingWorktreeIDs.contains(id) {
+            applyLocalRename(id: id, displayName: displayName)
+            return
+        }
+        // The id resolves nowhere (e.g. the placeholder was just swapped
+        // away, or the row was archived): no-op instead of firing a doomed
+        // RPC for a row that's already gone.
+        guard let previous = findWorktree(id: id) else {
+            logger.debug("renameWorktree: \(id, privacy: .public) resolves nowhere; skipping")
+            return
+        }
         // Optimistic: apply locally before any await so the UI reflects the
         // new name immediately, exactly once (callers must not pre-apply).
         applyLocalRename(id: id, displayName: displayName)
-        // Creating worktrees only exist client-side — their placeholder id is
-        // unknown to the daemon, so there is nothing to persist yet.
-        // `createWorktree` carries the typed name onto the real row when it
-        // swaps the placeholder out (`replaceCreationPlaceholder`) and issues
-        // the rename RPC for the daemon row's id then.
-        if findWorktree(id: id)?.status == .creating { return }
         do {
-            try await daemonClient.renameWorktree(id: id, displayName: displayName)
+            if let override = renameRPCOverride {
+                try await override(id, displayName)
+            } else {
+                try await daemonClient.renameWorktree(id: id, displayName: displayName)
+            }
+            // Re-apply after success: a poll snapshot captured before the
+            // daemon row updated can land while the RPC was in flight and
+            // revert the name for a full poll interval. Idempotent.
+            applyLocalRename(id: id, displayName: displayName)
         } catch {
             logger.error("Failed to rename worktree: \(error)")
+            // Roll back the optimistic apply and surface the failure —
+            // silently reverting on the next poll hides that the daemon
+            // still has the old name. Error handling mirrors
+            // `archiveScratch`: `handleConnectionError` drives the reconnect
+            // UI on a connection drop, the alert covers the rest.
+            applyLocalRename(id: id, displayName: previous.displayName)
             handleConnectionError(error)
+            showAlert("Rename failed: \(error.localizedDescription)", isError: true)
         }
     }
 
     /// Local rename applied to whichever collection holds the row: the
     /// repo-grouped `worktrees` dict, or `scratchWorktrees` for repo-less
-    /// scratch spaces (which never appear in the dict). Owned exclusively by
-    /// `renameWorktree` (the single optimistic pre-RPC application) so callers
-    /// don't have to compensate per collection.
+    /// scratch spaces (which never appear in the dict). Idempotent — the
+    /// rename paths re-apply it after RPC success to clobber any poll
+    /// snapshot that reverted the name mid-flight. Owned by `renameWorktree`
+    /// (optimistic pre-RPC apply + post-RPC re-apply + failure rollback) and
+    /// `createWorktree`'s carried-rename persist block, so callers don't
+    /// have to compensate per collection.
     private func applyLocalRename(id: UUID, displayName: String) {
         for repoID in worktrees.keys {
             if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == id }) {
@@ -342,17 +421,8 @@ extension AppState {
         highlightedArchivedWorktreeID = nil
         selectedWorktreeIDs = [id]
         // Expand the containing repo so the row is part of the rendered list
-        // before we ask the sidebar to scroll to it. Update local state
-        // synchronously (List rerender + scroll), persist via RPC fire-and-forget.
-        // Intentionally repo-scoped (dict-only, not findWorktree): scratch
-        // spaces have no repo row to expand.
-        if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
-           let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
-           let repoID = worktree.repoID,
-           !repos[repoIdx].expanded {
-            repos[repoIdx].expanded = true
-            Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
-        }
+        // before we ask the sidebar to scroll to it.
+        expandRepoContaining(worktreeID: id)
         pendingScrollToWorktreeID = id
         // Switch to the originating terminal's tab when one matches. Both
         // `.terminal` and `.liveTranscript` panes count as matches — clicking
@@ -727,48 +797,36 @@ extension AppState {
         createWorktree(repoID: repoID)
     }
 
-    /// Which archive path `archiveSelectedWorktree` should take for a
-    /// selection. Scratch spaces live only in `scratchWorktrees` and must go
-    /// through the `scratch.archive` RPC — the repo-worktree `worktree.archive`
-    /// RPC rejects them with `repoNotFound`. Pure so both branches are
-    /// unit-testable without a daemon.
-    enum ArchiveShortcutRoute: Equatable {
-        case scratch(UUID)
-        case worktree(UUID)
-    }
-
-    /// Resolve the archive route for a pre-resolved selection (the caller
-    /// passes `selectedWorktreeIDs.first.flatMap(findWorktree)`). Returns
-    /// `nil` when:
+    /// Resolve the archive target for a pre-resolved selection (the caller
+    /// passes `selectedWorktreeIDs.first.flatMap(findWorktree)`). This seam
+    /// only decides refuse-vs-proceed — `archiveWorktree(id:)` is
+    /// scratch-aware and self-routes scratch rows to the `scratch.archive`
+    /// RPC. Pure so the branches are unit-testable without a daemon.
+    /// Returns `nil` when:
     /// - nothing is selected, or
     /// - the selected ID is stale/unknown (`findWorktree` returned nil — no
     ///   doomed RPC + error alert for a row that's already gone), or
     /// - the selected repo worktree is the main branch or still creating
-    ///   (those refuse the archive shortcut).
+    ///   (those refuse the archive shortcut; scratch rows always proceed —
+    ///   the daemon creates them `.active`, never `.main`/`.creating`).
     nonisolated static func archiveShortcutRoute(
         selectedWorktree: Worktree?
-    ) -> ArchiveShortcutRoute? {
+    ) -> UUID? {
         guard let wt = selectedWorktree else { return nil }
-        if wt.isScratch { return .scratch(wt.id) }
-        // Don't archive the main branch worktree
+        if wt.isScratch { return wt.id }
+        // Don't archive the main branch worktree (or one still creating)
         if wt.status == .main || wt.status == .creating { return nil }
-        return .worktree(wt.id)
+        return wt.id
     }
 
-    /// Archive the first selected worktree (refuses main worktrees). Routes
-    /// scratch spaces to the scratch archive path — same as the row context
-    /// menu's Archive action.
+    /// Archive the first selected worktree (refuses main worktrees). Scratch
+    /// routing happens inside `archiveWorktree(id:)` — same as the row
+    /// context menu's Archive action.
     func archiveSelectedWorktree() {
-        switch Self.archiveShortcutRoute(
+        guard let id = Self.archiveShortcutRoute(
             selectedWorktree: selectedWorktreeIDs.first.flatMap { findWorktree(id: $0) }
-        ) {
-        case .scratch(let id):
-            Task { await archiveScratch(id: id) }
-        case .worktree(let id):
-            Task { await archiveWorktree(id: id) }
-        case nil:
-            break
-        }
+        ) else { return }
+        Task { await archiveWorktree(id: id) }
     }
 
     /// Select a worktree by its index in the sidebar order.

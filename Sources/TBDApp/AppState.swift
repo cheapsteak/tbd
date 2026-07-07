@@ -208,6 +208,12 @@ final class AppState: ObservableObject {
     /// list.
     var archivedLookupOverride: ((UUID) async -> [Worktree])?
 
+    /// Test seam: when set, replaces the daemon rename RPC in
+    /// `renameWorktree(id:displayName:)`. Production code leaves this nil;
+    /// tests assign a closure to observe the RPC path (or throw from it to
+    /// exercise the rollback branch) without a live daemon.
+    var renameRPCOverride: (@MainActor (UUID, String) async throws -> Void)?
+
     /// True once `connectAndLoadInitialState()` has finished its initial
     /// `refreshAll()` and the worktree list is populated. Used by
     /// `navigateToWorktree(_:)` to detect cold-start clicks that arrive
@@ -1315,13 +1321,7 @@ final class AppState: ObservableObject {
             // Expand any repo whose worktree is now selected but was collapsed,
             // so the restored row is visible in the sidebar.
             for id in selectedWorktreeIDs {
-                if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
-                   let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
-                   let repoID = worktree.repoID,
-                   !repos[repoIdx].expanded {
-                    repos[repoIdx].expanded = true
-                    Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
-                }
+                expandRepoContaining(worktreeID: id)
             }
             await loadModelProfiles()
             await loadHibernationConfig()
