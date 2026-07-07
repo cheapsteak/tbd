@@ -285,7 +285,7 @@ struct PaneFanoutTests {
         #expect(fanout.markReady(key: PaneKey(server: server, paneID: "%404"), generation: 1) == false)
     }
 
-    @Test("a chunk larger than the pipe buffer delivers an intact prefix and drops the rest")
+    @Test("a chunk larger than the pipe buffer delivers an intact prefix and enters repair for the rest")
     func partialWriteDropsTailNotMiddle() throws {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%7")
@@ -293,10 +293,23 @@ struct PaneFanoutTests {
         defer { Darwin.close(readFD) }
         fanout.markReady(key: key, generation: gen)
 
-        // 256 KB into a ~64 KB pipe with no reader: the write must stop at
-        // EAGAIN and drop the tail — never skip bytes in the middle.
+        // 256 KB into a ~64 KB pipe with no reader: the EAGAIN remainder
+        // (~192 KB) exceeds the 128 KB backpressure queue cap. On a ready,
+        // unfenced, non-repairing sink that overflow takes the REPAIR-ENTRY
+        // branch (Phase B M3): the queue is cleared, the sink flips to
+        // `repairing`, and NOTHING counts as dropped — the repair's recapture
+        // supersedes the tail. Either way the delivered prefix stays intact:
+        // the pipe is never skipped in the middle. (The M1 whole-chunk-drop
+        // path is covered by the fenced-overflow test in
+        // PaneFanoutFlowControlTests, where repair entry is barred.)
         let big = Data(repeating: UInt8(ascii: "z"), count: 256 * 1024)
         fanout.route(server: server, event: .output(paneID: "%7", bytes: big))
+
+        let stats = try #require(fanout.flowStats(key: key))
+        #expect(stats.repairing == true,
+                "an oversized steady-state chunk must route into the repair cycle, not a drop")
+        #expect(stats.droppedBytes == 0,
+                "repair entry supersedes the tail — nothing counts as dropped")
 
         var received = Data()
         var buffer = [UInt8](repeating: 0, count: 16 * 1024)

@@ -274,6 +274,14 @@ actor TmuxControlSupervisor {
         fanout.markReady(key: PaneKey(server: server, paneID: paneID), generation: generation)
     }
 
+    /// Arm the attach-boundary fence (Phase B M2), generation-checked — see
+    /// `PaneFanout.armFence`. Returns whether the fence armed (`false` → the
+    /// caller's attach was superseded; send nothing more).
+    @discardableResult
+    func armFence(server: String, paneID: String, generation: UInt64) -> Bool {
+        fanout.armFence(key: PaneKey(server: server, paneID: paneID), generation: generation)
+    }
+
     /// Record the app's `attach.ready` ack and return the attach's CURRENT
     /// generation (M4.3) — the whole replay sequence is tagged with it.
     /// Generation-checked when the app echoed one (`expectedGeneration`): a

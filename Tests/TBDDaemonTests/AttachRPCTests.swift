@@ -168,14 +168,23 @@ struct AttachRPCOrchestrationTests {
         "\(paneID) 0 0 0 4294967295 4294967295 0 23 1 0 0 0 1 0 0 0 0 0 0 80 24 1"
     }
 
-    /// Feed the full happy-path reply set: pause, scrollback, screen, saved,
-    /// combined, state, pending. The non-alt assembly uses the COMBINED leg
-    /// verbatim (R8-M3), so it carries the history content these tests
-    /// assert on (screen leg empty → combined == history).
+    /// Feed the full happy-path reply set for the M2 two-batch sequence:
+    /// complete the pause (batch 1), await the captures+continue batch being
+    /// written (`recorder` reaching `captureBatchWrites`), then feed
+    /// scrollback, screen, saved, combined, state, pending and the batched
+    /// continue's reply. The non-alt assembly uses the COMBINED leg verbatim
+    /// (R8-M3), so it carries the history content these tests assert on
+    /// (screen leg empty → combined == history).
     private func feedCaptureReplies(
-        _ client: TmuxControlCommandClient, paneID: String, history: [String]
-    ) async {
-        for lines in [[], history, [], [], history, [stateLine(paneID: paneID)], [] as [String]] {
+        _ client: TmuxControlCommandClient, recorder: Recorder, paneID: String,
+        history: [String], captureBatchWrites: Int = 2,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
+        await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))  // pause
+        try await waitFor("capture batch write", sourceLocation: sourceLocation) {
+            recorder.writes.count >= captureBatchWrites
+        }
+        for lines in [history, [], [], history, [stateLine(paneID: paneID)], [], [] as [String]] {
             await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: lines))
         }
     }
@@ -329,21 +338,24 @@ struct AttachRPCOrchestrationTests {
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%7"))
         let readyTask = Task { await router.handle(ready) }
 
-        // The ack triggers ONE atomic stream write: pause then the captures.
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
-        let batch = try #require(recorder.writes.first)
-        #expect(batch.hasPrefix("refresh-client -A '%7:pause'\ncapture-pane -peqJN -S -50000 -E -1 -q -t %7\n"))
-        // The gate stays CLOSED while the capture is in flight.
+        // The ack triggers batch 1 — the pause ALONE (M2); the captures +
+        // continue follow as a second atomic write once the pause completes.
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+        #expect(recorder.writes.first == "refresh-client -A '%7:pause'")
+        // The gate stays CLOSED while the sequence is in flight.
         #expect(await supervisor.isReady(server: "tbd-gate-test", paneID: "%7") == false)
 
-        await feedCaptureReplies(client, paneID: "%7", history: ["replayed-history"])
+        try await feedCaptureReplies(client, recorder: recorder, paneID: "%7",
+                                     history: ["replayed-history"])
         let response = await readyTask.value
         #expect(response.success)
         #expect(await supervisor.isReady(server: "tbd-gate-test", paneID: "%7") == true)
 
-        // Unpause is the last command, after the gate opened.
-        try await waitFor("unpause write") { recorder.writes.count >= 2 }
-        #expect(recorder.writes.last == "refresh-client -A '%7:continue'")
+        // The continue rides batch 2 as its LAST command; no separate unpause.
+        #expect(recorder.writes.count == 2)
+        let batch = try #require(recorder.writes.last)
+        #expect(batch.hasPrefix("capture-pane -peqJN -S -50000 -E -1 -q -t %7\n"))
+        #expect(batch.hasSuffix("\nrefresh-client -A '%7:continue'"))
 
         // The vended fd carries the replay (which ends with a CUP).
         let text = (String(bytes: drain(rxFD), encoding: .utf8) ?? "")
@@ -378,7 +390,7 @@ struct AttachRPCOrchestrationTests {
             method: RPCMethod.attachReady,
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%6"))
         let readyTask = Task { await router.handle(ready) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
 
         // Let the 100 ms ready-timeout fire while the replay is in flight:
         // the acked attach must NOT be torn down (no EOF on the vended fd).
@@ -390,7 +402,8 @@ struct AttachRPCOrchestrationTests {
         #expect(n < 0 && errno == EAGAIN, "acked attach must survive the timer (no EOF, no data yet)")
 
         // The stalled replies arrive; the sequence completes normally.
-        await feedCaptureReplies(client, paneID: "%6", history: ["late-history"])
+        try await feedCaptureReplies(client, recorder: recorder, paneID: "%6",
+                                     history: ["late-history"])
         let response = await readyTask.value
         #expect(response.success)
         #expect(await supervisor.isReady(server: "tbd-timeout-test", paneID: "%6") == true)
@@ -424,22 +437,25 @@ struct AttachRPCOrchestrationTests {
             method: RPCMethod.attachReady,
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%8"))
         let readyTask = Task { await router.handle(ready) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
 
-        // A newer attach replaces the sink mid-sequence.
+        // A newer attach replaces the sink mid-sequence — while batch 1's
+        // pause reply is still in flight.
         _ = await router.handle(try attachRequest())
         let (rxFD2, _) = try SidecarTestSupport.receiveVend(from: clientSide)
         defer { Darwin.close(rxFD2) }
 
-        await feedCaptureReplies(client, paneID: "%8", history: ["stale-history"])
+        // The pause reply lands: the post-pause re-check (M2) sees the newer
+        // generation and stands down.
+        await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         // Benign race: RPC SUCCESS, but the successor's gate stays closed
         // (its own attach.ready opens it) and its pipe got no stale replay.
         let response = await readyTask.value
         #expect(response.success)
         #expect(await supervisor.isReady(server: "tbd-supersede-test", paneID: "%8") == false)
-        // No unpause from the superseded sequence (M2 review fix): the
-        // successor's own FIFO-ordered sequence unpauses the pane. The RPC
-        // returned, so the write log is final — batch only, no continue.
+        // Nothing after the pause from the superseded sequence: no captures,
+        // no continue — the successor's own FIFO-ordered sequence owns the
+        // pane's pause state (R11). The RPC returned, so the log is final.
         #expect(recorder.writes.count == 1)
         #expect(!recorder.writes.contains { $0.contains(":continue'") })
         #expect(drain(rxFD2).isEmpty, "successor's pipe must not receive the stale replay")
@@ -493,12 +509,13 @@ struct AttachRPCOrchestrationTests {
             method: RPCMethod.attachReady,
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%12", generation: gen2))
         let readyTask = Task { await router.handle(freshReady) }
-        try await waitFor("successor capture batch") { recorder.writes.count >= 1 }
-        await feedCaptureReplies(client, paneID: "%12", history: ["fresh"])
+        try await waitFor("successor pause batch") { recorder.writes.count >= 1 }
+        try await feedCaptureReplies(client, recorder: recorder, paneID: "%12", history: ["fresh"])
         #expect((await readyTask.value).success)
         #expect(await supervisor.isReady(server: "tbd-staleready-test", paneID: "%12") == true)
-        try await waitFor("successor unpause") { recorder.writes.count >= 2 }
-        #expect(recorder.writes.last == "refresh-client -A '%12:continue'")
+        // The successor's continue rode its capture batch (LAST command).
+        #expect(recorder.writes.count == 2)
+        #expect(recorder.writes.last?.hasSuffix("\nrefresh-client -A '%12:continue'") == true)
     }
 
     @Test("mid-sequence supersession on ONE shared correlator: stale generation sends no continue; the successor's sequence ends with its own")
@@ -531,35 +548,38 @@ struct AttachRPCOrchestrationTests {
             method: RPCMethod.attachReady,
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%13", generation: gen1))
         let ready1Task = Task { await router.handle(ready1) }
-        try await waitFor("gen 1 capture batch") { recorder.writes.count >= 1 }
+        try await waitFor("gen 1 pause batch") { recorder.writes.count >= 1 }
 
-        // Attach #2 replaces the sink MID-sequence; gen 1's replies then land.
+        // Attach #2 replaces the sink MID-sequence (while gen 1's pause reply
+        // is in flight); the pause reply then lands and the post-pause
+        // re-check (M2) stands gen 1 down before its capture batch.
         let gen2 = try await attach()
         let (fd2, _) = try SidecarTestSupport.receiveVend(from: clientSide)
         defer { Darwin.close(fd2) }
-        await feedCaptureReplies(client, paneID: "%13", history: ["stale"])
+        await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         #expect((await ready1Task.value).success)
-        // The superseded sequence sent its batch and NOTHING else — its
-        // unpause is skipped so it cannot land inside the successor's own
-        // pause window (FIFO puts the successor's sequence after this one).
+        // The superseded sequence sent its pause and NOTHING else — no
+        // captures, and no continue that could land inside the successor's
+        // own pause window (FIFO puts the successor's sequence after this
+        // one).
         #expect(recorder.writes.count == 1)
         #expect(!recorder.writes.contains { $0.contains(":continue'") })
 
-        // The successor's sequence runs on the SAME correlator and ends with
-        // its own continue — the pane ends unpaused, exactly once.
+        // The successor's sequence runs on the SAME correlator and its
+        // capture batch ends with its own continue — the pane ends unpaused,
+        // exactly once.
         let ready2 = try RPCRequest(
             method: RPCMethod.attachReady,
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%13", generation: gen2))
         let ready2Task = Task { await router.handle(ready2) }
-        try await waitFor("gen 2 capture batch") { recorder.writes.count >= 2 }
-        await feedCaptureReplies(client, paneID: "%13", history: ["fresh"])
+        try await waitFor("gen 2 pause batch") { recorder.writes.count >= 2 }
+        try await feedCaptureReplies(client, recorder: recorder, paneID: "%13",
+                                     history: ["fresh"], captureBatchWrites: 3)
         #expect((await ready2Task.value).success)
         #expect(await supervisor.isReady(server: "tbd-sharedsup-test", paneID: "%13") == true)
-        try await waitFor("gen 2 unpause") { recorder.writes.count >= 3 }
         let continues = recorder.writes.filter { $0.contains(":continue'") }
-        #expect(continues == ["refresh-client -A '%13:continue'"],
-                "exactly ONE continue, the successor's own")
-        #expect(recorder.writes.last == "refresh-client -A '%13:continue'")
+        #expect(continues.count == 1, "exactly ONE continue, the successor's own")
+        #expect(recorder.writes.last?.hasSuffix("\nrefresh-client -A '%13:continue'") == true)
     }
 
     @Test("a stale attach's late failure must not kill a healthy successor's sink")
@@ -594,12 +614,16 @@ struct AttachRPCOrchestrationTests {
             method: RPCMethod.attachReady,
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%5"))
 
-        // Attach #1 (gen 1); its ready sequence starts and stalls on replies.
+        // Attach #1 (gen 1); its ready sequence starts, gets PAST its pause
+        // (still the owner, so its capture batch goes out) and then stalls on
+        // the capture replies.
         _ = await router.handle(try attachRequest())
         let (fd1, _) = try SidecarTestSupport.receiveVend(from: clientSide)
         defer { Darwin.close(fd1) }
         let ready1 = Task { await router.handle(ready) }
-        try await waitFor("gen 1 capture batch") { recorderA.writes.count >= 1 }
+        try await waitFor("gen 1 pause batch") { recorderA.writes.count >= 1 }
+        await clientA.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))  // gen 1 pause
+        try await waitFor("gen 1 capture batch") { recorderA.writes.count >= 2 }
 
         // Attach #2 (fast tab-switch re-attach, gen 2) replaces the sink and
         // completes its OWN sequence: replay written, gate open. Healthy.
@@ -607,18 +631,18 @@ struct AttachRPCOrchestrationTests {
         let (fd2, _) = try SidecarTestSupport.receiveVend(from: clientSide)
         defer { Darwin.close(fd2) }
         let ready2 = Task { await router.handle(ready) }
-        try await waitFor("gen 2 capture batch") { recorderB.writes.count >= 1 }
-        await feedCaptureReplies(clientB, paneID: "%5", history: ["fresh-history"])
+        try await waitFor("gen 2 pause batch") { recorderB.writes.count >= 1 }
+        try await feedCaptureReplies(clientB, recorder: recorderB, paneID: "%5",
+                                     history: ["fresh-history"])
         let response2 = await ready2.value
         #expect(response2.success)
         #expect(await supervisor.isReady(server: "tbd-stalefail-test", paneID: "%5") == true)
         #expect((String(bytes: drain(fd2), encoding: .utf8) ?? "").contains("fresh-history"))
 
         // Gen 1's DELAYED capture reply is a %error → its sequence fails.
-        // (pause OK, scrollback %error, remaining five OK.)
-        await clientA.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
+        // (scrollback %error, remaining five + batched continue OK.)
         await clientA.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
-        for _ in 0..<5 {
+        for _ in 0..<6 {
             await clientA.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         }
         let response1 = await ready1.value
@@ -755,13 +779,14 @@ struct AttachRPCOrchestrationTests {
             method: RPCMethod.attachReady,
             params: AttachReadyParams(worktreeID: worktreeID, paneID: "%9"))
         let readyTask = Task { await router.handle(ready) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+        await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))  // pause OK
+        try await waitFor("capture batch write") { recorder.writes.count >= 2 }
 
-        // pause OK, then the scrollback capture %errors (dead pane);
-        // remaining five (screen, saved, combined, state, pending) OK.
-        await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
+        // The scrollback capture %errors (dead pane); remaining five
+        // (screen, saved, combined, state, pending) + batched continue OK.
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
-        for _ in 0..<5 {
+        for _ in 0..<6 {
             await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         }
 
@@ -771,8 +796,8 @@ struct AttachRPCOrchestrationTests {
         var buffer = [UInt8](repeating: 0, count: 8)
         let n = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
         #expect(n == 0, "failed attach must be detached (EOF on the vended fd)")
-        // Unpause still ran despite the failure.
-        try await waitFor("unpause write") { recorder.writes.count >= 2 }
+        // The failure-path unpause still ran despite the failure.
+        try await waitFor("unpause write") { recorder.writes.count >= 3 }
         #expect(recorder.writes.last == "refresh-client -A '%9:continue'")
     }
 }

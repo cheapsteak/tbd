@@ -4,12 +4,15 @@ import Testing
 
 @testable import TBDDaemonLib
 
-/// Unit tests for the attach orchestration v2 (M4.3): pause → capture →
-/// replay → gate → unpause. No tmux — same seam as the resize-coordinator
-/// tests: a real `TmuxControlCommandClient` whose `writeLine` records stream
-/// writes synchronously, with reply blocks fed by hand through
-/// `client.handle(...)`. The supervisor (and its fanout) are real, so the
-/// gate/generation semantics under test are the production ones.
+/// Unit tests for the attach orchestration v2 (M4.3) with the Phase B M2
+/// fence: pause (batch 1, awaited) → arm fence → captures+continue (batch 2,
+/// continue LAST) → replay → gate+flush. No tmux — same seam as the
+/// resize-coordinator tests: a real `TmuxControlCommandClient` whose
+/// `writeLine` records stream writes synchronously, with reply blocks fed by
+/// hand through `client.handle(...)`. The supervisor (and its fanout) are
+/// real, so the gate/generation/fence semantics under test are the
+/// production ones. The fence-specific scenarios live in
+/// `AttachReplayFenceTests`.
 @Suite("AttachReplayOrchestrator")
 struct AttachReplayOrchestratorTests {
     private let server = "tbd-orch-unit"
@@ -141,6 +144,21 @@ struct AttachReplayOrchestratorTests {
         }
     }
 
+    /// M2 two-phase feed: complete batch 1 (the pause), await batch 2 (the
+    /// captures + continue) being written, then feed the 6 capture replies
+    /// and the batched continue's reply.
+    private func feedSequence(
+        _ client: TmuxControlCommandClient, recorder: Recorder,
+        captures: [[String]],
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
+        await succeed(client, [[]])  // pause (batch 1)
+        try await waitFor("capture batch write", sourceLocation: sourceLocation) {
+            recorder.writes.count >= 2
+        }
+        await succeed(client, captures + [[]])  // 6 captures + continue (batch 2)
+    }
+
     /// Await `body` expecting an `AttachReplayFailure` whose generation is
     /// `generation`; returns its underlying error for case matching. Records
     /// an issue (and returns nil) on success or a bare/unwrapped error.
@@ -178,7 +196,7 @@ struct AttachReplayOrchestratorTests {
         return out
     }
 
-    @Test("happy path: pause+captures in ONE write, gate opens only after replay, unpause last")
+    @Test("happy path: pause alone, then captures+continue in ONE write, gate opens only after replay, NO separate unpause")
     func happyPathOrder() async throws {
         let (supervisor, orchestrator, recorder, client) = makeHarness()
         let paneID = "%1"
@@ -191,43 +209,50 @@ struct AttachReplayOrchestratorTests {
             try await orchestrator.performAttachReady(
                 server: server, paneID: paneID, expectedGeneration: generation)
         }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
 
-        // ONE atomic stream write: pause FIRST, then the 6-command capture
-        // (four legs: pure scrollback / current screen / saved primary /
-        // combined history+screen — R8-M3).
+        // Batch 1 (Phase B M2): the pause ALONE — its reply is the moment
+        // the pane is provably silent and the fence can arm.
         #expect(recorder.writes.count == 1)
-        let batch = try #require(recorder.writes.first)
-        #expect(batch == """
-            refresh-client -A '%1:pause'
+        #expect(recorder.writes.first == "refresh-client -A '%1:pause'")
+
+        // Gate still closed during the pre-fence window: a fabricated
+        // %output routed before the pause reply must be dropped (it is in
+        // the capture), not delivered before the replay.
+        #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
+        supervisor.fanout.route(
+            server: server, event: .output(paneID: paneID, bytes: Data("MID-SEQUENCE".utf8)))
+
+        // The pause reply lands; batch 2 goes out: the 6-command capture
+        // (four legs: pure scrollback / current screen / saved primary /
+        // combined history+screen — R8-M3) + the continue LAST, one atomic
+        // stream write.
+        await succeed(client, [[]])
+        try await waitFor("capture batch write") { recorder.writes.count >= 2 }
+        #expect(recorder.writes.count == 2)
+        #expect(recorder.writes.last == """
             capture-pane -peqJN -S -50000 -E -1 -q -t %1
             capture-pane -peqJN -t %1
             capture-pane -peqJN -a -q -t %1
             capture-pane -peqJN -S -50000 -t %1
             list-panes -t %1 -F '\(PaneStateCapture.format)'
             capture-pane -p -P -C -t %1
+            refresh-client -A '%1:continue'
             """)
 
-        // Gate still closed during the capture window: a fabricated %output
-        // routed mid-sequence must be dropped, not delivered before the replay.
-        #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
-        supervisor.fanout.route(
-            server: server, event: .output(paneID: paneID, bytes: Data("MID-SEQUENCE".utf8)))
-
-        // Reply blocks in FIFO order: pause, scrollback, screen, saved,
-        // combined, state, pending. Non-alt uses the combined leg verbatim.
-        await succeed(client, [[], ["hist-one"], ["hist-two"], [],
+        // Reply blocks in FIFO order: scrollback, screen, saved, combined,
+        // state, pending, continue. Non-alt uses the combined leg verbatim.
+        await succeed(client, [["hist-one"], ["hist-two"], [],
                                ["hist-one", "hist-two"],
-                               [stateLine(paneID: paneID)], []])
+                               [stateLine(paneID: paneID)], [], []])
 
         let outcome = try await task.value
         #expect(outcome == .ready)
         #expect(await supervisor.isReady(server: server, paneID: paneID) == true)
 
-        // Unpause is the LAST command, sent after markReady.
-        try await waitFor("unpause write") { recorder.writes.count >= 2 }
+        // NO separate unpause on success — batch 2's continue already ran.
+        try await Task.sleep(for: .milliseconds(200))  // bounded negative check
         #expect(recorder.writes.count == 2)
-        #expect(recorder.writes.last == "refresh-client -A '%1:continue'")
 
         // The pipe holds the replay: prelude first, history present, final
         // bytes are the CUP for cursor (x=2, y=1) — and no mid-sequence leak.
@@ -244,7 +269,7 @@ struct AttachReplayOrchestratorTests {
         #expect((String(bytes: drain(readFD), encoding: .utf8) ?? "") == "live-after")
     }
 
-    @Test("superseded mid-sequence: outcome success-shaped, successor's gate untouched, NO unpause")
+    @Test("superseded mid-sequence (after batch 2): outcome success-shaped, successor's gate untouched, NO extra unpause")
     func supersededMidSequence() async throws {
         let (supervisor, orchestrator, recorder, client) = makeHarness()
         let paneID = "%2"
@@ -252,28 +277,57 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(read1) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+        await succeed(client, [[]])  // pause — this sequence still owns the pane
+        try await waitFor("capture batch write") { recorder.writes.count >= 2 }
 
-        // A newer attach replaces the sink before the replies arrive.
+        // A newer attach replaces the sink before the capture replies arrive:
+        // writeReplay/markReady will see the newer generation.
         let (read2, _) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(read2) }
 
-        await succeed(client, [[], ["hist"], [], [], ["hist"],
-                               [stateLine(paneID: paneID)], []])
+        await succeed(client, [["hist"], [], [], ["hist"],
+                               [stateLine(paneID: paneID)], [], []])
         let outcome = try await task.value
         #expect(outcome == .superseded)
 
         // This task must NOT open the successor's gate — its own sequence does.
         #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
 
-        // And it must NOT unpause either (M2 review fix): pause state is per
-        // PANE on the shared correlator, and the successor's own sequence —
-        // FIFO-behind ours — pauses and unpauses it. A stale `continue` here
-        // could land while the successor is mid-capture with its gate still
-        // closed, resuming live output into a closed gate. The sequence ended
-        // (task.value returned), so the write log is final: batch only.
+        // And it must send NOTHING after batch 2 (R11): batch 2's continue
+        // was already on the stream BEFORE the successor attached (FIFO keeps
+        // it clear of the successor's pause window), but a post-supersession
+        // EXTRA continue could land while the successor is mid-capture with
+        // its gate still closed. The sequence ended (task.value returned), so
+        // the write log is final: pause + captures+continue, nothing more.
+        #expect(recorder.writes.count == 2)
+    }
+
+    @Test("superseded between batch 1 and batch 2: captures+continue never sent (post-pause re-check)")
+    func supersededBetweenBatchesSendsNoCaptures() async throws {
+        let (supervisor, orchestrator, recorder, client) = makeHarness()
+        let paneID = "%20"
+        let (read1, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read1) }
+
+        let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+
+        // The successor attaches while batch 1's reply is still in flight.
+        let (read2, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(read2) }
+
+        await succeed(client, [[]])  // pause reply → post-pause re-check fires
+        let outcome = try await task.value
+        #expect(outcome == .superseded)
+
+        // Nothing after the pause: no captures, no continue (R11 — the
+        // successor's own sequence owns the pane's pause state).
+        try await Task.sleep(for: .milliseconds(200))  // bounded negative check
         #expect(recorder.writes.count == 1)
+        #expect(!recorder.writes.contains { $0.contains("capture-pane") })
         #expect(!recorder.writes.contains { $0.contains(":continue'") })
+        #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
     }
 
     @Test("stale ready (echoed generation != current attach) sends ZERO commands, successor stays un-acked")
@@ -332,20 +386,23 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+        await succeed(client, [[]])  // pause OK (batch 1)
+        try await waitFor("capture batch write") { recorder.writes.count >= 2 }
 
-        // pause OK, scrollback capture returns %error (tolerated at the
-        // correlator level so the connection survives), rest succeed
-        // (screen, saved, combined, state, pending).
-        await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
+        // Scrollback capture returns %error (tolerated at the correlator
+        // level so the connection survives), rest succeed (screen, saved,
+        // combined, state, pending) — as does the batched continue.
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
-        await succeed(client, [[], [], [], [stateLine(paneID: paneID)], []])
+        await succeed(client, [[], [], [], [stateLine(paneID: paneID)], [], []])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying as? AttachReplayError == .captureFailed(
             command: "capture-pane -peqJN -S -50000 -E -1 -q -t %3"))
         #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
-        try await waitFor("unpause write") { recorder.writes.count >= 2 }
+        // The failure path sends its own generation-checked continue (it
+        // covers "pause ran but batch 2's continue may not have").
+        try await waitFor("unpause write") { recorder.writes.count >= 3 }
         #expect(recorder.writes.last == "refresh-client -A '%3:continue'")
     }
 
@@ -357,24 +414,28 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+        await succeed(client, [[]])  // pause — gen 1 still owns the pane
+        try await waitFor("capture batch write") { recorder.writes.count >= 2 }
 
-        // While gen-1's batch is in flight, a fast re-attach replaces the
-        // sink (gen 2). Gen-1's batch then fails with a real capture %error.
+        // While gen-1's capture batch is in flight, a fast re-attach replaces
+        // the sink (gen 2). Gen-1's batch then fails with a real capture
+        // %error. (Batch 2's own continue was already on the stream BEFORE
+        // gen 2 attached — FIFO keeps it clear of gen 2's pause window.)
         let (successorFD, _) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(successorFD) }
-        await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))   // pause
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["gone"]))
-        await succeed(client, [[], [], [], [stateLine(paneID: paneID)], []])
+        await succeed(client, [[], [], [], [stateLine(paneID: paneID)], [], []])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying is AttachReplayError)
-        // The stale catch path must NOT unpause: its continue could land
-        // between the successor's pause and captures, tearing the successor's
-        // capture. The successor's own sequence owns the pane's pause state.
+        // The stale catch path must NOT send an EXTRA unpause: its continue
+        // could land between the successor's pause and captures, tearing the
+        // successor's capture. The successor's own sequence owns the pane's
+        // pause state. Write log stays: pause + captures+continue only.
         try await Task.sleep(for: .milliseconds(200))   // bounded negative check
-        #expect(!recorder.writes.contains { $0.hasSuffix(":continue'") },
-                "stale sequence unpaused a pane a successor now owns")
+        #expect(recorder.writes.count == 2,
+                "stale sequence sent an extra command after supersession")
     }
 
     @Test("a malformed pending-output escape fails the attach; unpause still sent")
@@ -385,16 +446,17 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
 
         // Pending line with `\` not followed by three octal digits.
-        await succeed(client, [[], ["hist"], [], [], ["hist"],
-                               [stateLine(paneID: paneID)], ["bad\\9x"]])
+        try await feedSequence(client, recorder: recorder,
+                               captures: [["hist"], [], [], ["hist"],
+                                          [stateLine(paneID: paneID)], ["bad\\9x"]])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying is ReplayWriterError)
         #expect(await supervisor.isReady(server: server, paneID: paneID) == false)
-        try await waitFor("unpause write") { recorder.writes.count >= 2 }
+        try await waitFor("unpause write") { recorder.writes.count >= 3 }
         #expect(recorder.writes.last == "refresh-client -A '%4:continue'")
     }
 
@@ -434,16 +496,19 @@ struct AttachReplayOrchestratorTests {
             defer { Darwin.close(readFD) }
 
             let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-            try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+            try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+            await succeed(client, [[]])  // pause
+            try await waitFor("capture batch write") { recorder.writes.count >= 2 }
             // The injected depth reaches the scrollback capture command too.
-            #expect(recorder.writes.first?.contains("capture-pane -peqJN -S -3 -E -1 -q -t %9") == true)
+            #expect(recorder.writes.last?.contains("capture-pane -peqJN -S -3 -E -1 -q -t %9") == true)
 
             let history = (0..<lineCount).map { "line-\($0)" }
-            // Telemetry keys on the PURE-scrollback leg (index 1), not the
-            // combined one — the combined leg always carries screen rows too.
-            await succeed(client, [[], history, ["screen"], [],
+            // Telemetry keys on the PURE-scrollback leg (the batch's first
+            // capture), not the combined one — the combined leg always
+            // carries screen rows too.
+            await succeed(client, [history, ["screen"], [],
                                    history + ["screen"],
-                                   [stateLine(paneID: paneID, historySize: lineCount)], []])
+                                   [stateLine(paneID: paneID, historySize: lineCount)], [], []])
             let outcome = try await task.value
             #expect(outcome == .ready)
             #expect(truncations.counts == (expectFire ? [lineCount] : []),
@@ -460,16 +525,17 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
         // QUIRK (live-probed, tmux 3.6a): on a pane with history_size == 0
         // the `-S -N -E -1` leg does NOT return empty — it clamps and returns
         // the first visible screen row. Feeding that duplicate here must NOT
         // reach the replay when the state says the scrollback is empty. The
         // COMBINED leg has no such quirk: with no history it is exactly the
         // screen, and the non-alt path uses it verbatim (R8-M3).
-        await succeed(client, [[], ["screen-row-one"], ["screen-row-one", "screen-row-two"], [],
-                               ["screen-row-one", "screen-row-two"],
-                               [stateLine(paneID: paneID, historySize: 0)], []])
+        try await feedSequence(client, recorder: recorder, captures: [
+            ["screen-row-one"], ["screen-row-one", "screen-row-two"], [],
+            ["screen-row-one", "screen-row-two"],
+            [stateLine(paneID: paneID, historySize: 0)], []])
 
         let outcome = try await task.value
         #expect(outcome == .ready)
@@ -488,15 +554,15 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
         let scrollback = ["h1", "h2"]
         let screen = ["s1", "s2"]
         // The combined leg is what one tmux invocation would return for this
         // pane: the scrollback rows followed by the screen rows — the exact
         // legacy single-capture content.
-        await succeed(client, [[], scrollback, screen, [],
-                               scrollback + screen,
-                               [stateLine(paneID: paneID, historySize: 2)], []])
+        try await feedSequence(client, recorder: recorder, captures: [
+            scrollback, screen, [], scrollback + screen,
+            [stateLine(paneID: paneID, historySize: 2)], []])
         let outcome = try await task.value
         #expect(outcome == .ready)
 
@@ -520,10 +586,12 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
-        // The batch carries a COMBINED history+screen capture (one tmux
-        // invocation, `-J` joins the seam) as its fourth capture leg.
-        let batch = try #require(recorder.writes.first)
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+        await succeed(client, [[]])  // pause
+        try await waitFor("capture batch write") { recorder.writes.count >= 2 }
+        // The capture batch carries a COMBINED history+screen capture (one
+        // tmux invocation, `-J` joins the seam) as its fourth capture leg.
+        let batch = try #require(recorder.writes.last)
         #expect(batch.contains("capture-pane -peqJN -S -50000 -t %17"))
 
         // A logical line soft-wraps across the scrollback/screen seam: the
@@ -531,13 +599,13 @@ struct AttachReplayOrchestratorTests {
         // them with \r\n would insert a spurious hard break. The combined
         // leg — joined by tmux itself — carries the whole line.
         await succeed(client, [
-            [],                              // pause
             ["above", "WRAP-HEAD"],          // pure scrollback (seam-cut)
             ["WRAP-TAIL", "below"],          // current screen (seam-cut)
             [],                              // saved primary (not alt)
             ["above", "WRAP-HEADWRAP-TAIL", "below"],  // combined, tmux-joined
             [stateLine(paneID: paneID, historySize: 2)],
             [],                              // pending
+            [],                              // batched continue
         ])
         let outcome = try await task.value
         #expect(outcome == .ready)
@@ -557,15 +625,16 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
         // While alternate_on: historyLeg reaches the PRIMARY scrollback,
         // screenLeg returns the ALT content, savedLeg the saved primary
         // viewport (the H1 regression: historyLeg used to be dropped). The
         // combined leg is fed a marker line to prove the ALT branch ignores
         // it — it only reaches non-alt replays (R8-M3).
-        await succeed(client, [[], ["OLD-SCROLLBACK"], ["ALT-NOW"], ["SAVED-VIEWPORT"],
-                               ["COMBINED-UNUSED"],
-                               [altStateLine(paneID: paneID)], []])
+        try await feedSequence(client, recorder: recorder, captures: [
+            ["OLD-SCROLLBACK"], ["ALT-NOW"], ["SAVED-VIEWPORT"],
+            ["COMBINED-UNUSED"],
+            [altStateLine(paneID: paneID)], []])
         let outcome = try await task.value
         #expect(outcome == .ready)
 
@@ -596,14 +665,16 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
 
-        // The PAUSE fails; every capture succeeds. The captures therefore ran
+        // The PAUSE fails; every capture succeeds. The captures therefore run
         // UNPAUSED — a possibly-torn replay that self-heals — so the sequence
-        // must proceed to a ready gate, and the failure must be surfaced.
+        // must proceed (fence, batch 2, ready gate), and the failure must be
+        // surfaced.
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["bad refresh-client"]))
+        try await waitFor("capture batch write") { recorder.writes.count >= 2 }
         await succeed(client, [["hist"], ["screen"], [], ["hist", "screen"],
-                               [stateLine(paneID: paneID)], []])
+                               [stateLine(paneID: paneID)], [], []])
 
         let outcome = try await task.value
         #expect(outcome == .ready)
@@ -624,9 +695,10 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
-        await succeed(client, [[], ["hist"], ["screen"], [], ["hist", "screen"],
-                               [stateLine(paneID: paneID)], []])
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
+        try await feedSequence(client, recorder: recorder, captures: [
+            ["hist"], ["screen"], [], ["hist", "screen"],
+            [stateLine(paneID: paneID)], []])
         let outcome = try await task.value
         #expect(outcome == .ready)
         #expect(failures.writes.isEmpty)
@@ -662,39 +734,43 @@ struct AttachReplayOrchestratorTests {
         }
         try await waitFor("stale task parked at the provider hop") { gate.hasParkedCaller }
 
-        // A successor attaches and runs its ENTIRE pause → captures → replay
-        // → unpause sequence to completion while the stale task is parked.
+        // A successor attaches and runs its ENTIRE pause → fence → captures+
+        // continue → replay sequence to completion while the stale task is
+        // parked.
         let (read2, gen2) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(read2) }
         let successorTask = Task {
             try await orchestrator.performAttachReady(
                 server: server, paneID: paneID, expectedGeneration: gen2)
         }
-        try await waitFor("successor batch write") { recorder.writes.count >= 1 }
-        await succeed(client, [[], ["hist"], ["screen"], [], ["hist", "screen"],
-                               [stateLine(paneID: paneID)], []])
+        try await waitFor("successor pause write") { recorder.writes.count >= 1 }
+        await succeed(client, [[]])  // successor's pause
+        try await waitFor("successor capture batch write") { recorder.writes.count >= 2 }
+        await succeed(client, [["hist"], ["screen"], [], ["hist", "screen"],
+                               [stateLine(paneID: paneID)], [], []])
         #expect(try await successorTask.value == .ready)
-        try await waitFor("successor unpause write") { recorder.writes.count >= 2 }
         #expect(await supervisor.isReady(server: server, paneID: paneID) == true)
 
         // Release the stale task. Its pause landing NOW would re-freeze the
         // live pane with nothing left to unpause it (the supersession rule
-        // skips ITS unpause, and the successor's already ran) — the post-hop
-        // re-check must return .superseded having sent NOTHING.
+        // skips ITS unpause, and the successor's batched continue already
+        // ran) — the post-hop re-check must return .superseded having sent
+        // NOTHING.
         gate.release()
         try await waitFor("stale sequence resolution") {
             staleDone.writes.count == 1 || recorder.writes.count > 2
         }
         if recorder.writes.count > 2 {
-            // Regression path only: the stale batch WAS sent — feed its
-            // replies so the test fails on the assertions below instead of
-            // hanging on `staleTask.value`.
-            await succeed(client, [[], [], [], [], [],
-                                   [stateLine(paneID: paneID)], []])
+            // Regression path only: the stale PAUSE was sent — feed its
+            // reply so the test fails on the assertions below instead of
+            // hanging on `staleTask.value` (the post-pause re-check then
+            // supersedes it before any capture batch).
+            await succeed(client, [[]])
         }
         #expect(try await staleTask.value == .superseded)
-        // Exactly the successor's writes: one batch + one unpause. The stale
-        // task contributed ZERO commands — in particular no second pause.
+        // Exactly the successor's writes: pause + captures+continue. The
+        // stale task contributed ZERO commands — in particular no second
+        // pause.
         #expect(recorder.writes.count == 2)
         #expect(recorder.writes.filter { $0.contains(":pause'") }.count == 1)
         #expect(await supervisor.isReady(server: server, paneID: paneID) == true)
@@ -709,14 +785,15 @@ struct AttachReplayOrchestratorTests {
         defer { Darwin.close(readFD) }
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
-        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        try await waitFor("pause batch write") { recorder.writes.count >= 1 }
         // The state reply describes a DIFFERENT pane.
-        await succeed(client, [[], ["hist"], [], [], ["hist"],
-                               [stateLine(paneID: "%99")], []])
+        try await feedSequence(client, recorder: recorder,
+                               captures: [["hist"], [], [], ["hist"],
+                                          [stateLine(paneID: "%99")], []])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying as? AttachReplayError == .paneStateMissing)
-        try await waitFor("unpause write") { recorder.writes.count >= 2 }
+        try await waitFor("unpause write") { recorder.writes.count >= 3 }
         #expect(recorder.writes.last == "refresh-client -A '%10:continue'")
     }
 }
