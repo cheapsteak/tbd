@@ -107,6 +107,14 @@ public enum FDChannel {
 
                 let sent = withUnsafeMutablePointer(to: &msg) { sendmsg(socket, $0, 0) }
                 if sent < 0 { throw FDChannelError.sendFailed(errno) }
+                // A short sendmsg is POSIX-legal (R10-minor): the ancillary
+                // fd rides whatever prefix landed, so send the REMAINDER of
+                // the frame through the same full-write loop `sendData` uses
+                // — otherwise the peer's scanner sees a truncated frame and
+                // desyncs, the exact bug class sendData already closes.
+                if sent < frameBytes.count {
+                    try sendData(Data(frame.dropFirst(sent)), over: socket)
+                }
             }
         }
     }
