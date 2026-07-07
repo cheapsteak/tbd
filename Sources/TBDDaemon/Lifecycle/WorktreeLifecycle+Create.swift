@@ -516,6 +516,24 @@ extension WorktreeLifecycle {
                     repo: repo, worktree: worktree, isResume: false,
                     scratchInstructions: config.scratchInstructions,
                     scratchRenamePrompt: config.scratchRenamePrompt)
+            let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+            if isResume {
+                // Pre-resume freshness: `claude --resume` only looks in the
+                // project dir derived from the current cwd. If the archived
+                // session's transcript lives elsewhere (worktree moved or
+                // promoted since it was written), mirror it in first
+                // (copy-if-newer, best-effort). No stored transcript path
+                // survives archival (archive deletes terminal rows), so the
+                // sync falls back to locating the jsonl by session ID across
+                // the projects root. Detached: the copy is synchronous
+                // filesystem work; the await keeps it ordered before spawn.
+                await TranscriptProjectDirSync.ensureSessionResumableDetached(
+                    sessionID: sessionUUID,
+                    worktreePath: worktreePath,
+                    projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
+                    storedTranscriptPath: nil
+                )
+            }
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 freshSessionID: isResume ? nil : sessionUUID,
@@ -527,7 +545,7 @@ extension WorktreeLifecycle {
                 profileModel: resolvedProfile?.model,
                 profileAwsRegion: resolvedProfile?.awsRegion,
                 profileAwsProfile: resolvedProfile?.awsProfile,
-                profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
+                profileConfigDir: profileConfigDir,
                 cmd: nil,
                 shellFallback: defaultShell,
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
@@ -634,6 +652,14 @@ extension WorktreeLifecycle {
             for sessionID in additionalArchivedClaudeSessions {
                 let plannedID = UUID()
                 createdTerminalIDs.append(plannedID)
+                let restoreProfileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+                // Same pre-resume freshness sync as the primary terminal above.
+                await TranscriptProjectDirSync.ensureSessionResumableDetached(
+                    sessionID: sessionID,
+                    worktreePath: worktreePath,
+                    projectsRoot: claudeProjectsRoot(profileConfigDirPath: restoreProfileConfigDir),
+                    storedTranscriptPath: nil
+                )
                 let spawn = ClaudeSpawnCommandBuilder.build(
                     resumeID: sessionID,
                     freshSessionID: nil,
@@ -645,7 +671,7 @@ extension WorktreeLifecycle {
                     profileModel: resolvedProfile?.model,
                     profileAwsRegion: resolvedProfile?.awsRegion,
                     profileAwsProfile: resolvedProfile?.awsProfile,
-                    profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
+                    profileConfigDir: restoreProfileConfigDir,
                     cmd: nil,
                     shellFallback: defaultShell,
                     settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(

@@ -56,6 +56,11 @@ public struct WorktreeLifecycle: Sendable {
     public let subscriptions: StateSubscriptionManager?
     public let modelProfileResolver: ModelProfileResolver?
     public let pendingQuestions: PendingQuestionStore
+    /// Routes ambient claude-projects-root resolution for the revive
+    /// transcript sync — injectable (mirroring `RPCRouter.configDirManager`)
+    /// so tests point it at a temp dir instead of falling back to the real
+    /// `~/.claude`.
+    public let configDirManager: ClaudeProfileConfigDirManager
     /// How long to wait for a blocking `preSession` hook before giving up and
     /// spawning the primary terminals anyway. Injectable for tests.
     public let preSessionTimeout: TimeInterval
@@ -94,6 +99,7 @@ public struct WorktreeLifecycle: Sendable {
         subscriptions: StateSubscriptionManager? = nil,
         modelProfileResolver: ModelProfileResolver? = nil,
         pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         preSessionTimeout: TimeInterval = WorktreeLifecycle.defaultPreSessionTimeout,
         preSessionPollInterval: TimeInterval = 0.5,
         processSignaller: ProcessSignaller = ProductionProcessSignaller(),
@@ -107,12 +113,28 @@ public struct WorktreeLifecycle: Sendable {
         self.subscriptions = subscriptions
         self.modelProfileResolver = modelProfileResolver
         self.pendingQuestions = pendingQuestions
+        self.configDirManager = configDirManager
         self.controlMode = nil
         self.preSessionTimeout = preSessionTimeout
         self.preSessionPollInterval = preSessionPollInterval
         self.processSignaller = processSignaller
         self.reaperGraceAttempts = reaperGraceAttempts
         self.reaperPollInterval = reaperPollInterval
+    }
+
+    /// Projects root for a revive spawn's resolved profile config dir path,
+    /// falling back to the lifecycle's (injectable) ambient claude dir.
+    /// Mirrors `RPCRouter.claudeProjectsRoot(profileConfigDirPath:)`: unlike
+    /// `TranscriptProjectDirSync.projectsRoot`, whose nil-profile fallback
+    /// constructs a default manager (real `~/.claude`), this routes through
+    /// `configDirManager` so tests isolate via the injection seam.
+    func claudeProjectsRoot(profileConfigDirPath: String?) -> URL {
+        if let path = profileConfigDirPath, !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+                .appendingPathComponent("projects", isDirectory: true)
+        }
+        return configDirManager.ambientConfigDirectory
+            .appendingPathComponent("projects", isDirectory: true)
     }
 
     /// The agent reaper composed from the injected tmux + signaller seams.

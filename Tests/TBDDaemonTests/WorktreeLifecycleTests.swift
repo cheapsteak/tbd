@@ -769,6 +769,62 @@ import Testing
     #expect(suspendedAfter?.claudeSessionID == fakeSessionID, "claudeSessionID must be preserved for suspended terminal")
 }
 
+/// Hibernated-but-not-legacy-suspended terminals (`hibernatedAt` set,
+/// `suspendedAt` nil) are parked and must be skipped by the dead-window pass
+/// exactly like legacy-suspended ones: a parked row's window being gone is
+/// expected, and the row is already what the pass would produce.
+///
+/// Regression guard for the old `suspendedAt == nil` filter, which passed
+/// hibernated rows through — refreshing the park timestamp on resumable rows
+/// and DELETING parked rows that aren't Claude-resumable.
+@Test func testReconcileHibernatedTerminalSkippedOnDeadWindow() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    // Every window reads as dead — the exact scenario the parking pass acts on.
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true }),
+        hooks: HookResolver()
+    )
+
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
+    // A worktree at the repo path so `git worktree list` reports it and
+    // reconcile doesn't archive it as missing.
+    let wt = try await db.worktrees.create(
+        repoID: repo.id, name: "wt", branch: "main",
+        path: repoDir.path, tmuxServer: serverName
+    )
+
+    let claude = try await db.terminals.create(
+        worktreeID: wt.id, tmuxWindowID: "@hib-claude", tmuxPaneID: "%hib-claude",
+        label: "claude", claudeSessionID: "sess-hib", kind: .claude
+    )
+    try await db.terminals.setHibernated(id: claude.id, sessionID: "sess-hib")
+    // A parked row that is NOT Claude-resumable: under the old filter this
+    // fell through to the delete branch and the parked row vanished.
+    let codex = try await db.terminals.create(
+        worktreeID: wt.id, tmuxWindowID: "@hib-codex", tmuxPaneID: "%hib-codex",
+        label: "Codex", claudeSessionID: "sess-codex", kind: .codex
+    )
+    try await db.terminals.setHibernated(id: codex.id, sessionID: "sess-codex")
+
+    try await lifecycle.reconcile(repoID: repo.id)
+
+    let claudeAfter = try await db.terminals.get(id: claude.id)
+    #expect(claudeAfter != nil, "hibernated claude terminal must survive reconcile")
+    #expect(claudeAfter?.hibernatedAt != nil, "hibernated claude must stay parked")
+    #expect(claudeAfter?.suspendedAt == nil, "hibernated-only row must not gain legacy suspendedAt")
+    #expect(claudeAfter?.claudeSessionID == "sess-hib")
+
+    let codexAfter = try await db.terminals.get(id: codex.id)
+    #expect(codexAfter != nil, "a parked non-Claude-resumable row must be skipped, not deleted")
+    #expect(codexAfter?.hibernatedAt != nil)
+}
+
 /// Server gone path (reboot): in dryRun mode serverExists → true, so this path
 /// cannot be directly triggered. Instead, this test seeds a stale windowID and
 /// verifies that when the server IS alive (dryRun), the stale window is treated

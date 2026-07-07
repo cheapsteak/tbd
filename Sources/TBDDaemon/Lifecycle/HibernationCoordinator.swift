@@ -21,6 +21,10 @@ public enum WakeResult: Equatable, Sendable {
     /// so a later retry can wake it; `reason` names the real failure instead
     /// of the misleading "Terminal not found".
     case respawnFailed(reason: String)
+    /// The worktree row exists but its directory is gone from disk — respawn
+    /// would silently land in $HOME. Carries the missing path so callers can
+    /// surface an actionable message instead of a generic "not found".
+    case worktreeMissing(path: String)
 }
 
 /// Owns session PARKING — the single unified "park a Claude session" feature
@@ -60,6 +64,10 @@ public actor HibernationCoordinator {
     private let detector: ClaudeStateDetector
     private let modelProfileResolver: ModelProfileResolver?
     private let subscriptions: StateSubscriptionManager?
+    /// Routes ambient claude-projects-root resolution for the wake transcript
+    /// sync — injectable (mirroring `RPCRouter.configDirManager`) so tests
+    /// point it at a temp dir instead of falling back to the real `~/.claude`.
+    private let configDirManager: ClaudeProfileConfigDirManager
     private let now: @Sendable () -> Date
 
     /// Per-terminal "first time we observed it idle-at-rest" marker, maintained
@@ -120,6 +128,7 @@ public actor HibernationCoordinator {
         tmux: TmuxManager,
         modelProfileResolver: ModelProfileResolver? = nil,
         subscriptions: StateSubscriptionManager? = nil,
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.db = db
@@ -127,7 +136,23 @@ public actor HibernationCoordinator {
         self.detector = ClaudeStateDetector(tmux: tmux)
         self.modelProfileResolver = modelProfileResolver
         self.subscriptions = subscriptions
+        self.configDirManager = configDirManager
         self.now = now
+    }
+
+    /// Projects root for a wake spawn's resolved profile config dir path,
+    /// falling back to the coordinator's (injectable) ambient claude dir.
+    /// Mirrors `RPCRouter.claudeProjectsRoot(profileConfigDirPath:)`: unlike
+    /// `TranscriptProjectDirSync.projectsRoot`, whose nil-profile fallback
+    /// constructs a default manager (real `~/.claude`), this routes through
+    /// `configDirManager` so tests isolate via the injection seam.
+    private func claudeProjectsRoot(profileConfigDirPath: String?) -> URL {
+        if let path = profileConfigDirPath, !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+                .appendingPathComponent("projects", isDirectory: true)
+        }
+        return configDirManager.ambientConfigDirectory
+            .appendingPathComponent("projects", isDirectory: true)
     }
 
     /// Wire the post-`ensureServer` hook (see `onServerCreated`). Set once by
@@ -347,6 +372,14 @@ public actor HibernationCoordinator {
         guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
             return .notFound
         }
+        // Never respawn into a missing directory: tmux's `-c` silently falls
+        // back to $HOME, and the resumed claude would neither find its session
+        // (resume is cwd-scoped) nor belong to this worktree. Leave the row
+        // parked so a retry after the path is restored can still wake it.
+        guard FileManager.default.fileExists(atPath: worktree.path) else {
+            logger.error("wake: worktree path missing on disk for terminal \(terminal.id, privacy: .public): \(worktree.path, privacy: .public) — refusing respawn (would fall back to $HOME)")
+            return .worktreeMissing(path: worktree.path)
+        }
 
         wakesInFlight.insert(terminalID)
         defer { wakesInFlight.remove(terminalID) }
@@ -391,6 +424,21 @@ public actor HibernationCoordinator {
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: terminal.id.uuidString
         )
+        let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+        // Pre-resume freshness: if the worktree was moved/promoted while this
+        // session was parked, its transcript still lives under the OLD munged
+        // project dir; the cwd-scoped `claude --resume` below only checks the
+        // dir derived from the CURRENT path. Mirror the jsonl (+ subagents)
+        // there first — copy-if-newer, best-effort, never rewrites the row's
+        // transcriptPath. Detached variant: the recursive copy must not run on
+        // this actor's serial executor; the await still completes before the
+        // respawn below.
+        await TranscriptProjectDirSync.ensureSessionResumableDetached(
+            sessionID: sessionID,
+            worktreePath: worktree.path,
+            projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
+            storedTranscriptPath: terminal.transcriptPath
+        )
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
@@ -402,7 +450,7 @@ public actor HibernationCoordinator {
             profileModel: resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
-            profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
+            profileConfigDir: profileConfigDir,
             cmd: nil,
             shellFallback: defaultShell,
             settingsOverlayPath: overlayPath,

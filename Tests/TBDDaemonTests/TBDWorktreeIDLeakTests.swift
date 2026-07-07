@@ -58,6 +58,13 @@ private func installCodexTestHomeOverride() {
     _ = codexTestHomePath
 }
 
+/// terminal.create / terminal.recreateWindow refuse to spawn into a missing
+/// directory (tmux would silently fall back to $HOME), so fixtures must
+/// materialize their fake worktree paths on disk. Idempotent.
+private func ensureWorktreeDir(_ path: String) throws {
+    try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+}
+
 // MARK: - Fix 1: Daemon scrubInheritedTBDEnv
 
 @Test("Daemon.scrubInheritedTBDEnv clears inherited routing vars")
@@ -124,6 +131,7 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
     let repo = try await db.repos.create(
         path: "/tmp/fake-repo-recreate", displayName: "test", defaultBranch: "main"
     )
+    try ensureWorktreeDir("/tmp/fake-repo-recreate/wt-recreate")
     let wt = try await db.worktrees.create(
         repoID: repo.id,
         name: "wt-recreate",
@@ -175,6 +183,7 @@ func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
     let repo = try await db.repos.create(
         path: "/tmp/fake-repo-recreate-codex", displayName: "test", defaultBranch: "main"
     )
+    try ensureWorktreeDir("/tmp/fake-repo-recreate-codex/wt-recreate-codex")
     let wt = try await db.worktrees.create(
         repoID: repo.id,
         name: "wt-recreate-codex",
@@ -351,6 +360,7 @@ func testHandleTerminalRecreateWindowRebuildsShellAsShell() async throws {
     let repo = try await db.repos.create(
         path: "/tmp/fake-repo-recreate-shell", displayName: "test", defaultBranch: "main"
     )
+    try ensureWorktreeDir("/tmp/fake-repo-recreate-shell/wt-recreate-shell")
     let wt = try await db.worktrees.create(
         repoID: repo.id,
         name: "wt-recreate-shell",
@@ -479,6 +489,7 @@ func testHandleTerminalCreateRegressionWorktreeID() async throws {
     let repo = try await db.repos.create(
         path: "/tmp/fake-repo-create", displayName: "test", defaultBranch: "main"
     )
+    try ensureWorktreeDir("/tmp/fake-repo-create/wt-create")
     let wt = try await db.worktrees.create(
         repoID: repo.id,
         name: "wt-create",
@@ -525,6 +536,7 @@ func testHandleTerminalCreateCodexLaunchCommand() async throws {
     let repo = try await db.repos.create(
         path: "/tmp/fake-repo-create-codex", displayName: "test", defaultBranch: "main"
     )
+    try ensureWorktreeDir("/tmp/fake-repo-create-codex/wt-create-codex")
     let wt = try await db.worktrees.create(
         repoID: repo.id,
         name: "wt-create-codex",
@@ -578,6 +590,7 @@ func testHandleTerminalCreateCodexInitialPrompt() async throws {
     let repo = try await db.repos.create(
         path: "/tmp/fake-repo-create-codex-prompt", displayName: "test", defaultBranch: "main"
     )
+    try ensureWorktreeDir("/tmp/fake-repo-create-codex-prompt/wt-create-codex-prompt")
     let wt = try await db.worktrees.create(
         repoID: repo.id,
         name: "wt-create-codex-prompt",

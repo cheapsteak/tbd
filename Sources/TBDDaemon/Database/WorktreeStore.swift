@@ -712,6 +712,58 @@ public struct WorktreeStore: Sendable {
         }
     }
 
+    /// The entire scratch-promote row migration in ONE write transaction:
+    /// terminals re-parented, tab rows re-pointed, the main worktree inherits
+    /// the scratch tmux server + tab order/selection, and the scratch row is
+    /// retired (archived + `promotedToRepoID`). Any failure rolls the whole
+    /// thing back, leaving the pre-promote state intact — in particular the
+    /// scratch row stays un-promoted (retryable) and its terminals stay
+    /// parented to it, so a later `scratch.delete` can never tmux-kill live
+    /// windows that a half-migration left behind. DB-only: tmux windows and
+    /// the processes inside them are never touched — live sessions keep
+    /// running throughout. File copies (Claude project-dir snapshot) are the
+    /// caller's job, outside this transaction (idempotent copy-if-newer).
+    public func promoteScratchMigration(
+        scratchID: UUID,
+        mainWorktreeID: UUID,
+        repoID: UUID,
+        tmuxServer: String
+    ) async throws {
+        try await writer.write { db in
+            // Re-parent terminal + tab rows first, guards after: a missing row
+            // then exercises the rollback of these UPDATEs (and tests assert
+            // exactly that), rather than short-circuiting before any mutation.
+            try db.execute(
+                sql: "UPDATE terminal SET worktreeID = ? WHERE worktreeID = ?",
+                arguments: [mainWorktreeID.uuidString, scratchID.uuidString]
+            )
+            try db.execute(
+                sql: "UPDATE tab SET worktreeID = ? WHERE worktreeID = ?",
+                arguments: [mainWorktreeID.uuidString, scratchID.uuidString]
+            )
+            guard let scratch = try WorktreeRecord.fetchOne(db, key: scratchID.uuidString) else {
+                throw DatabaseError(message: "Scratch worktree not found: \(scratchID)")
+            }
+            guard var main = try WorktreeRecord.fetchOne(db, key: mainWorktreeID.uuidString) else {
+                throw DatabaseError(message: "Main worktree not found: \(mainWorktreeID)")
+            }
+            // Main worktree inherits the tmux server the live panes run on,
+            // plus the scratch row's tab order and selection.
+            main.tmuxServer = tmuxServer
+            main.tabOrder = scratch.tabOrder
+            main.activeTabID = scratch.activeTabID
+            try main.update(db)
+            // Retire the scratch row: archived + promotion pointer together,
+            // so nothing can resolve its stale path as active again and the
+            // skip-trash guard in scratch.delete sees the pointer atomically.
+            var retired = scratch
+            retired.status = WorktreeStatus.archived.rawValue
+            retired.archivedAt = Date()
+            retired.promotedToRepoID = repoID.uuidString
+            try retired.update(db)
+        }
+    }
+
     private static func decodeTabOrder(_ json: String) -> [UUID] {
         guard let data = json.data(using: .utf8) else { return [] }
         guard let strings = try? JSONDecoder().decode([String].self, from: data) else { return [] }

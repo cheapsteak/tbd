@@ -35,6 +35,14 @@ public final class RPCRouter: Sendable {
     /// post-construction wiring. `nil` for unit tests / HTTP-only paths, which
     /// report 0.
     public nonisolated(unsafe) var connectedClientsProvider: (@Sendable () -> Int)?
+    /// Test-only injection seam: when set, `handleScratchPromote` awaits this
+    /// immediately before the row migration (`promoteScratchMigration`). A
+    /// throw simulates a mid-promote migration failure at the worst moment —
+    /// AFTER the folder move and repo registration succeeded — so RPC-level
+    /// tests can drive the full handler path and assert that both non-DB side
+    /// effects get rolled back. Never set in production; when nil (always,
+    /// outside tests) the promote path is unchanged.
+    nonisolated(unsafe) var scratchPromoteMigrationFailureHook: (@Sendable () async throws -> Void)?
     public let pendingQuestions: PendingQuestionStore
     public let repoSerializer: RepoSerializer
     public let configDirManager: ClaudeProfileConfigDirManager
@@ -94,7 +102,7 @@ public final class RPCRouter: Sendable {
         self.modelProfileResolver = resolvedModelProfileResolver
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
-            subscriptions: subscriptions
+            subscriptions: subscriptions, configDirManager: configDirManager
         )
         self.usageFetcher = usageFetcher
         self.pendingQuestions = pendingQuestions
