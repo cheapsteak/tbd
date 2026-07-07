@@ -41,11 +41,25 @@ public struct TerminalHibernationDelta: Codable, Sendable {
     /// Current keep-warm pin state (carried on every hibernation delta so a
     /// keep-warm toggle can reuse this same channel).
     public let keepWarm: Bool
-    public init(terminalID: UUID, worktreeID: UUID, hibernated: Bool, keepWarm: Bool) {
+    /// The terminal's CURRENT tmux window/pane ids, carried on wake so the app
+    /// updates its cached row together with the un-park flag. Without them, a
+    /// wake that RECREATED the window (post-reboot) flips `hibernated` first
+    /// and the terminal view rebuilds keyed on the DEAD window id — the failed
+    /// attach then triggers the dead-window recreate path, which kills the
+    /// just-spawned claude and re-parks the row (wake flap). Optional with a
+    /// nil default so payloads from older daemons still decode.
+    public let tmuxWindowID: String?
+    public let tmuxPaneID: String?
+    public init(
+        terminalID: UUID, worktreeID: UUID, hibernated: Bool, keepWarm: Bool,
+        tmuxWindowID: String? = nil, tmuxPaneID: String? = nil
+    ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.hibernated = hibernated
         self.keepWarm = keepWarm
+        self.tmuxWindowID = tmuxWindowID
+        self.tmuxPaneID = tmuxPaneID
     }
 }
 

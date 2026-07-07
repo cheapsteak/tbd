@@ -55,4 +55,33 @@ struct WakeOnFocusDecisionTests {
 
         #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == nil)
     }
+
+    // MARK: - Wake-failure alert coalescing (modal-spam fix)
+    //
+    // After a reboot kills every tmux server, each wake failure used to fire
+    // its own modal — alert spam. `wakeTerminal` no longer alerts at all; it
+    // RETURNS the failure message. The automatic focus path ignores it
+    // (silent — its "no alert" branch is structural), and the explicit Wake
+    // menu action folds its batch of failures through this pure function
+    // into at most ONE modal per user action. All three branches covered.
+
+    /// No failures → nil → no alert shown.
+    @Test func noWakeFailuresProducesNoAlert() {
+        #expect(AppState.coalescedWakeFailureMessage(failures: []) == nil)
+    }
+
+    /// A single failure → the bare message, no count prefix.
+    @Test func singleWakeFailureShowsBareMessage() {
+        #expect(AppState.coalescedWakeFailureMessage(failures: ["tmux window @1 is gone"])
+                == "Couldn't wake session: tmux window @1 is gone")
+    }
+
+    /// Multiple failures → ONE message carrying the count and the first
+    /// failure — never one modal per terminal.
+    @Test func multipleWakeFailuresCoalesceIntoOneMessage() {
+        let message = AppState.coalescedWakeFailureMessage(
+            failures: ["window @1 gone", "window @2 gone", "window @3 gone"]
+        )
+        #expect(message == "Couldn't wake 3 sessions: window @1 gone")
+    }
 }

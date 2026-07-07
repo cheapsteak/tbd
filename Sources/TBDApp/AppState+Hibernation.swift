@@ -47,8 +47,17 @@ extension AppState {
     /// Wake a hibernated terminal (respawn `claude --resume`). Idempotent and
     /// singleflighted on the app side: a second call while one is in flight is
     /// dropped, so double-focus never fires two respawns.
-    func wakeTerminal(terminalID: UUID, worktreeID: UUID) async {
-        guard !wakeInFlight.contains(terminalID) else { return }
+    ///
+    /// Never shows an alert itself — it returns the failure message (nil on
+    /// success) so CALL SITES decide how to surface it: the explicit Wake menu
+    /// action shows ONE coalesced alert for its whole batch (see
+    /// `coalescedWakeFailureMessage`), while automatic focus-wakes stay silent
+    /// — otherwise every worktree focus after a reboot (which kills all tmux
+    /// windows) fired a modal per parked terminal. `userInitiated` drives the
+    /// failure log level (explicit action → error; background → warning).
+    @discardableResult
+    func wakeTerminal(terminalID: UUID, worktreeID: UUID, userInitiated: Bool) async -> String? {
+        guard !wakeInFlight.contains(terminalID) else { return nil }
         wakeInFlight.insert(terminalID)
         defer { wakeInFlight.remove(terminalID) }
         do {
@@ -57,10 +66,29 @@ extension AppState {
                 terminalID: terminalID, cols: size.cols, rows: size.rows
             )
             await refreshTerminals(worktreeID: worktreeID)
+            return nil
         } catch {
-            logger.error("Failed to wake terminal: \(error, privacy: .public)")
-            showAlert("Couldn't wake session: \(error.localizedDescription)", isError: true)
+            if userInitiated {
+                logger.error("Failed to wake terminal \(terminalID, privacy: .public): \(error, privacy: .public)")
+            } else {
+                logger.warning("Automatic wake failed for terminal \(terminalID, privacy: .public) (alert suppressed): \(error, privacy: .public)")
+            }
+            return error.localizedDescription
         }
+    }
+
+    /// Pure decision/formatting seam behind the explicit Wake menu action's
+    /// COALESCED failure alert: `nil` for no failures (no alert), the bare
+    /// message for a single failure, and a count-prefixed message when several
+    /// wakes failed — one modal per user action, never one per terminal.
+    /// Extracted as a pure function so every branch is unit-tested without a
+    /// live `DaemonClient` (same pattern as `terminalIDToWakeOnFocus`).
+    static func coalescedWakeFailureMessage(failures: [String]) -> String? {
+        guard let first = failures.first else { return nil }
+        if failures.count == 1 {
+            return "Couldn't wake session: \(first)"
+        }
+        return "Couldn't wake \(failures.count) sessions: \(first)"
     }
 
     /// Toggle a terminal's keep-warm pin (exempts it from auto-hibernation).
@@ -98,7 +126,7 @@ extension AppState {
     func wakeHibernatedTerminalsOnFocus(worktreeID: UUID) {
         guard let target = terminalIDToWakeOnFocus(worktreeID: worktreeID) else { return }
         // Wake exactly one; never a parallel fan-out (see the storm rationale above).
-        Task { await wakeTerminal(terminalID: target, worktreeID: worktreeID) }
+        Task { await wakeTerminal(terminalID: target, worktreeID: worktreeID, userInitiated: false) }
     }
 
     /// Pure decision behind `wakeHibernatedTerminalsOnFocus`: the single parked

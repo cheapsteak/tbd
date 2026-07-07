@@ -1079,6 +1079,17 @@ final class AppState: ObservableObject {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
+        // Apply fresh tmux ids (carried on wake, especially after a window
+        // RECREATE) together with the un-park flip. The terminal view keys on
+        // `id-tmuxWindowID-isParked`; flipping isParked while the cached row
+        // still points at the dead window would rebuild the view against that
+        // dead window, and its failed attach re-parks the row (wake flap).
+        if let windowID = delta.tmuxWindowID {
+            terminals[delta.worktreeID]?[idx].tmuxWindowID = windowID
+        }
+        if let paneID = delta.tmuxPaneID {
+            terminals[delta.worktreeID]?[idx].tmuxPaneID = paneID
+        }
         terminals[delta.worktreeID]?[idx].hibernatedAt = delta.hibernated ? Date() : nil
         terminals[delta.worktreeID]?[idx].keepWarm = delta.keepWarm
     }
