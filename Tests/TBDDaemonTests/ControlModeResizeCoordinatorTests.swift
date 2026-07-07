@@ -18,6 +18,29 @@ struct ControlModeResizeCoordinatorTests {
         var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
     }
 
+    /// Thread-safe monotonic call counter for the provider seam.
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func next() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    /// One-shot async gate: `wait()` parks until `open()`; opening first is fine.
+    private actor ProviderGate {
+        private var opened = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            if opened { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+        func open() {
+            opened = true
+            for waiter in waiters { waiter.resume() }
+            waiters.removeAll()
+        }
+    }
+
     /// Coordinator whose single server "srv" resolves to a client backed by
     /// `recorder`; an unknown server resolves to nil. The client is returned so
     /// tests can feed reply blocks (`%end`/`%error`) back into it.
@@ -111,6 +134,48 @@ struct ControlModeResizeCoordinatorTests {
         #expect(recorder.writes.isEmpty)
         // No fence opened → layout changes for that window still apply.
         #expect(coordinator.shouldApplyLayoutChange(server: "nope", windowID: "@0") == true)
+    }
+
+    @Test("concurrent resizes are latest-wins across the provider hop — the older size never lands last (R7-M1)")
+    func concurrentResizeIsLatestWins() async throws {
+        // SocketServer spawns an unstructured Task per RPC, so two resize()
+        // calls for one window can overlap; the OLDER call's provider hop
+        // resolving LAST must not put the older geometry on the wire last.
+        let recorder = Recorder()
+        let client = TmuxControlCommandClient(
+            writeLine: { recorder.record($0) },
+            onFatalError: {})
+        let gate = ProviderGate()
+        let calls = CallCounter()
+        let coordinator = ControlModeResizeCoordinator(
+            commandProvider: { _ in
+                // The FIRST (older) call parks until the test releases it;
+                // the second resolves immediately and sends first.
+                if calls.next() == 1 { await gate.wait() }
+                return client
+            })
+
+        // Older resize: stamped first, then suspends in the provider hop.
+        let older = Task { await coordinator.resize(server: "srv", windowID: "@0", cols: 80, rows: 24) }
+        #expect(await waitUntil({ calls.count == 1 }, timeout: .seconds(15)),
+                "older resize never reached the provider")
+
+        // Newer resize: resolves and sends while the older is still parked.
+        await coordinator.resize(server: "srv", windowID: "@0", cols: 120, rows: 40)
+        #expect(recorder.writes.count == 1)
+        #expect(recorder.writes.first?.hasPrefix("resize-window -t @0 -x 120 -y 40\n") == true)
+
+        // Release the older call: it must DROP (a newer size was stamped
+        // since), not send 80x24 after 120x40.
+        await gate.open()
+        await older.value
+        #expect(recorder.writes.count == 1,
+                "the superseded resize must be dropped, not sent after the newer one")
+
+        // Fence bookkeeping stays balanced: only the sent resize opened a
+        // fence, so completing its two blocks closes suppression fully.
+        await succeed(client, 2)
+        #expect(coordinator.shouldApplyLayoutChange(server: "srv", windowID: "@0") == true)
     }
 
     @Test("garbage geometry is clamped into sane bounds before it reaches tmux")

@@ -38,6 +38,18 @@ final class ControlModeResizeCoordinator: @unchecked Sendable {
     /// layout notifications for that window are stale echoes to be suppressed.
     /// Entries are removed at 0 to keep the map small.
     private var outstanding: [WindowKey: Int] = [:]
+    /// Latest-wins arbitration across the provider hop (R7-M1). Each `resize()`
+    /// stamps a globally monotonic sequence per window AT ENTRY, before the
+    /// `await commandProvider(...)` suspension; after the hop it re-checks and
+    /// DROPS itself if a newer resize has been stamped since — SocketServer
+    /// spawns an unstructured Task per RPC, so two concurrent calls can resolve
+    /// the hop out of order, and without this the OLDER geometry lands on the
+    /// wire last and sticks. Entries are cleared when the stamping call is done
+    /// with them (fence completion, nil-provider drop) to keep the map small;
+    /// the counter is global and never reset, so a fresh stamp after removal
+    /// is still strictly newer.
+    private var latestSequence: [WindowKey: UInt64] = [:]
+    private var sequenceCounter: UInt64 = 0
 
     /// Sane geometry bounds. Garbage sizes from a mid-animation view (or a wildly
     /// wrong debounce sample) must not wedge tmux, which historically misbehaves
@@ -54,16 +66,40 @@ final class ControlModeResizeCoordinator: @unchecked Sendable {
 
     /// Issue a `resize-window` for `windowID` and open an echo fence. Called on
     /// the `pane.resize` RPC handler's task, once per debounced app resize.
+    ///
+    /// Latest-wins across the provider hop (R7-M1): concurrent calls for one
+    /// window stamp a sequence before suspending; a call that resolves the hop
+    /// only to find a newer stamp drops itself — the newer call sends. The
+    /// residual window (a newer call completing its ENTIRE send between this
+    /// call's re-check and its `sendList` enqueue) is far narrower than the
+    /// provider hop and additionally guarded app-side by
+    /// `ControlModeResizeSerializer`'s one-in-flight discipline.
     func resize(server: String, windowID: String, cols: Int, rows: Int) async {
         let clampedCols = min(max(cols, Self.colBounds.lowerBound), Self.colBounds.upperBound)
         let clampedRows = min(max(rows, Self.rowBounds.lowerBound), Self.rowBounds.upperBound)
 
+        let key = WindowKey(server: server, windowID: windowID)
+        // Stamp BEFORE the provider hop — this is what a concurrent newer
+        // resize's re-check observes.
+        let sequence = stampSequence(key)
+
         guard let client = await commandProvider(server) else {
             // Unknown/down server: nothing to resize. The counter is untouched.
             logger.debug("no command client for server \(server, privacy: .public); dropping resize")
+            clearSequence(key, ifCurrent: sequence)
             return
         }
-        let key = WindowKey(server: server, windowID: windowID)
+        guard isCurrentSequence(key, sequence) else {
+            // A newer resize was stamped while this one was suspended in the
+            // provider hop; sending now would put the OLDER size on the wire
+            // last. Drop — the newer call sends. Counter untouched (only
+            // sends that proceed open a fence).
+            logger.debug("""
+                dropping superseded resize for \(windowID, privacy: .public) \
+                on \(server, privacy: .public) (a newer size was stamped mid-hop)
+                """)
+            return
+        }
         // Increment AT SEND so a layout echo that races back before the fence
         // completes is already suppressed.
         increment(key)
@@ -95,6 +131,9 @@ final class ControlModeResizeCoordinator: @unchecked Sendable {
             tolerateErrors: true
         ) { [weak self] _ in
             self?.decrement(key)
+            // This send's stamp is spent; clear it unless a newer resize has
+            // re-stamped the window (its own completion clears its own).
+            self?.clearSequence(key, ifCurrent: sequence)
         }
         // ONE stream write: `resize-window` THEN the fence are atomic in the
         // FIFO, so tmux processes the resize (emitting its layout echoes) strictly
@@ -109,6 +148,33 @@ final class ControlModeResizeCoordinator: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return (outstanding[WindowKey(server: server, windowID: windowID)] ?? 0) == 0
+    }
+
+    /// Stamp `key` with the next global sequence and return it (R7-M1).
+    private func stampSequence(_ key: WindowKey) -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        sequenceCounter += 1
+        latestSequence[key] = sequenceCounter
+        return sequenceCounter
+    }
+
+    /// Whether `sequence` is still the newest stamp for `key` — i.e. no
+    /// concurrent resize entered for this window since we stamped.
+    private func isCurrentSequence(_ key: WindowKey, _ sequence: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return latestSequence[key] == sequence
+    }
+
+    /// Remove `key`'s stamp iff it is still `sequence`, so windows that stop
+    /// resizing don't accumulate entries forever. Never touches a newer stamp.
+    private func clearSequence(_ key: WindowKey, ifCurrent sequence: UInt64) {
+        lock.lock()
+        if latestSequence[key] == sequence {
+            latestSequence.removeValue(forKey: key)
+        }
+        lock.unlock()
     }
 
     private func increment(_ key: WindowKey) {
