@@ -110,6 +110,86 @@ struct ScratchPromoteReconcileTests {
         #expect(claudeAfter.suspendedAt == nil)
     }
 
+    /// After the promoted main worktree is archived, its row is the only
+    /// remaining pointer to the inherited scratch server. With nothing live
+    /// referencing that server anywhere (the scratch row was archived by the
+    /// promote itself), reconcile's cleanup pass must kill it — before this,
+    /// the pass only ever considered the canonical per-repo server, so the
+    /// inherited server lingered forever.
+    @Test func reconcileKillsInheritedServerOnceNothingReferencesIt() async throws {
+        let (home, cleanup) = isolate(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db, home: home)
+        let promoted = try await promoteScratchWithTerminals(db: db, router: router, home: home)
+
+        try await db.worktrees.updateStatus(id: promoted.mainWorktree.id, status: .archived)
+
+        let recorder = RecordedTmux()
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(),
+            tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorder.append($0) }),
+            hooks: HookResolver())
+        try await lifecycle.reconcile(repoID: promoted.repoID)
+
+        let serverKills = recorder.snapshot().filter { $0.contains("kill-server") }
+        #expect(serverKills.contains { $0.contains(promoted.scratch.tmuxServer) },
+                "the inherited scratch server must be killed once no live worktree row references it")
+    }
+
+    /// The scratch server is SHARED: every scratch space (and every promoted
+    /// repo's main worktree) runs on the one server derived from the scratch
+    /// base dir. When the archived promoted main's windows linger there but
+    /// another scratch space is still live on it, reconcile must sweep only
+    /// the untracked windows and leave the server — and the other space's
+    /// live window — alone.
+    @Test func reconcileSweepsArchivedMainWindowsButSparesSharedScratchServer() async throws {
+        let (home, cleanup) = isolate(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db, home: home)
+        let promoted = try await promoteScratchWithTerminals(db: db, router: router, home: home)
+
+        // A second scratch space, still live on the same shared server.
+        let created = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
+        let otherScratch = try created.decodeResult(Worktree.self)
+        #expect(otherScratch.tmuxServer == promoted.scratch.tmuxServer,
+                "sanity: scratch spaces share one tmux server")
+        let liveTerminal = try await db.terminals.create(
+            worktreeID: otherScratch.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
+            label: "shell", kind: .shell)
+
+        try await db.worktrees.updateStatus(id: promoted.mainWorktree.id, status: .archived)
+
+        let scratchServer = promoted.scratch.tmuxServer
+        let recorder = RecordedTmux()
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(),
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunRecorder: { recorder.append($0) },
+                dryRunListWindows: { server, _ in
+                    server == scratchServer
+                        ? [(windowID: "@1", paneID: "%1"),
+                           (windowID: "@2", paneID: "%2"),
+                           (windowID: "@9", paneID: "%9")]
+                        : []
+                }),
+            hooks: HookResolver())
+        try await lifecycle.reconcile(repoID: promoted.repoID)
+
+        let cmds = recorder.snapshot()
+        #expect(!cmds.contains { $0.contains("kill-server") && $0.contains(scratchServer) },
+                "a shared server still referenced by a live scratch space must survive")
+        let windowKills = cmds.filter { $0.contains("kill-window") }
+        #expect(windowKills.contains { $0.contains("@1") && $0.contains(scratchServer) },
+                "the archived promoted main's orphaned windows must be swept")
+        #expect(windowKills.contains { $0.contains("@2") })
+        #expect(!windowKills.contains { $0.contains("@9") },
+                "the live scratch space's tracked window must be spared")
+        // And the live scratch space's terminal row is untouched.
+        #expect(try await db.terminals.get(id: liveTerminal.id) != nil)
+    }
+
     @Test func reconcileStillCanonicalizesWhenStoredServerHasNoLiveWindows() async throws {
         let (home, cleanup) = isolate(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
@@ -133,6 +213,22 @@ struct ScratchPromoteReconcileTests {
         #expect(claudeAfter.hibernatedAt != nil)          // parked, session preserved
         #expect(claudeAfter.claudeSessionID == "sess-1")
         #expect(try await db.terminals.get(id: promoted.shell.id) == nil)  // nothing to preserve
+    }
+
+    /// Thread-safe collector for TmuxManager dryRun recorded argv.
+    private final class RecordedTmux: @unchecked Sendable {
+        private let lock = NSLock()
+        private var commands: [[String]] = []
+
+        func append(_ args: [String]) {
+            lock.lock(); defer { lock.unlock() }
+            commands.append(args)
+        }
+
+        func snapshot() -> [[String]] {
+            lock.lock(); defer { lock.unlock() }
+            return commands
+        }
     }
 }
 

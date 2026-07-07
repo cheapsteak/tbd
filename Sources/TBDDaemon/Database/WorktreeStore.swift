@@ -712,29 +712,6 @@ public struct WorktreeStore: Sendable {
         }
     }
 
-    /// Move all tab state from one worktree row to another in one transaction:
-    /// re-points `tab` rows (the table has no FK to `worktree`; see TabStore's
-    /// cleanup note) and copies the source row's `tabOrder` + `activeTabID`
-    /// columns onto the destination row. Used by scratch-promote to carry tab
-    /// labels, order, and selection onto the new repo's main worktree. Lives
-    /// here rather than TabStore because `tabOrder`/`activeTabID` are worktree
-    /// columns and the `tab` UPDATE must ride the same transaction.
-    public func migrateTabState(from sourceWorktreeID: UUID, to destWorktreeID: UUID) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE tab SET worktreeID = ? WHERE worktreeID = ?",
-                arguments: [destWorktreeID.uuidString, sourceWorktreeID.uuidString]
-            )
-            guard let source = try WorktreeRecord.fetchOne(db, key: sourceWorktreeID.uuidString),
-                  var dest = try WorktreeRecord.fetchOne(db, key: destWorktreeID.uuidString) else {
-                return
-            }
-            dest.tabOrder = source.tabOrder
-            dest.activeTabID = source.activeTabID
-            try dest.update(db)
-        }
-    }
-
     /// The entire scratch-promote row migration in ONE write transaction:
     /// terminals re-parented, tab rows re-pointed, the main worktree inherits
     /// the scratch tmux server + tab order/selection, and the scratch row is
