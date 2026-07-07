@@ -11,7 +11,7 @@ struct StatusBarView: View {
     private var selectedWorktreeInfo: (path: String, repoID: UUID?)? {
         guard appState.selectedWorktreeIDs.count == 1,
               let id = appState.selectedWorktreeIDs.first,
-              let worktree = appState.worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
+              let worktree = appState.findWorktree(id: id),
               !worktree.path.isEmpty else { return nil }
         return (worktree.path, worktree.repoID)
     }
@@ -63,6 +63,7 @@ struct StatusBarView: View {
     nonisolated static func focusLabel(
         selectedWorktreeIDs: Set<UUID>,
         worktrees: [UUID: [Worktree]],
+        scratchWorktrees: [Worktree],
         repos: [Repo],
         selectedRepoID: UUID?
     ) -> String? {
@@ -72,7 +73,7 @@ struct StatusBarView: View {
                   let repo = repos.first(where: { $0.id == repoID }) else { return nil }
             return repo.displayName
         } else if count == 1, let id = selectedWorktreeIDs.first {
-            let allWorktrees = worktrees.values.flatMap { $0 }
+            let allWorktrees = worktrees.values.flatMap { $0 } + scratchWorktrees
             guard let wt = allWorktrees.first(where: { $0.id == id }) else { return nil }
             if let repo = repos.first(where: { $0.id == wt.repoID }) {
                 return "\(repo.displayName) / \(wt.displayName)"
@@ -116,6 +117,7 @@ struct StatusBarView: View {
             if let label = Self.focusLabel(
                 selectedWorktreeIDs: appState.selectedWorktreeIDs,
                 worktrees: appState.worktrees,
+                scratchWorktrees: appState.scratchWorktrees,
                 repos: appState.repos,
                 selectedRepoID: appState.selectedRepoID
             ) {

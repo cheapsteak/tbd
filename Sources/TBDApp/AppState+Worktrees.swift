@@ -166,7 +166,7 @@ extension AppState {
 
     /// Archive a worktree.
     func archiveWorktree(id: UUID, force: Bool = false) async {
-        let worktreeName = worktrees.values.flatMap { $0 }.first { $0.id == id }?.displayName ?? "worktree"
+        let worktreeName = findWorktree(id: id)?.displayName ?? "worktree"
         do {
             try await daemonClient.archiveWorktree(id: id, force: force)
             removeArchivedWorktreeFromState(id: id)
@@ -363,9 +363,7 @@ extension AppState {
             return
         }
 
-        let activeMatch = worktrees.values
-            .flatMap { $0 }
-            .contains(where: { $0.id == id })
+        let activeMatch = findWorktree(id: id) != nil
         if activeMatch {
             navigateToActiveWorktree(id, terminalID: terminalID)
         } else {

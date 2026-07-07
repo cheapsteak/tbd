@@ -36,6 +36,7 @@ struct StatusBarFocusLabelTests {
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [wtID],
             worktrees: [repoID: [wt]],
+            scratchWorktrees: [],
             repos: [repo],
             selectedRepoID: nil
         )
@@ -52,11 +53,36 @@ struct StatusBarFocusLabelTests {
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [wtID],
             worktrees: [unknownRepoID: [wt]],
+            scratchWorktrees: [],
             repos: [],  // no repos — lookup will fail
             selectedRepoID: nil
         )
 
         #expect(label == "feat-branch")
+    }
+
+    @Test("single scratch-space selection resolves via scratchWorktrees")
+    func singleScratchSelection() {
+        let wtID = UUID()
+        let scratch = Worktree(
+            id: wtID,
+            repoID: nil,
+            name: "scratch-1",
+            displayName: "Scratch 1",
+            branch: "main",
+            path: "/tmp/scratch-1",
+            tmuxServer: "tmux-\(wtID.uuidString)"
+        )
+
+        let label = StatusBarView.focusLabel(
+            selectedWorktreeIDs: [wtID],
+            worktrees: [:],
+            scratchWorktrees: [scratch],
+            repos: [],
+            selectedRepoID: nil
+        )
+
+        #expect(label == "Scratch 1")
     }
 
     @Test("multi-selection shows count label")
@@ -68,6 +94,7 @@ struct StatusBarFocusLabelTests {
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: Set(ids),
             worktrees: [repoID: worktrees],
+            scratchWorktrees: [],
             repos: [],
             selectedRepoID: nil
         )
@@ -83,6 +110,7 @@ struct StatusBarFocusLabelTests {
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [],
             worktrees: [:],
+            scratchWorktrees: [],
             repos: [repo],
             selectedRepoID: repoID
         )
@@ -95,6 +123,7 @@ struct StatusBarFocusLabelTests {
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [],
             worktrees: [:],
+            scratchWorktrees: [],
             repos: [],
             selectedRepoID: nil
         )
@@ -107,6 +136,7 @@ struct StatusBarFocusLabelTests {
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [],
             worktrees: [:],
+            scratchWorktrees: [],
             repos: [],
             selectedRepoID: UUID()  // unknown ID
         )

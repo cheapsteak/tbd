@@ -242,7 +242,7 @@ final class AppState: ObservableObject {
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
         guard let id = selectedWorktreeIDs.first else { return nil }
-        return worktrees.values.flatMap { $0 }.first { $0.id == id }
+        return findWorktree(id: id)
     }
 
     /// All pinned terminals across all worktrees, sorted by pinnedAt.

@@ -19,7 +19,8 @@ import TBDShared
 /// `PinnedTerminalCell` (PinnedTerminalDock.swift) previously hand-rolled a
 /// worktrees-dict-only lookup, so pins from scratch spaces resolved to nil and
 /// the cell rendered "Loading..." forever. It now resolves through
-/// `findWorktree`, which this suite covers.
+/// `findWorktree`. This suite covers the `findWorktree` helper itself
+/// (including its scratch branch); the SwiftUI cell wiring is not under test.
 ///
 /// Constructs `AppState(userDefaults:)` against a unique throwaway suite —
 /// `UserDefaults.standard` on this unbundled executable is the developer's real
