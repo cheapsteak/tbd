@@ -36,19 +36,12 @@ enum TranscriptProjectDirSync {
         return projectsRoot.appendingPathComponent(munged, isDirectory: true)
     }
 
-    /// Projects root for a spawn's resolved profile config dir path. `nil` (an
-    /// ambient spawn) falls back to the ambient host claude dir (`~/.claude`,
-    /// honoring the `TBD_CLAUDE_HOST_HOME` test-isolation override). Handler
-    /// code on `RPCRouter` should prefer `claudeProjectsRoot(...)` which routes
-    /// through the router's injectable `configDirManager`.
-    static func projectsRoot(profileConfigDirPath: String?) -> URL {
-        if let path = profileConfigDirPath, !path.isEmpty {
-            return URL(fileURLWithPath: path, isDirectory: true)
-                .appendingPathComponent("projects", isDirectory: true)
-        }
-        return ClaudeProfileConfigDirManager().ambientConfigDirectory
-            .appendingPathComponent("projects", isDirectory: true)
-    }
+    // NOTE: there is deliberately NO `projectsRoot(profileConfigDirPath:)`
+    // helper here. Its nil-profile fallback would have to construct a default
+    // `ClaudeProfileConfigDirManager()` — the real `~/.claude` — which tests
+    // cannot intercept. Callers (`RPCRouter`, `WorktreeLifecycle`,
+    // `HibernationCoordinator`) each expose `claudeProjectsRoot(...)` routed
+    // through their injectable `configDirManager` instead.
 
     // MARK: - Copy-if-newer primitives
 

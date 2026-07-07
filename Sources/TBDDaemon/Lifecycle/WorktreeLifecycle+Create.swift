@@ -530,8 +530,7 @@ extension WorktreeLifecycle {
                 await TranscriptProjectDirSync.ensureSessionResumableDetached(
                     sessionID: sessionUUID,
                     worktreePath: worktreePath,
-                    projectsRoot: TranscriptProjectDirSync.projectsRoot(
-                        profileConfigDirPath: profileConfigDir),
+                    projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
                     storedTranscriptPath: nil
                 )
             }
@@ -658,8 +657,7 @@ extension WorktreeLifecycle {
                 await TranscriptProjectDirSync.ensureSessionResumableDetached(
                     sessionID: sessionID,
                     worktreePath: worktreePath,
-                    projectsRoot: TranscriptProjectDirSync.projectsRoot(
-                        profileConfigDirPath: restoreProfileConfigDir),
+                    projectsRoot: claudeProjectsRoot(profileConfigDirPath: restoreProfileConfigDir),
                     storedTranscriptPath: nil
                 )
                 let spawn = ClaudeSpawnCommandBuilder.build(

@@ -3,6 +3,19 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+/// A `ClaudeProfileConfigDirManager` pointed at fresh temp dirs, so the
+/// wake/revive transcript-sync ambient fallback lists a sandbox — never the
+/// developer's real `~/.claude/projects`. Every `WorktreeLifecycle`/`RPCRouter`
+/// construction in this file must pass one.
+private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
+    let home = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tbd-spawn-claude-\(UUID().uuidString)", isDirectory: true)
+    return ClaudeProfileConfigDirManager(
+        baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
+        hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)
+    )
+}
+
 // Nested under TBDHomeSerialized: several tests mutate the process-global
 // `TBD_HOME` env var (via setenv/unsetenv) to isolate the overlay/runtime dir.
 // Nesting prevents cross-suite races with the other TBD_HOME-mutating suites.
@@ -36,13 +49,16 @@ struct ModelProfileSpawnTests {
         let recorder = TmuxRecorder()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
         let db = try! TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            configDirManager: isolatedConfigDirManager())
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
-            usageFetcher: StubClaudeUsageFetcher()
+            usageFetcher: StubClaudeUsageFetcher(),
+            configDirManager: isolatedConfigDirManager()
         )
         return (router, db, recorder)
     }
@@ -188,7 +204,8 @@ struct ModelProfileSpawnTests {
         )
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            modelProfileResolver: resolver
+            modelProfileResolver: resolver,
+            configDirManager: isolatedConfigDirManager()
         )
         return (lifecycle, db, recorder)
     }
@@ -795,13 +812,16 @@ struct ModelProfileSpawnTests {
             dryRunCapturePane: { _, _ in pane.text }
         )
         let db = try! TBDDatabase(inMemory: true)
-        let lifecycle = WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver())
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+            configDirManager: isolatedConfigDirManager())
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
             tmux: tmux,
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
+            configDirManager: isolatedConfigDirManager(),
             loginSessions: LoginSessionCoordinator(delays: .init(
                 pumpInitialDelay: .zero,
                 pumpPollInterval: .milliseconds(5),

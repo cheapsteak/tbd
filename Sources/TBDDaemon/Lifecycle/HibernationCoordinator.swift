@@ -64,6 +64,10 @@ public actor HibernationCoordinator {
     private let detector: ClaudeStateDetector
     private let modelProfileResolver: ModelProfileResolver?
     private let subscriptions: StateSubscriptionManager?
+    /// Routes ambient claude-projects-root resolution for the wake transcript
+    /// sync — injectable (mirroring `RPCRouter.configDirManager`) so tests
+    /// point it at a temp dir instead of falling back to the real `~/.claude`.
+    private let configDirManager: ClaudeProfileConfigDirManager
     private let now: @Sendable () -> Date
 
     /// Per-terminal "first time we observed it idle-at-rest" marker, maintained
@@ -124,6 +128,7 @@ public actor HibernationCoordinator {
         tmux: TmuxManager,
         modelProfileResolver: ModelProfileResolver? = nil,
         subscriptions: StateSubscriptionManager? = nil,
+        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.db = db
@@ -131,7 +136,23 @@ public actor HibernationCoordinator {
         self.detector = ClaudeStateDetector(tmux: tmux)
         self.modelProfileResolver = modelProfileResolver
         self.subscriptions = subscriptions
+        self.configDirManager = configDirManager
         self.now = now
+    }
+
+    /// Projects root for a wake spawn's resolved profile config dir path,
+    /// falling back to the coordinator's (injectable) ambient claude dir.
+    /// Mirrors `RPCRouter.claudeProjectsRoot(profileConfigDirPath:)`: unlike
+    /// `TranscriptProjectDirSync.projectsRoot`, whose nil-profile fallback
+    /// constructs a default manager (real `~/.claude`), this routes through
+    /// `configDirManager` so tests isolate via the injection seam.
+    private func claudeProjectsRoot(profileConfigDirPath: String?) -> URL {
+        if let path = profileConfigDirPath, !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+                .appendingPathComponent("projects", isDirectory: true)
+        }
+        return configDirManager.ambientConfigDirectory
+            .appendingPathComponent("projects", isDirectory: true)
     }
 
     /// Wire the post-`ensureServer` hook (see `onServerCreated`). Set once by
@@ -415,8 +436,7 @@ public actor HibernationCoordinator {
         await TranscriptProjectDirSync.ensureSessionResumableDetached(
             sessionID: sessionID,
             worktreePath: worktree.path,
-            projectsRoot: TranscriptProjectDirSync.projectsRoot(
-                profileConfigDirPath: profileConfigDir),
+            projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
             storedTranscriptPath: terminal.transcriptPath
         )
         let spawn = ClaudeSpawnCommandBuilder.build(

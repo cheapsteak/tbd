@@ -102,7 +102,7 @@ public final class RPCRouter: Sendable {
         self.modelProfileResolver = resolvedModelProfileResolver
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
-            subscriptions: subscriptions
+            subscriptions: subscriptions, configDirManager: configDirManager
         )
         self.usageFetcher = usageFetcher
         self.pendingQuestions = pendingQuestions
