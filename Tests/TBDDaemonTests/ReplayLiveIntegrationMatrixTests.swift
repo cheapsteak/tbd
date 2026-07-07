@@ -17,11 +17,11 @@ import Testing
 ///     snapshot shows a coherent frame and live output continues from a
 ///     counter >= the replayed one (replay/live boundary coherence).
 ///  4. Pending-output race: a monotonic SEQ counter emitting across the
-///     attach; history capture + pending + live must yield every token AT
-///     MOST ONCE, in order, with any loss confined to the replay/live seam —
-///     the pause-serialization claim, adjusted for the measured tmux-3.6a
-///     residual that pause → continue discards paused-window output (see the
-///     scenario's FINDING comment).
+///     attach; history capture + fence flush + live must yield every token
+///     EXACTLY ONCE, in order, with a seam gap of ZERO — the Phase B M2
+///     fence (pause → arm fence → atomic captures+continue → replay →
+///     markReady flush) closes the boundary gap the M4-era matrix had to
+///     accept (see the scenario's comment for the probe facts).
 ///
 /// Boundary detection: the replay's final cursor escape is always a
 /// PARAMETERIZED CUP (`ESC[<row>;<col>H`, digits — `ReplayWriter.cup`), while
@@ -462,7 +462,7 @@ struct ReplayLiveIntegrationMatrixTests {
 
     // MARK: - Scenario 4: pending-output race — no loss, no duplication
 
-    @Test("sequenced tokens: no dup/disorder anywhere; loss only at the replay/live seam")
+    @Test("sequenced tokens: no dup/disorder/loss anywhere — the replay/live seam is exactly zero")
     func pendingOutputRace() async throws {
         guard await controlModeTmuxAvailable() else { return }
         let server = "tbd-replay-\(UUID().uuidString.prefix(8))"
@@ -508,20 +508,22 @@ struct ReplayLiveIntegrationMatrixTests {
                                     "replay never produced its final digit-CUP")
         let boundaryBytes = context(text, around: boundary)
 
-        // MEASURED FINDING (tmux 3.6a, probed live during M4): pause →
-        // continue DISCARDS pane output emitted while paused — delivery
-        // resumes from the pane's CURRENT position and nothing is drained as
-        // backlog (with or without the `pause-after` client flag). Tokens the
-        // pane emits between the capture and the unpause are therefore lost:
-        // a boundary-only, strictly-forward gap whose width scales with the
-        // replay-assembly window (observed 3 -> 25 under full-suite load).
-        // Closing it needs an interleave buffer (capture fence → gate open),
-        // a design follow-up tracked with the M4 findings.
+        // M2 FENCE (Phase B): the boundary gap the M4-era matrix accepted
+        // (3 -> 25 tokens lost under load) is CLOSED. Two probe-verified
+        // facts (tmux 3.6a, 6/6 trials under throttle and firehose) carry
+        // the design: (1) a paused pane delivers NOTHING — its output lands
+        // in pane history, reachable via capture; (2) an atomic
+        // [captures…, continue] command list has a seam gap of exactly
+        // zero — the first live token delivered after the continue is
+        // contiguous with the capture's last token. The orchestrator pauses
+        // (awaited alone), arms a generation-scoped fence while the pane is
+        // provably silent, sends captures + continue as ONE list, and
+        // markReady flushes the fenced bytes right after the replay.
         //
-        // This test pins every guarantee that DOES hold at the boundary:
-        // nothing duplicated, nothing reordered, no rewind, gapless within
-        // the replay, gapless within the live stream — i.e. any loss is
-        // confined to the single replay/live seam.
+        // This test therefore pins the STRICT zero-seam contract: nothing
+        // duplicated, nothing reordered, no rewind, gapless within the
+        // replay, gapless within the live stream, and the first live token
+        // is EXACTLY lastReplayed + 1.
         let replayTokens = tokens(
             in: strippingEscapes(String(text[..<boundary.upperBound])), label: "SEQ")
         let liveTokens = tokens(
@@ -536,8 +538,8 @@ struct ReplayLiveIntegrationMatrixTests {
         #expect(liveViolations.isEmpty,
                 "LOSS/DUP inside the live stream: \(liveViolations) — boundary bytes \(boundaryBytes)")
         if let lastReplayed = replayTokens.last, let firstLive = liveTokens.first {
-            #expect(firstLive > lastReplayed,
-                    "DUPLICATION/REWIND at the replay/live boundary: replay ended at \(lastReplayed), live began at \(firstLive) — bytes \(boundaryBytes)")
+            #expect(firstLive == lastReplayed + 1,
+                    "SEAM violation at the replay/live boundary: replay ended at \(lastReplayed), live began at \(firstLive) — expected exactly \(lastReplayed + 1) (zero-loss fence, Phase B M2) — bytes \(boundaryBytes)")
         }
 
         await supervisor.stopAll()

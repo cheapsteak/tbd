@@ -241,6 +241,102 @@ struct PaneFanoutFlowControlTests {
         #expect(fanout.flowStats(key: key) == nil)
     }
 
+    @Test("fence: routed-while-fenced bytes stay parked (nothing on the pipe) until markReady flushes them")
+    func fenceQueueParkedUntilMarkReadyFlushes() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%7")
+        let (readFD, gen) = try fanout.attach(key: key)
+        defer { Darwin.close(readFD) }
+        setNonblocking(readFD)
+
+        #expect(fanout.armFence(key: key, generation: gen),
+                "arming the fence at the live generation must succeed")
+
+        // Routed while fenced (gate still closed): queued whole, not dropped.
+        let fenced = Data("FENCED-ATTACH-WINDOW-BYTES".utf8)
+        fanout.route(server: server, event: .output(paneID: "%7", bytes: fenced))
+        let stats = try #require(fanout.flowStats(key: key))
+        #expect(stats.queuedBytes == fenced.count)
+        #expect(stats.droppedBytes == 0)
+        #expect(stats.droppedEvents == 0)
+
+        // The drain must NOT be armed while fenced: the queue stays parked
+        // behind the closed gate so writeReplay's direct pipe write cannot
+        // be interleaved. Nothing may appear on the pipe yet.
+        usleep(100_000)
+        var probe = [UInt8](repeating: 0, count: 64)
+        let n = probe.withUnsafeMutableBytes { Darwin.read(readFD, $0.baseAddress, $0.count) }
+        #expect(n < 0 && errno == EAGAIN, "fenced bytes must stay parked until markReady")
+        #expect(try #require(fanout.flowStats(key: key)).queuedBytes == fenced.count)
+
+        // markReady clears the fence and arms the drain: the parked bytes
+        // flush.
+        #expect(fanout.markReady(key: key, generation: gen))
+        let received = readAll(fd: readFD, expected: fenced.count)
+        #expect(received == fenced, "markReady must flush the fence queue intact and in order")
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, (fanout.flowStats(key: key)?.queuedBytes ?? 0) > 0 {
+            usleep(5_000)
+        }
+        #expect(fanout.flowStats(key: key)?.queuedBytes == 0)
+    }
+
+    @Test("armFence is generation-checked: stale generation or missing sink → false, sink untouched")
+    func armFenceGenerationChecked() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%8")
+        let (read1, gen1) = try fanout.attach(key: key)
+        defer { Darwin.close(read1) }
+        setNonblocking(read1)
+
+        // Wrong generation → refused, and the sink stays UNFENCED: a routed
+        // chunk drops (not-ready bookkeeping) instead of queueing.
+        #expect(fanout.armFence(key: key, generation: gen1 + 1) == false)
+        fanout.route(server: server, event: .output(paneID: "%8", bytes: Data("early".utf8)))
+        let stats = try #require(fanout.flowStats(key: key))
+        #expect(stats.droppedEvents == 1, "an unfenced not-ready chunk must still drop")
+        #expect(stats.queuedBytes == 0, "a refused armFence must not have fenced the sink")
+
+        // Missing sink → refused.
+        #expect(fanout.armFence(
+            key: PaneKey(server: server, paneID: "%none"), generation: 1) == false)
+
+        // A re-attach supersedes: the old generation is refused, the new one
+        // arms.
+        let (read2, gen2) = try fanout.attach(key: key)
+        defer { Darwin.close(read2) }
+        #expect(fanout.armFence(key: key, generation: gen1) == false)
+        #expect(fanout.armFence(key: key, generation: gen2))
+    }
+
+    @Test("fence overflow: chunks past the queue cap drop whole with overflow telemetry (M1 semantics; M3 heals the residual)")
+    func fenceOverflowDropsWholeChunks() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%9")
+        let (readFD, gen) = try fanout.attach(key: key)
+        defer { Darwin.close(readFD) }
+        setNonblocking(readFD)
+        #expect(fanout.armFence(key: key, generation: gen))
+
+        // While fenced NOTHING reaches the pipe, so 5 x 32 KB fills the
+        // 128 KB queue exactly; the fifth chunk must overflow-drop whole.
+        let total = patterned(count: 160 * 1024)
+        routeChunks(fanout, paneID: "%9", data: total)
+
+        let stats = try #require(fanout.flowStats(key: key))
+        #expect(stats.queuedBytes == PaneFanout.queueCap, "queue must fill to its cap, never past it")
+        #expect(stats.overflowEvents == 1)
+        #expect(stats.droppedBytes == 32 * 1024, "the overflowing chunk drops WHOLE")
+
+        // markReady flushes the intact prefix; the overflow residual is the
+        // M3 repair cycle's to heal.
+        #expect(fanout.markReady(key: key, generation: gen))
+        let received = readAll(fd: readFD, expected: PaneFanout.queueCap)
+        #expect(received == total.prefix(PaneFanout.queueCap),
+                "delivered bytes must be an intact prefix — no mid-stream holes")
+    }
+
     @Test("not-ready drop bookkeeping is unchanged: counted, nothing queued")
     func notReadyDropUnchanged() throws {
         let fanout = PaneFanout()

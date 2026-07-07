@@ -80,8 +80,17 @@ final class PaneFanout: @unchecked Sendable {
         /// The attach handshake's write gate: false between `attach` (fd
         /// vended) and the end of the attach.ready replay sequence (M4.3):
         /// the orchestrator opens the gate only AFTER the replay bytes are in
-        /// the pipe. Output routed while not ready is dropped.
+        /// the pipe. Output routed while not ready is dropped — unless the
+        /// M2 attach fence (`fenced`) is armed, which queues it instead for
+        /// the post-replay flush.
         var ready = false
+        /// Attach-boundary fence (Phase B M2, issue #376): armed by the
+        /// attach orchestrator once the pane is provably silent (the pause
+        /// reply completed). While set — the gate is necessarily still
+        /// closed — routed output QUEUES (M1 machinery, drain deliberately
+        /// unarmed) instead of dropping; `markReady` clears it and arms the
+        /// drain, flushing the parked bytes strictly after the replay.
+        var fenced = false
         /// The app's `attach.ready` ack arrived (M4.3). Since M4.3, `ready`
         /// flips only after the replay lands — so the ready-timeout (whose
         /// purpose is "app never acked") keys off THIS flag instead: a slow
@@ -169,17 +178,48 @@ final class PaneFanout: @unchecked Sendable {
     @discardableResult
     func markReady(key: PaneKey, generation: UInt64) -> Bool {
         lock.lock()
-        guard let sink = sinks[key], sink.generation == generation else {
+        guard var sink = sinks[key], sink.generation == generation else {
             lock.unlock()
             logger.info(
                 "fanout stale ready refused \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
             return false
         }
-        sinks[key]?.ready = true
-        sinks[key]?.acknowledged = true
+        sink.ready = true
+        sink.acknowledged = true
+        // Clear the M2 attach fence and flush what it parked: the replay
+        // bytes are already in the pipe (`writeReplay` precedes markReady),
+        // so arming the drain NOW delivers the fenced bytes strictly after
+        // the replay — and `route()`'s queue-nonempty ordering folds live
+        // output in behind them. Zero loss at the attach seam.
+        sink.fenced = false
+        armDrainIfNeededLocked(&sink, key: key)
+        sinks[key] = sink
         lock.unlock()
         logger.info(
             "fanout ready \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
+        return true
+    }
+
+    /// Arm the attach-boundary fence for `key` (Phase B M2) — generation-
+    /// checked like every other sink mutation: mismatch or missing sink →
+    /// `false`, nothing touched (the caller treats it like a superseded
+    /// attach). Call ONLY at a moment the pane is provably silent (the
+    /// orchestrator's pause reply): `%output` is routed synchronously on the
+    /// reader thread while command replies hop actors, so arming at any
+    /// noisier moment could fence pre-pause output the capture already holds.
+    @discardableResult
+    func armFence(key: PaneKey, generation: UInt64) -> Bool {
+        lock.lock()
+        guard let sink = sinks[key], sink.generation == generation else {
+            lock.unlock()
+            logger.info(
+                "fanout stale fence refused \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
+            return false
+        }
+        sinks[key]?.fenced = true
+        lock.unlock()
+        logger.debug(
+            "fanout fence armed \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
         return true
     }
 
@@ -292,9 +332,11 @@ final class PaneFanout: @unchecked Sendable {
 
     /// Write the attach replay into `key`'s pipe. Callable while the sink is
     /// NOT ready — that's the point: the replay lands behind the closed gate
-    /// (live output routed meanwhile is still dropped), and the orchestrator
-    /// acks `attach.ready` only after this returns, so live bytes follow the
-    /// replay in order (addendum §3).
+    /// (live output routed meanwhile is dropped, or PARKED in the fence
+    /// queue once the M2 fence is armed — the drain is never live while
+    /// fenced, so this direct write cannot be interleaved), and the
+    /// orchestrator opens the gate only after this returns, so live bytes
+    /// follow the replay in order (addendum §3).
     ///
     /// Unlike `route()` (hot path — queues on EAGAIN and drains
     /// asynchronously), a replay must arrive
@@ -411,13 +453,27 @@ final class PaneFanout: @unchecked Sendable {
 
         lock.lock()
         defer { lock.unlock() }
-        guard var sink = sinks[key], sink.ready else {
-            // Not-ready / unattached drops are unchanged in M1 — the attach
-            // fence (M2) owns that window.
-            if sinks[key] != nil {
-                sinks[key]!.droppedEvents += 1
+        guard var sink = sinks[key] else {
+            unattachedDrops += 1
+            return
+        }
+        guard sink.ready else {
+            if sink.fenced {
+                // Attach-fence window (M2): the pane's attach sequence owns
+                // the seam from the pause reply to markReady — queue (M1 cap
+                // + overflow telemetry apply unchanged) WITHOUT arming the
+                // drain. The queue must stay parked behind the closed gate
+                // until the replay lands: `writeReplay` writes the pipe
+                // directly, and a live drain would interleave fenced bytes
+                // into the replay. `markReady` clears the fence and arms it.
+                enqueueLocked(bytes, into: &sink, key: key)
+                sinks[key] = sink
             } else {
-                unattachedDrops += 1
+                // Pre-fence not-ready window (attach → pause reply): dropped
+                // — those bytes are in the attach's capture, not lost;
+                // delivering them too would duplicate them.
+                sink.droppedEvents += 1
+                sinks[key] = sink
             }
             return
         }
@@ -459,7 +515,11 @@ final class PaneFanout: @unchecked Sendable {
     /// continuation is lost, corrupting escape sequences; dropping the entire
     /// incoming chunk keeps everything delivered + queued an intact prefix.
     /// The overflow drop here is the M3 hook point — the pause+repair cycle
-    /// (tmux flow control + recapture) replaces it later.
+    /// (tmux flow control + recapture) replaces it later. That includes the
+    /// FENCED window's residual (M2): a blast pane can exceed the cap while
+    /// the replay is still being assembled, and the chunks dropped here are
+    /// then missing between the replay and the flushed queue — M3's repair
+    /// cycle owns healing that; M2 adds no extra behavior for it.
     private func enqueueLocked(_ data: Data, into sink: inout Sink, key: PaneKey) {
         guard !data.isEmpty else { return }
         if sink.queuedBytes + data.count > Self.queueCap {

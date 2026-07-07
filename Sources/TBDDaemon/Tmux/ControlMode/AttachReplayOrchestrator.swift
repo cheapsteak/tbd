@@ -40,38 +40,70 @@ struct AttachReplayFailure: Error {
     let underlying: any Error
 }
 
-/// The attach orchestration v2 (M4.3, addendum §3): `attach.ready` triggers
-/// pause → capture → replay → gate → unpause, with pause as the serialization
-/// mechanism — the pane emits nothing between the pause and the unpause the
-/// orchestrator sends only after the replay bytes are in the pipe, so live
-/// output physically cannot race the replay. No interleave buffer.
+/// The attach orchestration v2 (M4.3, addendum §3) with the Phase B M2
+/// attach-boundary fence (issue #376): `attach.ready` triggers pause →
+/// fence → captures+continue → replay → gate+flush, with pause as the
+/// serialization mechanism and a generation-scoped fence queue closing the
+/// boundary gap — live output physically cannot precede, interleave, OR be
+/// lost around the replay.
 ///
 /// Sequence:
 ///  1. Acknowledge the attach and read its CURRENT generation atomically —
 ///     the whole sequence is tagged with it, and the ready-timeout stops
 ///     threatening the attach (its purpose is "app never acked").
-///  2. ONE atomic command list down the `-CC` stream: pause, then the
-///     5-command capture (pure scrollback, current screen, saved primary,
-///     pane state, pending).
-///  3. Assemble the replay (`ReplayWriter`) and write it into the pane's
-///     pipe behind the still-closed gate (`writeReplay`, generation-checked).
-///  4. Open the gate (`markReady`) — ONLY after the replay bytes landed.
-///  5. Unpause LAST, on every exit path after the pause was sent EXCEPT
-///     mid-sequence supersession: pause state is per PANE on the shared
-///     per-server correlator, so a superseded generation leaves the unpause
-///     to its successor's own FIFO-ordered sequence — a stale continue could
-///     otherwise land inside the successor's pause window and resume output
-///     into its still-closed gate. (A stale unpause on an unpaused pane
-///     no-ops via tolerate-errors.)
+///  2. Batch 1: the PAUSE alone, awaited. Command replies and `%output`
+///     reach the daemon on paths that do NOT preserve relative order
+///     end-to-end (`%output` is routed synchronously on the connection
+///     reader thread via `outputSink` → `PaneFanout.route`; replies hop
+///     AsyncStream → supervisor actor → correlator actor → completion), so
+///     the fence can only be armed at a moment the pane is PROVABLY silent
+///     — arming it any earlier could fence pre-pause output the capture
+///     already holds; any later could miss post-continue output racing
+///     ahead of a reply. The pause reply is that moment: everything the
+///     pane emitted before the pause has, by stream order, already been
+///     routed (and dropped by the closed gate — it is in the capture, no
+///     loss), and a PAUSED pane delivers NOTHING (live-probed, tmux 3.6a:
+///     zero bytes even with ~500k tokens emitted while paused; the content
+///     lands in pane history/screen, reachable via capture).
+///  3. Arm the fence (generation-checked): output routed for the pane while
+///     the gate stays closed now QUEUES (the M1 machinery, drain unarmed)
+///     instead of dropping.
+///  4. Batch 2: the 6-command capture + the continue, ONE atomic command
+///     list with the continue LAST — live-probed (tmux 3.6a, 6/6 trials
+///     under throttled AND firehose load): the first live token delivered
+///     after an atomic [captures…, continue] is contiguous with the
+///     capture's last token, a seam gap of exactly ZERO. Post-continue
+///     output flows into the armed fence.
+///  5. Assemble the replay (`ReplayWriter`) and write it into the pane's
+///     pipe behind the still-closed gate (`writeReplay`, generation-checked)
+///     — safe against the fence queue because the drain is never armed
+///     while fenced.
+///  6. Open the gate (`markReady`) — ONLY after the replay bytes landed. It
+///     clears the fence and arms the drain, so the fenced bytes follow the
+///     replay in order and live output folds in behind them (`route()`'s
+///     queue-nonempty ordering). ZERO output loss at the attach seam.
+///  7. No trailing unpause on success — batch 2's continue already ran.
+///     Failure paths after the pause still send a generation-checked
+///     unpause: it covers "the pause executed but batch 2's continue may
+///     not have" (e.g. the send raced a connection close); a redundant
+///     continue on an unpaused pane no-ops via tolerate-errors. Mid-sequence
+///     supersession NEVER unpauses (R11): pause state is per PANE on the
+///     shared per-server correlator, so a superseded generation leaves it
+///     to its successor's own FIFO-ordered sequence — a stale continue
+///     could otherwise land inside the successor's pause window and resume
+///     output into its still-closed gate.
 ///
-/// Measured residual (tmux 3.6a, M4 live matrix): pause → continue DISCARDS
+/// HISTORY (pre-M2 residual, M4 live matrix): pause → continue DISCARDS
 /// pane output emitted while paused — tmux resumes delivery from the pane's
 /// CURRENT position, draining nothing (with or without the `pause-after`
-/// client flag; iTerm2 handles `%pause` by re-capturing for the same reason).
-/// So output the pane emits between the capture and the unpause is lost to
-/// the viewer: a boundary-only, strictly-forward gap. Live output still
-/// cannot precede or interleave the replay; closing the gap needs an
-/// interleave buffer (capture fence → gate open), a design follow-up.
+/// client flag; iTerm2 handles `%pause` by re-capturing for the same
+/// reason). Before the fence, output the pane emitted between the capture
+/// and the trailing unpause was therefore lost to the viewer: a measured
+/// boundary-only forward gap (3–25 tokens under load). The fence + atomic
+/// captures+continue batch eliminate it. Remaining residual: fence-queue
+/// OVERFLOW during replay assembly (a blast pane exceeding the 128 KB cap)
+/// still drops whole chunks with telemetry — M3's pause+repair cycle owns
+/// healing that.
 struct AttachReplayOrchestrator: Sendable {
     /// How the sequence ended without error.
     enum Outcome: Equatable {
@@ -185,10 +217,67 @@ struct AttachReplayOrchestrator: Sendable {
             return .superseded
         }
 
-        // ONE atomic sendList: pause FIRST, then the capture batch — atomicity
-        // in the FIFO guarantees nothing (not even our own commands) slips
-        // between the pause and the captures, and everything the pane emitted
-        // before the pause is already ordered ahead of the capture replies.
+        // Batch 1 — the PAUSE alone, awaited (M2). The fence below can only
+        // be armed while the pane is provably silent, and the pause reply is
+        // the earliest such moment (see the sequence doc: replies and
+        // %output travel order-skewed paths, so no reply-relative moment
+        // earlier than "paused and confirmed" is race-free). Tolerates
+        // errors at the correlator level like every command this sequence
+        // sends: one dead pane must not tear down the whole server's
+        // connection.
+        let pause = "refresh-client -A '\(paneID):pause'"
+        let pauseResults = await sendBatch(client, texts: [pause])
+
+        // A failed pause means the captures below run UNPAUSED: the pane may
+        // emit between the capture replies and the gate opening, so the
+        // replay can be slightly torn (cursor vs content mismatch). Surface
+        // it and PROCEED rather than fail the attach: fullscreen apps
+        // repaint differentially and self-heal, and a genuinely dead pane
+        // %errors the captures right below, which fails the attach on its
+        // own (review M4). The fence still arms — whatever the pane emits
+        // after the arm is queued, not lost.
+        if case .failure(let pauseError) = pauseResults.first {
+            Self.logger.error("""
+                attach pause failed for \(server, privacy: .public)/\(paneID, privacy: .public) \
+                (\(pause, privacy: .public)): \(String(describing: pauseError), privacy: .public) \
+                — proceeding with an unpaused capture (replay may be slightly torn; self-heals)
+                """)
+            onPauseFailure?(String(describing: pauseError))
+        }
+
+        // Post-pause supersession re-check (M2): splitting the batch adds an
+        // await between the acknowledge and the capture send — a stale task
+        // resumed here must not send its captures+continue after a
+        // successor's completed sequence (same rationale as the R10-3
+        // post-hop re-check above). R11 scoping: superseded → send NOTHING
+        // more and do NOT unpause — the successor's own FIFO-ordered
+        // sequence owns the pane's pause state.
+        guard await supervisor.currentGeneration(server: server, paneID: paneID) == generation else {
+            Self.logger.debug("""
+                attach.ready superseded after the pause for \
+                \(server, privacy: .public)/\(paneID, privacy: .public) gen=\(generation) — sending nothing
+                """)
+            return .superseded
+        }
+
+        // Arm the fence — the pane is silent (pause reply in hand), so no
+        // output can race the arming. Generation-checked: refusal means a
+        // newer attach owns the pane, the same benign race as above (R11:
+        // no unpause; the successor owns the pause state).
+        guard await supervisor.armFence(server: server, paneID: paneID, generation: generation) else {
+            Self.logger.debug("""
+                attach.ready superseded at the fence for \
+                \(server, privacy: .public)/\(paneID, privacy: .public) gen=\(generation) — sending nothing
+                """)
+            return .superseded
+        }
+
+        // Batch 2 — the capture list + the CONTINUE, one atomic command list
+        // with the continue LAST (M2): atomicity in the FIFO guarantees
+        // nothing slips between the captures and the continue, and the
+        // live-probed seam of an atomic [captures…, continue] is exactly
+        // zero — the first post-continue byte (which flows into the armed
+        // fence) is contiguous with the capture's tail.
         //
         // All entries tolerate errors at the correlator level: a capture
         // %error (pane died mid-attach) must fail THIS attach, not tear down
@@ -201,7 +290,6 @@ struct AttachReplayOrchestrator: Sendable {
         // on tmux 3.6a). So the scrollback is captured on its own leg
         // (`-E -1` = end before the visible screen), which works during alt
         // mode too, and the assembler recombines the legs by `alternate_on`.
-        let pause = "refresh-client -A '\(paneID):pause'"
         let captureCommands = [
             // Pure primary scrollback, NO screen rows. QUIRK (live-probed):
             // on a history-less pane this clamps and returns the first
@@ -224,54 +312,43 @@ struct AttachReplayOrchestrator: Sendable {
             PaneStateCapture.listPanesCommand(target: paneID),
             "capture-pane -p -P -C -t \(paneID)",
         ]
-        let results = await sendBatch(client, texts: [pause] + captureCommands)
+        let continueCommand = "refresh-client -A '\(paneID):continue'"
+        let results = await sendBatch(client, texts: captureCommands + [continueCommand])
 
-        // A failed pause means the captures below ran UNPAUSED: the pane may
-        // have emitted between the capture replies and the gate opening, so
-        // the replay can be slightly torn (cursor vs content mismatch).
-        // Surface it and PROCEED rather than fail the attach: the tear is the
-        // same class as the accepted pause-discard boundary gap — fullscreen
-        // apps repaint differentially and self-heal, and a genuinely dead
-        // pane %errors the captures right below, which fails the attach on
-        // its own (review M4).
-        if case .failure(let pauseError) = results.first {
+        // A failed batched continue is log-only: a %error is tolerated (the
+        // failure-path unpause below re-sends one when the captures failed
+        // too), and a connection close fails the captures as well — which
+        // fails the attach on its own. Pause state is per control CLIENT,
+        // so it cannot outlive a closed connection either way.
+        if case .failure(let continueError) = results.last {
             Self.logger.error("""
-                attach pause failed for \(server, privacy: .public)/\(paneID, privacy: .public) \
-                (\(pause, privacy: .public)): \(String(describing: pauseError), privacy: .public) \
-                — proceeding with an unpaused capture (replay may be slightly torn; self-heals)
+                attach batched continue failed for \(server, privacy: .public)/\(paneID, privacy: .public): \
+                \(String(describing: continueError), privacy: .public)
                 """)
-            onPauseFailure?(String(describing: pauseError))
         }
 
-        // The pause has been sent — from here, unpause runs on every exit
-        // path EXCEPT mid-sequence supersession (defer-equivalent; `defer`
-        // can't await the actor call).
+        // The pause has been sent — from here, every FAILURE exit unpauses
+        // unless superseded (defer-equivalent; `defer` can't await the actor
+        // call). The SUCCESS path sends nothing more: batch 2's continue
+        // already ran.
         do {
-            let outcome = try await replayAndOpenGate(
+            // `.superseded` (writeReplay/markReady saw a newer generation)
+            // sends nothing further either — batch 2 (with its continue) was
+            // already on the stream BEFORE the successor's own sequence, so
+            // FIFO keeps it clear of the successor's pause window (R11).
+            return try await replayAndOpenGate(
                 server: server, paneID: paneID, generation: generation,
-                captureResults: Array(results.dropFirst()),
+                captureResults: Array(results.dropLast()),
                 captureCommands: captureCommands)
-            // `.superseded` (writeReplay/markReady saw a newer generation) SKIPS the
-            // unpause: pause state is per PANE on the shared correlator, and
-            // FIFO ordering puts the successor's own pause → captures →
-            // replay → unpause sequence AFTER ours — a stale continue here
-            // could land while the successor is mid-capture with its gate
-            // still closed, resuming live output into a closed gate (dropped;
-            // widens the boundary gap). Accepted residual: if the successor's
-            // ready never arrives, the pane stays paused until the NEXT
-            // attach's sequence unpauses it — benign (no viewer is watching;
-            // tmux buffers server-side).
-            if outcome == .ready {
-                await sendUnpause(client, paneID: paneID)
-            }
-            return outcome
         } catch {
-            // Same generation scoping as the success path's `.superseded`
-            // skip (R11): a failing STALE sequence must not unpause either —
-            // its continue could land between a live successor's pause and
-            // captures, tearing the successor's capture. When we still own
-            // the pane, unpause as always; when superseded, the successor's
-            // own sequence (unpause on every exit path) owns the pause state.
+            // Generation-checked unpause-on-failure: it covers "the pause
+            // executed but batch 2's continue may not have" (e.g. the send
+            // raced a connection close); a redundant continue on an unpaused
+            // pane no-ops via tolerate-errors. R11 scoping unchanged: a
+            // failing STALE sequence must not unpause — its continue could
+            // land between a live successor's pause and captures, tearing
+            // the successor's capture. The successor's own sequence owns the
+            // pane's pause state.
             if await supervisor.currentGeneration(server: server, paneID: paneID) == generation {
                 await sendUnpause(client, paneID: paneID)
             }
@@ -354,7 +431,10 @@ struct AttachReplayOrchestrator: Sendable {
             return .superseded
         }
         // Gate opens ONLY after the replay bytes are in the pipe: live output
-        // routed from here lands strictly after the replay. Generation-checked
+        // routed from here lands strictly after the replay. markReady also
+        // clears the M2 fence and arms the drain, flushing the fenced bytes
+        // (everything the pane emitted since batch 2's continue) in behind
+        // the replay — the zero-seam flush. Generation-checked
         // (R6-H1): a re-attach can swap the sink between the writeReplay above
         // and this call, and a stale markReady must not open the successor's
         // gate before ITS replay landed. Refusal is the same benign race as a
@@ -369,8 +449,9 @@ struct AttachReplayOrchestrator: Sendable {
         return .ready
     }
 
-    /// Unpause, tolerate-errors: must no-op when the pane wasn't paused or a
-    /// newer attach already unpaused it. Fire-and-forget — the reply is not
+    /// Failure-path unpause (M2: the success path's continue rides batch 2),
+    /// tolerate-errors: must no-op when the pane wasn't paused or a newer
+    /// attach already unpaused it. Fire-and-forget — the reply is not
     /// awaited (nothing left to order behind it for THIS attach).
     private func sendUnpause(_ client: TmuxControlCommandClient, paneID: String) async {
         await client.sendList([
