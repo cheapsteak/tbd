@@ -213,9 +213,9 @@ struct WorktreeRowView: View {
         .opacity(AppState.scratchRowIsDimmed(
             worktree, directoryExists: FileManager.default.fileExists(atPath: worktree.path)
         ) ? 0.5 : 1.0)
-        // The worktree-row hover surface is intentionally reserved: account
-        // facts moved to the "…" menu (info header + Switch account), and this
-        // hover is earmarked for the planned recency-biased work summary
+        // The worktree-row hover surface is intentionally reserved: per-session
+        // account facts and switching live in the tab bar, and this hover is
+        // earmarked for the planned recency-biased work summary
         // (see tbd-redesign-direction). No `.hoverCard` here for now.
         .background(
             RoundedRectangle(cornerRadius: 4)
@@ -240,25 +240,19 @@ struct WorktreeRowView: View {
         }
         .overlay(alignment: .trailing) {
             if isRowHovered && !isMain {
-                HStack(spacing: 2) {
-                    // The action list ("…") — account section + the
-                    // shared RowActionMenu actions. Hidden until hover, calm
-                    // styling matching the "+" affordance.
-                    RowAccountMenuView(worktree: worktree, onRename: startRename)
-                    Button(action: {
-                        let parentID = worktree.id
-                        // Scratch spaces have no repo, so nested-worktree creation
-                        // isn't offered for them — this affordance is repo-only.
-                        guard let repoID = worktree.repoID else { return }
-                        appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
-                    }) {
-                        Image(systemName: "plus")
-                            .font(.caption)
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(HoverPressButtonStyle())
-                    .hoverCard(newNestedWorktreeHoverCard)
+                Button(action: {
+                    let parentID = worktree.id
+                    // Scratch spaces have no repo, so nested-worktree creation
+                    // isn't offered for them — this affordance is repo-only.
+                    guard let repoID = worktree.repoID else { return }
+                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
+                }) {
+                    Image(systemName: "plus")
+                        .font(.caption)
+                        .frame(width: 20, height: 20)
                 }
+                .buttonStyle(HoverPressButtonStyle())
+                .hoverCard(newNestedWorktreeHoverCard)
                 .padding(.trailing, 4)
             }
         }

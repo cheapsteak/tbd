@@ -2,19 +2,16 @@ import Foundation
 import TBDShared
 
 /// Typed, ordered action model for a worktree row's action list — the single
-/// source of truth shared by BOTH the right-click context menu
-/// (`SidebarContextMenu`) and the hover-revealed "…" menu (`RowAccountMenuView`).
+/// source of truth behind the right-click context menu (`SidebarContextMenu`).
 ///
-/// Pure composition on top of a small `Context` of live inputs the surfaces read
+/// Pure composition on top of a small `Context` of live inputs the surface reads
 /// from `AppState`. No AppKit, no SwiftUI: `role` is our own `ActionRole` and the
-/// view maps it to SwiftUI's `.destructive`. `items(context:includeSessionForks:)`
-/// is a pure function of its inputs, so the ordered structure both surfaces
-/// render is directly unit-testable without any `AppState`.
+/// view maps it to SwiftUI's `.destructive`. `items(context:)` is a pure
+/// function of its inputs, so the ordered structure the menu renders is
+/// directly unit-testable without any `AppState`.
 ///
-/// The account section (per-session info + "Switch account") is intentionally
-/// NOT modeled here — it is contributed separately by `RowAccountMenu` and shown
-/// only in the "…" menu, above these items. This model is exactly what the
-/// right-click menu shows, and exactly the tail of what the "…" menu shows.
+/// Per-session account facts and switching are intentionally NOT modeled here —
+/// they live in the tab bar, not on the worktree row.
 enum RowActionMenu {
     // MARK: - Typed model
 
@@ -190,32 +187,20 @@ enum RowActionMenu {
     ///
     /// Sections are joined with a single divider each; empty sections collapse,
     /// so the list never renders doubled or dangling dividers.
-    ///
-    /// `includeSessionForks` controls whether per-session "Fork session" entries
-    /// are part of this list. The right-click menu passes `true` (it has no
-    /// account section, so fork lives here); the "…" menu passes `false` and
-    /// renders fork inside each account section instead, so it isn't duplicated.
-    static func items(context: Context, includeSessionForks: Bool = true) -> [Item] {
+    static func items(context: Context) -> [Item] {
         if context.isScratch {
-            return scratchItems(context: context, includeSessionForks: includeSessionForks)
+            return scratchItems(context: context)
         } else if context.status == .main || context.status == .creating {
             return mainItems(context: context)
         } else {
-            return regularItems(context: context, includeSessionForks: includeSessionForks)
+            return regularItems(context: context)
         }
-    }
-
-    /// The per-session fork actions for this worktree, used by the "…" menu's
-    /// account section (which renders fork alongside each session's switch
-    /// submenu rather than in the shared action block).
-    static func sessionForkActions(context: Context) -> [Action] {
-        forkActions(context: context)
     }
 
     /// Hibernation actions for a worktree row: Wake (if any session is
     /// hibernated), Hibernate now (if any is eligible), and the keep-warm
-    /// toggle. Shared by the regular and scratch branches so both surfaces
-    /// (right-click + "…") stay in lockstep.
+    /// toggle. Shared by the regular and scratch branches so both stay in
+    /// lockstep.
     static func hibernationActions(context: Context) -> [Action] {
         var actions: [Action] = []
         if context.hasHibernatedClaude {
@@ -247,14 +232,13 @@ enum RowActionMenu {
     }
 
     /// Join non-empty sections with a single `.divider` between them. Empty
-    /// sections (e.g. no hibernation-eligible sessions, or forks excluded with
-    /// nothing else in that section) collapse entirely, so the rendered list
-    /// never shows doubled dividers or a leading/trailing one.
+    /// sections (e.g. no hibernation-eligible sessions) collapse entirely, so
+    /// the rendered list never shows doubled dividers or a leading/trailing one.
     private static func joined(_ sections: [[Item]]) -> [Item] {
         Array(sections.filter { !$0.isEmpty }.joined(separator: [Item.divider]))
     }
 
-    private static func scratchItems(context: Context, includeSessionForks: Bool) -> [Item] {
+    private static func scratchItems(context: Context) -> [Item] {
         // Trailing section: Delete stays last among the actions; the
         // promote-hint caption sits beneath it as the menu's footnote.
         var trailing: [Item] = [
@@ -272,10 +256,9 @@ enum RowActionMenu {
                 .action(Action(kind: .archiveScratch, title: "Archive", role: .destructive)),
             ],
             hibernationActions(context: context).map(Item.action),
-            // Scratch spaces host Claude sessions too — same fork parity as the
-            // regular branch (right-click carries fork; the "…" menu's account
-            // section renders it instead).
-            includeSessionForks ? forkActions(context: context).map(Item.action) : [],
+            // Scratch spaces host Claude sessions too — same fork entries as
+            // the regular branch.
+            forkActions(context: context).map(Item.action),
             [
                 .action(Action(kind: .openInFinder, title: "Open in Finder")),
                 .action(Action(kind: .copyPath, title: "Copy Path")),
@@ -294,16 +277,12 @@ enum RowActionMenu {
         ]
     }
 
-    private static func regularItems(context: Context, includeSessionForks: Bool) -> [Item] {
+    private static func regularItems(context: Context) -> [Item] {
         let archiveBlocked = context.hasActiveChildren
 
-        // Sessions & spawning: per-session fork (only in surfaces without an
-        // account section — the right-click menu; the "…" menu renders fork in
-        // its account section), then the nested-worktree creators.
-        var spawning: [Item] = []
-        if includeSessionForks {
-            spawning.append(contentsOf: forkActions(context: context).map(Item.action))
-        }
+        // Sessions & spawning: per-session fork entries, then the
+        // nested-worktree creators.
+        var spawning: [Item] = forkActions(context: context).map(Item.action)
         // Nested-worktree creation is repo-only.
         if context.hasRepoID {
             spawning.append(.action(Action(kind: .createNestedWorktree, title: "Create Nested Worktree")))

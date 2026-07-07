@@ -426,11 +426,10 @@ enum AddTabMenu {
         return image
     }
 
-    /// NSMenu counterpart of `RowAccountMenuView.twoLineLabel`: an attributed
-    /// two-line NSMenuItem title — identity at menu size, the usage line
-    /// smaller, secondary-colored, and indented underneath. nil when there is
-    /// no secondary line, so snapshotless profiles keep the plain single-line
-    /// title set at item creation.
+    /// An attributed two-line NSMenuItem title — identity at menu size, the
+    /// usage line smaller, secondary-colored, and indented underneath. nil when
+    /// there is no secondary line, so snapshotless profiles keep the plain
+    /// single-line title set at item creation.
     static func twoLineAttributedTitle(
         _ line: ProfileUsagePresentation.MenuLineModel
     ) -> NSAttributedString? {

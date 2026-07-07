@@ -150,12 +150,6 @@ struct RowActionMenuRegularTests {
         #expect(archive?.disabledHelp == nil)
     }
 
-    @Test func includeSessionForksFalseExcludesForks() {
-        let s = session("Claude 1")
-        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b", claudeSessions: [s])
-        let ks = kinds(RowActionMenu.items(context: ctx, includeSessionForks: false))
-        #expect(!ks.contains { if case .forkSession = $0 { return true }; return false })
-    }
 }
 
 // MARK: - Scratch branch
@@ -220,15 +214,13 @@ struct RowActionMenuScratchTests {
         #expect(items.last?.actionKind == .deleteScratch)
     }
 
-    @Test func scratchWithClaudeSessionGetsForkParityOnRightClickOnly() {
-        // Scratch spaces host Claude sessions too: right-click carries the fork
-        // entries (in the middle section); the "…" action block does not (its
-        // account section renders fork instead) — and the emptied fork section
-        // collapses without leaving doubled dividers.
+    @Test func scratchWithClaudeSessionCarriesForkEntries() {
+        // Scratch spaces host Claude sessions too: the fork entries appear in
+        // the middle section, same as the regular branch.
         let s = session("Claude 1")
         let ctx = RowActionMenu.Context(isScratch: true, claudeSessions: [s])
-        let rightClick = kinds(RowActionMenu.items(context: ctx, includeSessionForks: true))
-        #expect(rightClick == [
+        let items = RowActionMenu.items(context: ctx)
+        #expect(kinds(items) == [
             .rename,
             .archiveScratch,
             .forkSession(terminalID: s.terminalID, profileID: s.profileID),
@@ -236,9 +228,7 @@ struct RowActionMenuScratchTests {
             .copyPath,
             .deleteScratch,
         ])
-        let ellipsisItems = RowActionMenu.items(context: ctx, includeSessionForks: false)
-        #expect(!kinds(ellipsisItems).contains { if case .forkSession = $0 { return true }; return false })
-        expectWellFormedDividers(ellipsisItems)
+        expectWellFormedDividers(items)
     }
 
     @Test func scratchArchiveAndDeleteAreDestructive() {
@@ -312,9 +302,11 @@ struct RowActionMenuForkTests {
     @Test func forkAmbientSessionCarriesNilProfile() {
         let s = session("Claude 1", profileID: nil)
         let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b", claudeSessions: [s])
-        let forks = RowActionMenu.sessionForkActions(context: ctx)
+        let forks = RowActionMenu.items(context: ctx).compactMap(\.action).filter {
+            if case .forkSession = $0.kind { return true }; return false
+        }
         #expect(forks.count == 1)
-        if case let .forkSession(_, profileID) = forks[0].kind {
+        if case let .forkSession(_, profileID)? = forks.first?.kind {
             #expect(profileID == nil)
         } else {
             Issue.record("expected forkSession")
@@ -367,45 +359,5 @@ struct RowActionMenuHibernationTests {
     @Test func hibernationActionsAppearInScratchToo() {
         let ctx = RowActionMenu.Context(hasHibernatedClaude: true, isScratch: true)
         #expect(kinds(RowActionMenu.items(context: ctx)).contains(.wakeHibernated))
-    }
-}
-
-// MARK: - Shared-list invariant across surfaces
-
-@Suite("RowActionMenu — shared surfaces")
-struct RowActionMenuSurfaceInvariantTests {
-    /// The "…" action block (includeSessionForks: false) is the right-click list
-    /// with the per-session fork entries removed — everything else identical.
-    @Test func ellipsisActionBlockOmitsForksButOtherwiseMatchesRightClick() {
-        let s = session("Claude 1")
-        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b", claudeSessions: [s])
-
-        let rightClick = RowActionMenu.items(context: ctx, includeSessionForks: true)
-        let ellipsis = RowActionMenu.items(context: ctx, includeSessionForks: false)
-
-        // Right-click includes the fork; the "…" action block does not.
-        #expect(kinds(rightClick).contains { if case .forkSession = $0 { return true }; return false })
-        #expect(!kinds(ellipsis).contains { if case .forkSession = $0 { return true }; return false })
-
-        // Removing the fork entries from the right-click list yields the "…" list.
-        let rightClickSansForks = rightClick.filter {
-            if case let .action(a) = $0, case .forkSession = a.kind { return false }
-            return true
-        }
-        #expect(rightClickSansForks == ellipsis)
-    }
-
-    /// The account section is contributed by `RowAccountMenu`, never
-    /// `RowActionMenu`: no action item is an account/switch entry.
-    @Test func actionItemsContainNoAccountOrSwitchEntries() {
-        let s = session("Claude 1")
-        let ctx = RowActionMenu.Context(hasRepoID: true, branch: "b", claudeSessions: [s])
-        for item in RowActionMenu.items(context: ctx) {
-            if case let .action(action) = item {
-                // No switch-account kinds exist in RowActionMenu.Kind at all;
-                // assert titles don't leak the account section's copy either.
-                #expect(action.title != RowAccountMenu.switchAccountLabel)
-            }
-        }
     }
 }
