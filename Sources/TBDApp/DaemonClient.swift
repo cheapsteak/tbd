@@ -42,6 +42,19 @@ enum DaemonClientError: Error, CustomStringConvertible, LocalizedError, Sendable
     var errorDescription: String? { description }
 }
 
+/// `openAttach` failed AFTER `attach.request` succeeded — the daemon minted
+/// an attach (generation known, sink allocated) but the vended fd never
+/// arrived on the sidecar (timeout, supersession, or disconnect). The minted
+/// generation rides the error (R6-H2) so the caller's failure teardown stays
+/// generation-scoped: a nil-generation `pane.detach` here is UNCONDITIONAL
+/// and can kill a healthy racing re-attach's fresh sink (the 56029f5b class,
+/// from a different throw site). `generation` is nil only when an older
+/// daemon minted none.
+struct AttachFDVendError: Error {
+    let generation: UInt64?
+    let underlying: any Error
+}
+
 /// Actor that communicates with the TBD daemon over a Unix domain socket.
 /// Uses one-shot POSIX socket connections per RPC call (same approach as the CLI).
 actor DaemonClient {
@@ -786,6 +799,17 @@ actor DaemonClient {
         try await callNoParamsAsync(method: RPCMethod.configGet, resultType: Config.self)
     }
 
+    /// Persist the tmux control-mode opt-in (M5). Applies to newly created
+    /// panes; a truthy TBD_TMUX_CONTROL_MODE in the daemon's env still forces
+    /// the gate on regardless of this flag.
+    func setControlMode(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetControlMode,
+            params: ConfigSetControlModeParams(enabled: enabled)
+        )
+    }
+
+
     /// Set or clear a repo's free-form env overrides.
     func setRepoEnvOverrides(repoID: UUID, overrides: [String: String]) async throws {
         try await callVoidAsync(
@@ -816,18 +840,24 @@ actor DaemonClient {
     }
 
     /// Request an attach and receive the vended fd via the sidecar. Returns
-    /// the read fd (ownership passes to the caller's reader). Does NOT send
-    /// `attach.ready` — the caller does that after wiring the reader.
+    /// the read fd (ownership passes to the caller's reader) plus the attach
+    /// generation the daemon minted (echo it back in `paneDetach` so a stale
+    /// detach cannot kill a newer attach's sink; nil from older daemons).
+    /// Does NOT send `attach.ready` — the caller does that after wiring the
+    /// reader.
     ///
     /// Ordering: the sidecar expectation is registered BEFORE the RPC is
     /// issued, so the vended fd can never race past its waiter; the header
     /// demux (`FDSidecarClient`) is what keeps concurrent attaches for
     /// different panes from cross-delivering fds.
-    func openAttach(worktreeID: UUID, paneID: String, windowID: String) async throws -> Int32 {
+    func openAttach(
+        worktreeID: UUID, paneID: String, windowID: String
+    ) async throws -> (fd: Int32, generation: UInt64?) {
         // Fresh nonce per attach: the daemon echoes it in the vend header, so
         // a superseded attach's stale fd can never be delivered to this one.
         let attachID = UUID()
         let promise = fdSidecar.expectFD(worktreeID: worktreeID, paneID: paneID, attachID: attachID)
+        let generation: UInt64?
         do {
             let result = try await attachRequest(
                 worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID)
@@ -835,28 +865,59 @@ actor DaemonClient {
                 promise.cancel()
                 throw DaemonClientError.attachUnavailable(result.status)
             }
+            generation = result.generation
         } catch {
             promise.cancel()
             throw error
         }
-        return try await promise.value(timeout: .seconds(5))
+        do {
+            return (try await promise.value(timeout: .seconds(5)), generation)
+        } catch {
+            // attach.request already succeeded, so the daemon-minted
+            // generation is known — it must survive this throw (R6-H2): the
+            // caller's failure teardown detaches by it, and losing it here
+            // would force the unconditional nil-generation detach that can
+            // kill a healthy racing re-attach.
+            throw AttachFDVendError(generation: generation, underlying: error)
+        }
     }
 
     /// Ack that the app's reader is draining the vended fd — opens the
-    /// daemon-side write gate.
-    func attachReady(worktreeID: UUID, paneID: String) async throws {
+    /// daemon-side write gate. Pass the `generation` from `openAttach` so the
+    /// daemon runs the replay sequence only if this attach still owns the
+    /// pane — a stale ready (superseded by a faster re-attach) must not
+    /// pause/unpause the pane out from under the successor's sequence; nil
+    /// (unknown generation) acks unchecked, as before.
+    func attachReady(worktreeID: UUID, paneID: String, generation: UInt64? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.attachReady,
-            params: AttachReadyParams(worktreeID: worktreeID, paneID: paneID)
+            params: AttachReadyParams(
+                worktreeID: worktreeID, paneID: paneID, generation: generation)
         )
     }
 
     /// Tell the daemon this pane is no longer rendered; the daemon closes the
-    /// pipe write end and the app-side reader sees EOF.
-    func paneDetach(worktreeID: UUID, paneID: String) async throws {
+    /// pipe write end and the app-side reader sees EOF. Pass the `generation`
+    /// from `openAttach` so the daemon detaches generation-checked — a stale
+    /// detach from a closing view must not kill a newer attach's sink; nil
+    /// (unknown generation) detaches unconditionally, as before.
+    func paneDetach(worktreeID: UUID, paneID: String, generation: UInt64? = nil) async throws {
         try await callVoidAsync(
             method: RPCMethod.paneDetach,
-            params: PaneDetachParams(worktreeID: worktreeID, paneID: paneID)
+            params: PaneDetachParams(worktreeID: worktreeID, paneID: paneID, generation: generation)
+        )
+    }
+
+    /// Tell the daemon the desired size for one control-mode window. Debounced
+    /// by the caller; the daemon arbitrates the `resize-window` with echo
+    /// suppression (addendum §4). Fire-and-forget from the app's view: errors
+    /// are dropped because the resize is re-fired repeatedly and the next tick
+    /// self-heals.
+    func paneResize(worktreeID: UUID, windowID: String, cols: Int, rows: Int) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.paneResize,
+            params: PaneResizeParams(
+                worktreeID: worktreeID, windowID: windowID, cols: cols, rows: rows)
         )
     }
 

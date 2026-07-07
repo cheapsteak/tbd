@@ -111,9 +111,20 @@ public struct TmuxManager: Sendable {
     }
 
     public static func newServerCommand(server: String, session: String, cwd: String, cols: Int? = nil, rows: Int? = nil) -> [String] {
-        // Place size flags before -PF so the format spec stays last (consistent
-        // with tmux argument-order conventions).
-        ["-L", server, "new-session", "-d", "-s", session, "-c", cwd]
+        // history-limit is chained BEFORE new-session in the same tmux
+        // invocation (";" separates commands in one command list). tmux
+        // captures a pane's history ceiling at window-creation time, so
+        // setting it after windows exist does nothing for them — chaining it
+        // first guarantees even window 0, created by new-session at server
+        // birth, gets the full limit. The server auto-starts for this list
+        // because it contains new-session; set-option -g then runs before any
+        // window exists. 50000 matches the control-mode replay capture depth
+        // (`capture-pane -S -50000`).
+        //
+        // Place size flags before -PF so the format spec stays last
+        // (consistent with tmux argument-order conventions).
+        ["-L", server, "set-option", "-g", "history-limit", "50000", ";",
+         "new-session", "-d", "-s", session, "-c", cwd]
             + sizeFlags(cols: cols, rows: rows)
             + ["-PF", "#{window_id}"]
     }

@@ -25,6 +25,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var nightwatch_mode: String?
     var auto_hibernate_enabled: Bool?
     var hibernate_idle_minutes: Int?
+    var control_mode_enabled: Bool?
 
     func toModel() -> Config {
         Config(
@@ -41,7 +42,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             nightwatchMode: nightwatch_mode
                 .flatMap(NightwatchMode.init(rawValue:)) ?? .off,
             autoHibernateEnabled: auto_hibernate_enabled ?? true,
-            hibernateIdleMinutes: hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes
+            hibernateIdleMinutes: hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes,
+            controlModeEnabled: control_mode_enabled ?? false
         )
     }
 }
@@ -198,6 +200,18 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET auto_hibernate_enabled = ?, hibernate_idle_minutes = ? WHERE id = ?",
                 arguments: [enabled, minutes, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the tmux control-mode opt-in. The attach gate re-reads this
+    /// per decision (`env || flag`), so no daemon restart is required —
+    /// but only newly created panes pick up the change.
+    public func setControlModeEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET control_mode_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
             )
         }
     }

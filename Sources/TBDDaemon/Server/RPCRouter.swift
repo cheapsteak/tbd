@@ -212,8 +212,10 @@ public final class RPCRouter: Sendable {
                 return try await handleAttachReady(request.paramsData)
             case RPCMethod.paneDetach:
                 return try await handlePaneDetach(request.paramsData)
+            case RPCMethod.paneResize:
+                return try await handlePaneResize(request.paramsData)
             case RPCMethod.daemonCapabilities:
-                return try handleDaemonCapabilities()
+                return try await handleDaemonCapabilities()
             case RPCMethod.terminalSuspend:
                 return try await handleTerminalSuspend(request.paramsData)
             case RPCMethod.terminalResume:
@@ -331,6 +333,8 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalSetKeepWarm(request.paramsData)
             case RPCMethod.configSetAutoHibernate:
                 return try await handleConfigSetAutoHibernate(request.paramsData)
+            case RPCMethod.configSetControlMode:
+                return try await handleConfigSetControlMode(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }
@@ -344,16 +348,21 @@ public final class RPCRouter: Sendable {
 
     /// Report daemon feature flags the app cannot derive locally. The app is
     /// launched via `open` (LaunchServices), which drops shell env — so the
-    /// control-mode gate state must be asked for, not mirrored.
-    func handleDaemonCapabilities() throws -> RPCResponse {
+    /// control-mode gate state must be asked for, not mirrored. The gate is
+    /// re-evaluated per call (env || persisted flag), so a Settings toggle is
+    /// visible on the next fetch without a daemon restart.
+    func handleDaemonCapabilities() async throws -> RPCResponse {
         let enabled: Bool
         if let bridge = controlMode {
-            enabled = ControlModeGate.shouldEnable(
-                environment: bridge.environment, tmuxVersion: bridge.tmuxVersion)
+            enabled = await bridge.gateEnabled()
         } else {
             enabled = false
         }
-        return try RPCResponse(result: DaemonCapabilitiesResult(controlModeEnabled: enabled))
+        let version = controlMode?.tmuxVersion
+        return try RPCResponse(result: DaemonCapabilitiesResult(
+            controlModeEnabled: enabled,
+            tmuxVersion: version?.description,
+            controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false))
     }
 
     // MARK: - PR Status

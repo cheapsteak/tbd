@@ -68,7 +68,7 @@ struct PhaseTwoIntegrationTests {
         await supervisor.ensureConnection(serverName: server)
         try await Task.sleep(for: .milliseconds(300))  // let the -CC connection settle
 
-        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        let (readFD, attachGeneration) = try await supervisor.attach(server: server, paneID: paneID)
 
         let (daemonSideSocket, appSideSocket) = try makeSocketPair()
         defer { Darwin.close(appSideSocket) }
@@ -78,11 +78,11 @@ struct PhaseTwoIntegrationTests {
         try await vending.send(fd: readFD, header: header)
         Darwin.close(readFD)  // daemon can drop its copy
 
-        let (rxFD, _) = try FDChannel.receiveFD(from: appSideSocket, headerCapacity: 256)
+        let (rxFD, _) = try SidecarTestSupport.receiveVend(from: appSideSocket)
         defer { Darwin.close(rxFD) }
 
         // Now signal ready and drive a marker through tmux.
-        await supervisor.markReady(server: server, paneID: paneID)
+        await supervisor.markReady(server: server, paneID: paneID, generation: attachGeneration)
         let marker = "TBDPHASE2-\(UUID().uuidString.prefix(6))"
         tmux(["-L", server, "send-keys", "printf %s '\(marker)'", "Enter"])
 

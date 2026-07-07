@@ -112,6 +112,7 @@ public enum RPCMethod {
     public static let attachRequest = "attach.request"
     public static let attachReady = "attach.ready"
     public static let paneDetach = "pane.detach"
+    public static let paneResize = "pane.resize"
     public static let daemonCapabilities = "daemon.capabilities"
     public static let terminalRecreateWindow = "terminal.recreateWindow"
     public static let noteCreate = "note.create"
@@ -180,6 +181,7 @@ public enum RPCMethod {
     public static let nightwatchSetMode = "nightwatch.setMode"
     public static let nightwatchReport = "nightwatch.report"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
+    public static let configSetControlMode = "config.setControlMode"
 }
 
 // MARK: - Branch Listing
@@ -1101,6 +1103,14 @@ public struct ConfigSetAutoHibernateParams: Codable, Sendable {
     }
 }
 
+/// Params for `config.setControlMode` — persist the tmux control-mode opt-in
+/// (M5). The gate is `env || flag`; the change applies to newly created
+/// panes, existing attaches are untouched.
+public struct ConfigSetControlModeParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `repo.setEnvOverrides` — per-repo free-form env overrides.
 public struct SetRepoEnvOverridesParams: Codable, Sendable, Equatable {
     public let repoID: UUID
@@ -1153,7 +1163,15 @@ public struct AttachRequestResult: Codable, Sendable {
     /// One of "pending" (fd vended; waiting for attach.ready) or
     /// "unavailable" (control mode off / not configured).
     public let status: String
-    public init(status: String) { self.status = status }
+    /// Daemon-side fanout generation of the vended attach ("pending" only).
+    /// The app echoes it back in `pane.detach` so a stale detach — a closing
+    /// view racing a fresh attach for the same pane — cannot kill the newer
+    /// attach's sink. Optional for wire back-compat with older daemons.
+    public let generation: UInt64?
+    public init(status: String, generation: UInt64? = nil) {
+        self.status = status
+        self.generation = generation
+    }
 }
 
 /// Params for `attach.ready` — the app's ack that its reader is draining the
@@ -1161,9 +1179,19 @@ public struct AttachRequestResult: Codable, Sendable {
 public struct AttachReadyParams: Codable, Sendable {
     public let worktreeID: UUID
     public let paneID: String
-    public init(worktreeID: UUID, paneID: String) {
+    /// The attach generation this ready acknowledges (echoed from
+    /// `AttachRequestResult.generation`). When present, the daemon runs the
+    /// replay sequence ONLY if it still matches the pane's current attach —
+    /// a stale ready (a superseded viewer's ack landing after a successor's
+    /// attach) must send NOTHING on the shared per-server command client:
+    /// pause state is keyed per PANE there, so a stale pause/continue would
+    /// freeze the pane or resume output into the successor's closed gate.
+    /// Optional for wire back-compat; absent → behave as before.
+    public let generation: UInt64?
+    public init(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
         self.worktreeID = worktreeID
         self.paneID = paneID
+        self.generation = generation
     }
 }
 
@@ -1172,9 +1200,32 @@ public struct AttachReadyParams: Codable, Sendable {
 public struct PaneDetachParams: Codable, Sendable {
     public let worktreeID: UUID
     public let paneID: String
-    public init(worktreeID: UUID, paneID: String) {
+    /// The attach generation this detach targets (from
+    /// `AttachRequestResult.generation`). When present the daemon detaches
+    /// generation-checked — a stale detach from a closing view no-ops against
+    /// a newer attach's sink. Absent (older app) → unconditional detach.
+    public let generation: UInt64?
+    public init(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
         self.worktreeID = worktreeID
         self.paneID = paneID
+        self.generation = generation
+    }
+}
+
+/// Params for `pane.resize` — the app's debounced desired size for one
+/// control-mode window. Carries `windowID` because the daemon sizes per WINDOW
+/// (the same tmux server hosts other windows' viewers), and `worktreeID` to
+/// resolve the server (pane/window ids are only unique per server).
+public struct PaneResizeParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let windowID: String
+    public let cols: Int
+    public let rows: Int
+    public init(worktreeID: UUID, windowID: String, cols: Int, rows: Int) {
+        self.worktreeID = worktreeID
+        self.windowID = windowID
+        self.cols = cols
+        self.rows = rows
     }
 }
 
@@ -1182,8 +1233,32 @@ public struct PaneDetachParams: Codable, Sendable {
 /// locally (it is launched via `open`, which drops shell env, so it cannot
 /// read the daemon's gate variables itself).
 public struct DaemonCapabilitiesResult: Codable, Sendable {
+    /// Effective control-mode gate: `(env || persisted flag) && tmux >= 3.2`,
+    /// re-evaluated by the daemon on every call.
     public let controlModeEnabled: Bool
-    public init(controlModeEnabled: Bool) { self.controlModeEnabled = controlModeEnabled }
+    /// tmux version the daemon detected at startup (e.g. "3.6a"); nil when
+    /// detection failed (tmux missing/unparseable).
+    public let tmuxVersion: String?
+    /// Whether the detected tmux meets the control-mode minimum (>= 3.2).
+    /// Computed daemon-side so the app never parses version strings.
+    public let controlModeSupported: Bool
+
+    public init(controlModeEnabled: Bool,
+                tmuxVersion: String? = nil,
+                controlModeSupported: Bool = false) {
+        self.controlModeEnabled = controlModeEnabled
+        self.tmuxVersion = tmuxVersion
+        self.controlModeSupported = controlModeSupported
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        controlModeEnabled = try c.decodeIfPresent(Bool.self, forKey: .controlModeEnabled) ?? false
+        // New in M5 — absent when talking to a pre-M5 daemon; default to the
+        // conservative "unsupported / unknown version".
+        tmuxVersion = try c.decodeIfPresent(String.self, forKey: .tmuxVersion)
+        controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
+    }
 }
 
 public struct TerminalResumeParams: Codable, Sendable {

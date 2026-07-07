@@ -26,6 +26,7 @@ public enum StateDelta: Codable, Sendable {
     case terminalProfileChanged(TerminalProfileDelta)
     case worktreeMoved(WorktreeMovedDelta)
     case terminalHibernationChanged(TerminalHibernationDelta)
+    case controlModeInputHealthChanged(ControlModeInputHealthDelta)
 }
 
 /// Delta payload for a terminal's hibernation state change (hibernate / wake)
@@ -61,6 +62,35 @@ public struct TerminalProfileDelta: Codable, Sendable {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.newProfileID = newProfileID
+    }
+}
+
+/// Delta payload for a control-mode input-delivery health transition (#318
+/// polish ruling). EDGE-TRIGGERED by the daemon's `ControlModeInputRouter`:
+/// one `healthy: false` when a pane's keystroke/paste delivery starts
+/// failing, one `healthy: true` when a subsequent delivery succeeds — never
+/// one per keystroke. The app shows/clears a passive "input not being
+/// delivered" indicator on the affected pane; delivery plumbing stays
+/// tolerant (nothing is torn down on failure).
+public struct ControlModeInputHealthDelta: Codable, Sendable, Equatable {
+    public let worktreeID: UUID
+    /// tmux pane id (`%N`) — only unique within one server, so it is always
+    /// paired with `worktreeID` (same keying as `SidecarInputHeader`).
+    public let paneID: String
+    public let healthy: Bool
+    /// Attach generation the health observation belongs to (R6-M7), stamped
+    /// from the input route registered at attach time. The app applies a
+    /// FAILING delta only when this matches its recorded attach generation —
+    /// a stale attach's failure surfacing after a re-attach must not flag
+    /// the fresh, healthy attach. Optional for wire back-compat: nil (older
+    /// daemon, or a route registered without one) applies unchecked, as
+    /// before. Recovery deltas clear regardless — clearing is always safe.
+    public let generation: UInt64?
+    public init(worktreeID: UUID, paneID: String, healthy: Bool, generation: UInt64? = nil) {
+        self.worktreeID = worktreeID
+        self.paneID = paneID
+        self.healthy = healthy
+        self.generation = generation
     }
 }
 

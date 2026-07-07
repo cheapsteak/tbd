@@ -21,6 +21,10 @@ final class FDSidecarClient: @unchecked Sendable {
     private let lock = NSLock()
     private var socketFD: Int32 = -1
     private var waiters: [String: (Int32?, Error?) -> Void] = [:]
+    /// Serial queue for app → daemon input frames. Keeps `sendInput` off the
+    /// caller's thread (SwiftTerm calls it on the main thread) and serializes
+    /// writes so two frames never interleave on the socket.
+    private let sendQueue = DispatchQueue(label: "fd-sidecar-send")
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return socketFD >= 0 }
 
@@ -89,33 +93,168 @@ final class FDSidecarClient: @unchecked Sendable {
         lock.lock(); waiters[key] = nil; lock.unlock()
     }
 
-    private func receiveLoop(_ fd: Int32) {
-        while true {
-            guard let (rxFD, header) = try? FDChannel.receiveFD(from: fd, headerCapacity: 256) else { break }
-            guard let hdr = try? JSONDecoder().decode(FDVendHeader.self, from: header) else {
-                logger.error("sidecar: undecodable vend header, closing fd")
-                Darwin.close(rxFD)
-                continue
+    /// Send keystroke `bytes` for a pane to the daemon as an `.input`
+    /// frame. Never blocks the caller: encodes inline (cheap) then enqueues the
+    /// write on `sendQueue`. Errors — including a disconnected socket — are
+    /// logged and dropped; the receive loop's EOF path handles daemon death and
+    /// Phase B owns reconnect.
+    func sendInput(worktreeID: UUID, paneID: String, bytes: Data) {
+        // Defense-in-depth cap (R6-H3), mirroring `sendPaste`'s guard: a
+        // single `.input` frame that couldn't fit the daemon scanner's 4 MiB
+        // hard cap would desync the ONE app-wide sidecar connection and kill
+        // control-mode input everywhere (no Phase A reconnect). Keystrokes
+        // are tiny — anything near the cap is a bug or abuse upstream (the
+        // drag-drop and paste paths both route through PasteInterception),
+        // so refusing is strictly safer than writing.
+        guard bytes.count <= SidecarFrameCodec.maxPasteBytes else {
+            logger.fault("""
+                sidecar: sendInput payload \(bytes.count, privacy: .public) bytes exceeds cap \
+                \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping (input this large is a routing bug)
+                """)
+            return
+        }
+        let frame: Data
+        do {
+            frame = try SidecarFrameCodec.encodeInput(
+                header: SidecarInputHeader(worktreeID: worktreeID, paneID: paneID), bytes: bytes)
+        } catch {
+            logger.error("sidecar: failed to encode input frame, dropping \(bytes.count, privacy: .public) bytes")
+            return
+        }
+        sendQueue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
+            guard fd >= 0 else {
+                self.logger.error("sidecar: sendInput while disconnected, dropping \(bytes.count, privacy: .public) bytes")
+                return
             }
-            lock.lock()
-            let waiter = waiters.removeValue(forKey: hdr.routingKey)
-            lock.unlock()
-            if let waiter {
-                waiter(rxFD, nil)
-            } else {
-                logger.info("sidecar: no waiter for \(hdr.routingKey, privacy: .public) (stale vend), closing fd")
-                Darwin.close(rxFD)
+            do {
+                try FDChannel.sendData(frame, over: fd)
+            } catch {
+                self.logger.error("sidecar: input send failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    /// Send bulk paste `bytes` for a pane to the daemon as a `.paste` frame (the
+    /// paste ruling v2: every control-mode paste rides this path). Same serial
+    /// `sendQueue` + inline-encode pattern as `sendInput`, so a paste and a
+    /// following keystroke stay FIFO-ordered on the wire. Oversize payloads are
+    /// dropped defensively — the view-level `PasteInterception` gate already
+    /// refuses them before they reach here.
+    func sendPaste(worktreeID: UUID, paneID: String, bytes: Data) {
+        guard bytes.count <= SidecarFrameCodec.maxPasteBytes else {
+            logger.fault("""
+                sidecar: sendPaste payload \(bytes.count, privacy: .public) bytes exceeds cap \
+                \(SidecarFrameCodec.maxPasteBytes, privacy: .public), dropping (view gate should have prevented this)
+                """)
+            return
+        }
+        let frame: Data
+        do {
+            frame = try SidecarFrameCodec.encodePaste(
+                header: SidecarInputHeader(worktreeID: worktreeID, paneID: paneID), bytes: bytes)
+        } catch {
+            logger.error("sidecar: failed to encode paste frame, dropping \(bytes.count, privacy: .public) bytes")
+            return
+        }
+        sendQueue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let fd = self.socketFD; self.lock.unlock()
+            guard fd >= 0 else {
+                self.logger.error("sidecar: sendPaste while disconnected, dropping \(bytes.count, privacy: .public) bytes")
+                return
+            }
+            do {
+                try FDChannel.sendData(frame, over: fd)
+            } catch {
+                self.logger.error("sidecar: paste send failed: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
+    private func receiveLoop(_ fd: Int32) {
+        let scanner = SidecarFrameScanner()
+        // FDs arrive in frame order (SCM_RIGHTS ancillary is delivered with the
+        // first byte of the sendmsg segment, and recvmsg does not read across an
+        // ancillary boundary), so a queue paired FIFO with completed `.fdVend`
+        // frames routes each fd correctly.
+        var pendingFDs: [Int32] = []
+        while true {
+            let message: (data: Data, fds: [Int32])
+            do {
+                message = try FDChannel.receiveMessage(from: fd, capacity: 16 * 1024)
+            } catch {
+                break   // EOF or read error
+            }
+            pendingFDs.append(contentsOf: message.fds)
+            // Process the frames `append` returned FIRST, THEN check isDesynced
+            // and break. A desync-tripping tail can arrive in the same read as
+            // the last valid frames; checking before processing would silently
+            // discard those valid frames (their waiters would get .disconnected
+            // instead of their fd). This must stay in lockstep with the daemon's
+            // receive loop in FDVendingServer.startReceiveThread, which likewise
+            // drains the returned frames before its isDesynced break.
+            for frame in scanner.append(message.data) {
+                guard let type = SidecarFrameType(rawValue: frame.type) else {
+                    logger.error("sidecar: unknown frame type \(frame.type, privacy: .public), skipping")
+                    continue
+                }
+                switch type {
+                case .fdVend:
+                    let rxFD: Int32? = pendingFDs.isEmpty ? nil : pendingFDs.removeFirst()
+                    handleFDVend(headerPayload: frame.payload, fd: rxFD)
+                case .input, .paste:
+                    // The daemon must never send input/paste frames — those
+                    // directions are app → daemon only.
+                    logger.error("sidecar: received \(frame.type, privacy: .public) frame from daemon (protocol violation), dropping")
+                }
+            }
+            if scanner.isDesynced {
+                logger.fault("sidecar: frame scanner desynced, closing connection")
+                break
             }
         }
         // EOF: fail everything pending, mark disconnected (reconnect is a
-        // Phase 7 crash-recovery concern).
+        // Phase B crash-recovery concern).
         lock.lock()
         let pending = waiters; waiters = [:]
         socketFD = -1
         lock.unlock()
+        // Barrier before close: a `sendInput` write block may be mid-`write()` on
+        // this same fd right now. `sendFD` was already set to -1 above, so any
+        // block that has NOT yet started sees the guard and drops; this barrier
+        // waits out the one that's already inside `FDChannel.sendData`. Closing
+        // under a mid-`write()` racer risks writing into a recycled fd number.
+        sendQueue.sync {}
         Darwin.close(fd)
+        for leftover in pendingFDs { Darwin.close(leftover) }   // fds with no completed frame
         for (_, waiter) in pending { waiter(nil, FDSidecarError.disconnected) }
         logger.info("sidecar receive loop exited")
+    }
+
+    /// Route a completed `.fdVend` frame's paired fd to its waiter, or close it.
+    private func handleFDVend(headerPayload: Data, fd: Int32?) {
+        guard let hdr = try? JSONDecoder().decode(FDVendHeader.self, from: headerPayload) else {
+            logger.error("sidecar: undecodable vend header, closing fd")
+            if let fd { Darwin.close(fd) }
+            return
+        }
+        guard let fd else {
+            // A completed fdVend frame with no paired fd is a protocol bug on
+            // the daemon side — nothing to deliver.
+            logger.error("sidecar: fdVend \(hdr.routingKey, privacy: .public) arrived with no paired fd")
+            return
+        }
+        lock.lock()
+        let waiter = waiters.removeValue(forKey: hdr.routingKey)
+        lock.unlock()
+        if let waiter {
+            waiter(fd, nil)
+        } else {
+            logger.info("sidecar: no waiter for \(hdr.routingKey, privacy: .public) (stale vend), closing fd")
+            Darwin.close(fd)
+        }
     }
 }
 

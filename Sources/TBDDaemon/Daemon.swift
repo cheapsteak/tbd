@@ -319,10 +319,30 @@ public final class Daemon: Sendable {
         // gated control connection through a single supervisor. When the gate
         // is off (the default), `enableIfGated` is a no-op.
         let tmuxVersion = await TmuxVersion.detect()
+        // Input router with the health sink wired to the state-delta broadcast
+        // (#318 polish): edge-triggered per-pane input-delivery transitions
+        // ride the same subscription channel the app already listens on.
+        let controlModeInputRouter = ControlModeInputRouter(
+            commandProvider: { [supervisor = controlModeSupervisor] server in
+                await supervisor.command(server: server)
+            },
+            onHealthChange: { [subs] worktreeID, paneID, healthy, generation in
+                subs.broadcast(delta: .controlModeInputHealthChanged(ControlModeInputHealthDelta(
+                    worktreeID: worktreeID, paneID: paneID, healthy: healthy,
+                    generation: generation)))
+            }
+        )
         let controlModeBridge = TmuxControlModeBridge(
             supervisor: controlModeSupervisor,
             tmuxVersion: tmuxVersion,
-            fdVending: fdVendingServer
+            fdVending: fdVendingServer,
+            inputRouter: controlModeInputRouter,
+            // Live provider, not a snapshot: the gate re-reads the persisted
+            // Settings flag on every attach decision (M5), so a toggle takes
+            // effect without a daemon restart.
+            persistedFlagProvider: { [config = database.config] in
+                (try? await config.get().controlModeEnabled) ?? false
+            }
         )
 
         var lifecycle = WorktreeLifecycle(
@@ -440,7 +460,21 @@ public final class Daemon: Sendable {
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
 
-        // 9a. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
+        // 9a. Install the app → daemon input sink BEFORE the sidecar listens:
+        // each adopted connection captures `onInput` at adopt time (M2.1
+        // contract), so wiring it after `listen` would miss the app's connect.
+        // The router is the bridge's (built above with the health sink, wired
+        // to `controlModeSupervisor`'s correlators).
+        await fdVendingServer.setOnInput { [inputRouter = controlModeBridge.inputRouter] header, bytes in
+            inputRouter.enqueue(header: header, bytes: bytes)
+        }
+        // Bulk pastes ride the SAME router (and thus the same ordered stream) so
+        // a keystroke after a paste stays FIFO-behind it (the M2 paste ruling).
+        await fdVendingServer.setOnPaste { [inputRouter = controlModeBridge.inputRouter] header, bytes in
+            inputRouter.enqueuePaste(header: header, bytes: bytes)
+        }
+
+        // 9b. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
         // app). Failure is non-fatal: control-mode attaches will fail and the
         // app falls back to grouped sessions.
         do {

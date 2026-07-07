@@ -30,6 +30,14 @@ struct TabCloseContext: Equatable {
     let tabID: UUID
 }
 
+/// Identifies one control-mode pane app-side. `paneID` (tmux `%N`) is only
+/// unique within one server, so it is always paired with `worktreeID` — the
+/// same keying as the daemon router and `SidecarInputHeader`.
+struct ControlModePaneKey: Hashable {
+    let worktreeID: UUID
+    let paneID: String
+}
+
 @MainActor
 final class AppState: ObservableObject {
     /// Reference to the global appearance settings, wired by `TBDAppMain`
@@ -422,6 +430,22 @@ final class AppState: ObservableObject {
     /// User dismissed the build-mismatch banner. In-memory only (advisory);
     /// reset whenever the mismatch message changes.
     @Published var daemonBuildMismatchDismissed = false
+    /// Panes currently rendered through a live control-mode attach, mapped to
+    /// the attach GENERATION the record belongs to (`nil` when the daemon
+    /// vended none). Maintained by `TerminalPanelRepresentable.Coordinator`
+    /// (attach success inserts; detach/fallback removes). Gates the
+    /// input-health indicator: it must NEVER show on a pane that isn't
+    /// control-mode attached (#318 polish), whatever health deltas arrive.
+    /// Generation-scoped (M3 review fix) so a closing pane's stale clear —
+    /// landing after a fresh attach's set for the same pane under adverse
+    /// MainActor scheduling — cannot drop a healthy pane's attached state
+    /// (the app-side twin of the daemon's generation-checked detach).
+    @Published private(set) var controlModeAttachedPanes: [ControlModePaneKey: UInt64?] = [:]
+    /// Panes the daemon has flagged input-failing via edge-triggered
+    /// `controlModeInputHealthChanged` deltas. A `healthy: true` delta or a
+    /// detach clears the flag. Read through `isInputDeliveryFailing(_:)`,
+    /// which applies the attached-pane gate.
+    @Published private(set) var controlModeFailingInputPanes: Set<ControlModePaneKey> = []
     @Published var historyActiveWorktrees: Set<UUID> = []
     @Published var historyLoadStates: [UUID: HistoryLoadState] = [:]
     @Published var selectedSessionIDs: [UUID: String] = [:]       // worktreeID → sessionId
@@ -566,7 +590,31 @@ final class AppState: ObservableObject {
     /// Feature flags fetched from the daemon at connect time. Nil until the
     /// first successful fetch — treated as "control mode off". The app cannot
     /// derive these locally: it is launched via `open`, which drops shell env.
-    var daemonCapabilities: DaemonCapabilitiesResult?
+    /// Published so the Settings control-mode toggle re-renders after
+    /// `setControlModeEnabled` refreshes it.
+    @Published var daemonCapabilities: DaemonCapabilitiesResult?
+    /// How `refreshDaemonCapabilities()` fetches — injectable because
+    /// `DaemonClient` is concrete (no protocol), so state-level tests stub the
+    /// RPC here. Production default asks the daemon; nil result = fetch failed.
+    lazy var daemonCapabilitiesFetcher: @MainActor () async -> DaemonCapabilitiesResult? =
+        { [daemonClient] in try? await daemonClient.daemonCapabilities() }
+    /// How `setControlModeEnabled` persists the flag — injectable for the same
+    /// reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete, no
+    /// protocol), so the Settings-toggle tests can exercise the success branch.
+    lazy var controlModeSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setControlMode(enabled: enabled) }
+
+    /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
+    /// `.modelProfilesChanged` delta handler so a control-mode toggle from
+    /// ANOTHER client propagates here without waiting for a reconnect. Keeps
+    /// the last known value on failure: the delta fires for many config
+    /// changes, and a transient RPC hiccup must not nil out good capabilities
+    /// (new panes would silently fall back to grouped sessions).
+    func refreshDaemonCapabilities() async {
+        if let capabilities = await daemonCapabilitiesFetcher() {
+            daemonCapabilities = capabilities
+        }
+    }
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     private var pollTimer: Timer?
@@ -861,6 +909,12 @@ final class AppState: ObservableObject {
             Task { [weak self] in
                 await self?.loadModelProfiles()
                 await self?.loadHibernationConfig()
+                // The daemon reuses this delta for config changes including
+                // the control-mode toggle (handleConfigSetControlMode), so
+                // refresh capabilities too — a toggle from ANOTHER client
+                // must reach this one without waiting for a reconnect
+                // (R7-minor). Best-effort: failure keeps the last value.
+                await self?.refreshDaemonCapabilities()
             }
         case .terminalSessionUpdated(let d):
             applyTerminalSessionDelta(d)
@@ -879,8 +933,84 @@ final class AppState: ObservableObject {
         case .worktreeRevived(let d):
             recentlyArchivedWorktreeIDs.removeValue(forKey: d.worktreeID)
             Task { [weak self] in await self?.refreshWorktrees() }
+        case .controlModeInputHealthChanged(let d):
+            applyControlModeInputHealthDelta(d)
         default:
             break
+        }
+    }
+
+    // MARK: - Control-mode input-delivery health (#318 polish)
+
+    /// Record that `paneID` is now rendered through a live control-mode
+    /// attach owned by `generation` (from `openAttach`; nil when the daemon
+    /// vended none). Called by the terminal coordinator once `attach.ready`
+    /// is acked. A re-attach for the same pane overwrites the record with its
+    /// own generation AND clears any stale failing flag — a fresh attach
+    /// starts from a healthy baseline, mirroring the daemon router's
+    /// `register()` reset. Without this, a failing flag from a previous
+    /// generation could stick forever: the stale detach's generation guard
+    /// (correctly) refuses to clear it, and the daemon's register-reset is
+    /// silent — no recovery delta ever arrives to un-stick the indicator.
+    func controlModePaneAttached(worktreeID: UUID, paneID: String, generation: UInt64?) {
+        let key = ControlModePaneKey(worktreeID: worktreeID, paneID: paneID)
+        controlModeAttachedPanes[key] = generation
+        controlModeFailingInputPanes.remove(key)
+    }
+
+    /// Clear a pane's attach record AND any failing flag — the indicator must
+    /// vanish on detach, and a later re-attach starts from a healthy baseline
+    /// (mirrors the daemon router's unregister semantics). Idempotent; also
+    /// safe to call from the attach-failure fallback path where the pane was
+    /// never marked attached.
+    ///
+    /// Generation-scoped (M3 review fix): when `generation` is present, the
+    /// clear applies ONLY if it matches the recorded attach's generation — a
+    /// closing pane's stale clear landing after a fresh attach's set for the
+    /// same pane must not drop the successor's attached state. `nil`
+    /// (generation unknown — e.g. an openAttach that failed before vending
+    /// one) clears unconditionally, as before. A record stored WITHOUT a
+    /// generation can't be discriminated, so any detach clears it.
+    func controlModePaneDetached(worktreeID: UUID, paneID: String, generation: UInt64? = nil) {
+        let key = ControlModePaneKey(worktreeID: worktreeID, paneID: paneID)
+        if let generation,
+           let record = controlModeAttachedPanes[key], let recordedGeneration = record,
+           recordedGeneration != generation {
+            return
+        }
+        controlModeAttachedPanes.removeValue(forKey: key)
+        controlModeFailingInputPanes.remove(key)
+    }
+
+    /// Whether the "input not being delivered" indicator should show for a
+    /// pane: it must be BOTH control-mode attached and flagged failing. A
+    /// failing delta for a non-attached pane (stale, or grouped-sessions
+    /// fallback) never surfaces.
+    func isInputDeliveryFailing(_ key: ControlModePaneKey) -> Bool {
+        controlModeAttachedPanes.index(forKey: key) != nil
+            && controlModeFailingInputPanes.contains(key)
+    }
+
+    private func applyControlModeInputHealthDelta(_ delta: ControlModeInputHealthDelta) {
+        let key = ControlModePaneKey(worktreeID: delta.worktreeID, paneID: delta.paneID)
+        if delta.healthy {
+            // Recovery clears regardless of generation: clearing is always
+            // safe (worst case the indicator re-fires on the next failure).
+            controlModeFailingInputPanes.remove(key)
+        } else {
+            // A FAILING delta is generation-scoped (R6-M7): apply only if it
+            // belongs to the attach this pane currently records — a stale
+            // attach's failure surfacing after a re-attach must not flag the
+            // fresh, healthy attach. Nil on either side (older daemon delta,
+            // or a record vended without a generation) applies unchecked,
+            // preserving pre-R6 behavior — same discrimination rule as
+            // `controlModePaneDetached`.
+            if let deltaGeneration = delta.generation,
+               let record = controlModeAttachedPanes[key], let recordedGeneration = record,
+               recordedGeneration != deltaGeneration {
+                return
+            }
+            controlModeFailingInputPanes.insert(key)
         }
     }
 

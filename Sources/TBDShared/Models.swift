@@ -688,6 +688,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// Minutes a Claude session must sit idle-at-rest before the auto-hibernate
     /// timer terminates its process. Clamped to a sane floor by the daemon.
     public var hibernateIdleMinutes: Int
+    /// Persisted opt-in for the tmux control-mode render path. The effective
+    /// gate is `env || flag` (a truthy `TBD_TMUX_CONTROL_MODE` is the
+    /// developer override) AND tmux >= 3.2; applies to newly created panes.
+    public var controlModeEnabled: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -703,7 +707,8 @@ public struct Config: Codable, Sendable, Equatable {
                 scratchProfileOverrideID: UUID? = nil,
                 nightwatchMode: NightwatchMode = .off,
                 autoHibernateEnabled: Bool = true,
-                hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes) {
+                hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
+                controlModeEnabled: Bool = false) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -716,6 +721,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.nightwatchMode = nightwatchMode
         self.autoHibernateEnabled = autoHibernateEnabled
         self.hibernateIdleMinutes = hibernateIdleMinutes
+        self.controlModeEnabled = controlModeEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -741,6 +747,8 @@ public struct Config: Codable, Sendable, Equatable {
         autoHibernateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateEnabled) ?? true
         hibernateIdleMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateIdleMinutes)
             ?? Config.defaultHibernateIdleMinutes
+        controlModeEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .controlModeEnabled) ?? false
     }
 }
 

@@ -63,6 +63,14 @@ struct TerminalPanelView: View {
             .first(where: { $0.id == terminalID })?.profileID
     }
 
+    /// This terminal's control-mode pane key, for the input-health indicator.
+    /// `nil` while AppState hasn't loaded the terminal yet.
+    private var controlModePaneKey: ControlModePaneKey? {
+        appState.terminals.values.flatMap({ $0 })
+            .first(where: { $0.id == terminalID })
+            .map { ControlModePaneKey(worktreeID: $0.worktreeID, paneID: $0.tmuxPaneID) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if let warning = proxyWarning,
@@ -79,6 +87,22 @@ struct TerminalPanelView: View {
                 }
                 .padding(8)
                 .background(Color.yellow.opacity(0.2))
+            }
+            // Passive input-delivery indicator (#318 polish): shows only while
+            // this pane is control-mode attached AND the daemon has flagged
+            // its input failing (edge-triggered deltas); clears itself on the
+            // recovery delta or on detach — no dismiss affordance.
+            if let paneKey = controlModePaneKey, appState.isInputDeliveryFailing(paneKey) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text("Input not being delivered — keystrokes are not reaching this pane")
+                        .font(.caption)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.orange.opacity(0.18))
             }
             TerminalPanelRepresentable(
                 terminalID: terminalID,
@@ -310,7 +334,29 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// FD vending). `cleanup()` uses these to pair the teardown correctly:
         /// `pane.detach` RPC first (daemon EOFs the pipe), then flag the
         /// reader stopped — the reader closes its own fd when the EOF lands.
-        private var controlModeAttach: (worktreeID: UUID, paneID: String, routingKey: String)?
+        /// `windowID` is carried for `pane.resize` (M3.2): the daemon sizes per
+        /// WINDOW, so resize RPCs need it.
+        private var controlModeAttach:
+            (worktreeID: UUID, paneID: String, windowID: String, routingKey: String, generation: UInt64?)?
+        /// Debounces control-mode `pane.resize` RPCs (M3.2). Cancel-and-replace
+        /// so only the tail of a window-drag flurry reaches the daemon; cancelled
+        /// in `cleanup()`.
+        private var resizeDebounceTask: Task<Void, Never>?
+        /// Latest-wins cross-call ordering for the debounced resizes (R5-M3):
+        /// at most one `paneResize` RPC in flight; a tick landing meanwhile
+        /// stashes and the in-flight sender's completion drains it. MainActor-
+        /// confined like `resizeDebounceTask` — mutated only from the
+        /// `@MainActor` debounce path.
+        private var resizeSerializer = ControlModeResizeSerializer()
+        /// Set (permanently) by `cleanup()` when the view is torn down. The
+        /// attach establishment in `startControlModeClient` re-checks it
+        /// after every `await` resumption and self-detaches anything it
+        /// committed after the teardown ran (review H2) — `cleanup()`'s own
+        /// attach teardown only covers an attach that had already landed in
+        /// `controlModeAttach`. MainActor-confined: `cleanup()` is called
+        /// from `dismantleNSView` and every reader is a `@MainActor` method,
+        /// so plain-var access is race-free.
+        private var isTornDown = false
 
         @MainActor
         func syncTabCloseContext(_ context: TabCloseContext?, for terminalID: UUID) {
@@ -327,6 +373,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             windowID: String,
             panelID: UUID
         ) async {
+            // A torn-down view must never (re)start a client (review H2):
+            // checked at entry AND after the await below — teardown can land
+            // while `prepareSession` is in flight, and the LocalProcess +
+            // NSEvent monitors committed after it would leak (cleanup()
+            // already ran; only deinit would remove the monitors, nothing
+            // would terminate the process).
+            guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else { return }
             // `prepareSession` is non-isolated and awaits tmux subprocesses
             // off the main actor — Swift releases main while we suspend here,
             // so SwiftUI's render loop is no longer blocked while tmux runs.
@@ -350,6 +403,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 return
             }
             recreationAttempts = 0 // Reset on successful connect
+
+            // Teardown landed while prepareSession was in flight — stop
+            // before spawning the PTY / installing the monitors (review H2).
+            guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else { return }
 
             let tmuxPath = findExecutable(args[0])
             let processArgs = Array(args.dropFirst())
@@ -518,8 +575,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
+        @MainActor
         func cleanup() {
             debugLog("PANEL: cleanup for \(panelID.uuidString.prefix(8))")
+            // Before anything else: any in-flight attach establishment must
+            // see the teardown at its next await resumption (review H2).
+            isTornDown = true
             if let monitor = scrollMonitor {
                 NSEvent.removeMonitor(monitor)
                 scrollMonitor = nil
@@ -529,15 +590,31 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 clickMonitor = nil
             }
             tmuxBridge?.cleanupSession(panelID: panelID, server: tmuxServer)
+            resizeDebounceTask?.cancel()
+            resizeDebounceTask = nil
+            (terminalView as? TBDTerminalView)?.onControlModePaste = nil
             if let attach = controlModeAttach, let appState {
                 controlModeAttach = nil
                 Task {
+                    // Clear the attach record + any failing-input flag first
+                    // so the indicator vanishes with the pane (#318 polish).
+                    // Generation-scoped like the daemon-side detach below: a
+                    // closing view's clear racing a new view's attach for the
+                    // same pane must not drop the fresh attach's record.
+                    await appState.controlModePaneDetached(
+                        worktreeID: attach.worktreeID, paneID: attach.paneID,
+                        generation: attach.generation)
                     // Order matters: detach first so the daemon closes the
                     // pipe's write end (EOF unblocks the reader thread), then
-                    // flag the reader — it closes its own fd on exit.
+                    // flag the reader — it closes its own fd on exit. The
+                    // generation scopes the detach to THIS attach: a closing
+                    // view's detach racing a new view's attach for the same
+                    // pane must not kill the fresh sink.
                     try? await appState.daemonClient.paneDetach(
-                        worktreeID: attach.worktreeID, paneID: attach.paneID)
-                    await appState.controlModeReaders.remove(routingKey: attach.routingKey)
+                        worktreeID: attach.worktreeID, paneID: attach.paneID,
+                        generation: attach.generation)
+                    await appState.controlModeReaders.remove(
+                        routingKey: attach.routingKey, generation: attach.generation)
                 }
             }
         }
@@ -564,31 +641,177 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // attach nonce.
             let routingKey = "\(worktreeID.uuidString)/\(paneID)"
             do {
-                let fd = try await appState.daemonClient.openAttach(
+                let (fd, generation) = try await appState.daemonClient.openAttach(
                     worktreeID: worktreeID, paneID: paneID, windowID: windowID)
-                controlModeAttach = (worktreeID, paneID, routingKey)
+                // The view can be torn down while ANY of this function's
+                // awaits is in flight, and `cleanup()`'s attach teardown
+                // only covers an attach that already landed in
+                // `controlModeAttach` — so every resumption that committed
+                // a resource re-checks the teardown flag and unwinds what
+                // it just acquired (review H2). Here: the fd (nothing owns
+                // it yet) and the daemon-side attach.
+                if let undo = ControlModeAttachAbort.undo(tornDown: isTornDown, at: .openAttachResolved) {
+                    abortLateAttach(undo, fd: fd, appState: appState, worktreeID: worktreeID,
+                                    paneID: paneID, routingKey: routingKey, generation: generation)
+                    return
+                }
+                controlModeAttach = (worktreeID, paneID, windowID, routingKey, generation)
                 let weakTV = WeakTerminalRef(terminalView)
                 await appState.controlModeReaders.registerReader(
-                    routingKey: routingKey, fd: fd) { chunk in
+                    routingKey: routingKey, fd: fd, generation: generation) { chunk in
                         let bytes = [UInt8](chunk)
                         DispatchQueue.main.async {
                             weakTV.view?.feed(byteArray: bytes[...])
                         }
                     }
-                try await appState.daemonClient.attachReady(worktreeID: worktreeID, paneID: paneID)
+                // Teardown during registration: cleanup() ran its attach
+                // teardown, but its reader removal can have raced AHEAD of
+                // the registration that just completed — remove again.
+                if let undo = ControlModeAttachAbort.undo(tornDown: isTornDown, at: .readerRegistered) {
+                    abortLateAttach(undo, fd: fd, appState: appState, worktreeID: worktreeID,
+                                    paneID: paneID, routingKey: routingKey, generation: generation)
+                    return
+                }
+                // Echo this attach's generation so a stale ready — superseded
+                // by a faster re-attach for the same pane — sends nothing on
+                // the daemon's shared command client (no pause/unpause under
+                // the successor's sequence).
+                try await appState.daemonClient.attachReady(
+                    worktreeID: worktreeID, paneID: paneID, generation: generation)
+                // Teardown during the ready ack: the daemon's gate is open
+                // but no viewer exists — detach before wiring anything else.
+                if let undo = ControlModeAttachAbort.undo(tornDown: isTornDown, at: .attachReadyAcked) {
+                    abortLateAttach(undo, fd: fd, appState: appState, worktreeID: worktreeID,
+                                    paneID: paneID, routingKey: routingKey, generation: generation)
+                    return
+                }
+                // Send one initial resize at the view's real size: the window is
+                // otherwise stuck at whatever size it had until the user first
+                // drags, so fullscreen Claude would render at the wrong width.
+                // Same debounced path as live resizes.
+                scheduleControlModeResize(
+                    cols: terminalView.terminal.cols, rows: terminalView.terminal.rows)
+                // Intercept ALL pastes at the view level while attached (the
+                // paste ruling v2) and ship them as a `.paste` sidecar frame.
+                // Interception happens BEFORE SwiftTerm brackets the content,
+                // so the daemon-side `paste-buffer -p` is the SOLE wrapping
+                // authority — SwiftTerm's own 2004 tracking can be stale after
+                // a tab-switch re-attach, so no size rides the keystroke path.
+                // Returns true → the paste is consumed here (frame sent, or
+                // oversize refused); false → not attached, SwiftTerm's normal
+                // local paste runs.
+                (terminalView as? TBDTerminalView)?.onControlModePaste = { [weak self] data in
+                    guard let self else { return false }
+                    switch PasteInterception.decide(
+                        controlModeAttached: self.controlModeAttach != nil, byteCount: data.count) {
+                    case .passthrough:
+                        return false
+                    case .interceptAsPaste:
+                        // Empty pasteboard → consume with no frame: there is
+                        // nothing to paste and zero-byte `.paste` frames are
+                        // never sent — but SwiftTerm must not run either.
+                        if !data.isEmpty {
+                            self.appState?.daemonClient.fdSidecar.sendPaste(
+                                worktreeID: worktreeID, paneID: paneID, bytes: data)
+                        }
+                        return true
+                    case .refuseOversize:
+                        logger.error("""
+                            control-mode paste refused: \(data.count, privacy: .public) bytes \
+                            exceeds the \(SidecarFrameCodec.maxPasteBytes, privacy: .public)-byte \
+                            cap; paste dropped — split the content into smaller pastes
+                            """)
+                        // The log alone is invisible to the user — surface the
+                        // refusal in the pane itself, same "\r\n[...]\r\n"
+                        // status-line style as processTerminated's messages.
+                        self.terminalView?.feed(
+                            text: PasteInterception.refusalMessage(byteCount: data.count))
+                        return true
+                    }
+                }
                 logger.info("control-mode attach live for pane \(paneID, privacy: .public)")
+                // Gate the input-health indicator open for this pane (#318
+                // polish): failing deltas only surface while attached. The
+                // generation scopes the record to THIS attach so a stale
+                // clear can't drop it (M3 review fix).
+                appState.controlModePaneAttached(
+                    worktreeID: worktreeID, paneID: paneID, generation: generation)
             } catch {
                 logger.warning("""
                     control-mode attach failed for pane \(paneID, privacy: .public); \
                     falling back to grouped sessions: \(error.localizedDescription, privacy: .public)
                     """)
+                // The failure can equally resolve AFTER the view was torn
+                // down (review H2's analog hazard). Two things must NOT run
+                // then: the grouped-sessions fallback (a PTY + NSEvent
+                // monitors for a dead view — nothing would ever terminate
+                // that attach client), and the UNCONDITIONAL nil-generation
+                // teardown below — cleanup() already tore down anything that
+                // had committed (generation-scoped), and a nil-generation
+                // detach here could kill a SUCCESSOR view's fresh attach for
+                // the same pane (the stale-cleanup class of 56029f5b).
+                guard ControlModeAttachAbort.shouldStartFallback(tornDown: isTornDown) else {
+                    logger.info("""
+                        skipping grouped-sessions fallback for pane \
+                        \(paneID, privacy: .public) — the view was torn down while the \
+                        attach was in flight
+                        """)
+                    // cleanup() only tears down an attach that had committed
+                    // into `controlModeAttach` — a failure whose generation
+                    // was minted INSIDE openAttach (AttachFDVendError from
+                    // the fd-vend wait) committed a daemon-side attach that
+                    // cleanup() never saw, and without a detach here that
+                    // attach + its router/health registration leak (R10-1).
+                    // Generation-scoped ONLY: nil means nothing daemon-side
+                    // exists, and an unconditional detach from a dead view
+                    // could kill a successor's fresh attach for the same
+                    // pane (56029f5b class) — send nothing then. No reader
+                    // exists for this attach (registration happens after
+                    // commit), so there is nothing registry-side to remove.
+                    let tornDownGeneration = ControlModeAttachAbort.tornDownTeardownGeneration(
+                        committed: controlModeAttach?.generation, error: error)
+                    controlModeAttach = nil
+                    (terminalView as? TBDTerminalView)?.onControlModePaste = nil
+                    if let tornDownGeneration {
+                        // Mirrors abortLateAttach's post-await teardown: clear
+                        // any generation-scoped AppState record, then the
+                        // generation-scoped daemon detach (idempotent against
+                        // cleanup()'s own for the same generation).
+                        appState.controlModePaneDetached(
+                            worktreeID: worktreeID, paneID: paneID, generation: tornDownGeneration)
+                        Task {
+                            try? await appState.daemonClient.paneDetach(
+                                worktreeID: worktreeID, paneID: paneID,
+                                generation: tornDownGeneration)
+                        }
+                    }
+                    return
+                }
+                // Scope the teardown detach to THIS attach when its generation
+                // is known: from the committed attach record, or — when the
+                // fd-vend wait timed out inside openAttach AFTER attach.request
+                // minted one — from the AttachFDVendError that carries it
+                // (R6-H2). Only a failure before attach.request succeeded
+                // (truly no generation) falls back to the unconditional detach.
+                let failedGeneration = ControlModeAttachAbort.teardownGeneration(
+                    committed: controlModeAttach?.generation, error: error)
                 controlModeAttach = nil
+                (terminalView as? TBDTerminalView)?.onControlModePaste = nil
+                // Clear any attach record / stale failing flag for this pane
+                // — the indicator must never show over the grouped-sessions
+                // fallback rendering. Scoped to this attach's generation when
+                // known (nil → unconditional): a concurrent fresh attach's
+                // record must survive this stale failure's cleanup.
+                appState.controlModePaneDetached(
+                    worktreeID: worktreeID, paneID: paneID, generation: failedGeneration)
                 // Best-effort teardown of any half-completed attach (e.g. fd
                 // received and reader registered, but attach.ready failed):
                 // detach so the daemon EOFs the pipe, then flag the reader.
                 Task {
-                    try? await appState.daemonClient.paneDetach(worktreeID: worktreeID, paneID: paneID)
-                    await appState.controlModeReaders.remove(routingKey: routingKey)
+                    try? await appState.daemonClient.paneDetach(
+                        worktreeID: worktreeID, paneID: paneID, generation: failedGeneration)
+                    await appState.controlModeReaders.remove(
+                        routingKey: routingKey, generation: failedGeneration)
                 }
                 await startTmuxClient(
                     terminalView: terminalView,
@@ -597,6 +820,46 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     windowID: windowID,
                     panelID: panelID
                 )
+            }
+        }
+
+        /// Unwind a late-resolving control-mode attach: the view was torn
+        /// down while one of `startControlModeClient`'s awaits was in flight
+        /// (review H2). Undoes exactly what the interrupted stage had
+        /// committed — `undo` (see `ControlModeAttachAbort`) says who owns
+        /// the fd — plus the unconditional parts: the generation-scoped
+        /// daemon detach (idempotent against `cleanup()`'s own, harmless to
+        /// a successor attach) and any AppState bookkeeping.
+        @MainActor
+        private func abortLateAttach(
+            _ undo: ControlModeAttachAbort.Undo, fd: Int32, appState: AppState,
+            worktreeID: UUID, paneID: String, routingKey: String, generation: UInt64?
+        ) {
+            logger.info("""
+                control-mode attach for pane \(paneID, privacy: .public) resolved after \
+                view teardown — self-detaching (gen \(generation ?? 0, privacy: .public))
+                """)
+            controlModeAttach = nil
+            (terminalView as? TBDTerminalView)?.onControlModePaste = nil
+            // Clear any attach record / failing-input flag (generation-scoped;
+            // normally none exists yet — the record is created only after the
+            // last teardown checkpoint).
+            appState.controlModePaneDetached(
+                worktreeID: worktreeID, paneID: paneID, generation: generation)
+            if undo.closeFD {
+                Darwin.close(fd)
+            }
+            Task {
+                // Order matters (same as cleanup()): detach first so the
+                // daemon closes the pipe's write end (EOF unblocks the reader
+                // thread), then flag the reader — it closes its own fd on
+                // exit.
+                try? await appState.daemonClient.paneDetach(
+                    worktreeID: worktreeID, paneID: paneID, generation: generation)
+                if undo.removeReader {
+                    await appState.controlModeReaders.remove(
+                        routingKey: routingKey, generation: generation)
+                }
             }
         }
 
@@ -660,8 +923,24 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // MARK: - TerminalViewDelegate
 
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            // Interrupt detection (Ctrl-C / Esc) must keep working in every
+            // path, so run it FIRST regardless of where the bytes go next.
             handleOutgoingInput(data)
-            localProcess?.send(data: data)
+            switch OutgoingInputRoute.decide(
+                controlModeAttached: controlModeAttach != nil, byteCount: data.count) {
+            case .localPTY:
+                localProcess?.send(data: data)
+            case .sidecarInput:
+                // Keystrokes ride the sidecar. Pastes NEVER reach here while
+                // attached — every paste, any size, is intercepted at the view
+                // level and shipped as a `.paste` frame (or refused when
+                // oversize) BEFORE SwiftTerm brackets it (see
+                // TBDTerminalView.paste + the `onControlModePaste` wiring in
+                // startControlModeClient).
+                guard let attach = controlModeAttach else { return }
+                appState?.daemonClient.fdSidecar.sendInput(
+                    worktreeID: attach.worktreeID, paneID: attach.paneID, bytes: Data(data))
+            }
         }
 
         func handleOutgoingInput(_ data: ArraySlice<UInt8>) {
@@ -679,11 +958,69 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         }
 
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-            // Propagate resize to the PTY so tmux/shell gets SIGWINCH
-            guard newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 else { return }
-            var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
-            _ = ioctl(fd, TIOCSWINSZ, &size)
-            debugLog("PANEL: resize -> \(newCols)x\(newRows)")
+            // SwiftTerm delivers delegate callbacks on the main thread; the
+            // resize/debounce state (`resizeDebounceTask`, `resizeSerializer`,
+            // `controlModeAttach`) is MainActor-confined like the rest of the
+            // coordinator — same guard as `getWindowSize`/`requestOpenLink`.
+            MainActor.assumeIsolated {
+                // Grouped / local-PTY path (UNCHANGED): propagate resize to the PTY so
+                // tmux/shell gets SIGWINCH. In control mode `localProcess` is nil, so
+                // this is a no-op there and the daemon-authoritative path below runs.
+                if newCols > 0, newRows > 0, let fd = localProcess?.childfd, fd >= 0 {
+                    var size = winsize(ws_row: UInt16(newRows), ws_col: UInt16(newCols), ws_xpixel: 0, ws_ypixel: 0)
+                    _ = ioctl(fd, TIOCSWINSZ, &size)
+                    debugLog("PANEL: resize -> \(newCols)x\(newRows)")
+                }
+                // Control-mode path (M3.2): the daemon is the sole size authority
+                // (addendum §4). Debounced so only the tail of a drag flurry lands.
+                scheduleControlModeResize(cols: newCols, rows: newRows)
+            }
+        }
+
+        /// Debounced `pane.resize` for the control-mode window. No-op unless this
+        /// panel is control-mode attached. Cancel-and-replace ~100ms debounce so a
+        /// window-drag flurry collapses to one RPC. Errors are dropped: the resize
+        /// is re-sent on the next tick and self-heals (the daemon is authoritative).
+        ///
+        /// Cross-call ordering (R5-M3): cancel-and-replace only stops the
+        /// debounce wrapper — an RPC already in flight rides its own socket
+        /// task and could be processed AFTER a newer one. `resizeSerializer`
+        /// makes delivery latest-wins: at most one RPC in flight; a tick that
+        /// fires meanwhile stashes its size, and the in-flight sender drains
+        /// the stash on completion (looping until quiescent).
+        @MainActor
+        private func scheduleControlModeResize(cols: Int, rows: Int) {
+            guard let attach = controlModeAttach,
+                  ControlModeResizeGate.shouldSend(
+                    controlModeAttached: true, cols: cols, rows: rows)
+            else { return }
+            resizeDebounceTask?.cancel()
+            let daemonClient = appState?.daemonClient
+            resizeDebounceTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled, let self else { return }
+                guard var size = self.resizeSerializer.sizeToSend(cols: cols, rows: rows) else {
+                    // A send is in flight; the size is stashed and ITS sender
+                    // will deliver it — this tick must not race a second RPC.
+                    return
+                }
+                // Deliberately NOT re-checking Task.isCancelled in this loop: a
+                // newer tick that cancelled this wrapper has only STASHED its
+                // size (see above) — this loop is the sole sender left to
+                // deliver it, in order, after the in-flight call completes.
+                // TEARDOWN is different (R6-M6): cleanup()'s cancel cannot
+                // reach a sender already past the guard above, so every
+                // iteration re-checks the torn-down flag BEFORE sending — a
+                // dead view must stop draining (its stash is irrelevant; the
+                // next live view sends its own initial resize).
+                while ControlModeResizeSerializer.shouldContinueDraining(tornDown: self.isTornDown) {
+                    try? await daemonClient?.paneResize(
+                        worktreeID: attach.worktreeID, windowID: attach.windowID,
+                        cols: size.cols, rows: size.rows)
+                    guard let next = self.resizeSerializer.completedInFlight() else { return }
+                    size = next
+                }
+            }
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {}

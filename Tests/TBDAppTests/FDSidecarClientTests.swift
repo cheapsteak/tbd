@@ -33,7 +33,8 @@ struct FDSidecarClientTests {
 
     private func vend(readFD: Int32, worktreeID: UUID, paneID: String, attachID: UUID, over socket: Int32) throws {
         let header = try JSONEncoder().encode(FDVendHeader(worktreeID: worktreeID, paneID: paneID, attachID: attachID))
-        try FDChannel.sendFD(readFD, over: socket, header: header)
+        let frame = SidecarFrameCodec.encode(type: .fdVend, payload: header)
+        try FDChannel.sendFD(readFD, over: socket, frame: frame)
         Darwin.close(readFD)
     }
 
@@ -97,6 +98,158 @@ struct FDSidecarClientTests {
         #expect(Data(buffer[0..<Int(nB)]) == Data("for-B".utf8))
     }
 
+    @Test("a vend frame split across writes (fd on the first chunk) still pairs and delivers")
+    func splitFrameVendStillPairs() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        let attachID = UUID()
+        let promise = client.expectFD(worktreeID: worktreeID, paneID: "%split", attachID: attachID)
+
+        let (readFD, writeFD) = try makePipe()
+        defer { Darwin.close(writeFD) }
+        _ = Data("split-ok".utf8).withUnsafeBytes { Darwin.write(writeFD, $0.baseAddress, $0.count) }
+
+        // Build the full vend frame, then send the first byte carrying the fd
+        // (SCM_RIGHTS ancillary rides the first byte of its segment) and the
+        // remainder as a plain write with no ancillary.
+        let header = try JSONEncoder().encode(FDVendHeader(worktreeID: worktreeID, paneID: "%split", attachID: attachID))
+        let frame = SidecarFrameCodec.encode(type: .fdVend, payload: header)
+        let firstChunk = frame.prefix(1)
+        let rest = frame.suffix(from: frame.startIndex + 1)
+        try FDChannel.sendFD(readFD, over: daemonSide, frame: Data(firstChunk))
+        Darwin.close(readFD)
+        try FDChannel.sendData(Data(rest), over: daemonSide)
+
+        let rxFD = try await promise.value(timeout: .seconds(2))
+        defer { Darwin.close(rxFD) }
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let n = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
+        #expect(Data(buffer[0..<Int(n)]) == Data("split-ok".utf8))
+    }
+
+    @Test("sendInput writes a decodable input frame to the daemon side")
+    func sendInputWritesFrame() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        client.sendInput(worktreeID: worktreeID, paneID: "%in", bytes: Data("hi\r".utf8))
+
+        // Read the framed input on the daemon side and decode it.
+        let scanner = SidecarFrameScanner()
+        var decoded: (header: SidecarInputHeader, bytes: Data)?
+        let deadline = ContinuousClock.now + .seconds(2)
+        while decoded == nil && ContinuousClock.now < deadline {
+            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
+            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.input.rawValue {
+                decoded = try SidecarFrameCodec.decodeInput(payload: frame.payload)
+            }
+        }
+        let result = try #require(decoded)
+        #expect(result.header.worktreeID == worktreeID)
+        #expect(result.header.paneID == "%in")
+        #expect(result.bytes == Data("hi\r".utf8))
+    }
+
+    @Test("sendPaste writes a decodable paste frame to the daemon side")
+    func sendPasteWritesFrame() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        let payload = Data("pasted content\n".utf8)
+        client.sendPaste(worktreeID: worktreeID, paneID: "%pa", bytes: payload)
+
+        // Read the framed paste on the daemon side and decode it.
+        let scanner = SidecarFrameScanner()
+        var decoded: (header: SidecarInputHeader, bytes: Data)?
+        let deadline = ContinuousClock.now + .seconds(2)
+        while decoded == nil && ContinuousClock.now < deadline {
+            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
+            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.paste.rawValue {
+                decoded = try SidecarFrameCodec.decodeTagged(payload: frame.payload)
+            }
+        }
+        let result = try #require(decoded)
+        #expect(result.header.worktreeID == worktreeID)
+        #expect(result.header.paneID == "%pa")
+        #expect(result.bytes == payload)
+    }
+
+    @Test("sendInput refuses an oversize payload — the frame is never written (R6-H3)")
+    func sendInputOversizeRefused() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        // One byte past the cap: had this been encoded and written, the
+        // daemon-side scanner would desync and the whole shared sidecar
+        // connection would tear down.
+        let oversize = Data(repeating: 0x41, count: SidecarFrameCodec.maxPasteBytes + 1)
+        client.sendInput(worktreeID: worktreeID, paneID: "%big", bytes: oversize)
+        // A small frame follows on the SAME serial send queue: the first
+        // frame the daemon side sees must be this one — proof the oversize
+        // frame was refused, not merely delayed.
+        client.sendInput(worktreeID: worktreeID, paneID: "%ok", bytes: Data("k".utf8))
+
+        let scanner = SidecarFrameScanner()
+        var decoded: (header: SidecarInputHeader, bytes: Data)?
+        let deadline = ContinuousClock.now + .seconds(2)
+        while decoded == nil && ContinuousClock.now < deadline {
+            let message = try FDChannel.receiveMessage(from: daemonSide, capacity: 4096)
+            for frame in scanner.append(message.data) where frame.type == SidecarFrameType.input.rawValue {
+                decoded = try SidecarFrameCodec.decodeInput(payload: frame.payload)
+                break
+            }
+        }
+        let result = try #require(decoded)
+        #expect(result.header.paneID == "%ok", "the oversize frame must never hit the wire")
+        #expect(result.bytes == Data("k".utf8))
+        #expect(!scanner.isDesynced)
+    }
+
+    @Test("sendInput while disconnected is dropped without crashing")
+    func sendInputWhileDisconnectedDrops() async throws {
+        let client = FDSidecarClient()   // never connected
+        client.sendInput(worktreeID: UUID(), paneID: "%x", bytes: Data("bytes".utf8))
+        // Give the send queue a beat; reaching here without a crash is the point.
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!client.isConnected)
+    }
+
+    @Test("sendInput after the receive loop exits is dropped without crashing")
+    func sendInputAfterLoopExitDrops() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        Darwin.close(daemonSide)   // peer dies → receive loop hits EOF and tears down
+
+        // Wait for the loop to finish teardown (socketFD == -1 under the barrier).
+        var spins = 0
+        while client.isConnected && spins < 200 {
+            try await Task.sleep(for: .milliseconds(10))
+            spins += 1
+        }
+        #expect(!client.isConnected)
+
+        // Post-exit send races the just-closed fd: the disconnected guard must
+        // drop it silently — no write into a recycled fd, no crash.
+        client.sendInput(worktreeID: UUID(), paneID: "%late", bytes: Data("late".utf8))
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!client.isConnected)
+    }
+
     @Test("value(timeout:) throws timedOut when nothing is vended; a late vend is closed safely")
     func timeoutThenLateVend() async throws {
         let (daemonSide, appSide) = try makeSocketPair()
@@ -120,6 +273,43 @@ struct FDSidecarClientTests {
         try await Task.sleep(for: .milliseconds(200))
         // Reaching here without a crash is the assertion; the client stays usable.
         #expect(client.isConnected)
+    }
+
+    @Test("a valid vend followed by a desync-tripping tail in one read still delivers the fd")
+    func validFrameBeforeDesyncStillDelivers() async throws {
+        let (daemonSide, appSide) = try makeSocketPair()
+        defer { Darwin.close(daemonSide) }
+        let client = FDSidecarClient()
+        client.adopt(fd: appSide)
+
+        let worktreeID = UUID()
+        let attachID = UUID()
+        let promise = client.expectFD(worktreeID: worktreeID, paneID: "%desync", attachID: attachID)
+
+        let (readFD, writeFD) = try makePipe()
+        defer { Darwin.close(writeFD) }
+        _ = Data("survives".utf8).withUnsafeBytes { Darwin.write(writeFD, $0.baseAddress, $0.count) }
+
+        // One sendmsg carrying: a complete valid fdVend frame (fd rides the
+        // first byte's SCM_RIGHTS ancillary) IMMEDIATELY followed by a corrupt
+        // outer length (0xFFFFFFFF > the 4 MiB cap) that trips the scanner's
+        // isDesynced flag. The scanner returns the valid frame AND flags desync
+        // in the same `append`; the receive loop must process the returned
+        // frame (delivering the fd) BEFORE breaking on desync. Pre-fix it broke
+        // first and this waiter got .disconnected instead of its fd.
+        let header = try JSONEncoder().encode(
+            FDVendHeader(worktreeID: worktreeID, paneID: "%desync", attachID: attachID))
+        var combined = SidecarFrameCodec.encode(type: .fdVend, payload: header)
+        combined.append(contentsOf: [0xFF, 0xFF, 0xFF, 0xFF])   // corrupt length → desync
+        try FDChannel.sendFD(readFD, over: daemonSide, frame: combined)
+        Darwin.close(readFD)
+
+        // The valid frame's fd must arrive despite the trailing desync.
+        let rxFD = try await promise.value(timeout: .seconds(2))
+        defer { Darwin.close(rxFD) }
+        var buffer = [UInt8](repeating: 0, count: 16)
+        let n = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
+        #expect(Data(buffer[0..<Int(n)]) == Data("survives".utf8))
     }
 
     @Test("socket EOF fails pending waiters with disconnected")

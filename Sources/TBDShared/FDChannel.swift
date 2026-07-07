@@ -1,13 +1,11 @@
 import Darwin
 import Foundation
 
-/// Errors raised by `FDChannel.sendFD` / `receiveFD`.
+/// Errors raised by `FDChannel.sendFD` / `sendData` / `receiveMessage`.
 public enum FDChannelError: Error, Equatable {
-    case sendFailed(Int32)          // errno from sendmsg or setup
+    case sendFailed(Int32)          // errno from sendmsg/write or setup
     case receiveFailed(Int32)       // errno from recvmsg
     case peerClosed                 // clean EOF from the peer
-    case noAncillaryData            // recvmsg succeeded but no SCM_RIGHTS attached
-    case unexpectedControlLevel     // cmsg header wasn't SOL_SOCKET / SCM_RIGHTS
 }
 
 /// Structured header accompanying every vended pane fd (JSON-encoded into the
@@ -74,19 +72,24 @@ public enum FDChannel {
         UnsafeMutableRawPointer(cmsg) + align32(MemoryLayout<cmsghdr>.size)
     }
 
-    /// Send `fd` plus `header` over `socket`. On return, `fd` is still owned by
-    /// the caller (the kernel duplicated it into the peer's fd table); it is
-    /// safe — and usually correct — to `close(fd)` immediately after.
-    public static func sendFD(_ fd: Int32, over socket: Int32, header: Data) throws {
+    /// Send `fd` alongside `frame` (the full length-prefixed frame bytes) over
+    /// `socket` in a single `sendmsg`. On return, `fd` is still owned by the
+    /// caller (the kernel duplicated it into the peer's fd table); it is safe —
+    /// and usually correct — to `close(fd)` immediately after.
+    ///
+    /// SCM_RIGHTS ancillary data is associated with the first byte of `frame`,
+    /// so the receiver observes the fd on the `recvmsg` that reads that byte,
+    /// regardless of how the stream later re-chunks the frame.
+    public static func sendFD(_ fd: Int32, over socket: Int32, frame: Data) throws {
         // Layout the ancillary buffer for exactly one fd.
         let controlLen = cmsgSpace(MemoryLayout<Int32>.size)
         var control = [UInt8](repeating: 0, count: controlLen)
 
-        try header.withUnsafeBytes { headerBytes in
+        try frame.withUnsafeBytes { frameBytes in
             try control.withUnsafeMutableBufferPointer { controlBuf in
                 var iov = iovec(
-                    iov_base: UnsafeMutableRawPointer(mutating: headerBytes.baseAddress),
-                    iov_len: headerBytes.count)
+                    iov_base: UnsafeMutableRawPointer(mutating: frameBytes.baseAddress),
+                    iov_len: frameBytes.count)
                 var msg = msghdr()
                 withUnsafeMutablePointer(to: &iov) { iovPtr in
                     msg.msg_iov = iovPtr
@@ -104,24 +107,57 @@ public enum FDChannel {
 
                 let sent = withUnsafeMutablePointer(to: &msg) { sendmsg(socket, $0, 0) }
                 if sent < 0 { throw FDChannelError.sendFailed(errno) }
+                // A short sendmsg is POSIX-legal (R10-minor): the ancillary
+                // fd rides whatever prefix landed, so send the REMAINDER of
+                // the frame through the same full-write loop `sendData` uses
+                // — otherwise the peer's scanner sees a truncated frame and
+                // desyncs, the exact bug class sendData already closes.
+                if sent < frameBytes.count {
+                    try sendData(Data(frame.dropFirst(sent)), over: socket)
+                }
             }
         }
     }
 
-    /// Receive one fd + header from `socket`. `headerCapacity` sets the max
-    /// header bytes the caller expects; larger senders will be truncated.
-    /// Returned fd is owned by the caller and must be `close()`d.
-    public static func receiveFD(from socket: Int32, headerCapacity: Int) throws -> (fd: Int32, header: Data) {
+    /// Write all of `data` to `socket` with a full-write loop (handling partial
+    /// writes and `EINTR`). For frames that carry no fd — the app → daemon input
+    /// path and any daemon → app control bytes.
+    public static func sendData(_ data: Data, over socket: Int32) throws {
+        if data.isEmpty { return }
+        try data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var offset = 0
+            while offset < raw.count {
+                let n = Darwin.write(socket, base + offset, raw.count - offset)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw FDChannelError.sendFailed(errno)
+                }
+                if n == 0 { throw FDChannelError.sendFailed(EIO) }
+                offset += n
+            }
+        }
+    }
+
+    /// Receive one datagram-ish chunk plus any `SCM_RIGHTS` fds from `socket`.
+    /// `capacity` bounds the data bytes read per call (the frame scanner
+    /// reassembles across calls). On a stream socket, `recvmsg` will not read
+    /// across an ancillary-data boundary, so at most the fd(s) sent with one
+    /// `sendmsg` are returned per call, in send order.
+    ///
+    /// Returned fds are owned by the caller and must be `close()`d. Throws
+    /// `.peerClosed` on clean EOF, `.receiveFailed` on error.
+    public static func receiveMessage(from socket: Int32, capacity: Int) throws -> (data: Data, fds: [Int32]) {
         let controlLen = cmsgSpace(MemoryLayout<Int32>.size)
         var control = [UInt8](repeating: 0, count: controlLen)
-        var headerBuffer = [UInt8](repeating: 0, count: max(headerCapacity, 1))
+        var dataBuffer = [UInt8](repeating: 0, count: max(capacity, 1))
 
-        var receivedFD: Int32 = -1
+        var fds: [Int32] = []
         var receivedBytes = 0
 
-        try headerBuffer.withUnsafeMutableBufferPointer { headerBuf in
+        try dataBuffer.withUnsafeMutableBufferPointer { dataBuf in
             try control.withUnsafeMutableBufferPointer { controlBuf in
-                var iov = iovec(iov_base: headerBuf.baseAddress, iov_len: headerBuf.count)
+                var iov = iovec(iov_base: dataBuf.baseAddress, iov_len: dataBuf.count)
                 var msg = msghdr()
                 let result = withUnsafeMutablePointer(to: &iov) { iovPtr -> ssize_t in
                     msg.msg_iov = iovPtr
@@ -132,21 +168,19 @@ public enum FDChannel {
                 }
                 if result < 0 { throw FDChannelError.receiveFailed(errno) }
                 if result == 0 { throw FDChannelError.peerClosed }
-
                 receivedBytes = Int(result)
 
-                guard let cmsg = firstControlHeader(in: msg) else {
-                    throw FDChannelError.noAncillaryData
+                if let cmsg = firstControlHeader(in: msg),
+                   cmsg.pointee.cmsg_level == SOL_SOCKET,
+                   cmsg.pointee.cmsg_type == SCM_RIGHTS {
+                    let dataBytes = Int(cmsg.pointee.cmsg_len) - align32(MemoryLayout<cmsghdr>.size)
+                    let fdCount = max(0, dataBytes / MemoryLayout<Int32>.size)
+                    let fdPtr = controlData(cmsg).assumingMemoryBound(to: Int32.self)
+                    for i in 0..<fdCount { fds.append(fdPtr[i]) }
                 }
-                guard cmsg.pointee.cmsg_level == SOL_SOCKET,
-                      cmsg.pointee.cmsg_type == SCM_RIGHTS else {
-                    throw FDChannelError.unexpectedControlLevel
-                }
-                let fdPtr = controlData(cmsg).assumingMemoryBound(to: Int32.self)
-                receivedFD = fdPtr.pointee
             }
         }
 
-        return (fd: receivedFD, header: Data(headerBuffer.prefix(receivedBytes)))
+        return (data: Data(dataBuffer.prefix(receivedBytes)), fds: fds)
     }
 }

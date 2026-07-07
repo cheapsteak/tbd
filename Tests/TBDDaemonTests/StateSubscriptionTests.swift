@@ -53,6 +53,31 @@ struct StateSubscriptionTests {
         #expect(liveReceived.count == 1)
     }
 
+    @Test("control-mode input-health delta round-trips through broadcast")
+    func inputHealthDeltaRoundTrips() throws {
+        let manager = StateSubscriptionManager()
+        let received = SendableBox<Data>()
+        manager.addSubscriber { data in
+            received.append(data)
+            return true
+        }
+
+        let worktreeID = UUID()
+        manager.broadcast(delta: .controlModeInputHealthChanged(ControlModeInputHealthDelta(
+            worktreeID: worktreeID, paneID: "%7", healthy: false)))
+
+        #expect(received.count == 1)
+        // Decode exactly like the app's subscription loop does.
+        let decoded = try JSONDecoder().decode(StateDelta.self, from: received.values[0])
+        guard case .controlModeInputHealthChanged(let delta) = decoded else {
+            Issue.record("decoded wrong case: \(decoded)")
+            return
+        }
+        #expect(delta.worktreeID == worktreeID)
+        #expect(delta.paneID == "%7")
+        #expect(delta.healthy == false)
+    }
+
     @Test("broadcast delivers to all live subscribers")
     func broadcastDeliversToAll() {
         let manager = StateSubscriptionManager()

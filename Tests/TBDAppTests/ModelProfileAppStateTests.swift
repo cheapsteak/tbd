@@ -38,6 +38,87 @@ import TBDShared
     #expect(true)
 }
 
+// R7-minor: the daemon broadcasts `.modelProfilesChanged` when ANY client
+// toggles control mode (handleConfigSetControlMode reuses that channel), so
+// the delta handler must refresh `daemonCapabilities` too — otherwise a
+// SECOND connected client keeps stale capabilities until its own reconnect.
+// DaemonClient is concrete, so the refetch goes through the injectable
+// `daemonCapabilitiesFetcher` seam (production default hits the daemon).
+@MainActor
+@Test func appState_profilesChangedDeltaRefreshesDaemonCapabilities() async {
+    let state = AppState()
+    state.daemonCapabilitiesFetcher = {
+        DaemonCapabilitiesResult(
+            controlModeEnabled: true, tmuxVersion: "3.6a", controlModeSupported: true)
+    }
+    #expect(state.daemonCapabilities == nil)
+
+    state.handleDelta(.modelProfilesChanged)
+
+    // The handler refreshes in a spawned task — poll (60s CI-safe bound).
+    var refreshed = false
+    for _ in 0..<1200 {
+        if state.daemonCapabilities?.controlModeEnabled == true { refreshed = true; break }
+        try? await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(refreshed, ".modelProfilesChanged must refresh daemonCapabilities on non-toggling clients")
+}
+
+@MainActor
+@Test func appState_capabilitiesRefreshFailureKeepsLastKnownValue() async {
+    // Best-effort semantics: `.modelProfilesChanged` fires for many config
+    // changes; a transient RPC failure during the refetch must not nil out
+    // good capabilities (which would silently flip new panes off control mode).
+    let state = AppState()
+    state.daemonCapabilities = DaemonCapabilitiesResult(
+        controlModeEnabled: true, tmuxVersion: "3.6a", controlModeSupported: true)
+    state.daemonCapabilitiesFetcher = { nil }
+
+    state.handleDelta(.modelProfilesChanged)
+
+    // Bounded negative check: give the refresh task ample time to (wrongly)
+    // clobber the value.
+    try? await Task.sleep(for: .milliseconds(500))
+    #expect(state.daemonCapabilities?.controlModeEnabled == true,
+            "a failed capabilities refetch must keep the last known value")
+}
+
+// R8-M1: the Settings toggle's own call site must go through the same
+// keep-last-known-value refresh as the delta handler. Pre-fix it re-fetched
+// with `try? ... daemonCapabilities()` directly, so a transient RPC failure
+// right AFTER a successful setControlMode nil'd the capabilities — snapping
+// the toggle off and showing "Requires tmux 3.2" although the daemon applied
+// the change.
+@MainActor
+@Test func appState_setControlModeEnabledRefreshesCapabilitiesOnSuccess() async {
+    let state = AppState()
+    state.controlModeSetter = { _ in }  // set RPC succeeds
+    state.daemonCapabilitiesFetcher = {
+        DaemonCapabilitiesResult(
+            controlModeEnabled: true, tmuxVersion: "3.6a", controlModeSupported: true)
+    }
+    #expect(state.daemonCapabilities == nil)
+
+    await state.setControlModeEnabled(true)
+
+    #expect(state.daemonCapabilities?.controlModeEnabled == true,
+            "a successful toggle must re-fetch the daemon's effective gate")
+}
+
+@MainActor
+@Test func appState_setControlModeEnabledKeepsLastKnownCapabilitiesOnRefreshFailure() async {
+    let state = AppState()
+    state.controlModeSetter = { _ in }  // set RPC succeeds...
+    state.daemonCapabilitiesFetcher = { nil }  // ...but the re-fetch transiently fails
+    state.daemonCapabilities = DaemonCapabilitiesResult(
+        controlModeEnabled: true, tmuxVersion: "3.6a", controlModeSupported: true)
+
+    await state.setControlModeEnabled(true)
+
+    #expect(state.daemonCapabilities?.controlModeEnabled == true,
+            "a transient refresh failure after a successful set must not snap the toggle off")
+}
+
 @MainActor
 @Test func appState_dismissedProxyWarningsStartsEmptyAndAcceptsInsertions() {
     // The banner dismissal logic in TerminalPanelView writes to this set so a

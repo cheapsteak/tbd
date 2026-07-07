@@ -784,6 +784,18 @@ public final class TBDDatabase: Sendable {
                 """)
         }
 
+        // Persisted opt-in for the tmux control-mode render path (#318 M5).
+        // The attach gate evaluates `env || flag` per decision, so flipping
+        // this from Settings affects the next attach without a daemon restart.
+        // (Authored as v35 on the feature branch; renumbered on rebase as
+        // upstream took v35–v44 first — this migration never shipped to a
+        // live database under an earlier name, so renaming is safe.)
+        migrator.registerMigration("v45_config_control_mode") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "control_mode_enabled",
+                type: .boolean, defaults: false)
+        }
+
         return migrator
     }
 }
