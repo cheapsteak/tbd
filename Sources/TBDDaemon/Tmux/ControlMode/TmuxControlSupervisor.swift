@@ -113,16 +113,62 @@ actor TmuxControlSupervisor {
         }
     }
 
-    /// Stop every connection. Call on daemon shutdown.
-    func stopAll() {
-        for connection in connections.values { connection.stop() }
-        connections.removeAll()
-        let clients = commandClients
-        commandClients.removeAll()
-        for client in clients.values {
-            Task { await client.connectionClosed() }  // fail any pending sends
+    /// Stop every connection. Call on daemon shutdown. Two halves, same rule
+    /// as `teardownConnection` (`stop()` blocks up to ~2 s per connection —
+    /// never on this actor): the actor-isolated half (`beginStopAll`) empties
+    /// the maps — failing each client's pending sends immediately, in the
+    /// same bookkeeping order as `evictForTeardown` — and marks every server
+    /// `stopping` (R6-M4 consistency: an `ensureConnection` racing the
+    /// shutdown parks instead of starting a successor beside a still-dying
+    /// tmux client process, which would double-route `%output`). The blocking
+    /// `stop()`s then run OFF the actor — and OFF the cooperative pool: a
+    /// task-group closure runs on Swift concurrency's fixed-width executor,
+    /// so N connections blocking in `stop()` would starve every task in the
+    /// daemon (observed as a full test-runner wedge). GCD threads absorb the
+    /// blocking instead, concurrently (independent processes), the same
+    /// discipline as the codebase's dedicated-Thread rule for blocking
+    /// syscalls. The `stopping` marks are cleared once the stops return
+    /// rather than left forever: production's only caller is daemon shutdown
+    /// (the process exits right after, so a late successor is moot), and
+    /// tests rely on the supervisor staying usable after `stopAll` (the
+    /// reconnect-after-stopAll contract in
+    /// `TmuxControlCommandClientIntegrationTests`).
+    nonisolated func stopAll() async {
+        let evicted = await beginStopAll()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                DispatchQueue.concurrentPerform(iterations: evicted.count) { index in
+                    self.stopConnection(evicted[index].1)
+                }
+                continuation.resume()
+            }
+        }
+        await finishStopAll(serverNames: evicted.map(\.0))
+    }
+
+    /// Actor-isolated half of `stopAll`: evict every connection from the maps
+    /// (failing pending sends, marking each server `stopping`) and close the
+    /// fanout. Returns the evicted connections for the off-actor stops.
+    private func beginStopAll() async -> [(String, TmuxControlConnection)] {
+        var evicted: [(String, TmuxControlConnection)] = []
+        for serverName in Array(connections.keys) {
+            // Re-lookup per iteration: `connectionClosed()` inside the shared
+            // eviction suspends, and a concurrent drain cleanup may mutate
+            // the map between iterations.
+            if let connection = await evictForStop(serverName: serverName) {
+                evicted.append((serverName, connection))
+            }
         }
         fanout.closeAll()
+        return evicted
+    }
+
+    /// Post-stop half of `stopAll`: clear every `stopping` mark and resume
+    /// the `ensureConnection` calls parked on them.
+    private func finishStopAll(serverNames: [String]) {
+        for serverName in serverNames {
+            finishTeardown(serverName: serverName)
+        }
     }
 
     /// The FIFO command correlator for `server`, if a connection is up. Used by
@@ -181,13 +227,21 @@ actor TmuxControlSupervisor {
     ) async -> Bool {
         guard connections[serverName] === connection else { return false }
         logger.error("tearing down tmux -CC connection for \(serverName, privacy: .public) after correlator fault")
-        connections[serverName] = nil
-        // Mark the server stopping BEFORE ownership leaves the actor: from
-        // here until `finishTeardown`, `ensureConnection` must wait (R6-M4).
+        _ = await evictForStop(serverName: serverName)
+        return true
+    }
+
+    /// Shared eviction bookkeeping for `evictForTeardown` and `stopAll` — the
+    /// order is load-bearing: remove the connection from the map and mark the
+    /// server stopping BEFORE ownership leaves the actor (from here until
+    /// `finishTeardown`, `ensureConnection` must wait — R6-M4), then fail the
+    /// client's pending sends NOW rather than after the blocking `stop()`.
+    private func evictForStop(serverName: String) async -> TmuxControlConnection? {
+        guard let connection = connections.removeValue(forKey: serverName) else { return nil }
         stoppingServers.insert(serverName)
         let client = commandClients.removeValue(forKey: serverName)
         await client?.connectionClosed()  // fail pending sends without waiting for stop()
-        return true
+        return connection
     }
 
     /// Allocate a per-pane pipe in the fanout and return the read end for the
