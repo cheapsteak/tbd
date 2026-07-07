@@ -4,6 +4,11 @@ import Testing
 
 @testable import TBDDaemonLib
 
+/// Positive-wait deadline sized for starved CI runners (PR #379: cooperative-pool
+/// starvation stretched sub-second async-drain deliveries past a 5 s poll).
+/// Passing runs still complete in milliseconds — only failures wait this long.
+private let ciSafeDeadline: TimeInterval = 30
+
 /// Phase B M1 — `PaneFanout.route` backpressure: instead of dropping the
 /// unwritten remainder on EAGAIN (issue #376's corruption source), the
 /// remainder is queued per (key, generation) and an async drain task delivers
@@ -46,7 +51,7 @@ struct PaneFanoutFlowControlTests {
 
     /// Poll-read a nonblocking fd until `expected` bytes arrived or the
     /// deadline passes. Never a fixed sleep alone — the drain is async.
-    private func readAll(fd: Int32, expected: Int, deadline: TimeInterval = 5) -> Data {
+    private func readAll(fd: Int32, expected: Int, deadline: TimeInterval = ciSafeDeadline) -> Data {
         let start = Date()
         var received = Data()
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
@@ -67,7 +72,7 @@ struct PaneFanoutFlowControlTests {
     /// pipe stops yielding data (quiescence), or the deadline passes. For
     /// tests where the delivered byte count is not known up front.
     private func readUntilQuiescent(
-        _ fanout: PaneFanout, key: PaneKey, fd: Int32, deadline: TimeInterval = 5
+        _ fanout: PaneFanout, key: PaneKey, fd: Int32, deadline: TimeInterval = ciSafeDeadline
     ) -> Data {
         let start = Date()
         var received = Data()
@@ -123,7 +128,7 @@ struct PaneFanoutFlowControlTests {
         #expect(received == total, "stream must arrive intact and in order across backpressure")
 
         // Queue must eventually report empty.
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(ciSafeDeadline)
         while Date() < deadline, (fanout.flowStats(key: key)?.queuedBytes ?? 0) > 0 {
             usleep(5_000)
         }
@@ -371,7 +376,7 @@ struct PaneFanoutFlowControlTests {
         #expect(fanout.flowStats(key: key) == nil)
         // Drain the pipe to EOF — the write end is closed; the drain task
         // must exit quietly without writing into a recycled fd.
-        _ = readUntilQuiescent(fanout, key: key, fd: readFD, deadline: 2)
+        _ = readUntilQuiescent(fanout, key: key, fd: readFD)
         usleep(100_000)
         #expect(fanout.flowStats(key: key) == nil)
     }
@@ -410,7 +415,7 @@ struct PaneFanoutFlowControlTests {
         let received = readAll(fd: readFD, expected: fenced.count)
         #expect(received == fenced, "markReady must flush the fence queue intact and in order")
 
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(ciSafeDeadline)
         while Date() < deadline, (fanout.flowStats(key: key)?.queuedBytes ?? 0) > 0 {
             usleep(5_000)
         }

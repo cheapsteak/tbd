@@ -4,6 +4,11 @@ import Testing
 
 @testable import TBDDaemonLib
 
+/// Positive-wait deadline sized for starved CI runners (PR #379: cooperative-pool
+/// starvation stretched sub-second async-drain deliveries past a 5 s poll).
+/// Passing runs still complete in milliseconds — only failures wait this long.
+private let ciSafeDeadline: Duration = .seconds(30)
+
 /// Phase B M3 — the overflow repair cycle (issue #376, the queue-overflow
 /// residual M1/M2 left behind). When a ready, unfenced pane's backpressure
 /// queue overflows, the fanout clears the queue, marks the sink `repairing`,
@@ -105,7 +110,7 @@ struct PaneRepairCoordinatorTests {
 
     /// Poll until `condition`, failing after `deadline`.
     private func waitFor(
-        _ what: String, deadline: Duration = .seconds(15),
+        _ what: String, deadline: Duration = ciSafeDeadline,
         sourceLocation: SourceLocation = #_sourceLocation,
         _ condition: @Sendable () async -> Bool
     ) async throws {
@@ -127,7 +132,7 @@ struct PaneRepairCoordinatorTests {
     /// Poll-read `fd` (nonblocking) until `condition` holds on the
     /// accumulated text or the deadline passes.
     private func readUntil(
-        fd: Int32, deadline: Duration = .seconds(15),
+        fd: Int32, deadline: Duration = ciSafeDeadline,
         _ condition: @Sendable (String) -> Bool
     ) async -> String {
         var out = Data()

@@ -4,6 +4,11 @@ import Testing
 
 @testable import TBDDaemonLib
 
+/// Positive-wait deadline sized for starved CI runners (PR #379: cooperative-pool
+/// starvation stretched sub-second async-drain deliveries past a 5 s poll).
+/// Passing runs still complete in milliseconds — only failures wait this long.
+private let ciSafeDeadline: Duration = .seconds(30)
+
 /// Phase B M2 — the attach-boundary fence (issue #376, second bullet).
 ///
 /// Before M2, output a pane emitted between the attach's capture and the
@@ -56,7 +61,7 @@ struct AttachReplayFenceTests {
     /// Poll until `condition`, failing after `deadline` (async work — the
     /// orchestrator's batch writes — lands on other tasks).
     private func waitFor(
-        _ what: String, deadline: Duration = .seconds(15),
+        _ what: String, deadline: Duration = ciSafeDeadline,
         sourceLocation: SourceLocation = #_sourceLocation,
         _ condition: @Sendable () async -> Bool
     ) async throws {
@@ -108,7 +113,7 @@ struct AttachReplayFenceTests {
     /// accumulated text or the deadline passes — the fence flush arrives via
     /// the async drain task, so a one-shot read snapshot could race it.
     private func readUntil(
-        fd: Int32, deadline: Duration = .seconds(15),
+        fd: Int32, deadline: Duration = ciSafeDeadline,
         _ condition: @Sendable (String) -> Bool
     ) async -> String {
         let flags = fcntl(fd, F_GETFL)
