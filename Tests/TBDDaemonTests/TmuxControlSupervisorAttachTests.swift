@@ -293,8 +293,9 @@ struct PaneFanoutTests {
         defer { Darwin.close(readFD) }
         fanout.markReady(key: key, generation: gen)
 
-        // 256 KB into a ~64 KB pipe with no reader: the write must stop at
-        // EAGAIN and drop the tail — never skip bytes in the middle.
+        // 256 KB into a ~64 KB pipe with no reader: the EAGAIN remainder
+        // (~192 KB) exceeds the 128 KB backpressure queue cap, so it is
+        // dropped WHOLE (Phase B M1 overflow) — never skipped in the middle.
         let big = Data(repeating: UInt8(ascii: "z"), count: 256 * 1024)
         fanout.route(server: server, event: .output(paneID: "%7", bytes: big))
 

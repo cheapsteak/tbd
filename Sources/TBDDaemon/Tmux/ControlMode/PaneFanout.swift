@@ -31,6 +31,17 @@ enum PaneReplayWriteError: Error, Equatable {
     case writeFailed(errno: Int32)
 }
 
+/// Locked snapshot of one pane's flow-control counters (Phase B M1) — test
+/// visibility plus diagnostics. `droppedEvents`/`droppedBytes` count ONLY
+/// overflow and not-ready drops; plain EAGAIN no longer drops (it queues).
+struct PaneFlowStats: Equatable {
+    let queuedBytes: Int
+    let droppedBytes: Int
+    let droppedEvents: Int
+    let overflowEvents: Int
+    let queuedHighWater: Int
+}
+
 /// Outcome of the generation-checked `PaneFanout.acknowledge`.
 enum PaneAcknowledgeResult: Equatable {
     /// The ack landed: a sink exists and (when a generation was echoed) it
@@ -76,10 +87,35 @@ final class PaneFanout: @unchecked Sendable {
         /// purpose is "app never acked") keys off THIS flag instead: a slow
         /// capture must not let the stale timer kill a live, acked attach.
         var acknowledged = false
+        /// Overflow + not-ready drops only (Phase B M1): plain EAGAIN no
+        /// longer drops — the unwritten remainder is queued instead.
         var droppedEvents = 0
         var droppedBytes = 0
         var lastDropLog = Date.distantPast
+        /// Backpressure queue (Phase B M1): bytes the pipe could not accept
+        /// yet, delivered IN ORDER by the async drain task. Bounded by
+        /// `PaneFanout.queueCap`; scoped to this (key, generation) — a
+        /// superseded sink's queued bytes die with it.
+        var queue: [Data] = []
+        var queuedBytes = 0
+        /// A drain task is live for this (key, generation).
+        var drainArmed = false
+        /// Chunks dropped whole because the queue was at its cap.
+        var overflowEvents = 0
+        /// Highest `queuedBytes` ever observed on this sink.
+        var queuedHighWater = 0
+        /// Cumulative bytes that were queued and later delivered by the
+        /// drain (telemetry for the recovery log only).
+        var queuedDeliveredBytes = 0
+        /// Rate limiter for the backpressure-enter / drain-recovery logs
+        /// (`lastDropLog` covers the drop logs).
+        var lastFlowLog = Date.distantPast
     }
+
+    /// Per-pane backpressure queue cap. Beyond this, incoming chunks are
+    /// dropped whole (see `enqueueLocked`) — the M3 pause+repair cycle
+    /// replaces that drop later.
+    static let queueCap = 128 * 1024
 
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
     private let lock = NSLock()
@@ -98,7 +134,9 @@ final class PaneFanout: @unchecked Sendable {
         if !ok { throw PaneFanoutError.pipeAllocationFailed(errno) }
         let (readFD, writeFD) = (fds[0], fds[1])
         // Nonblocking write end: a slow app-side reader must never stall the
-        // reader thread. EAGAIN → drop-and-count (Phase 6 adds flow control).
+        // reader thread. EAGAIN → queue-and-drain (Phase B M1): the unwritten
+        // remainder is queued per pane (cap `queueCap`) and an async drain
+        // task delivers it as the reader catches up.
         let flags = fcntl(writeFD, F_GETFL)
         _ = fcntl(writeFD, F_SETFL, flags | O_NONBLOCK)
 
@@ -258,7 +296,8 @@ final class PaneFanout: @unchecked Sendable {
     /// acks `attach.ready` only after this returns, so live bytes follow the
     /// replay in order (addendum §3).
     ///
-    /// Unlike `route()` (hot path — drops on EAGAIN), a replay must arrive
+    /// Unlike `route()` (hot path — queues on EAGAIN and drains
+    /// asynchronously), a replay must arrive
     /// INTACT: a truncated escape sequence corrupts the terminal. On EAGAIN
     /// this waits for pipe writability in short poll slices under `deadline`,
     /// re-validating the sink between slices. It can therefore block up to
@@ -333,7 +372,28 @@ final class PaneFanout: @unchecked Sendable {
             "replay write \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation) \(total) bytes delivered")
     }
 
+    /// Locked snapshot of `key`'s flow-control counters. `nil` when no sink
+    /// exists (never attached, detached, or superseded-and-gone).
+    func flowStats(key: PaneKey) -> PaneFlowStats? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let sink = sinks[key] else { return nil }
+        return PaneFlowStats(
+            queuedBytes: sink.queuedBytes,
+            droppedBytes: sink.droppedBytes,
+            droppedEvents: sink.droppedEvents,
+            overflowEvents: sink.overflowEvents,
+            queuedHighWater: sink.queuedHighWater)
+    }
+
     /// Hot path — called on the reader thread for every output event.
+    ///
+    /// Phase B M1 backpressure: a chunk the pipe cannot accept whole is no
+    /// longer truncated (issue #376 — every dropped byte leaves permanently
+    /// wrong cells on a differential renderer). The unwritten remainder is
+    /// queued (bounded by `queueCap`) and an async drain task delivers it in
+    /// order; while ANY bytes are queued, new chunks go straight to the queue
+    /// so live bytes can never overtake queued ones.
     func route(server: String, event: TmuxControlEvent) {
         let paneID: String
         let bytes: Data
@@ -352,6 +412,8 @@ final class PaneFanout: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard var sink = sinks[key], sink.ready else {
+            // Not-ready / unattached drops are unchanged in M1 — the attach
+            // fence (M2) owns that window.
             if sinks[key] != nil {
                 sinks[key]!.droppedEvents += 1
             } else {
@@ -360,32 +422,187 @@ final class PaneFanout: @unchecked Sendable {
             return
         }
 
-        // Partial-write loop: nonblocking write() may legally return a short
-        // count. Stopping mid-chunk and dropping the REMAINDER keeps the
-        // delivered prefix intact; skipping bytes in the middle would corrupt
-        // the escape-sequence stream.
-        let buf = [UInt8](bytes)
-        var offset = 0
-        while offset < buf.count {
-            let written = buf[offset...].withUnsafeBytes { Darwin.write(sink.writeFD, $0.baseAddress, $0.count) }
-            if written > 0 {
-                offset += written
-                continue
-            }
-            if written < 0 && errno == EAGAIN {
-                sink.droppedEvents += 1
-                sink.droppedBytes += buf.count - offset
-                if Date().timeIntervalSince(sink.lastDropLog) > 1 {
-                    sink.lastDropLog = Date()
-                    logger.debug(
-                        "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) EAGAIN — dropped \(sink.droppedBytes) bytes total (\(sink.droppedEvents) events)")
+        if sink.queuedBytes > 0 {
+            // Order preservation: bytes must NEVER overtake queued bytes —
+            // while the queue is non-empty, everything goes through it.
+            enqueueLocked(bytes, into: &sink, key: key)
+        } else {
+            // Partial-write loop: nonblocking write() may legally return a
+            // short count. On EAGAIN (or a short write) the UNWRITTEN
+            // remainder is queued — the delivered prefix stays intact and
+            // the queued continuation follows it in order.
+            let buf = [UInt8](bytes)
+            var offset = 0
+            while offset < buf.count {
+                let written = buf[offset...].withUnsafeBytes { Darwin.write(sink.writeFD, $0.baseAddress, $0.count) }
+                if written > 0 {
+                    offset += written
+                    continue
                 }
-            } else {
-                logger.error(
-                    "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) write errno=\(errno)")
+                if written < 0 && errno == EINTR { continue }
+                if written < 0 && errno == EAGAIN {
+                    enqueueLocked(Data(buf[offset...]), into: &sink, key: key)
+                } else {
+                    logger.error(
+                        "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) write errno=\(errno)")
+                }
+                break
             }
-            break
+        }
+        armDrainIfNeededLocked(&sink, key: key)
+        sinks[key] = sink
+    }
+
+    /// Append `data` to the sink's backpressure queue — MUST be called with
+    /// `lock` held. Chunks are enqueued (and, on overflow, dropped) WHOLE:
+    /// splitting what we enqueue would put a fragment mid-queue whose
+    /// continuation is lost, corrupting escape sequences; dropping the entire
+    /// incoming chunk keeps everything delivered + queued an intact prefix.
+    /// The overflow drop here is the M3 hook point — the pause+repair cycle
+    /// (tmux flow control + recapture) replaces it later.
+    private func enqueueLocked(_ data: Data, into sink: inout Sink, key: PaneKey) {
+        guard !data.isEmpty else { return }
+        if sink.queuedBytes + data.count > Self.queueCap {
+            sink.overflowEvents += 1
+            sink.droppedEvents += 1
+            sink.droppedBytes += data.count
+            if Date().timeIntervalSince(sink.lastDropLog) > 1 {
+                sink.lastDropLog = Date()
+                let (dropped, events, overflows) = (sink.droppedBytes, sink.droppedEvents, sink.overflowEvents)
+                logger.info(
+                    "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) queue overflow — dropped \(dropped) bytes total (\(events) events, \(overflows) overflows)")
+            }
+            return
+        }
+        let wasEmpty = sink.queuedBytes == 0
+        sink.queue.append(data)
+        sink.queuedBytes += data.count
+        sink.queuedHighWater = max(sink.queuedHighWater, sink.queuedBytes)
+        if wasEmpty, Date().timeIntervalSince(sink.lastFlowLog) > 1 {
+            sink.lastFlowLog = Date()
+            let queued = sink.queuedBytes
+            logger.info(
+                "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) backpressure — pipe full, queued \(queued) bytes")
+        }
+    }
+
+    /// Spawn the drain task for `sink` if its queue is non-empty and no drain
+    /// is live yet — MUST be called with `lock` held. The task captures only
+    /// (key, generation): it re-validates the sink on every pass, so a
+    /// superseded or detached sink's queue simply dies with it.
+    private func armDrainIfNeededLocked(_ sink: inout Sink, key: PaneKey) {
+        guard sink.queuedBytes > 0, !sink.drainArmed else { return }
+        sink.drainArmed = true
+        let generation = sink.generation
+        Task.detached { [weak self] in
+            await self?.drainQueue(key: key, generation: generation)
+        }
+    }
+
+    /// Async drain for one (key, generation)'s backpressure queue. Writes
+    /// with the same nonblocking write-under-lock discipline as `route()` /
+    /// `writeReplay` (every fd use re-validates the sink under the lock, so
+    /// a write into a closed-and-recycled fd cannot happen). On EAGAIN it
+    /// sleeps OFF the lock (10 ms — the sleep IS the pacing) and retries.
+    ///
+    /// Generation-scoped, the invariant everything here protects: a
+    /// superseded attach's queued bytes must NEVER flush into a successor's
+    /// pipe. On generation mismatch or missing sink this exits touching
+    /// NOTHING — the successor manages its own `drainArmed`.
+    private func drainQueue(key: PaneKey, generation: UInt64) async {
+        while true {
+            // The pass itself is synchronous (NSLock is `noasync`); this
+            // loop only paces between passes, never holding the lock across
+            // a suspension.
+            if drainPass(key: key, generation: generation) == .finished { return }
+            // Pipe still full: pace OFF the lock, then re-validate and retry.
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    private enum DrainPassResult {
+        /// The drain task is done: queue emptied, sink gone/superseded, or a
+        /// hard write error abandoned the queue.
+        case finished
+        /// EAGAIN — the pipe is still full; sleep and run another pass.
+        case pipeFull
+    }
+
+    /// One locked drain pass — the synchronous half of `drainQueue`.
+    private func drainPass(key: PaneKey, generation: UInt64) -> DrainPassResult {
+        lock.lock()
+        guard var sink = sinks[key], sink.generation == generation, sink.ready else {
+            // Only a still-live sink at OUR generation gets its flag
+            // cleared (`ready` never reverts once set — that arm is
+            // defensive only).
+            if let current = sinks[key], current.generation == generation {
+                sinks[key]!.drainArmed = false
+            }
+            lock.unlock()
+            return .finished
+        }
+
+        var sawHardError = false
+        var pipeFull = false
+        while let head = sink.queue.first, !pipeFull, !sawHardError {
+            let buf = [UInt8](head)
+            var offset = 0
+            while offset < buf.count {
+                let written = buf[offset...].withUnsafeBytes {
+                    Darwin.write(sink.writeFD, $0.baseAddress, $0.count)
+                }
+                if written > 0 {
+                    offset += written
+                    continue
+                }
+                if written < 0 && errno == EINTR { continue }
+                if written < 0 && errno == EAGAIN {
+                    pipeFull = true
+                } else {
+                    sawHardError = true
+                }
+                break
+            }
+            if offset > 0 {
+                sink.queuedBytes -= offset
+                sink.queuedDeliveredBytes += offset
+                if offset >= buf.count {
+                    sink.queue.removeFirst()
+                } else {
+                    // Partial write: keep the remainder at the head.
+                    sink.queue[0] = Data(buf[offset...])
+                }
+            }
+        }
+
+        if sawHardError {
+            // e.g. EPIPE after the app closed the read end — the queue can
+            // never deliver; count it dropped and stand down (the detach
+            // path closes the fd).
+            logger.error(
+                "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) drain write errno=\(errno) — abandoning \(sink.queuedBytes) queued bytes")
+            sink.droppedEvents += sink.queue.count
+            sink.droppedBytes += sink.queuedBytes
+            sink.queue.removeAll()
+            sink.queuedBytes = 0
+            sink.drainArmed = false
+            sinks[key] = sink
+            lock.unlock()
+            return .finished
+        }
+        if sink.queue.isEmpty {
+            sink.drainArmed = false
+            if Date().timeIntervalSince(sink.lastFlowLog) > 1 {
+                sink.lastFlowLog = Date()
+                logger.info(
+                    "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) drained — high water \(sink.queuedHighWater) bytes, \(sink.queuedDeliveredBytes) bytes queued-then-delivered total")
+            }
+            sinks[key] = sink
+            lock.unlock()
+            return .finished
         }
         sinks[key] = sink
+        lock.unlock()
+        return .pipeFull
     }
 }
