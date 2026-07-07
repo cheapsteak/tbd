@@ -274,29 +274,37 @@ struct PaneFanoutFlowControlTests {
         #expect(String(decoding: resumed, as: UTF8.self) == "POST-ABORT")
     }
 
-    @Test("isPipeWritable: false while full, true after the reader drains, nil on stale generation or missing sink")
+    @Test("isPipeWritable: .full while full, .writable after the reader drains, .broken when the read end closes, nil on stale generation or missing sink")
     func pipeWritableProbe() throws {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%11")
         let (readFD, gen) = try fanout.attach(key: key)
-        defer { Darwin.close(readFD) }
+        var readClosed = false
+        defer { if !readClosed { Darwin.close(readFD) } }
         setNonblocking(readFD)
         fanout.markReady(key: key, generation: gen)
 
-        #expect(fanout.isPipeWritable(key: key, generation: gen) == true,
+        #expect(fanout.isPipeWritable(key: key, generation: gen) == .writable,
                 "a fresh pipe must be writable")
         // Fill the pipe (direct writes land until EAGAIN queues the rest).
         routeChunks(fanout, paneID: "%11", data: patterned(count: 160 * 1024))
-        #expect(fanout.isPipeWritable(key: key, generation: gen) == false,
-                "a full pipe must probe unwritable")
+        #expect(fanout.isPipeWritable(key: key, generation: gen) == .full,
+                "a full pipe must probe full — healthy, keep waiting")
         // The reader catches up.
         _ = readAll(fd: readFD, expected: 160 * 1024)
-        #expect(fanout.isPipeWritable(key: key, generation: gen) == true)
+        #expect(fanout.isPipeWritable(key: key, generation: gen) == .writable)
 
         // Stale generation / missing sink → nil (repair must abort silently).
         #expect(fanout.isPipeWritable(key: key, generation: gen + 1) == nil)
         #expect(fanout.isPipeWritable(
             key: PaneKey(server: server, paneID: "%none"), generation: 1) == nil)
+
+        // The reader dies: read end closed → .broken (the pipe can never
+        // drain; the repair must unpause + abort instead of waiting forever).
+        Darwin.close(readFD)
+        readClosed = true
+        #expect(fanout.isPipeWritable(key: key, generation: gen) == .broken,
+                "a read-end-closed pipe must probe broken")
     }
 
     /// Read `fd` until EAGAIN.

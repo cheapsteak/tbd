@@ -50,10 +50,17 @@ actor PaneRepairCoordinator {
     /// Recapture depth — matches the attach orchestrator's (see its note on
     /// the server-side `history-limit 50000`).
     private let historyDepth: Int
-    /// Reader-catch-up poll pacing and deadline (step 2) — injectable so
-    /// tests can wedge the reader without waiting 30 s.
+    /// Reader-catch-up poll pacing (step 2) — injectable so tests can wedge
+    /// the reader on tiny intervals. The wait has NO deadline: pacing starts
+    /// at `writableCheckInterval` and relaxes to `writableSlowInterval` once
+    /// the wait exceeds `writableEscalationThreshold`.
     private let writableCheckInterval: Duration
-    private let writableDeadline: Duration
+    private let writableSlowInterval: Duration
+    private let writableEscalationThreshold: Duration
+    /// One `.error` line when the wait crosses this mark — the pane is still
+    /// healthy (paused, buffering server-side) but the app reader has been
+    /// stalled suspiciously long.
+    private static let readerStallLogThreshold: Duration = .seconds(30)
     /// One in-flight repair per pane. Belt-and-suspenders: the sink's
     /// `repairing` flag already gates re-signaling at the fanout, but a
     /// duplicate signal for a key mid-repair must still be a no-op here.
@@ -63,12 +70,14 @@ actor PaneRepairCoordinator {
          commandProvider: @escaping @Sendable (String) async -> TmuxControlCommandClient?,
          historyDepth: Int = 50_000,
          writableCheckInterval: Duration = .milliseconds(50),
-         writableDeadline: Duration = .seconds(30)) {
+         writableSlowInterval: Duration = .milliseconds(500),
+         writableEscalationThreshold: Duration = .seconds(5)) {
         self.supervisor = supervisor
         self.commandProvider = commandProvider
         self.historyDepth = historyDepth
         self.writableCheckInterval = writableCheckInterval
-        self.writableDeadline = writableDeadline
+        self.writableSlowInterval = writableSlowInterval
+        self.writableEscalationThreshold = writableEscalationThreshold
     }
 
     /// Test seam: whether a repair for `key` is currently running.
@@ -122,30 +131,52 @@ actor PaneRepairCoordinator {
         // the repair aborts silently (R11: no unpause — a successor attach's
         // own sequence owns the pane's pause state, and a plain detach
         // %errors nothing worse than a paused, viewerless pane).
-        let deadline = ContinuousClock.now + writableDeadline
+        //
+        // The wait has NO deadline: a TRANSIENTLY wedged reader (e.g. a long
+        // app main-thread hitch) must not turn into a permanently frozen
+        // pane — nothing in the daemon ever re-triggers a given generation's
+        // repair, so giving up here would leave the sink `repairing` and the
+        // pane paused forever. Instead the loop waits it out: the pane stays
+        // paused (tmux buffers server-side — nothing is lost) and THIS repair
+        // completes whenever the reader drains. Pacing escalates from
+        // `writableCheckInterval` to `writableSlowInterval` past the
+        // escalation threshold, with ONE `.error` line at the 30 s mark.
+        // A BROKEN pipe (read end closed) can never drain: unpause + abort —
+        // the viewer is gone or dying, the app-death detach path finishes the
+        // job, and leaving the pane unpaused keeps it healthy for the next
+        // attach.
+        let waitStart = ContinuousClock.now
+        var loggedStall = false
         waitLoop: while true {
             switch supervisor.fanout.isPipeWritable(key: key, generation: generation) {
             case nil:
                 return
-            case true?:
+            case .writable?:
                 break waitLoop
-            case false?:
-                if ContinuousClock.now >= deadline {
-                    // The reader is wedged. Deliberately do NOT abortRepair:
-                    // a continue now would just re-overflow the queue, so
-                    // the pane stays PAUSED (tmux buffers it server-side in
-                    // pane history/screen — nothing is being lost) and the
-                    // sink stays `repairing` (which keeps re-signaling
-                    // gated). A later attach replaces the sink and re-runs
-                    // the full pause→capture→replay sequence, which heals
-                    // everything this repair could not.
-                    Self.logger.error("""
-                        repair reader wedged for \(server, privacy: .public)/\(paneID, privacy: .public) \
-                        gen=\(generation) — leaving the pane paused; a later attach re-runs the sequence
-                        """)
-                    return
+            case .broken?:
+                Self.logger.error("""
+                    repair pipe broken (read end closed) for \(server, privacy: .public)/\(paneID, privacy: .public) \
+                    gen=\(generation) — unpausing and aborting; the app-death detach path finishes the job
+                    """)
+                if await stillOwner(key, generation) {
+                    await client.sendList([
+                        TmuxCommand(text: continueCommand, tolerateErrors: true) { _ in }
+                    ])
+                    supervisor.fanout.abortRepair(key: key, generation: generation)
                 }
-                try? await Task.sleep(for: writableCheckInterval)
+                return
+            case .full?:
+                let waited = ContinuousClock.now - waitStart
+                if !loggedStall, waited >= Self.readerStallLogThreshold {
+                    loggedStall = true
+                    Self.logger.error("""
+                        repair reader stalled >30s for \(server, privacy: .public)/\(paneID, privacy: .public) \
+                        gen=\(generation) — waiting; the pane stays paused, tmux buffers server-side
+                        """)
+                }
+                let interval = waited >= writableEscalationThreshold
+                    ? writableSlowInterval : writableCheckInterval
+                try? await Task.sleep(for: interval)
             }
         }
 

@@ -37,7 +37,7 @@ One per-sink byte queue (cap **128 KB**, chunk-granular, generation-scoped) serv
 
 Everything is **generation-scoped**, the invariant carried from Phase A's eleven review rounds: a superseded attach's queued/fenced bytes die with its sink; the drain, the fence, and every repair step re-validate `(key, generation)` and abort silently on mismatch.
 
-Telemetry (issue #376's explicit ask — the old `.debug` drop counters weren't persisted and we flew blind): backpressure entry, overflow, drain recovery, and repair completion log at rate-limited `.info`; `PaneFlowStats` exposes the counters.
+Telemetry (issue #376's explicit ask — the old `.debug` drop counters weren't persisted and we flew blind): backpressure entry, overflow, and drain recovery log at rate-limited `.info`; repair completion logs an unconditional `.info` (repairs are rare); `PaneFlowStats` exposes the counters.
 
 ## 3. Why the attach/repair sequences batch in two phases
 
@@ -57,14 +57,14 @@ The batch split adds one supersession window (between batches), guarded by the s
 Steady-state queue overflow (ready, unfenced, not repairing) no longer drops. Instead:
 
 1. The fanout **clears the queue** (its content is in pane history; the recapture supersedes it — nothing counts as dropped), flips the sink to `repairing` (routed output now drops-with-counters: pre-pause bytes the capture will include), and signals the coordinator outside the lock.
-2. The coordinator pauses the pane (batch 1), then **waits for the app reader to catch up** (nonblocking `POLLOUT` probe, 50 ms pacing, 30 s deadline) — a recapture replayed into a still-full pipe would just re-overflow.
+2. The coordinator pauses the pane (batch 1), then **waits for the app reader to catch up** (nonblocking `POLLOUT` probe, 50 ms pacing escalating to 500 ms after ~5 s, **no deadline**) — a recapture replayed into a still-full pipe would just re-overflow.
 3. Repair fence → atomic captures+continue (shared `PaneCaptureReplay` construction, byte-identical to the attach's batch 2) → recapture replay via `writeReplay` → `endRepair` flushes the fenced bytes in order.
 
 The repair replay resets the terminal (reset prelude + full history) mid-session — accepted and intentional: iTerm2 re-captures on `%pause` for the same reason, and a one-frame repaint beats permanently corrupt cells on a differential renderer.
 
 **Deliberate policies:**
 
-- **Wedged reader (30 s deadline exceeded):** leave the pane *paused* and the sink `repairing`. A continue would just re-overflow; tmux holds the content server-side, and a later attach replaces the sink and re-runs the full sequence, healing everything. (Wedged-*tmux* detection is separate, still-open Phase B scope.)
+- **Wedged reader:** wait indefinitely — the pane stays *paused* and the sink `repairing` while the repair polls for pipe writability (50 ms, then 500 ms past ~5 s; one `.error` escalation line at 30 s). A continue would just re-overflow, and giving up would freeze the pane forever (nothing re-triggers a generation's repair), so a *transiently* wedged reader — e.g. a long app main-thread hitch — heals the moment it drains: the **same in-flight repair** completes. tmux holds the content server-side meanwhile; a re-attach still supersedes the wait via the generation check. A **broken** pipe (read end closed — the viewer is gone or dying) can never drain: unpause + `abortRepair`; the app-death detach path finishes the job, and an unpaused pane stays healthy for the next attach. (Wedged-*tmux* detection is separate, still-open Phase B scope.)
 - **Repair failure while still owner** (capture `%error`, replay write failure): unpause + `abortRepair` — the stream resumes with a possible hole; a pane frozen behind a fence that never flushes is worse than a hole.
 - **Overflow while fenced or already repairing:** keeps the M1 whole-chunk drop + telemetry. A repair launched during a fence would race the in-flight attach/repair sequence on the same pane's pause state. Bounded residual, rare (requires a blast pane overflowing 128 KB *during* replay assembly).
 
@@ -75,7 +75,7 @@ The repair replay resets the terminal (reset prelude + full history) mid-session
 | Per-pane local-queue cap | 128 KB | overflow enters the repair cycle (was: drop) |
 | Resume gate | pipe writable | replaces the 32 KB drain hysteresis — the queue is cleared at overflow, so there is nothing to drain below a threshold |
 | Drain pacing | 10 ms | async task; nonblocking writes under the fanout lock |
-| Repair reader-wait | 50 ms poll / 30 s deadline | deadline → pane stays paused; later attach heals |
+| Repair reader-wait | 50 ms → 500 ms escalating poll, no deadline | one `.error` escalation log at 30 s; pane stays paused, tmux buffers server-side; broken pipe → unpause + abort |
 | Repair recapture depth | 50 000 | matches the attach's `history-limit` |
 | `pause-after` safety nets | **not yet set** | remaining Phase B scope, below |
 

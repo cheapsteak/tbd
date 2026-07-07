@@ -48,6 +48,19 @@ struct PaneFlowStats: Equatable {
     let repairs: Int
 }
 
+/// Tri-state result of `PaneFanout.isPipeWritable` — the repair
+/// coordinator's reader-catch-up gate.
+enum PipeWritability {
+    /// `POLLOUT`: the pipe has room; the repair may proceed.
+    case writable
+    /// `poll` timed out with no events: the pipe is full but healthy — the
+    /// reader just hasn't caught up yet; keep waiting.
+    case full
+    /// `POLLERR`/`POLLHUP`/`POLLNVAL`: the read end is closed or the fd is
+    /// invalid — the pipe can NEVER drain, so waiting is pointless.
+    case broken
+}
+
 /// Outcome of the generation-checked `PaneFanout.acknowledge`.
 enum PaneAcknowledgeResult: Equatable {
     /// The ack landed: a sink exists and (when a generation was echoed) it
@@ -533,13 +546,20 @@ final class PaneFanout: @unchecked Sendable {
     /// or the repair replay would just re-overflow it. Held under the lock
     /// (same fd-close safety discipline as every write path). `nil` when the
     /// sink is gone or superseded — the repair must abort silently.
-    func isPipeWritable(key: PaneKey, generation: UInt64) -> Bool? {
+    /// `.broken` when `poll` flags `POLLERR`/`POLLHUP`/`POLLNVAL` (read end
+    /// closed / fd invalid): the pipe can never drain, so the coordinator
+    /// unpauses and aborts instead of waiting forever; `.full` on a quiet
+    /// poll — keep waiting for the reader.
+    func isPipeWritable(key: PaneKey, generation: UInt64) -> PipeWritability? {
         lock.lock()
         defer { lock.unlock() }
         guard let sink = sinks[key], sink.generation == generation else { return nil }
         var pollFD = pollfd(fd: sink.writeFD, events: Int16(POLLOUT), revents: 0)
         let result = Darwin.poll(&pollFD, 1, 0)
-        return result > 0 && (pollFD.revents & Int16(POLLOUT)) != 0
+        guard result > 0 else { return .full }
+        let brokenFlags = Int16(POLLERR) | Int16(POLLHUP) | Int16(POLLNVAL)
+        if pollFD.revents & brokenFlags != 0 { return .broken }
+        return (pollFD.revents & Int16(POLLOUT)) != 0 ? .writable : .full
     }
 
     /// Hot path — called on the reader thread for every output event.
@@ -764,14 +784,21 @@ final class PaneFanout: @unchecked Sendable {
     /// One locked drain pass — the synchronous half of `drainQueue`.
     private func drainPass(key: PaneKey, generation: UInt64) -> DrainPassResult {
         lock.lock()
-        guard var sink = sinks[key], sink.generation == generation, sink.ready, !sink.fenced else {
+        guard var sink = sinks[key], sink.generation == generation, sink.ready, !sink.fenced,
+              !sink.repairing else {
             // Only a still-live sink at OUR generation gets its flag cleared
             // (`ready` never reverts once set — that arm is defensive only).
             // FENCED stands the drain down too (M3): the repair fence arms on
             // a READY sink, and a straggler drain task from pre-overflow
             // backpressure would otherwise flush fence-parked bytes into the
-            // pipe AHEAD of the repair replay. `endRepair`/`markReady` clears
-            // the fence and re-arms the drain for the ordered flush.
+            // pipe AHEAD of the repair replay. REPAIRING stands it down as
+            // well — structurally, not by cross-function invariant: today the
+            // repairing-unfenced window provably has an empty queue (overflow
+            // entry clears it; routed output drops), but a drain live there
+            // would race the repair's `writeReplay`, so the guard refuses it
+            // outright. Every resume path re-arms: `markReady`, `endRepair`,
+            // and `abortRepair` all clear their flags and call
+            // `armDrainIfNeededLocked` for the ordered flush.
             if let current = sinks[key], current.generation == generation {
                 sinks[key]!.drainArmed = false
             }
