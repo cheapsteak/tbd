@@ -36,9 +36,36 @@ public enum RateLimitDetection {
     public static func detect(
         transcriptData: Data,
         now: Date = Date(),
-        timeZone: TimeZone = .current
+        timeZone: TimeZone = .current,
+        newerThan floor: Date? = nil
     ) -> DetectedRateLimit? {
-        guard let entry = lastApiErrorEntry(in: transcriptData) else { return nil }
+        detectWithText(transcriptData: transcriptData, now: now, timeZone: timeZone, newerThan: floor)?
+            .detectedLimit
+    }
+
+    /// Single-scan variant of `detect(transcriptData:)` that also returns the
+    /// matched record's verbatim text, so a caller needing both the detected
+    /// limit AND the display message (e.g. the CLI's StopFailure hook) parses
+    /// the transcript exactly once instead of running two independent
+    /// full-file scans for the same record.
+    public static func detectWithText(
+        transcriptData: Data,
+        now: Date = Date(),
+        timeZone: TimeZone = .current,
+        newerThan floor: Date? = nil
+    ) -> (text: String?, detectedLimit: DetectedRateLimit?)? {
+        guard let entry = lastApiErrorEntry(in: transcriptData, newerThan: floor) else { return nil }
+        return (text: entry.text, detectedLimit: detect(entry: entry, now: now, timeZone: timeZone))
+    }
+
+    /// Shared entry→DetectedRateLimit derivation used by both `detect(transcriptData:)`
+    /// (via `detectWithText`) so there is exactly one implementation of the
+    /// structured/text-fallback decision.
+    private static func detect(
+        entry: (text: String?, rateLimitInfo: [String: Any]?),
+        now: Date,
+        timeZone: TimeZone
+    ) -> DetectedRateLimit? {
         let text = entry.text ?? ""
 
         // 1. Structured first.
@@ -208,13 +235,37 @@ public enum RateLimitDetection {
 
     /// Last `isApiErrorMessage == true` record: first non-empty text block +
     /// the top-level `rate_limit_info` object when present.
-    static func lastApiErrorEntry(in data: Data) -> (text: String?, rateLimitInfo: [String: Any]?)? {
+    ///
+    /// When `floor` is supplied, the record is additionally required to carry
+    /// a parseable `timestamp` strictly newer than `floor` — otherwise `nil`
+    /// is returned. A missing/unparseable timestamp is treated as NOT newer
+    /// than any floor (conservative: keep waiting rather than risk parsing
+    /// stale data). Since transcripts are one continuously-growing JSONL per
+    /// terminal across resumes, the newest `isApiErrorMessage` record found
+    /// here (first hit scanning from the end) could otherwise be a stale,
+    /// already-resolved record left over from a PRIOR rate-limit incident —
+    /// this is what makes the retry backstop a no-op on a session's 2nd+ hit.
+    /// Because this is already the newest such record in the file, failing
+    /// the floor means no qualifying record exists yet; there is no need to
+    /// keep scanning further back for an even-older one.
+    static func lastApiErrorEntry(
+        in data: Data,
+        newerThan floor: Date? = nil
+    ) -> (text: String?, rateLimitInfo: [String: Any]?)? {
         guard let contents = String(data: data, encoding: .utf8) else { return nil }
         for line in contents.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
             guard let lineData = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                   obj["isApiErrorMessage"] as? Bool == true
             else { continue }
+
+            if let floor {
+                guard let ts = obj["timestamp"] as? String,
+                      let recordDate = parseTimestamp(ts),
+                      recordDate > floor
+                else { return nil }
+            }
+
             var text: String?
             if let message = obj["message"] as? [String: Any],
                let content = message["content"] as? [[String: Any]] {
@@ -231,13 +282,32 @@ public enum RateLimitDetection {
         return nil
     }
 
-    /// True when the transcript JSONL contains at least one
-    /// `isApiErrorMessage == true` record. Used by the CLI's StopFailure
-    /// retry loop to decide whether a transcript read is "good enough" yet —
-    /// Claude Code's hook fires 0.28-0.5s before this record is appended, so
-    /// a first read often predates it.
-    public static func hasApiErrorRecord(in data: Data) -> Bool {
-        lastApiErrorEntry(in: data) != nil
+    /// True when the transcript JSONL contains an `isApiErrorMessage == true`
+    /// record — and, when `floor` is supplied, that record's `timestamp` is
+    /// strictly newer than `floor` (see `lastApiErrorEntry` for the recency
+    /// contract). Used by the CLI's StopFailure retry loop to decide whether
+    /// a transcript read is "good enough" yet — Claude Code's hook fires
+    /// 0.28-0.5s before this record is appended, so a first read often
+    /// predates it. The `floor` variant additionally prevents an OLD
+    /// resolved record from a prior rate-limit incident (this transcript is
+    /// one continuously-growing JSONL across resumes) from permanently
+    /// satisfying this gate on a session's 2nd+ hit.
+    public static func hasApiErrorRecord(in data: Data, newerThan floor: Date? = nil) -> Bool {
+        lastApiErrorEntry(in: data, newerThan: floor) != nil
+    }
+
+    /// Parse a transcript record's ISO8601 `timestamp` field, trying
+    /// fractional-seconds format first then plain. `nil` means unparseable —
+    /// callers must treat that conservatively (not newer than any floor).
+    private static func parseTimestamp(_ ts: String) -> Date? {
+        let isoFractional = ISO8601DateFormatter()
+        isoFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let parsed = isoFractional.date(from: ts) {
+            return parsed
+        }
+        let isoPlain = ISO8601DateFormatter()
+        isoPlain.formatOptions = [.withInternetDateTime]
+        return isoPlain.date(from: ts)
     }
 
     /// True when the newest timestamped transcript record is newer than
@@ -245,26 +315,13 @@ public enum RateLimitDetection {
     /// user already continued — cancel, send nothing (spec §Actuation 2).
     public static func hasRecord(newerThan cutoff: Date, in data: Data) -> Bool {
         guard let contents = String(data: data, encoding: .utf8) else { return false }
-        let isoFractional = ISO8601DateFormatter()
-        isoFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let isoPlain = ISO8601DateFormatter()
-        isoPlain.formatOptions = [.withInternetDateTime]
-
         for line in contents.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
             guard let lineData = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                   let ts = obj["timestamp"] as? String
             else { continue }
 
-            var date: Date?
-            // Try ISO8601 with fractional seconds first
-            if let parsed = isoFractional.date(from: ts) {
-                date = parsed
-            } else if let parsed = isoPlain.date(from: ts) {
-                date = parsed
-            }
-
-            if let parsedDate = date {
+            if let parsedDate = parseTimestamp(ts) {
                 return parsedDate > cutoff
             }
         }

@@ -99,7 +99,13 @@ enum StopFailureMessage {
     /// 1. Payload-first (race-free, no file I/O): `last_assistant_message`
     ///    then `error_details`, whichever first yields a hard-limit hit.
     /// 2. Transcript read, retried up to `maxRetries` times (`retryInterval`
-    ///    apart) until `RateLimitDetection.hasApiErrorRecord` sees a record.
+    ///    apart) until `RateLimitDetection.hasApiErrorRecord(in:newerThan:)`
+    ///    sees a record newer than `recencyFloor` (see below) — NOT merely
+    ///    "a record exists", since the transcript is one continuously-growing
+    ///    JSONL per terminal across resumes: an old, already-resolved
+    ///    `isApiErrorMessage` record from a PRIOR hit would otherwise
+    ///    permanently satisfy an existence-only gate on every hit after the
+    ///    first, making the retry backstop a no-op.
     static func computeOutcomeWithRetry(
         stdinData: Data,
         readFile: (String) -> Data?,
@@ -130,9 +136,20 @@ enum StopFailureMessage {
             return Outcome(message: fallback, detectedLimit: nil)
         }
 
+        // Recency floor for the transcript-append race: the StopFailure hook
+        // fires ~0.28-0.5s before the API-error record lands in the
+        // transcript, so a legitimate NEW record can appear slightly BEFORE
+        // `now`. 10s is a generous backward tolerance for that — stale
+        // records left over from a prior, already-resolved rate-limit
+        // incident on this same continuously-growing transcript file are
+        // minutes+ old, well outside this window, and must never be parsed
+        // as the current detection.
+        let recencyFloor = now.addingTimeInterval(-10)
+
         var data = readFile(transcriptPath)
         var attempts = 0
-        while attempts < maxRetries && !(data.map(RateLimitDetection.hasApiErrorRecord(in:)) ?? false) {
+        while attempts < maxRetries
+            && !(data.map { RateLimitDetection.hasApiErrorRecord(in: $0, newerThan: recencyFloor) } ?? false) {
             waiter(retryInterval)
             attempts += 1
             data = readFile(transcriptPath)
@@ -142,39 +159,19 @@ enum StopFailureMessage {
             return Outcome(message: fallback, detectedLimit: nil)
         }
 
-        let detected = RateLimitDetection.detect(
-            transcriptData: data, now: now, timeZone: timeZone)
-        let text = lastApiErrorText(in: data)
-        return Outcome(message: text ?? fallback, detectedLimit: detected)
+        // Single scan: derive both the detected limit and the display
+        // message from the SAME floor-gated record — one parse of `data`
+        // instead of two independent full-file scans for the same result.
+        guard let scan = RateLimitDetection.detectWithText(
+            transcriptData: data, now: now, timeZone: timeZone, newerThan: recencyFloor
+        ) else {
+            return Outcome(message: fallback, detectedLimit: nil)
+        }
+        return Outcome(message: scan.text ?? fallback, detectedLimit: scan.detectedLimit)
     }
 
     /// Legacy entry point — existing tests exercise this shape.
     static func compute(stdinData: Data, readFile: (String) -> Data?) -> String? {
         computeOutcome(stdinData: stdinData, readFile: readFile).message
-    }
-
-    /// Scan transcript JSONL lines from the end; return the first
-    /// `isApiErrorMessage == true` entry's first non-empty text block.
-    static func lastApiErrorText(in data: Data) -> String? {
-        guard let contents = String(data: data, encoding: .utf8) else { return nil }
-        let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
-        for line in lines.reversed() {
-            guard
-                let lineData = line.data(using: .utf8),
-                let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                obj["isApiErrorMessage"] as? Bool == true,
-                let message = obj["message"] as? [String: Any],
-                let content = message["content"] as? [[String: Any]]
-            else {
-                continue
-            }
-            for block in content where block["type"] as? String == "text" {
-                if let text = block["text"] as? String,
-                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return text
-                }
-            }
-        }
-        return nil
     }
 }
