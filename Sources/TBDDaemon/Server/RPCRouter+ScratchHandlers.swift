@@ -237,6 +237,7 @@ extension RPCRouter {
             // half-migrated state can leave `scratch.delete` free to tmux-kill
             // live un-reparented terminals.
             do {
+                if let failureHook = scratchPromoteMigrationFailureHook { try await failureHook() }
                 try await db.worktrees.promoteScratchMigration(
                     scratchID: wt.id,
                     mainWorktreeID: mainWorktree.id,
@@ -245,7 +246,38 @@ extension RPCRouter {
                 )
             } catch {
                 scratchLogger.error("scratch.promote: row migration failed for \(wt.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                return RPCResponse(error: "Registered \(dest) as a repo, but migrating the scratch space's sessions failed: \(error.localizedDescription). The scratch row and its terminals were left unchanged — live sessions keep running under the scratch space; the repo at \(dest) is registered and usable.")
+                // The migration transaction itself rolled back atomically (the
+                // scratch row is still active + un-promoted, terminals still
+                // parented to it — see promoteScratchMigration). But two non-DB
+                // side effects already happened: the folder moved to `dest` and
+                // addRepo registered it. Mirror the addRepo-failure branch
+                // above and undo both — otherwise a retry trips the
+                // "Destination already exists" guard against a half-promoted
+                // repo whose scratch row points at a dead path.
+                //
+                // Unregister first: addRepo created exactly a repo row plus its
+                // synthetic main worktree row, so tear down both (the same
+                // store calls handleRepoRemove uses) before touching the
+                // filesystem.
+                var unregisterError: (any Error)?
+                do {
+                    try await db.worktrees.deleteForRepo(repoID: repo.id)
+                    try await db.repos.remove(id: repo.id)
+                    subscriptions.broadcast(delta: .repoRemoved(RepoIDDelta(repoID: repo.id)))
+                } catch let repoRemoveError {
+                    unregisterError = repoRemoveError
+                    scratchLogger.error("scratch.promote: could not unregister repo \(repo.id, privacy: .public) after migration failure: \(repoRemoveError.localizedDescription, privacy: .public)")
+                }
+                let repoNote = unregisterError.map {
+                    " The repo registration at \(dest) could NOT be removed (\($0.localizedDescription)) — remove it manually with `tbd repo remove`."
+                } ?? " Unregistered the repo again."
+                do {
+                    try fm.moveItem(atPath: dest, toPath: wt.path)
+                    return RPCResponse(error: "Migrating the scratch space's sessions failed: \(error.localizedDescription).\(repoNote) Moved the folder back to \(wt.path); the scratch row and its terminals were left unchanged, so promoting again is safe.")
+                } catch let moveBackError {
+                    scratchLogger.error("scratch.promote: move-back failed after migration failure for \(wt.id, privacy: .public): \(moveBackError.localizedDescription, privacy: .public)")
+                    return RPCResponse(error: "Migrating the scratch space's sessions failed: \(error.localizedDescription).\(repoNote) The folder could NOT be moved back to \(wt.path) (\(moveBackError.localizedDescription)) — it currently still lives at \(dest); the scratch row was not marked promoted.")
+                }
             }
             // File copies stay OUTSIDE the transaction: idempotent
             // copy-if-newer snapshots, safe to redo and useless to roll back.

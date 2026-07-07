@@ -199,5 +199,66 @@ struct ScratchPromoteRPCTests {
         #expect(row?.promotedToRepoID == nil)
         #expect(try await db.repos.list().count == repoCountBefore)
     }
+
+    /// A row-migration failure strikes at the worst moment: the folder has
+    /// already moved to `dest` and addRepo has already registered it. The
+    /// handler must roll BOTH side effects back — un-register the repo (repo
+    /// row + synthetic main worktree row) and move the folder home — leaving
+    /// the scratch row active, un-promoted, and retryable. Forced through the
+    /// full RPC path via the router's test-only migration failure hook; a
+    /// second promote with the hook cleared exercises the hook-nil branch and
+    /// proves the rollback left a cleanly retryable state.
+    @Test func migrationFailureRollsBackRepoRegistrationAndFolderMove() async throws {
+        let (home, cleanup) = isolate(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let router = makeRouter(db)
+        let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
+        let wt = try created.decodeResult(Worktree.self)
+        try gitInitCommit(at: wt.path)
+        let claude = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude)
+        let shell = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            label: "shell", kind: .shell)
+
+        struct MigrationBoom: Error {}
+        router.scratchPromoteMigrationFailureHook = { throw MigrationBoom() }
+
+        let dest = home.appendingPathComponent("projects/rolled-back").path
+        let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
+            params: ScratchPromoteParams(worktreeID: wt.id, destPath: dest, displayName: nil)))
+        #expect(!resp.success)
+        // The error tells the truth about the rollback outcome.
+        #expect(resp.error?.contains("Unregistered the repo again") == true)
+        #expect(resp.error?.contains("Moved the folder back") == true)
+
+        // Folder is back home; dest is gone.
+        #expect(FileManager.default.fileExists(atPath: wt.path))
+        #expect(!FileManager.default.fileExists(atPath: dest))
+        // Scratch row still active and un-promoted — retryable.
+        let row = try #require(try await db.worktrees.get(id: wt.id))
+        #expect(row.status == .active)
+        #expect(row.promotedToRepoID == nil)
+        // Terminals untouched, still parented to the scratch row.
+        #expect(Set(try await db.terminals.list(worktreeID: wt.id).map(\.id)) == [claude.id, shell.id])
+        // No half-registered repo left behind: the repo row and its synthetic
+        // main worktree row are both gone.
+        #expect(try await db.repos.findByPath(path: dest) == nil)
+        #expect(try await db.repos.list().isEmpty)
+        #expect(try await db.worktrees.list(status: .main).isEmpty)
+
+        // With the injected failure cleared, retrying the same promote
+        // succeeds — no "Destination already exists" trap, terminals migrate.
+        router.scratchPromoteMigrationFailureHook = nil
+        let retry = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
+            params: ScratchPromoteParams(worktreeID: wt.id, destPath: dest, displayName: nil)))
+        #expect(retry.success)
+        let result = try retry.decodeResult(ScratchPromoteResult.self)
+        #expect(FileManager.default.fileExists(atPath: dest))
+        #expect(try await db.worktrees.get(id: wt.id)?.promotedToRepoID == result.repoID)
+        let mainWt = try #require(try await db.worktrees.list(repoID: result.repoID, status: .main).first)
+        #expect(Set(try await db.terminals.list(worktreeID: mainWt.id).map(\.id)) == [claude.id, shell.id])
+    }
 }
 }

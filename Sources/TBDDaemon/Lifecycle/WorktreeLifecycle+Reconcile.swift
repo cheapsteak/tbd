@@ -316,6 +316,20 @@ extension WorktreeLifecycle {
         let repoRows = try await db.worktrees.list(repoID: repoID)
         var referencedServers = Set(repoRows.map(\.tmuxServer))
         referencedServers.insert(correctTmuxServer)
+        // Also visit every server referenced by scratch rows (repoID nil,
+        // archived included — the retired promoted-scratch row is often the
+        // LAST pointer). Scratch spaces belong to no repo, so no per-repo
+        // visit set would otherwise ever include their shared server once the
+        // repo-side pointer is gone: `repo.remove` on a promoted repo
+        // hard-deletes its main worktree row (deleteForRepo) — the only repo
+        // row referencing the inherited scratch server — leaving that
+        // server, and the removed repo's still-running windows on it,
+        // reachable by no reconcile at all (#325-class leak). Folding scratch
+        // servers into every repo's reconcile makes whichever repo reconciles
+        // next sweep those orphans; the live-row checks below already span
+        // all repos + scratch spaces, so live scratch windows stay safe.
+        let scratchRows = try await db.worktrees.list(scratchOnly: true)
+        referencedServers.formUnion(scratchRows.map(\.tmuxServer))
         let globalLiveRows = try await db.worktrees.list(excludeArchived: true)
 
         for server in referencedServers.sorted() {

@@ -110,26 +110,50 @@ struct ScratchPromoteReconcileTests {
         #expect(claudeAfter.suspendedAt == nil)
     }
 
-    /// After the promoted main worktree is archived, its row is the only
-    /// remaining pointer to the inherited scratch server. With nothing live
-    /// referencing that server anywhere (the scratch row was archived by the
-    /// promote itself), reconcile's cleanup pass must kill it — before this,
-    /// the pass only ever considered the canonical per-repo server, so the
-    /// inherited server lingered forever.
+    /// Register a plain git repo through the real `repo.add` RPC, giving the
+    /// harness a surviving repo whose reconcile can janitor shared servers
+    /// after the promoted repo itself is removed.
+    private func addSurvivorRepo(router: RPCRouter, home: URL) async throws -> Repo {
+        let dir = home.appendingPathComponent("projects/survivor-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try gitInitCommit(at: dir)
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.repoAdd, params: RepoAddParams(path: dir)))
+        return try resp.decodeResult(Repo.self)
+    }
+
+    /// The reachable trigger for "nothing references the inherited server
+    /// anymore" is REMOVING the promoted repo: `repo.remove` hard-deletes its
+    /// main worktree row via `deleteForRepo` (a `.main` row can never be
+    /// merely archived — `WorktreeStore.archive` refuses `.main`). That row
+    /// was the only repo-side pointer to the inherited scratch server, so
+    /// afterwards only the retired scratch row (repoID nil, archived) still
+    /// references it — and scratch rows belong to no repo, so no per-repo
+    /// reconcile visited that server before scratch-referenced servers were
+    /// folded into every reconcile's visit set. With nothing live on the
+    /// server anywhere, the next reconcile of ANY surviving repo must kill it.
     @Test func reconcileKillsInheritedServerOnceNothingReferencesIt() async throws {
         let (home, cleanup) = isolate(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
         let router = makeRouter(db, home: home)
         let promoted = try await promoteScratchWithTerminals(db: db, router: router, home: home)
 
-        try await db.worktrees.updateStatus(id: promoted.mainWorktree.id, status: .archived)
+        let removeResp = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: promoted.repoID, force: false)))
+        #expect(removeResp.success)
+        // Hard-deleted, not archived: no row of any repo references the
+        // inherited server anymore.
+        #expect(try await db.worktrees.list(repoID: promoted.repoID).isEmpty)
+
+        let survivor = try await addSurvivorRepo(router: router, home: home)
 
         let recorder = RecordedTmux()
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(),
             tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorder.append($0) }),
             hooks: HookResolver())
-        try await lifecycle.reconcile(repoID: promoted.repoID)
+        try await lifecycle.reconcile(repoID: survivor.id)
 
         let serverKills = recorder.snapshot().filter { $0.contains("kill-server") }
         #expect(serverKills.contains { $0.contains(promoted.scratch.tmuxServer) },
@@ -138,11 +162,13 @@ struct ScratchPromoteReconcileTests {
 
     /// The scratch server is SHARED: every scratch space (and every promoted
     /// repo's main worktree) runs on the one server derived from the scratch
-    /// base dir. When the archived promoted main's windows linger there but
-    /// another scratch space is still live on it, reconcile must sweep only
-    /// the untracked windows and leave the server — and the other space's
-    /// live window — alone.
-    @Test func reconcileSweepsArchivedMainWindowsButSparesSharedScratchServer() async throws {
+    /// base dir. After the promoted repo is removed through the real flow
+    /// (`repo.remove` hard-deletes the main worktree row), its windows linger
+    /// untracked on that server while another scratch space is still live on
+    /// it. The next reconcile of a surviving repo must sweep only the
+    /// untracked windows and leave the server — and the other space's live
+    /// window — alone.
+    @Test func reconcileSweepsRemovedPromotedRepoWindowsButSparesSharedScratchServer() async throws {
         let (home, cleanup) = isolate(); defer { cleanup() }
         let db = try TBDDatabase(inMemory: true)
         let router = makeRouter(db, home: home)
@@ -158,7 +184,14 @@ struct ScratchPromoteReconcileTests {
             worktreeID: otherScratch.id, tmuxWindowID: "@9", tmuxPaneID: "%9",
             label: "shell", kind: .shell)
 
-        try await db.worktrees.updateStatus(id: promoted.mainWorktree.id, status: .archived)
+        // Real trigger: remove the promoted repo; its main worktree row (and
+        // with it the tracking for windows @1/@2) is hard-deleted.
+        let removeResp = await router.handle(try RPCRequest(
+            method: RPCMethod.repoRemove,
+            params: RepoRemoveParams(repoID: promoted.repoID, force: false)))
+        #expect(removeResp.success)
+
+        let survivor = try await addSurvivorRepo(router: router, home: home)
 
         let scratchServer = promoted.scratch.tmuxServer
         let recorder = RecordedTmux()
@@ -175,14 +208,14 @@ struct ScratchPromoteReconcileTests {
                         : []
                 }),
             hooks: HookResolver())
-        try await lifecycle.reconcile(repoID: promoted.repoID)
+        try await lifecycle.reconcile(repoID: survivor.id)
 
         let cmds = recorder.snapshot()
         #expect(!cmds.contains { $0.contains("kill-server") && $0.contains(scratchServer) },
                 "a shared server still referenced by a live scratch space must survive")
         let windowKills = cmds.filter { $0.contains("kill-window") }
         #expect(windowKills.contains { $0.contains("@1") && $0.contains(scratchServer) },
-                "the archived promoted main's orphaned windows must be swept")
+                "the removed promoted repo's orphaned windows must be swept")
         #expect(windowKills.contains { $0.contains("@2") })
         #expect(!windowKills.contains { $0.contains("@9") },
                 "the live scratch space's tracked window must be spared")
