@@ -472,6 +472,11 @@ struct HibernationCoordinatorTests {
     /// each server saw its own new-window.
     @Test func concurrentWakesOnDifferentServersDoNotSerialize() async throws {
         let db = try TBDDatabase(inMemory: true)
+        // wake() refuses to respawn into a missing directory, so the (shared,
+        // idempotently created) fixture paths must exist on disk.
+        for path in ["/tmp/hib-repo", "/tmp/hib-repo-a", "/tmp/hib-repo-b"] {
+            try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+        }
         let repo = try await db.repos.create(path: "/tmp/hib-repo", displayName: "test", defaultBranch: "main")
         let wtA = try await db.worktrees.create(
             repoID: repo.id, name: "wt-a", branch: "a",
