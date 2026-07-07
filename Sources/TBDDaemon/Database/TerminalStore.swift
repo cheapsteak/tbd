@@ -148,6 +148,20 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Re-parent every terminal from one worktree to another in a single
+    /// UPDATE. DB-only: tmux windows and the processes inside them are left
+    /// completely untouched, so this is safe to run while sessions are live —
+    /// scratch-promote uses it to move a promoted scratch space's terminals
+    /// onto the new repo's main worktree row.
+    public func reparentTerminals(from oldWorktreeID: UUID, to newWorktreeID: UUID) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE terminal SET worktreeID = ? WHERE worktreeID = ?",
+                arguments: [newWorktreeID.uuidString, oldWorktreeID.uuidString]
+            )
+        }
+    }
+
     /// Delete all terminals for a worktree.
     public func deleteForWorktree(worktreeID: UUID) async throws {
         _ = try await writer.write { db in

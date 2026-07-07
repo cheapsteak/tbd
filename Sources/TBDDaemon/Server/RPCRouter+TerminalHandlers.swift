@@ -72,6 +72,14 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
 
+        // Never spawn into a missing directory: tmux's `-c` silently falls
+        // back to $HOME when the cwd doesn't exist, producing a terminal that
+        // looks alive but runs in the wrong place (classic after a stale
+        // worktree row, e.g. an un-migrated promoted scratch path). Fail loud.
+        guard FileManager.default.fileExists(atPath: worktree.path) else {
+            return RPCResponse(error: "Worktree directory missing on disk: \(worktree.path). Cannot create a terminal there.")
+        }
+
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
         let resolvedCols = params.cols ?? TmuxManager.defaultCols
@@ -251,6 +259,26 @@ extension RPCRouter {
         }
 
         let claudeEnvOverrides = createConfig?.envSettingOverrides ?? [:]
+        let profileConfigDir = isClaudeType
+            ? ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+            : nil
+
+        // Pre-resume freshness: `claude --resume` only looks in the project
+        // dir derived from the CURRENT cwd. If this session's transcript lives
+        // elsewhere (worktree moved/promoted since it was written), mirror it
+        // into the derived dir first (copy-if-newer; best-effort). The stored
+        // path, when a sibling terminal row owns this session, is authoritative.
+        if let resumeID = params.resumeSessionID {
+            let storedTranscriptPath = (try? await db.terminals.list(worktreeID: params.worktreeID))?
+                .first(where: { $0.claudeSessionID == resumeID })?.transcriptPath
+            TranscriptProjectDirSync.ensureSessionResumable(
+                sessionID: resumeID,
+                worktreePath: worktree.path,
+                projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
+                storedTranscriptPath: storedTranscriptPath
+            )
+        }
+
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: params.resumeSessionID,
             freshSessionID: freshSessionID,
@@ -262,7 +290,7 @@ extension RPCRouter {
             profileModel: resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
-            profileConfigDir: isClaudeType ? ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile) : nil,
+            profileConfigDir: profileConfigDir,
             cmd: params.cmd,
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
             settingsOverlayPath: isClaudeType
@@ -464,6 +492,13 @@ extension RPCRouter {
             }
             logger.info("recreateWindow: parked claude terminal \(terminal.id, privacy: .public) as suspended — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved")
             return try RPCResponse(result: updated)
+        }
+
+        // Never respawn into a missing directory — tmux's `-c` silently falls
+        // back to $HOME, leaving a live-looking pane in the wrong place. (The
+        // park branch above is fine: it doesn't spawn anything.) Fail loud.
+        guard FileManager.default.fileExists(atPath: worktree.path) else {
+            return RPCResponse(error: "Worktree directory missing on disk: \(worktree.path). Cannot recreate the terminal window.")
         }
 
         // Kill the old window if it still exists (avoids orphans)
@@ -961,6 +996,18 @@ extension RPCRouter {
             } else {
                 logger.warning("swap transcript carry: no source transcript found for session \(sessionID, privacy: .public) — fork will start fresh")
             }
+
+            // ensureTranscriptReachable preserves the transcript's ORIGINAL
+            // cwd slug. If the worktree's path changed since the transcript
+            // was written (scratch promotion), the resumed claude — cwd-scoped
+            // — looks in the dir derived from the CURRENT path instead. Make
+            // sure the session is fresh there too (copy-if-newer, best-effort).
+            TranscriptProjectDirSync.ensureSessionResumable(
+                sessionID: sessionID,
+                worktreePath: worktree.path,
+                projectsRoot: destConfigDir.appendingPathComponent("projects", isDirectory: true),
+                storedTranscriptPath: oldTerminal.transcriptPath
+            )
         }
 
         let claudeEnvOverrides = swapConfig?.envSettingOverrides ?? [:]
@@ -1472,6 +1519,31 @@ extension RPCRouter {
         return nil
     }
 
+    // MARK: - Claude projects roots (transcript sync)
+
+    /// Projects root for a spawn's resolved profile config dir path, falling
+    /// back to the router's (injectable) ambient claude dir. Handler-side
+    /// counterpart of `TranscriptProjectDirSync.projectsRoot`, routed through
+    /// `configDirManager` so tests can isolate via the injection seam.
+    func claudeProjectsRoot(profileConfigDirPath: String?) -> URL {
+        if let path = profileConfigDirPath, !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+                .appendingPathComponent("projects", isDirectory: true)
+        }
+        return configDirManager.ambientConfigDirectory
+            .appendingPathComponent("projects", isDirectory: true)
+    }
+
+    /// Projects root for a terminal's stored profile id (nil = ambient).
+    func claudeProjectsRoot(forProfileID profileID: UUID?) -> URL {
+        if let profileID {
+            return configDirManager.configDirectory(forProfileID: profileID)
+                .appendingPathComponent("projects", isDirectory: true)
+        }
+        return configDirManager.ambientConfigDirectory
+            .appendingPathComponent("projects", isDirectory: true)
+    }
+
     /// Bridge for the Claude SessionStart hook. The CLI relays the hook
     /// payload (session_id, transcript_path, source) plus the spawn-time
     /// `TBD_TERMINAL_ID` env to this method. We persist both fields and
@@ -1506,7 +1578,24 @@ extension RPCRouter {
         // absent we cannot validate, so we fall back to the old behavior.
         if let cwd = params.cwd, !cwd.isEmpty {
             let resolved = try await resolvePathToRepoOrWorktree(cwd)
-            if resolved?.worktreeID != terminal.worktreeID {
+            var accepted = resolved?.worktreeID == terminal.worktreeID
+            // Promotion follow-up: when the terminal's worktree is a promoted
+            // scratch row (promotedToRepoID set), its live session now runs in
+            // the moved folder — whose path resolves to the NEW repo's main
+            // worktree, not the scratch row. That's the same session, not a
+            // foreign one: accept when the cwd resolves to the main worktree
+            // of the promoted-to repo.
+            if !accepted,
+               let resolvedWorktreeID = resolved?.worktreeID,
+               let ownerWorktree = try await db.worktrees.get(id: terminal.worktreeID),
+               let promotedRepoID = ownerWorktree.promotedToRepoID,
+               let resolvedWorktree = try await db.worktrees.get(id: resolvedWorktreeID),
+               resolvedWorktree.repoID == promotedRepoID,
+               resolvedWorktree.status == .main {
+                accepted = true
+                logger.info("sessionEvent: accepted post-promote session for terminal \(terminal.id.uuidString, privacy: .public) — cwd resolves to main worktree of promoted repo \(promotedRepoID.uuidString, privacy: .public)")
+            }
+            if !accepted {
                 logger.info(
                     """
                     sessionEvent: REJECTED foreign session for terminal \
@@ -1585,6 +1674,32 @@ extension RPCRouter {
         if params.activityState == .working, terminal.pendingResumeAt != nil {
             if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
                 await limitResumeScheduler?.wake()
+            }
+        }
+
+        // Stop-hook transcript sync (Stop/StopFailure reach the daemon as
+        // activity=idle): when a session finishes a turn and its recorded
+        // transcript lives OUTSIDE the project dir derived from the worktree's
+        // CURRENT path — the worktree moved/was promoted after the session
+        // started — mirror the jsonl + its subagents into the derived dir so
+        // a later cwd-scoped `claude --resume` finds the conversation. Runs
+        // BEFORE the unchanged-state guard so repeated Stops keep converging.
+        // Never rewrites terminal.transcriptPath: the live session keeps
+        // appending to the original file; we only copy.
+        if params.activityState == .idle,
+           let storedPath = terminal.transcriptPath, !storedPath.isEmpty,
+           FileManager.default.fileExists(atPath: storedPath),
+           let worktree = try? await db.worktrees.get(id: terminal.worktreeID) {
+            let derivedDir = TranscriptProjectDirSync.derivedProjectDir(
+                worktreePath: worktree.path,
+                projectsRoot: claudeProjectsRoot(forProfileID: terminal.profileID)
+            )
+            let source = URL(fileURLWithPath: storedPath)
+            let sourceDirReal = source.deletingLastPathComponent()
+                .resolvingSymlinksInPath().standardizedFileURL.path
+            let derivedReal = derivedDir.resolvingSymlinksInPath().standardizedFileURL.path
+            if sourceDirReal != derivedReal {
+                TranscriptProjectDirSync.syncSession(jsonl: source, intoProjectDir: derivedDir)
             }
         }
 

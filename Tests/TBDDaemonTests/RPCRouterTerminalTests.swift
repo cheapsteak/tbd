@@ -16,11 +16,16 @@ extension RPCRouterTests {
             displayName: "test-repo",
             defaultBranch: "main"
         )
+        // terminal.create refuses to spawn into a missing directory, so the
+        // worktree path must actually exist on disk.
+        let wtPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test-wt-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: wtPath, withIntermediateDirectories: true)
         let wt = try await db.worktrees.create(
             repoID: repo.id,
             name: "test-wt",
             branch: "tbd/test-wt",
-            path: "/tmp/test-wt-\(UUID().uuidString)",
+            path: wtPath,
             tmuxServer: "tbd-test"
         )
 
@@ -86,11 +91,16 @@ extension RPCRouterTests {
             displayName: "test-repo",
             defaultBranch: "main"
         )
+        // terminal.create refuses to spawn into a missing directory, so the
+        // worktree path must actually exist on disk.
+        let wtPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test-wt-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: wtPath, withIntermediateDirectories: true)
         let wt = try await db.worktrees.create(
             repoID: repo.id,
             name: "test-wt",
             branch: "tbd/test-wt",
-            path: "/tmp/test-wt-\(UUID().uuidString)",
+            path: wtPath,
             tmuxServer: "tbd-test"
         )
 

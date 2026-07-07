@@ -14,6 +14,10 @@ struct HibernationCoordinatorTests {
         kind: TerminalKind? = .claude
     ) async throws -> (TBDDatabase, UUID, UUID) {
         let db = try TBDDatabase(inMemory: true)
+        // wake() refuses to respawn into a missing directory, so the (shared,
+        // idempotently created) fixture path must exist on disk.
+        try FileManager.default.createDirectory(
+            atPath: "/tmp/hib-repo", withIntermediateDirectories: true)
         let repo = try await db.repos.create(path: "/tmp/hib-repo", displayName: "test", defaultBranch: "main")
         let wt = try await db.worktrees.create(
             repoID: repo.id, name: "wt", branch: "main",

@@ -218,10 +218,77 @@ extension RPCRouter {
             }
         }
         try await db.worktrees.setPromotedToRepoID(id: wt.id, repoID: repo.id)
-        // .repoAdded (broadcast by addRepo) prompts the app to refresh state; the
-        // scratch row's promotedToRepoID surfaces on the next worktree poll.
+
+        // ---- Metadata migration (DB rows + project-dir snapshot only) ----
+        // The promote RPC is typically issued BY a live Claude session running
+        // in one of this scratch space's panes; the folder move above is a
+        // same-volume rename so those processes keep working. Everything below
+        // must therefore never suspend/kill/respawn a session and never
+        // rewrite a live terminal's transcriptPath — it only re-points DB rows
+        // and copies files.
+        let migratedTerminals = try await db.terminals.list(worktreeID: wt.id)
+        // addRepo just created the repo's main worktree; fetch it. Defensive
+        // guard only — addRepo unconditionally calls createMain, so the else
+        // branch is unreachable short of DB corruption.
+        if let mainWorktree = try await db.worktrees.list(repoID: repo.id, status: .main).first {
+            // Live panes live on the scratch tmux server — carry it over so
+            // they stay reachable from the new main worktree row. (Cosmetic
+            // that it's the shared scratch server; connectivity is what matters.)
+            try await db.worktrees.updateTmuxServer(id: mainWorktree.id, tmuxServer: wt.tmuxServer)
+            try await db.terminals.reparentTerminals(from: wt.id, to: mainWorktree.id)
+            try await db.worktrees.migrateTabState(from: wt.id, to: mainWorktree.id)
+            migrateClaudeProjectDirs(oldPath: wt.path, newPath: repo.path, terminals: migratedTerminals)
+
+            // Retire the scratch row: archived + promotedToRepoID (set above),
+            // so nothing can resolve its stale path as active again.
+            try await db.worktrees.archive(id: wt.id)
+
+            // .repoAdded was already broadcast by addRepo. Announce the moved
+            // terminals under their new worktree, then the scratch row's exit
+            // from the active section — same delta scratch.archive/delete use.
+            for terminal in migratedTerminals {
+                subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
+                    terminalID: terminal.id, worktreeID: mainWorktree.id, label: terminal.label)))
+            }
+            subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
+        } else {
+            scratchLogger.error("scratch.promote: no main worktree found for repo \(repo.id, privacy: .public) — terminals left on scratch row \(wt.id, privacy: .public)")
+        }
+
         scratchLogger.info("scratch.promote: \(wt.id, privacy: .public) -> repo \(repo.id, privacy: .public) at \(dest, privacy: .public)")
         return try RPCResponse(result: ScratchPromoteResult(
             worktreeID: wt.id, repoID: repo.id, repoPath: repo.path, repoDisplayName: repo.displayName))
+    }
+
+    /// Snapshot the promoted scratch space's Claude project directories into
+    /// the new path's derived directories. For every projects root involved —
+    /// the ambient host claude dir plus each distinct terminal profile's config
+    /// dir — copy the OLD munged dir's contents (session JSONLs,
+    /// `<id>/subagents/`, `memory/`, …) into the NEW munged dir with
+    /// copy-if-newer semantics, so `claude --resume` under the new cwd finds
+    /// the conversations. Best-effort by design: live sessions keep appending
+    /// to their old transcript files, and the lazy Stop-hook / pre-resume sync
+    /// converges anything written after this snapshot.
+    private func migrateClaudeProjectDirs(oldPath: String, newPath: String, terminals: [Terminal]) {
+        var roots: [URL] = []
+        var seen = Set<String>()
+        func addRoot(_ url: URL) {
+            if seen.insert(url.standardizedFileURL.path).inserted { roots.append(url) }
+        }
+        addRoot(configDirManager.ambientConfigDirectory
+            .appendingPathComponent("projects", isDirectory: true))
+        for terminal in terminals {
+            guard let profileID = terminal.profileID else { continue }
+            addRoot(configDirManager.configDirectory(forProfileID: profileID)
+                .appendingPathComponent("projects", isDirectory: true))
+        }
+        for root in roots {
+            guard let oldDir = ClaudeProjectDirectory.resolve(
+                worktreePath: oldPath, projectsBase: root) else { continue }
+            let newDir = TranscriptProjectDirSync.derivedProjectDir(
+                worktreePath: newPath, projectsRoot: root)
+            TranscriptProjectDirSync.syncDirectoryContents(from: oldDir, to: newDir)
+            scratchLogger.info("scratch.promote: snapshotted Claude project dir \(oldDir.path, privacy: .public) -> \(newDir.path, privacy: .public)")
+        }
     }
 }

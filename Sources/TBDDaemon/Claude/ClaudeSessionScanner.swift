@@ -26,9 +26,14 @@ enum ClaudeProjectDirectory {
     static func resolve(worktreePath: String, projectsBase: URL? = nil) -> URL? {
         let base = projectsBase ?? URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent(".claude/projects")
+        // Key on BOTH the projects base and the worktree path: promote and the
+        // per-profile transcript sync resolve the same worktree path under
+        // different roots, and a path-only key would return the first root's
+        // hit for every subsequent root.
+        let cacheKey = base.path + "|" + worktreePath
 
         lock.lock()
-        if let cached = cache[worktreePath] {
+        if let cached = cache[cacheKey] {
             let now = ContinuousClock.now
             if let url = cached.url {
                 // Positive entry: re-validate against filesystem, then unlock + return
@@ -43,7 +48,7 @@ enum ClaudeProjectDirectory {
                     return nil
                 }
                 // Expired, fall through to re-resolve
-                cache.removeValue(forKey: worktreePath)
+                cache.removeValue(forKey: cacheKey)
             }
         }
         lock.unlock()
@@ -51,7 +56,7 @@ enum ClaudeProjectDirectory {
         let result = resolveUncached(worktreePath: worktreePath, projectsBase: base)
         let entry = CacheEntry(url: result, cachedAt: ContinuousClock.now)
         lock.lock()
-        cache[worktreePath] = entry
+        cache[cacheKey] = entry
         lock.unlock()
         return result
     }

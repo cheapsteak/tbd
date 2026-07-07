@@ -347,6 +347,16 @@ public actor HibernationCoordinator {
         guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else {
             return .notFound
         }
+        // Never respawn into a missing directory: tmux's `-c` silently falls
+        // back to $HOME, and the resumed claude would neither find its session
+        // (resume is cwd-scoped) nor belong to this worktree. Leave the row
+        // parked so a retry after the path is restored can still wake it.
+        // (WakeResult's consumers switch exhaustively outside this change's
+        // scope, so reuse .notFound rather than adding a dedicated case.)
+        guard FileManager.default.fileExists(atPath: worktree.path) else {
+            logger.error("wake: worktree path missing on disk for terminal \(terminal.id, privacy: .public): \(worktree.path, privacy: .public) — refusing respawn (would fall back to $HOME)")
+            return .notFound
+        }
 
         wakesInFlight.insert(terminalID)
         defer { wakesInFlight.remove(terminalID) }
@@ -391,6 +401,20 @@ public actor HibernationCoordinator {
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: terminal.id.uuidString
         )
+        let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+        // Pre-resume freshness: if the worktree was moved/promoted while this
+        // session was parked, its transcript still lives under the OLD munged
+        // project dir; the cwd-scoped `claude --resume` below only checks the
+        // dir derived from the CURRENT path. Mirror the jsonl (+ subagents)
+        // there first — copy-if-newer, best-effort, never rewrites the row's
+        // transcriptPath.
+        TranscriptProjectDirSync.ensureSessionResumable(
+            sessionID: sessionID,
+            worktreePath: worktree.path,
+            projectsRoot: TranscriptProjectDirSync.projectsRoot(
+                profileConfigDirPath: profileConfigDir),
+            storedTranscriptPath: terminal.transcriptPath
+        )
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: sessionID,
             freshSessionID: nil,
@@ -402,7 +426,7 @@ public actor HibernationCoordinator {
             profileModel: resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
-            profileConfigDir: ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile),
+            profileConfigDir: profileConfigDir,
             cmd: nil,
             shellFallback: defaultShell,
             settingsOverlayPath: overlayPath,

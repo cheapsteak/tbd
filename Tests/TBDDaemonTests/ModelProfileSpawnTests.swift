@@ -53,11 +53,18 @@ struct ModelProfileSpawnTests {
             displayName: "r",
             defaultBranch: "main"
         )
+        // terminal.create / recreate refuse to spawn into a missing directory
+        // (tmux would silently fall back to $HOME), so the worktree path must
+        // actually exist on disk.
+        let wtPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wt-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(
+            atPath: wtPath, withIntermediateDirectories: true)
         let wt = try await db.worktrees.create(
             repoID: repo.id,
             name: "wt",
             branch: "main",
-            path: "/tmp/wt-\(UUID().uuidString)",
+            path: wtPath,
             tmuxServer: "tbd-test"
         )
         return (repo, wt)
