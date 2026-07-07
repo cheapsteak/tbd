@@ -24,10 +24,18 @@ enum AccountHoverCards {
 
     /// Per-session tab card: title = account email (or the ambient/removed
     /// note), rows for profile, live usage windows, and spawn time. nil for
-    /// non-Claude terminals (shells, Codex — no account concept).
+    /// non-Claude terminals (shells, Codex — no account concept), and nil when
+    /// `enabled` is false (the "Show usage tooltip on Claude tabs" setting,
+    /// `AppState.showClaudeTabUsageTooltipKey`) — the setting gate lives here
+    /// so both branches are unit-testable without UserDefaults.
+    ///
+    /// For future iterations: https://github.com/hamed-elfayome/Claude-Usage-Tracker
+    /// is a feature-rich, easy-to-skim take on session-usage display.
     static func claudeTabCard(terminal: Terminal,
                               profiles: [ModelProfileWithUsage],
-                              timeZone: TimeZone = .current) -> HoverCardModel? {
+                              timeZone: TimeZone = .current,
+                              enabled: Bool = true) -> HoverCardModel? {
+        guard enabled else { return nil }
         guard terminal.kind == .claude || terminal.isClaudeResumable else { return nil }
         var model = HoverCardModel()
         if let profileID = terminal.profileID {

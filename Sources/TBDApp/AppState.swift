@@ -1621,6 +1621,11 @@ final class AppState: ObservableObject {
     /// scratch spaces). Default on.
     static let showScratchSectionKey = "showScratchSection"
 
+    /// UserDefaults key for the Claude tab hover card (account email, profile,
+    /// 5h/weekly usage, spawn time). Default on; the Settings → Claude toggle
+    /// turns it off for users who find the hover card noisy.
+    static let showClaudeTabUsageTooltipKey = "showClaudeTabUsageTooltip"
+
     /// Pure, testable mirror of the sidebar's Scratch-section gate:
     /// shown whenever the setting is on, regardless of whether any scratch
     /// spaces exist yet. This keeps the section (and its hover "+" create

@@ -39,6 +39,7 @@ struct GeneralSettingsTab: View {
     @AppStorage(AppState.useTableViewTranscriptKey) private var useTableViewTranscript: Bool = true
     @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
+    @AppStorage(AppState.showClaudeTabUsageTooltipKey) private var showClaudeTabUsageTooltip: Bool = true
     @AppStorage("enableNotificationSounds") private var enableSounds: Bool = true
     @AppStorage("notificationSoundName") private var soundName: String = "Blow"
     @AppStorage("notificationSoundCustomPath") private var customPath: String = ""
@@ -148,6 +149,8 @@ struct GeneralSettingsTab: View {
                     set: { newValue in Task { await appState.setAutoResumeOnLimitReset(newValue) } }
                 ))
                 .help("When a session hits the usage limit, TBD schedules a resume for the reset time and types \"continue\" into the pane. Off by default; detection and notifications run regardless.")
+                Toggle("Show usage tooltip on Claude tabs", isOn: $showClaudeTabUsageTooltip)
+                    .help("Show a hover card on Claude tabs with the session's account, profile, 5h/weekly usage, and spawn time.")
             }
 
             Section("Session Hibernation") {
