@@ -421,6 +421,13 @@ public final class Daemon: Sendable {
             pendingQuestions: pendingQuestions
         )
         rpcRouter.controlMode = controlModeBridge
+        // The wake path recreates a terminal's tmux server/window when the
+        // window is gone (e.g. post-reboot); give the recreated server the
+        // same gated control-mode connection as every other ensureServer
+        // call site.
+        await rpcRouter.hibernationCoordinator.setOnServerCreated { server in
+            await controlModeBridge.enableIfGated(serverName: server)
+        }
         self.router = rpcRouter
 
         // Shared foreground gate: the app reports its active/inactive state via

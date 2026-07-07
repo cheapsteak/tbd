@@ -208,8 +208,13 @@ struct HibernationCoordinatorTests {
 
     @Test func wakeOnNonHibernatedIsIdempotentNoOp() async throws {
         let (db, _, terminalID) = try await setup()
-        let result = await coordinator(db).wake(terminalID: terminalID)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+        let result = await coord.wake(terminalID: terminalID)
         #expect(result == .notHibernated)
+        #expect(recorded.snapshot().isEmpty,
+                "a non-parked wake must not touch tmux; got: \(recorded.snapshot())")
     }
 
     @Test func wakeUnknownTerminalNotFound() async throws {
@@ -266,6 +271,122 @@ struct HibernationCoordinatorTests {
         let joined = recorded.snapshot().map { $0.joined(separator: " ") }
         #expect(joined.contains { $0.contains("respawn-window") && $0.contains("claude --resume sess-1") },
                 "expected a respawn-window carrying claude --resume; got: \(joined)")
+    }
+
+    // MARK: - Wake: window-gone recreate branch
+    //
+    // A reboot destroys every tmux server, leaving parked rows pointing at
+    // dead windows. Wake must detect the dead window and RECREATE it (server +
+    // window) instead of failing "Terminal not found". Both sides of the
+    // `windowExists` gate are covered.
+
+    /// Window ALIVE (dryRun default): the existing respawn-in-place path runs
+    /// unchanged — same window/pane ids, `respawn-window` issued, never
+    /// `new-window` — and the recreate-only server hook does NOT fire.
+    @Test func wakeWithLiveWindowRespawnsInPlaceKeepingIDs() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorded = RecordedTmuxCommands()
+        let serverHookCalls = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+        await coord.setOnServerCreated { server in serverHookCalls.append([server]) }
+
+        let wake = await coord.wake(terminalID: terminalID)
+        #expect(wake == .ok)
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == false, "row must be un-parked")
+        #expect(after?.tmuxWindowID == "@0", "live-window wake must keep the window id")
+        #expect(after?.tmuxPaneID == "%0", "live-window wake must keep the pane id")
+
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(joined.contains { $0.contains("respawn-window") },
+                "expected respawn-window; got: \(joined)")
+        #expect(!joined.contains { $0.contains("new-window") },
+                "a live window must NOT be recreated; got: \(joined)")
+        #expect(serverHookCalls.snapshot().isEmpty,
+                "onServerCreated must only fire on the recreate branch")
+    }
+
+    /// Window DEAD (post-reboot / killed): wake recreates the server + window,
+    /// persists the NEW window/pane ids, un-parks the row, and spawns the same
+    /// `claude --resume` via `new-window -c <worktree path>` — no
+    /// `respawn-window` into the dead window. The server hook fires so a
+    /// recreated server gets its gated control-mode connection.
+    @Test func wakeRecreatesDeadWindowAndPersistsNewIDs() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let recorded = RecordedTmuxCommands()
+        let serverHookCalls = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorded.append($0) },
+            dryRunWindowIsDead: { $0 == "@0" }
+        )
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+        await coord.setOnServerCreated { server in serverHookCalls.append([server]) }
+
+        let wake = await coord.wake(terminalID: terminalID)
+        #expect(wake == .ok)
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == false, "row must be un-parked")
+        #expect(after?.tmuxWindowID == "@mock-0", "recreate must persist the new window id")
+        #expect(after?.tmuxPaneID == "%mock-0", "recreate must persist the new pane id")
+
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(joined.contains { $0.contains("new-window") && $0.contains("-c /tmp/hib-repo") && $0.contains("--resume sess-1") },
+                "expected new-window in the worktree cwd carrying claude --resume; got: \(joined)")
+        #expect(!joined.contains { $0.contains("respawn-window") },
+                "a dead window must NOT be respawned into; got: \(joined)")
+        #expect(serverHookCalls.snapshot() == [["tbd-hib"]],
+                "onServerCreated must fire once with the recreated server name")
+    }
+
+    /// Recreate FAILS (window dead + createWindow errors): result is
+    /// `.respawnFailed` with a reason naming the dead window, the row STAYS
+    /// parked for a later retry, and the tmux ids are unchanged.
+    @Test func wakeReturnsRespawnFailedWhenRecreateFails() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunWindowIsDead: { $0 == "@0" },
+            dryRunCreateWindowError: { _ in TmuxError.unexpectedOutput("no server running") }
+        )
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+
+        let wake = await coord.wake(terminalID: terminalID)
+        guard case .respawnFailed(let reason) = wake else {
+            Issue.record("expected .respawnFailed, got \(wake)")
+            return
+        }
+        #expect(reason.contains("@0"), "reason must name the gone window; got: \(reason)")
+        #expect(reason.contains("could not be recreated"), "reason must say recreate failed; got: \(reason)")
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == true, "a failed wake must leave the row parked for retry")
+        #expect(after?.tmuxWindowID == "@0", "tmux ids must be unchanged on failure")
+    }
+
+    /// Respawn FAILS (window alive but respawn-window errors): result is
+    /// `.respawnFailed` naming the respawn, and the row stays parked.
+    @Test func wakeReturnsRespawnFailedWhenRespawnFails() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRespawnWindowError: { $0 == "@0" ? TmuxError.unexpectedOutput("pane died") : nil }
+        )
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+
+        let wake = await coord.wake(terminalID: terminalID)
+        guard case .respawnFailed(let reason) = wake else {
+            Issue.record("expected .respawnFailed, got \(wake)")
+            return
+        }
+        #expect(reason.contains("respawn"), "reason must name the respawn failure; got: \(reason)")
+        #expect(reason.contains("@0"), "reason must name the window; got: \(reason)")
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == true, "a failed wake must leave the row parked for retry")
     }
 
     // MARK: - Startup reconciliation
@@ -343,6 +464,54 @@ struct HibernationCoordinatorTests {
         for _ in 0..<4 { await coord.sweep() }
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil,
                 "a keep-warm session must never be auto-hibernated")
+    }
+}
+
+/// `terminal.wake` RPC error mapping. The shared `RPCRouterTests` harness pins
+/// a plain dry-run TmuxManager, so this suite builds its own router with a
+/// failing tmux to drive the `.respawnFailed` path end-to-end.
+@Suite("RPCRouter terminal.wake error mapping")
+struct RPCRouterWakeErrorMappingTests {
+
+    /// A wake whose tmux window is gone AND cannot be recreated must surface
+    /// the REAL failure over RPC — naming the window — and never the
+    /// misleading "Terminal not found" (the terminal row exists; the WINDOW
+    /// is gone).
+    @Test func wakeRespawnFailureIsNotReportedAsTerminalNotFound() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunWindowIsDead: { $0 == "@0" },
+            dryRunCreateWindowError: { _ in TmuxError.unexpectedOutput("no server running") }
+        )
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()),
+            tmux: tmux
+        )
+        let repo = try await db.repos.create(path: "/tmp/hib-repo", displayName: "test", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main",
+            path: "/tmp/hib-repo", tmuxServer: "tbd-hib"
+        )
+        let terminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude
+        )
+        try await db.terminals.setHibernated(id: terminal.id, sessionID: "sess-1")
+
+        let req = try RPCRequest(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: terminal.id)
+        )
+        let resp = await router.handle(req)
+        #expect(!resp.success)
+        #expect(resp.error != "Terminal not found",
+                "a tmux failure must not masquerade as a missing terminal row")
+        #expect(resp.error?.contains("@0") == true,
+                "the RPC error must name the gone window; got: \(resp.error ?? "nil")")
+        #expect(try await db.terminals.get(id: terminal.id)?.isParked == true,
+                "the row must stay parked so a retry can wake it")
     }
 }
 

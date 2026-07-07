@@ -111,8 +111,19 @@ struct RowActionMenuActions {
             // Wake every PARKED session (hibernated or legacy-suspended).
             let ids = terminals.filter { $0.isParked }.map { $0.id }
             Task {
+                // Collect failures and show ONE coalesced alert after the
+                // loop — never a modal per terminal (post-reboot every window
+                // is dead, and a per-terminal alert becomes a modal storm).
+                var failures: [String] = []
                 for id in ids {
-                    await appState.wakeTerminal(terminalID: id, worktreeID: wtID)
+                    if let failure = await appState.wakeTerminal(
+                        terminalID: id, worktreeID: wtID, userInitiated: true
+                    ) {
+                        failures.append(failure)
+                    }
+                }
+                if let message = AppState.coalescedWakeFailureMessage(failures: failures) {
+                    appState.showAlert(message, isError: true)
                 }
             }
 

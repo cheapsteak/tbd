@@ -46,6 +46,17 @@ public struct TmuxManager: Sendable {
     /// poll always see an immediate polite `/exit` — untestable for the
     /// SIGTERM-fallback branch where claude is still running after the poll.
     public let dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)?
+    /// Optional test hook consulted by `createWindow` in dryRun mode: return a
+    /// non-nil error for a server name to simulate window creation failing
+    /// (tmux refused the new-window, server wedged, …). Without it, dryRun
+    /// createWindow always succeeds, which makes the wake path's
+    /// recreate-failure branch (`WakeResult.respawnFailed`) untestable.
+    public let dryRunCreateWindowError: (@Sendable (String) -> Error?)?
+    /// Optional test hook consulted by `respawnWindow` in dryRun mode: return a
+    /// non-nil error for a window ID to simulate the respawn failing. Without
+    /// it, dryRun respawnWindow always succeeds, which makes the wake path's
+    /// respawn-failure branch (`WakeResult.respawnFailed`) untestable.
+    public let dryRunRespawnWindowError: (@Sendable (String) -> Error?)?
 
     // Thread-safe counter for generating unique mock IDs
     private final class Counter: Sendable {
@@ -60,7 +71,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -69,6 +80,8 @@ public struct TmuxManager: Sendable {
         self.dryRunListWindows = dryRunListWindows
         self.dryRunCapturePane = dryRunCapturePane
         self.dryRunPaneCurrentCommand = dryRunPaneCurrentCommand
+        self.dryRunCreateWindowError = dryRunCreateWindowError
+        self.dryRunRespawnWindowError = dryRunRespawnWindowError
     }
 
     // MARK: - Static Command Builders
@@ -336,6 +349,7 @@ public struct TmuxManager: Sendable {
         if dryRun {
             let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
             dryRunRecorder?(args)
+            if let error = dryRunCreateWindowError?(server) { throw error }
             let n = counter.next()
             result = (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
         } else {
@@ -387,6 +401,7 @@ public struct TmuxManager: Sendable {
         )
         if dryRun {
             dryRunRecorder?(args)
+            if let error = dryRunRespawnWindowError?(windowID) { throw error }
             return
         }
         try await runTmux(args)

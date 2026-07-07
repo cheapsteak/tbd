@@ -14,9 +14,13 @@ public enum HibernateResult: Equatable, Sendable {
 public enum WakeResult: Equatable, Sendable {
     case ok
     case notHibernated   // idempotent no-op: nothing to wake
-    case notFound
+    case notFound        // terminal/worktree DB row missing — NOT tmux failures
     case noSessionID
     case inFlight        // a wake for this terminal is already respawning
+    /// The respawn (or window recreate) failed in tmux. The row stays parked
+    /// so a later retry can wake it; `reason` names the real failure instead
+    /// of the misleading "Terminal not found".
+    case respawnFailed(reason: String)
 }
 
 /// Owns session PARKING — the single unified "park a Claude session" feature
@@ -68,6 +72,13 @@ public actor HibernationCoordinator {
     /// spawn two `claude --resume` processes into the same window.
     private var wakesInFlight: Set<UUID> = []
 
+    /// Invoked after the wake path recreates a tmux server via `ensureServer`
+    /// for a terminal whose window vanished (e.g. a machine reboot destroyed
+    /// every tmux server). Daemon.swift wires this to the control-mode
+    /// bridge's `enableIfGated` so a recreated server gets the same gated
+    /// `tmux -CC` connection as every other `ensureServer()` call site.
+    private var onServerCreated: (@Sendable (String) async -> Void)?
+
     /// Terminal ids with an in-flight hibernate, so a manual "Hibernate now"
     /// racing the idle sweep (or two sweeps) can't respawn-to-shell twice.
     private var hibernatesInFlight: Set<UUID> = []
@@ -107,6 +118,13 @@ public actor HibernationCoordinator {
         self.modelProfileResolver = modelProfileResolver
         self.subscriptions = subscriptions
         self.now = now
+    }
+
+    /// Wire the post-`ensureServer` hook (see `onServerCreated`). Set once by
+    /// Daemon.swift right after construction, mirroring how the RPC router's
+    /// `controlMode` is wired post-construction.
+    public func setOnServerCreated(_ hook: (@Sendable (String) async -> Void)?) {
+        onServerCreated = hook
     }
 
     // MARK: - Keep-warm
@@ -301,6 +319,11 @@ public actor HibernationCoordinator {
     /// Respawn `claude --resume <sessionID>` in the hibernated terminal's
     /// kept-alive window. Idempotent: a non-hibernated terminal is a no-op, and
     /// concurrent wakes for the same terminal collapse to one respawn.
+    ///
+    /// If the window is GONE (killed, or the whole tmux server died — e.g. a
+    /// machine reboot), the window is recreated (ensureServer + createWindow)
+    /// and the same resume command spawned there; the terminal row keeps its
+    /// identity and gets the new window/pane ids persisted.
     public func wake(terminalID: UUID, cols: Int? = nil, rows: Int? = nil) async -> WakeResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
@@ -384,21 +407,68 @@ public actor HibernationCoordinator {
         ]
         let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
 
-        do {
-            try await tmux.respawnWindow(
-                server: server,
-                windowID: windowID,
-                cwd: worktree.path,
-                shellCommand: spawn.command,
-                env: env,
-                sensitiveEnv: sensitiveEnv,
-                cols: cols,
-                rows: rows
-            )
-        } catch {
-            // Leave the row hibernated so the next focus/menu retry can wake it.
-            logger.warning("wake: respawn-to-claude failed for terminal \(terminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return .notFound
+        // The pane the delayed session-ID recapture below must poll: the
+        // original pane when the window survived, or the recreated window's
+        // fresh pane when it didn't.
+        let livePaneID: String
+
+        if await tmux.windowExists(server: server, windowID: windowID) {
+            do {
+                try await tmux.respawnWindow(
+                    server: server,
+                    windowID: windowID,
+                    cwd: worktree.path,
+                    shellCommand: spawn.command,
+                    env: env,
+                    sensitiveEnv: sensitiveEnv,
+                    cols: cols,
+                    rows: rows
+                )
+                livePaneID = paneID
+            } catch {
+                // Leave the row hibernated so the next focus/menu retry can wake it.
+                logger.warning("wake: respawn-to-claude failed for terminal \(terminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return .respawnFailed(reason: "failed to respawn claude in window \(windowID): \(error.localizedDescription)")
+            }
+        } else {
+            // The window is GONE — killed, or the whole tmux server died (a
+            // machine reboot destroys every server; `windowExists` returns
+            // false on any tmux error, covering both). Recreate the window and
+            // spawn the same `claude --resume` there: transcripts live on
+            // disk, so resume works fine in a fresh window. Mirrors
+            // `handleTerminalRecreateWindow`. Tabs are keyed by terminal id,
+            // so keeping the same terminal row preserves the tab.
+            do {
+                let resolvedCols = cols ?? TmuxManager.defaultCols
+                let resolvedRows = rows ?? TmuxManager.defaultRows
+                _ = try await tmux.ensureServer(
+                    server: server,
+                    session: "main",
+                    cwd: worktree.path,
+                    cols: resolvedCols,
+                    rows: resolvedRows
+                )
+                await onServerCreated?(server)
+                let window = try await tmux.createWindow(
+                    server: server,
+                    session: "main",
+                    cwd: worktree.path,
+                    shellCommand: spawn.command,
+                    env: env,
+                    sensitiveEnv: sensitiveEnv,
+                    cols: resolvedCols,
+                    rows: resolvedRows
+                )
+                try await db.terminals.updateTmuxIDs(
+                    id: terminal.id, windowID: window.windowID, paneID: window.paneID
+                )
+                livePaneID = window.paneID
+                logger.info("wake: window \(windowID, privacy: .public) was gone for terminal \(terminal.id, privacy: .public); recreated as \(window.windowID, privacy: .public) (pane \(window.paneID, privacy: .public))")
+            } catch {
+                // Leave the row hibernated so the next focus/menu retry can wake it.
+                logger.warning("wake: recreate-window failed for terminal \(terminal.id, privacy: .public) (old window \(windowID, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+                return .respawnFailed(reason: "tmux window \(windowID) is gone and could not be recreated: \(error.localizedDescription)")
+            }
         }
 
         do {
@@ -414,7 +484,7 @@ public actor HibernationCoordinator {
         let termID = terminal.id
         Task {
             try? await Task.sleep(for: .seconds(5))
-            if let newID = await self.detector.captureSessionID(server: server, paneID: paneID) {
+            if let newID = await self.detector.captureSessionID(server: server, paneID: livePaneID) {
                 try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
             }
         }

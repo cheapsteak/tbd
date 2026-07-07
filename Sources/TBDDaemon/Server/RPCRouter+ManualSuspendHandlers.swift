@@ -48,6 +48,10 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found")
         case .noSessionID:
             return RPCResponse(error: "No session ID to resume")
+        case .respawnFailed(let reason):
+            // The terminal row exists — the tmux respawn/recreate failed.
+            // Surface the real failure, never "Terminal not found".
+            return RPCResponse(error: reason)
         }
     }
 
