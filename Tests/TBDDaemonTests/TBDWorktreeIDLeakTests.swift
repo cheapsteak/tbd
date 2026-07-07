@@ -216,7 +216,9 @@ func testHandleTerminalRecreateWindowCodexLaunchCommand() async throws {
 @Test("handleTerminalRecreateWindow parks a resumable Claude terminal as suspended")
 func testHandleTerminalRecreateWindowParksClaudeAsSuspended() async throws {
     let db = try TBDDatabase(inMemory: true)
-    let tmux = TmuxManager(dryRun: true)
+    // The window is genuinely DEAD (the premise of this scenario); the stale-
+    // caller gate must not trip. dryRun default would report it alive.
+    let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true })
     let router = RPCRouter(
         db: db,
         lifecycle: WorktreeLifecycle(
@@ -264,6 +266,69 @@ func testHandleTerminalRecreateWindowParksClaudeAsSuspended() async throws {
     #expect(updated.claudeSessionID == sessionID, "claudeSessionID must be preserved")
     #expect(updated.transcriptPath == transcriptPath, "transcriptPath must be preserved")
     #expect(updated.isClaudeResumable, "parked terminal must remain Claude-resumable")
+}
+
+/// Stale-caller gate: when the claude terminal's CURRENT window is actually
+/// ALIVE (the app's dead-window path raced a wake that just recreated the
+/// window and updated the row's ids), `handleTerminalRecreateWindow` must NOT
+/// kill the window or re-park the row — that tears down the freshly-spawned
+/// claude and flaps the wake. It returns the row unchanged.
+@Test("handleTerminalRecreateWindow ignores a stale request when the claude window is alive")
+func testHandleTerminalRecreateWindowIgnoresStaleRequestWhenWindowAlive() async throws {
+    let db = try TBDDatabase(inMemory: true)
+    let recorded = RecordedCommands()
+    // dryRun default: every window reports ALIVE.
+    let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+    let router = RPCRouter(
+        db: db,
+        lifecycle: WorktreeLifecycle(
+            db: db,
+            git: GitManager(),
+            tmux: tmux,
+            hooks: HookResolver()
+        ),
+        tmux: tmux
+    )
+
+    let repo = try await db.repos.create(
+        path: "/tmp/fake-repo-recreate-stale", displayName: "test", defaultBranch: "main"
+    )
+    let wt = try await db.worktrees.create(
+        repoID: repo.id,
+        name: "wt-recreate-stale",
+        branch: "tbd/wt-recreate-stale",
+        path: "/tmp/fake-repo-recreate-stale/wt-recreate-stale",
+        tmuxServer: "tbd-51a1e000"
+    )
+    let sessionID = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    let terminal = try await db.terminals.create(
+        worktreeID: wt.id,
+        tmuxWindowID: "@live-claude",
+        tmuxPaneID: "%live-claude",
+        label: "claude",
+        claudeSessionID: sessionID,
+        kind: .claude
+    )
+
+    let request = try RPCRequest(
+        method: RPCMethod.terminalRecreateWindow,
+        params: TerminalRecreateWindowParams(terminalID: terminal.id)
+    )
+    let response = await router.handle(request)
+    #expect(response.success, "expected success; error: \(response.error ?? "nil")")
+
+    let updated = try #require(try await db.terminals.get(id: terminal.id))
+    #expect(!updated.isParked, "a live-window claude row must NOT be re-parked by a stale request")
+    #expect(updated.tmuxWindowID == "@live-claude", "tmux ids must be untouched")
+    #expect(updated.tmuxPaneID == "%live-claude")
+
+    let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+    #expect(!joined.contains { $0.contains("kill-window") },
+            "the alive window must NOT be killed; got: \(joined)")
+
+    let returned = try response.decodeResult(Terminal.self)
+    #expect(returned.id == terminal.id)
+    #expect(!returned.isParked, "the returned row must be the current, un-parked one")
 }
 
 /// Regression guard for the OTHER branch: a plain shell terminal whose window

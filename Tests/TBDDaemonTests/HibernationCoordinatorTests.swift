@@ -338,8 +338,79 @@ struct HibernationCoordinatorTests {
                 "expected new-window in the worktree cwd carrying claude --resume; got: \(joined)")
         #expect(!joined.contains { $0.contains("respawn-window") },
                 "a dead window must NOT be respawned into; got: \(joined)")
+        // Old-window cleanup: a transient windowExists misclassification must
+        // not leak a live old window (usually already dead — kill no-ops).
+        #expect(joined.contains { $0.contains("kill-window") && $0.contains("@0") },
+                "expected a best-effort kill of the old window; got: \(joined)")
         #expect(serverHookCalls.snapshot() == [["tbd-hib"]],
                 "onServerCreated must fire once with the recreated server name")
+    }
+
+    // MARK: - Wake: window-id ownership (post-reboot id recycling)
+    //
+    // A fresh tmux server reissues window ids from @1, so a stale parked
+    // row's id can equal a window ANOTHER terminal's wake just created.
+    // `windowExists` alone is not ownership — both sides of the claim gate
+    // are covered.
+
+    /// Collision + windowExists true: another terminal on the same server
+    /// claims this row's window id, so respawning in place would hijack that
+    /// terminal's live session. Wake must take the RECREATE branch — and must
+    /// NOT kill the other terminal's window.
+    @Test func wakeRecreatesWhenWindowIDClaimedByAnotherTerminal() async throws {
+        let (db, wtID, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        // The OTHER terminal (fresher claim — e.g. its wake just created @0
+        // on the rebooted server). Same worktree → same tmux server.
+        _ = try await db.terminals.create(
+            worktreeID: wtID, tmuxWindowID: "@0", tmuxPaneID: "%9",
+            label: "claude", claudeSessionID: "sess-2", kind: .claude
+        )
+        let recorded = RecordedTmuxCommands()
+        // No dryRunWindowIsDead: the window EXISTS — ownership must win.
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+
+        let wake = await coord.wake(terminalID: terminalID)
+        #expect(wake == .ok)
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.isParked == false)
+        #expect(after?.tmuxWindowID == "@mock-0", "collision must force a recreate with fresh ids")
+        #expect(after?.tmuxPaneID == "%mock-0")
+
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(joined.contains { $0.contains("new-window") },
+                "expected the recreate branch (new-window); got: \(joined)")
+        #expect(!joined.contains { $0.contains("respawn-window") },
+                "must never respawn into a window another terminal owns; got: \(joined)")
+        #expect(!joined.contains { $0.contains("kill-window") && $0.contains("@0") },
+                "must never kill the other terminal's live window; got: \(joined)")
+    }
+
+    /// No collision: another terminal exists on the same server but claims a
+    /// DIFFERENT window id — the respawn-in-place branch runs unchanged.
+    @Test func wakeRespawnsInPlaceWhenOtherTerminalHoldsDifferentWindow() async throws {
+        let (db, wtID, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        _ = try await db.terminals.create(
+            worktreeID: wtID, tmuxWindowID: "@7", tmuxPaneID: "%7",
+            label: "claude", claudeSessionID: "sess-2", kind: .claude
+        )
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+
+        let wake = await coord.wake(terminalID: terminalID)
+        #expect(wake == .ok)
+        let after = try await db.terminals.get(id: terminalID)
+        #expect(after?.tmuxWindowID == "@0", "no collision → in-place respawn keeps the ids")
+        #expect(after?.tmuxPaneID == "%0")
+
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(joined.contains { $0.contains("respawn-window") },
+                "expected the in-place respawn branch; got: \(joined)")
+        #expect(!joined.contains { $0.contains("new-window") },
+                "a non-colliding live window must not be recreated; got: \(joined)")
     }
 
     /// Recreate FAILS (window dead + createWindow errors): result is

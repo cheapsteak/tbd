@@ -442,6 +442,16 @@ extension RPCRouter {
         // ID on demand, so this is non-destructive even if the window were somehow
         // still alive.
         if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
+            // Stale-caller gate: if the row's CURRENT window is actually
+            // alive, the caller acted on stale state — e.g. the app's
+            // dead-window path racing a wake that just RECREATED the window
+            // and updated the row's ids. Killing it here would tear down the
+            // freshly-spawned claude and re-park the row (wake flap). Leave
+            // the row untouched.
+            if await tmux.windowExists(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID) {
+                logger.info("recreateWindow: window \(terminal.tmuxWindowID, privacy: .public) for claude terminal \(terminal.id, privacy: .public) is alive — ignoring stale recreate request")
+                return try RPCResponse(result: terminal)
+            }
             // Clean up any lingering (almost always already-dead) window to avoid orphans.
             try? await tmux.killWindow(server: worktree.tmuxServer, windowID: terminal.tmuxWindowID)
             // Authoritative `hibernatedAt` column so the unified `wake()` can resume it.
