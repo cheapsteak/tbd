@@ -20,7 +20,7 @@ The 32 KB resume-hysteresis knob from the base spec's defaults table is gone wit
 
 One per-sink byte queue (cap **128 KB**, chunk-granular, generation-scoped) serves three roles:
 
-- **M1 — backpressure queue.** `route()` no longer drops on `EAGAIN` (the #376 corruption source): the unwritten remainder queues, an async drain task (10 ms pacing, write-under-lock with sink+generation re-validation per pass) flushes as the reader catches up, and while *anything* is queued, new chunks enqueue behind it — live bytes can never overtake queued bytes.
+- **M1 — backpressure queue.** `route()` no longer drops on `EAGAIN` (the #376 corruption source): the unwritten remainder queues, a GCD drain worker (10 ms pacing, write-under-lock with sink+generation re-validation per pass; deliberately **not** a cooperative-pool task — a saturated pool must never starve render-path delivery, the R8-M2 discipline, observed as a real starvation-deadlock on narrow-vCPU CI) flushes as the reader catches up, and while *anything* is queued, new chunks enqueue behind it — live bytes can never overtake queued bytes.
 - **M2 — attach fence.** During the attach sequence, output routed for the pane queues behind the closed gate instead of dropping; `markReady` clears the fence and arms the drain, so fenced bytes follow the replay in order. This closes Phase A's accepted 0.2–0.5 s attach boundary gap (measured 3–25 lost tokens under load; now **zero**, pinned by the live matrix's strict `firstLive == lastReplayed + 1` assertion).
 - **M3 — repair fence.** The same fence parks post-continue output behind a mid-session recapture replay (below).
 
@@ -74,7 +74,7 @@ The repair replay resets the terminal (reset prelude + full history) mid-session
 |---|---|---|
 | Per-pane local-queue cap | 128 KB | overflow enters the repair cycle (was: drop) |
 | Resume gate | pipe writable | replaces the 32 KB drain hysteresis — the queue is cleared at overflow, so there is nothing to drain below a threshold |
-| Drain pacing | 10 ms | async task; nonblocking writes under the fanout lock |
+| Drain pacing | 10 ms | GCD worker (off the cooperative pool); nonblocking writes under the fanout lock |
 | Repair reader-wait | 50 ms → 500 ms escalating poll, no deadline | one `.error` escalation log at 30 s; pane stays paused, tmux buffers server-side; broken pipe → unpause + abort |
 | Repair recapture depth | 50 000 | matches the attach's `history-limit` |
 | `pause-after` safety nets | **not yet set** | remaining Phase B scope, below |
