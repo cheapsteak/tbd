@@ -111,11 +111,11 @@ final class JumpMenuController {
     /// Snapshot every live worktree for the jump menu: the repo-grouped dict
     /// flattened, plus repo-less scratch spaces (which live only in
     /// `scratchWorktrees` and would otherwise never be reachable via Cmd-K).
-    /// Scratch rows carry "Scratch" as their repo label.
+    /// Scratch rows carry the Scratch section's label as their repo label.
     static func worktreeSnapshots(appState: AppState) -> [JumpMenuWorktreeSnapshot] {
         appState.allWorktrees.map { wt in
             let repoName = appState.repos.first { $0.id == wt.repoID }?.displayName
-                ?? (wt.isScratch ? "Scratch" : "?")
+                ?? (wt.isScratch ? AppState.scratchSectionLabel : "?")
             return JumpMenuWorktreeSnapshot(
                 id: wt.id,
                 displayName: wt.displayName,

@@ -8,11 +8,11 @@ struct StatusBarView: View {
     /// Transient "Copied" feedback shown after the left label copies a path.
     @State private var didCopy = false
 
-    private var selectedWorktreeInfo: (path: String, repoID: UUID?)? {
-        guard appState.selectedWorktreeIDs.count == 1,
-              let id = appState.selectedWorktreeIDs.first,
-              let worktree = appState.findWorktree(id: id),
-              !worktree.path.isEmpty else { return nil }
+    /// Path + repo of the resolved single-selected worktree (nil when it has
+    /// no path yet). The caller resolves the selection once per body
+    /// evaluation and passes it in, so this never re-runs `findWorktree`.
+    private static func selectedWorktreeInfo(_ worktree: Worktree?) -> (path: String, repoID: UUID?)? {
+        guard let worktree, !worktree.path.isEmpty else { return nil }
         return (worktree.path, worktree.repoID)
     }
 
@@ -115,16 +115,21 @@ struct StatusBarView: View {
     }
 
     var body: some View {
+        // Resolve the single-selected worktree ONCE per body evaluation —
+        // focusLabel and both selectedWorktreeInfo consumers share it, instead
+        // of each re-running findWorktree per render.
+        let selected = appState.selectedWorktreeIDs.count == 1
+            ? appState.selectedWorktreeIDs.first.flatMap { appState.findWorktree(id: $0) }
+            : nil
+        let selectedInfo = Self.selectedWorktreeInfo(selected)
         HStack {
             if let label = Self.focusLabel(
                 selectedWorktreeIDs: appState.selectedWorktreeIDs,
-                selectedWorktree: appState.selectedWorktreeIDs.count == 1
-                    ? appState.selectedWorktreeIDs.first.flatMap { appState.findWorktree(id: $0) }
-                    : nil,
+                selectedWorktree: selected,
                 repos: appState.repos,
                 selectedRepoID: appState.selectedRepoID
             ) {
-                let behavior = Self.leftLabelBehavior(selectedWorktreePath: selectedWorktreeInfo?.path)
+                let behavior = Self.leftLabelBehavior(selectedWorktreePath: selectedInfo?.path)
                 switch behavior {
                 case .copyPath(let path):
                     Button(action: { copyPath(path) }) {
@@ -143,7 +148,7 @@ struct StatusBarView: View {
                 }
             }
             Spacer()
-            if let info = selectedWorktreeInfo {
+            if let info = selectedInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)
             }
             let footer = footerLabel

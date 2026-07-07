@@ -12,7 +12,7 @@ struct ScratchSectionView: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text("Scratch")
+            Text(AppState.scratchSectionLabel)
                 .font(.headline)
                 .foregroundStyle(appState.selectedScratchSection ? .primary : .secondary)
             Spacer()

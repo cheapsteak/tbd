@@ -1197,7 +1197,9 @@ final class AppState: ObservableObject {
         macNotificationManager.postIfEnabled(
             worktreeID: notification.worktreeID,
             message: notification.message,
-            worktrees: allWorktrees,
+            // Resolve the name here (scratch-aware) instead of handing over
+            // the whole materialized allWorktrees array for one lookup.
+            worktreeName: findWorktree(id: notification.worktreeID)?.displayName,
             type: notification.type,
             terminalID: notification.terminalID
         )

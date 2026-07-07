@@ -139,10 +139,9 @@ struct WorktreeRowView: View {
                 text: worktree.displayName,
                 isEditing: $isEditing,
                 onCommit: { newName in
-                    // Optimistic local update so the UI reflects the new name
-                    // before the RPC returns. Scratch-aware: applyLocalRename
-                    // covers both the repo dict and scratchWorktrees.
-                    appState.applyLocalRename(id: worktree.id, displayName: newName)
+                    // renameWorktree applies the optimistic local update
+                    // itself (scratch-aware, before its RPC) — no caller-side
+                    // pre-apply, or the rename would be applied twice.
                     Task {
                         await appState.renameWorktree(id: worktree.id, displayName: newName)
                     }

@@ -112,6 +112,9 @@ private struct PinnedTerminalCell: View {
     }
 
     var body: some View {
+        // Bind ONCE per render — the computed property is a linear scan, and
+        // both the header and the terminal content read it.
+        let worktree = self.worktree
         VStack(spacing: 0) {
             // Header: pin icon + worktree name
             HStack(spacing: 4) {

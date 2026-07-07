@@ -156,9 +156,18 @@ extension AppState {
         step: Int,
         excluding archivedID: UUID? = nil
     ) -> Int? {
+        // Built ONCE per walk and threaded through isUsableEntry — rebuilding
+        // it per entry made every selection change O(entries × worktrees).
+        // allWorktrees includes scratch spaces, so back/forward can land on a
+        // live scratch selection instead of skipping it as stale.
+        let existingWorktreeIDs = Set(allWorktrees.map(\.id))
         var index = start
         while index >= 0 && index < navigationEntries.count {
-            if isUsableEntry(navigationEntries[index], excluding: archivedID) { return index }
+            if isUsableEntry(
+                navigationEntries[index],
+                excluding: archivedID,
+                existingWorktreeIDs: existingWorktreeIDs
+            ) { return index }
             index += step
         }
         return nil
@@ -166,17 +175,19 @@ extension AppState {
 
     /// Whether a history entry is still a valid landing spot: worktree entries
     /// must not reference `archivedID` (when given) and every referenced
-    /// worktree must still exist; repo entries must reference a repo we still
+    /// worktree must still exist in `existingWorktreeIDs` (built once per walk
+    /// by `usableEntryIndex`); repo entries must reference a repo we still
     /// know about.
-    private func isUsableEntry(_ entry: NavigationEntry, excluding archivedID: UUID? = nil) -> Bool {
+    private func isUsableEntry(
+        _ entry: NavigationEntry,
+        excluding archivedID: UUID? = nil,
+        existingWorktreeIDs: Set<UUID>
+    ) -> Bool {
         switch entry {
         case .worktrees(let ids):
             guard !ids.isEmpty else { return false }
             if let archivedID, ids.contains(archivedID) { return false }
-            // allWorktrees includes scratch spaces, so back/forward can land
-            // on a live scratch selection instead of skipping it as stale.
-            let existing = Set(allWorktrees.map(\.id))
-            return ids.allSatisfy { existing.contains($0) }
+            return ids.allSatisfy { existingWorktreeIDs.contains($0) }
         case .repo(let id):
             return repos.contains { $0.id == id }
         }
