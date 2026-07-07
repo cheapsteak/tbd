@@ -35,8 +35,7 @@ struct StatusBarFocusLabelTests {
 
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [wtID],
-            worktrees: [repoID: [wt]],
-            scratchWorktrees: [],
+            selectedWorktree: wt,
             repos: [repo],
             selectedRepoID: nil
         )
@@ -52,8 +51,7 @@ struct StatusBarFocusLabelTests {
 
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [wtID],
-            worktrees: [unknownRepoID: [wt]],
-            scratchWorktrees: [],
+            selectedWorktree: wt,
             repos: [],  // no repos — lookup will fail
             selectedRepoID: nil
         )
@@ -74,10 +72,11 @@ struct StatusBarFocusLabelTests {
             tmuxServer: "tmux-\(wtID.uuidString)"
         )
 
+        // The caller resolves scratch spaces via the scratch-aware
+        // AppState.findWorktree(id:) and passes the result directly.
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [wtID],
-            worktrees: [:],
-            scratchWorktrees: [scratch],
+            selectedWorktree: scratch,
             repos: [],
             selectedRepoID: nil
         )
@@ -87,19 +86,30 @@ struct StatusBarFocusLabelTests {
 
     @Test("multi-selection shows count label")
     func multiSelectionShowsCount() {
-        let repoID = UUID()
         let ids = [UUID(), UUID(), UUID()]
-        let worktrees = ids.map { makeWorktree(id: $0, repoID: repoID, displayName: "wt-\($0.uuidString.prefix(4))") }
 
+        // Multi-selection ignores selectedWorktree — the caller passes nil.
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: Set(ids),
-            worktrees: [repoID: worktrees],
-            scratchWorktrees: [],
+            selectedWorktree: nil,
             repos: [],
             selectedRepoID: nil
         )
 
         #expect(label == "3 worktrees")
+    }
+
+    @Test("single selection that failed to resolve returns nil")
+    func singleSelectionUnresolvedReturnsNil() {
+        // The caller's findWorktree(id:) lookup came up empty (stale ID).
+        let label = StatusBarView.focusLabel(
+            selectedWorktreeIDs: [UUID()],
+            selectedWorktree: nil,
+            repos: [],
+            selectedRepoID: nil
+        )
+
+        #expect(label == nil)
     }
 
     @Test("repo selected shows repo name")
@@ -109,8 +119,7 @@ struct StatusBarFocusLabelTests {
 
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [],
-            worktrees: [:],
-            scratchWorktrees: [],
+            selectedWorktree: nil,
             repos: [repo],
             selectedRepoID: repoID
         )
@@ -122,8 +131,7 @@ struct StatusBarFocusLabelTests {
     func nothingSelectedReturnsNil() {
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [],
-            worktrees: [:],
-            scratchWorktrees: [],
+            selectedWorktree: nil,
             repos: [],
             selectedRepoID: nil
         )
@@ -135,8 +143,7 @@ struct StatusBarFocusLabelTests {
     func repoSelectedButMissingReturnsNil() {
         let label = StatusBarView.focusLabel(
             selectedWorktreeIDs: [],
-            worktrees: [:],
-            scratchWorktrees: [],
+            selectedWorktree: nil,
             repos: [],
             selectedRepoID: UUID()  // unknown ID
         )

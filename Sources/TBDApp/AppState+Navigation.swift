@@ -15,7 +15,8 @@ extension AppState {
     ///
     /// - Exactly one worktree selected → that worktree's ID.
     /// - Multiple selected → the selected worktree whose UUID string sorts
-    ///   first alphabetically among those that still exist in `worktrees`.
+    ///   first alphabetically among those that still exist in `worktrees` or
+    ///   `scratchWorktrees` (scratch spaces live only in the latter).
     ///   Returns `nil` when none of the selected IDs exist (all stale).
     /// - No worktree selected but `selectedRepoID` set → the repo ID (the repo
     ///   header row is tagged with repo.id so scrolling to it works).
@@ -23,13 +24,16 @@ extension AppState {
     nonisolated static func sidebarRevealTarget(
         selectedWorktreeIDs: Set<UUID>,
         worktrees: [UUID: [Worktree]],
+        scratchWorktrees: [Worktree],
         selectedRepoID: UUID?
     ) -> UUID? {
         if selectedWorktreeIDs.count == 1 {
             return selectedWorktreeIDs.first
         } else if selectedWorktreeIDs.count > 1 {
             // Sort by uuidString for a stable, deterministic pick.
-            let allWorktreeIDs = Set(worktrees.values.flatMap { $0 }.map(\.id))
+            let allWorktreeIDs = Set(
+                worktrees.values.flatMap { $0 }.map(\.id) + scratchWorktrees.map(\.id)
+            )
             let candidates = selectedWorktreeIDs.filter { allWorktreeIDs.contains($0) }
             return candidates.min(by: { $0.uuidString < $1.uuidString })
         } else if let repoID = selectedRepoID {
@@ -47,6 +51,7 @@ extension AppState {
         guard let target = Self.sidebarRevealTarget(
             selectedWorktreeIDs: selectedWorktreeIDs,
             worktrees: worktrees,
+            scratchWorktrees: scratchWorktrees,
             selectedRepoID: selectedRepoID
         ) else { return }
 
@@ -168,7 +173,9 @@ extension AppState {
         case .worktrees(let ids):
             guard !ids.isEmpty else { return false }
             if let archivedID, ids.contains(archivedID) { return false }
-            let existing = Set(worktrees.values.flatMap { $0 }.map(\.id))
+            // allWorktrees includes scratch spaces, so back/forward can land
+            // on a live scratch selection instead of skipping it as stale.
+            let existing = Set(allWorktrees.map(\.id))
             return ids.allSatisfy { existing.contains($0) }
         case .repo(let id):
             return repos.contains { $0.id == id }

@@ -139,15 +139,10 @@ struct WorktreeRowView: View {
                 text: worktree.displayName,
                 isEditing: $isEditing,
                 onCommit: { newName in
-                    // Optimistic local update so the UI reflects the new name before the RPC returns
-                    for repoID in appState.worktrees.keys {
-                        if let idx = appState.worktrees[repoID]?.firstIndex(where: { $0.id == worktree.id }) {
-                            appState.worktrees[repoID]?[idx].displayName = newName
-                        }
-                    }
-                    if let idx = appState.scratchWorktrees.firstIndex(where: { $0.id == worktree.id }) {
-                        appState.scratchWorktrees[idx].displayName = newName
-                    }
+                    // Optimistic local update so the UI reflects the new name
+                    // before the RPC returns. Scratch-aware: applyLocalRename
+                    // covers both the repo dict and scratchWorktrees.
+                    appState.applyLocalRename(id: worktree.id, displayName: newName)
                     Task {
                         await appState.renameWorktree(id: worktree.id, displayName: newName)
                     }

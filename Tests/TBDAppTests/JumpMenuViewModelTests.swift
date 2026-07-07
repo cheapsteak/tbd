@@ -309,3 +309,84 @@ struct JumpMenuViewModelTests {
         #expect(vm.selectedRow?.id == a)
     }
 }
+
+/// The controller's open-time snapshot must include repo-less scratch spaces
+/// (they live only in `AppState.scratchWorktrees`), otherwise Cmd-K can never
+/// reach them — neither as recents nor as typed matches. Submit-time staleness
+/// is guarded by the scratch-aware `AppState.findWorktree(id:)` (covered in
+/// FindWorktreeScratchTests), so a scratch row surviving into the snapshot is
+/// also accepted on submit.
+@MainActor
+@Suite("JumpMenuController snapshot includes scratch")
+struct JumpMenuSnapshotScratchTests {
+
+    private func withState(_ body: (AppState) -> Void) {
+        let suiteName = "TBDAppTests.JumpMenuSnapshot.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        body(AppState(userDefaults: defaults))
+    }
+
+    private func makeWorktree(id: UUID, repoID: UUID?, displayName: String) -> Worktree {
+        Worktree(
+            id: id,
+            repoID: repoID,
+            name: displayName.lowercased(),
+            displayName: displayName,
+            branch: "main",
+            path: "/tmp/\(displayName)",
+            tmuxServer: "tmux-\(id.uuidString)"
+        )
+    }
+
+    @Test func snapshotContainsScratchAndRepoRows() {
+        withState { state in
+            let repoID = UUID()
+            let repoWtID = UUID()
+            let scratchID = UUID()
+            state.repos = [Repo(id: repoID, path: "/tmp/acme", displayName: "acme")]
+            state.worktrees = [repoID: [makeWorktree(id: repoWtID, repoID: repoID, displayName: "feat")]]
+            state.scratchWorktrees = [makeWorktree(id: scratchID, repoID: nil, displayName: "Scribbles")]
+
+            let snapshots = JumpMenuController.worktreeSnapshots(appState: state)
+
+            #expect(Set(snapshots.map(\.id)) == Set([repoWtID, scratchID]))
+            let scratchSnap = snapshots.first { $0.id == scratchID }
+            #expect(scratchSnap?.repoName == "Scratch")
+            let repoSnap = snapshots.first { $0.id == repoWtID }
+            #expect(repoSnap?.repoName == "acme")
+        }
+    }
+
+    @Test func scratchRecentAppearsInDefaultRows() {
+        withState { state in
+            let scratchID = UUID()
+            state.scratchWorktrees = [makeWorktree(id: scratchID, repoID: nil, displayName: "Scribbles")]
+
+            let vm = JumpMenuViewModel(
+                worktrees: JumpMenuController.worktreeSnapshots(appState: state),
+                unread: [:],
+                recentIDs: [scratchID]
+            )
+
+            #expect(vm.rows.map(\.id) == [scratchID])
+            #expect(vm.rows.first?.section == .recent)
+        }
+    }
+
+    @Test func scratchRowMatchesTypedQuery() {
+        withState { state in
+            let scratchID = UUID()
+            state.scratchWorktrees = [makeWorktree(id: scratchID, repoID: nil, displayName: "Scribbles")]
+
+            let vm = JumpMenuViewModel(
+                worktrees: JumpMenuController.worktreeSnapshots(appState: state),
+                unread: [:],
+                recentIDs: []
+            )
+            vm.query = "scrib"
+
+            #expect(vm.rows.map(\.id) == [scratchID])
+        }
+    }
+}

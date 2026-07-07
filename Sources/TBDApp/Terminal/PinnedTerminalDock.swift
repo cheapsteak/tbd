@@ -104,6 +104,9 @@ private struct PinnedTerminalCell: View {
     let terminal: Terminal
     @EnvironmentObject var appState: AppState
 
+    // Must stay on findWorktree: scratch spaces live only in
+    // `scratchWorktrees`, never the repo-grouped dict, so a dict-only lookup
+    // leaves scratch pins stuck on "Loading..." forever.
     private var worktree: Worktree? {
         appState.findWorktree(id: terminal.worktreeID)
     }

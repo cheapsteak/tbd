@@ -238,35 +238,43 @@ extension AppState {
         }
     }
 
-    /// Rename a worktree.
+    /// Rename a worktree (repo-grouped or scratch).
     func renameWorktree(id: UUID, displayName: String) async {
         // For creating worktrees, just update locally — the name will be applied when creation finishes
-        let isCreating = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id })?.status == .creating
+        let isCreating = findWorktree(id: id)?.status == .creating
         if isCreating {
-            for repoID in worktrees.keys {
-                if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == id }) {
-                    worktrees[repoID]?[idx].displayName = displayName
-                }
-            }
+            applyLocalRename(id: id, displayName: displayName)
             return
         }
         do {
             try await daemonClient.renameWorktree(id: id, displayName: displayName)
-            for repoID in worktrees.keys {
-                if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == id }) {
-                    worktrees[repoID]?[idx].displayName = displayName
-                }
-            }
+            applyLocalRename(id: id, displayName: displayName)
         } catch {
             logger.error("Failed to rename worktree: \(error)")
             handleConnectionError(error)
         }
     }
 
+    /// Local rename applied to whichever collection holds the row: the
+    /// repo-grouped `worktrees` dict, or `scratchWorktrees` for repo-less
+    /// scratch spaces (which never appear in the dict). Owned by
+    /// `renameWorktree` so callers don't have to compensate per collection.
+    func applyLocalRename(id: UUID, displayName: String) {
+        for repoID in worktrees.keys {
+            if let idx = worktrees[repoID]?.firstIndex(where: { $0.id == id }) {
+                worktrees[repoID]?[idx].displayName = displayName
+            }
+        }
+        if let idx = scratchWorktrees.firstIndex(where: { $0.id == id }) {
+            scratchWorktrees[idx].displayName = displayName
+        }
+    }
+
     // MARK: - Archived Worktrees
 
     /// Active-worktree path for deep-link navigation. Caller is responsible
-    /// for verifying the id exists in `self.worktrees` first. When
+    /// for verifying the id resolves via `findWorktree(id:)` first (which
+    /// covers both repo-grouped worktrees and scratch spaces). When
     /// `terminalID` is non-nil, also switches the worktree's active tab to
     /// the one rendering that terminal (live transcript or terminal pane);
     /// silently falls back to current selection when no tab matches.
@@ -649,14 +657,49 @@ extension AppState {
         createWorktree(repoID: repoID)
     }
 
-    /// Archive the first selected worktree (refuses main worktrees).
-    func archiveSelectedWorktree() {
-        guard let id = selectedWorktreeIDs.first else { return }
+    /// Which archive path `archiveSelectedWorktree` should take for a
+    /// selection. Scratch spaces live only in `scratchWorktrees` and must go
+    /// through the `scratch.archive` RPC — the repo-worktree `worktree.archive`
+    /// RPC rejects them with `repoNotFound`. Pure so both branches are
+    /// unit-testable without a daemon.
+    enum ArchiveShortcutRoute: Equatable {
+        case scratch(UUID)
+        case worktree(UUID)
+    }
+
+    /// Resolve the archive route for the given selection. Returns `nil` when
+    /// nothing is selected, or when the selected repo worktree is the main
+    /// branch or still creating (those refuse the archive shortcut).
+    nonisolated static func archiveShortcutRoute(
+        selectedID: UUID?,
+        worktrees: [UUID: [Worktree]],
+        scratchWorktrees: [Worktree]
+    ) -> ArchiveShortcutRoute? {
+        guard let id = selectedID else { return nil }
+        if scratchWorktrees.contains(where: { $0.id == id }) {
+            return .scratch(id)
+        }
         // Don't archive the main branch worktree
-        let allWts = worktrees.values.flatMap { $0 }
-        if let wt = allWts.first(where: { $0.id == id }), wt.status == .main || wt.status == .creating { return }
-        Task {
-            await archiveWorktree(id: id)
+        if let wt = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
+           wt.status == .main || wt.status == .creating { return nil }
+        return .worktree(id)
+    }
+
+    /// Archive the first selected worktree (refuses main worktrees). Routes
+    /// scratch spaces to the scratch archive path — same as the row context
+    /// menu's Archive action.
+    func archiveSelectedWorktree() {
+        switch Self.archiveShortcutRoute(
+            selectedID: selectedWorktreeIDs.first,
+            worktrees: worktrees,
+            scratchWorktrees: scratchWorktrees
+        ) {
+        case .scratch(let id):
+            Task { await archiveScratch(id: id) }
+        case .worktree(let id):
+            Task { await archiveWorktree(id: id) }
+        case nil:
+            break
         }
     }
 

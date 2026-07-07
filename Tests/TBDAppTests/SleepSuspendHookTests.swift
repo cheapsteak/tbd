@@ -31,6 +31,20 @@ struct SleepSuspendHookTests {
         )
     }
 
+    /// Build a repo-less scratch space (lives only in `scratchWorktrees`).
+    private func makeScratch() -> Worktree {
+        let name = "scratch-\(UUID().uuidString.prefix(4))"
+        return Worktree(
+            id: UUID(),
+            repoID: nil,
+            name: name,
+            displayName: name,
+            branch: "main",
+            path: "/tmp/scratch",
+            tmuxServer: "tbd-test"
+        )
+    }
+
     @Test("gate OFF → returns [] even with worktrees present")
     func gateOffReturnsEmpty() {
         let repoID = UUID()
@@ -39,6 +53,7 @@ struct SleepSuspendHookTests {
         ]
         let ids = AppState.worktreeIDsToSuspendForSleep(
             worktrees: worktrees,
+            scratchWorktrees: [makeScratch()],
             autoSuspendEnabled: false
         )
         #expect(ids.isEmpty)
@@ -58,6 +73,7 @@ struct SleepSuspendHookTests {
 
         let ids = AppState.worktreeIDsToSuspendForSleep(
             worktrees: worktrees,
+            scratchWorktrees: [],
             autoSuspendEnabled: true
         )
 
@@ -66,10 +82,26 @@ struct SleepSuspendHookTests {
         #expect(ids.count == 3)
     }
 
+    @Test("gate ON → scratch spaces are included alongside repo worktrees")
+    func gateOnIncludesScratchSpaces() {
+        let repoID = UUID()
+        let repoWT = makeWorktree(repoID: repoID)
+        let scratch = makeScratch()
+
+        let ids = AppState.worktreeIDsToSuspendForSleep(
+            worktrees: [repoID: [repoWT]],
+            scratchWorktrees: [scratch],
+            autoSuspendEnabled: true
+        )
+
+        #expect(Set(ids) == Set([repoWT.id, scratch.id]))
+    }
+
     @Test("gate ON + empty worktrees → returns []")
     func gateOnEmptyReturnsEmpty() {
         let ids = AppState.worktreeIDsToSuspendForSleep(
             worktrees: [:],
+            scratchWorktrees: [],
             autoSuspendEnabled: true
         )
         #expect(ids.isEmpty)

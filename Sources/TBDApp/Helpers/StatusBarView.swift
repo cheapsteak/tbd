@@ -56,14 +56,17 @@ struct StatusBarView: View {
     /// Compute the left-side focus label for the status bar.
     ///
     /// - Single worktree selected: `"<repo name> / <worktree displayName>"`,
-    ///   or just `<worktree displayName>` when the repo lookup fails.
+    ///   or just `<worktree displayName>` when the repo lookup fails (or the
+    ///   worktree is a repo-less scratch space). The caller pre-resolves the
+    ///   selection via `AppState.findWorktree(id:)` — the scratch-aware
+    ///   lookup — and passes it as `selectedWorktree` (same seam
+    ///   `selectedWorktreeInfo` uses); `nil` means the lookup failed.
     /// - Multiple worktrees selected: `"<N> worktrees"`.
     /// - Repo selected, no worktree: the repo's `displayName`.
     /// - Nothing selected: `nil` (renders nothing on the left side).
     nonisolated static func focusLabel(
         selectedWorktreeIDs: Set<UUID>,
-        worktrees: [UUID: [Worktree]],
-        scratchWorktrees: [Worktree],
+        selectedWorktree: Worktree?,
         repos: [Repo],
         selectedRepoID: UUID?
     ) -> String? {
@@ -72,9 +75,8 @@ struct StatusBarView: View {
             guard let repoID = selectedRepoID,
                   let repo = repos.first(where: { $0.id == repoID }) else { return nil }
             return repo.displayName
-        } else if count == 1, let id = selectedWorktreeIDs.first {
-            let allWorktrees = worktrees.values.flatMap { $0 } + scratchWorktrees
-            guard let wt = allWorktrees.first(where: { $0.id == id }) else { return nil }
+        } else if count == 1 {
+            guard let wt = selectedWorktree else { return nil }
             if let repo = repos.first(where: { $0.id == wt.repoID }) {
                 return "\(repo.displayName) / \(wt.displayName)"
             }
@@ -116,8 +118,9 @@ struct StatusBarView: View {
         HStack {
             if let label = Self.focusLabel(
                 selectedWorktreeIDs: appState.selectedWorktreeIDs,
-                worktrees: appState.worktrees,
-                scratchWorktrees: appState.scratchWorktrees,
+                selectedWorktree: appState.selectedWorktreeIDs.count == 1
+                    ? appState.selectedWorktreeIDs.first.flatMap { appState.findWorktree(id: $0) }
+                    : nil,
                 repos: appState.repos,
                 selectedRepoID: appState.selectedRepoID
             ) {

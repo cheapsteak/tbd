@@ -31,6 +31,7 @@ struct SidebarRevealTargetTests {
         let target = AppState.sidebarRevealTarget(
             selectedWorktreeIDs: [wtID],
             worktrees: [repoID: [wt]],
+            scratchWorktrees: [],
             selectedRepoID: nil
         )
 
@@ -54,6 +55,7 @@ struct SidebarRevealTargetTests {
         let target = AppState.sidebarRevealTarget(
             selectedWorktreeIDs: [id1, id2, id3],
             worktrees: worktrees,
+            scratchWorktrees: [],
             selectedRepoID: nil
         )
 
@@ -74,11 +76,13 @@ struct SidebarRevealTargetTests {
         let first = AppState.sidebarRevealTarget(
             selectedWorktreeIDs: selectedSet,
             worktrees: worktrees,
+            scratchWorktrees: [],
             selectedRepoID: nil
         )
         let second = AppState.sidebarRevealTarget(
             selectedWorktreeIDs: selectedSet,
             worktrees: worktrees,
+            scratchWorktrees: [],
             selectedRepoID: nil
         )
 
@@ -92,6 +96,7 @@ struct SidebarRevealTargetTests {
         let target = AppState.sidebarRevealTarget(
             selectedWorktreeIDs: [],
             worktrees: [:],
+            scratchWorktrees: [],
             selectedRepoID: repoID
         )
 
@@ -103,10 +108,39 @@ struct SidebarRevealTargetTests {
         let target = AppState.sidebarRevealTarget(
             selectedWorktreeIDs: [],
             worktrees: [:],
+            scratchWorktrees: [],
             selectedRepoID: nil
         )
 
         #expect(target == nil)
+    }
+
+    @Test("all-scratch multi-selection resolves via scratchWorktrees")
+    func multiSelectionAllScratchReturnsCandidate() {
+        // Scratch spaces live only in `scratchWorktrees`, never the repo dict;
+        // a dict-only candidate filter made status-bar reveal a silent no-op
+        // for all-scratch multi-selections.
+        let scratchIDs = [UUID(), UUID()]
+        let scratches = scratchIDs.map { id in
+            Worktree(
+                id: id,
+                repoID: nil,
+                name: "scratch-\(id.uuidString.prefix(4))",
+                displayName: "Scratch \(id.uuidString.prefix(4))",
+                branch: "main",
+                path: "/tmp/scratch",
+                tmuxServer: "tmux-\(id.uuidString)"
+            )
+        }
+
+        let target = AppState.sidebarRevealTarget(
+            selectedWorktreeIDs: Set(scratchIDs),
+            worktrees: [:],
+            scratchWorktrees: scratches,
+            selectedRepoID: nil
+        )
+
+        #expect(target == scratchIDs.min(by: { $0.uuidString < $1.uuidString }))
     }
 
     @Test("multi-selection with all stale IDs returns nil")
@@ -123,6 +157,7 @@ struct SidebarRevealTargetTests {
         let target = AppState.sidebarRevealTarget(
             selectedWorktreeIDs: [staleID1, staleID2],
             worktrees: worktrees,
+            scratchWorktrees: [],
             selectedRepoID: nil
         )
 
