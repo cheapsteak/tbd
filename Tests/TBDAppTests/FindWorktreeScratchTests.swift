@@ -15,6 +15,12 @@ import TBDShared
 /// `worktrees`, so a freshly created scratch space resolved to nil and the
 /// detail pane rendered "Worktree not found" on first run.
 ///
+/// The same bug class hit a second call site: the pinned-terminal dock.
+/// `PinnedTerminalCell` (PinnedTerminalDock.swift) previously hand-rolled a
+/// worktrees-dict-only lookup, so pins from scratch spaces resolved to nil and
+/// the cell rendered "Loading..." forever. It now resolves through
+/// `findWorktree`, which this suite covers.
+///
 /// Constructs `AppState(userDefaults:)` against a unique throwaway suite —
 /// `UserDefaults.standard` on this unbundled executable is the developer's real
 /// `TBDApp.plist`.

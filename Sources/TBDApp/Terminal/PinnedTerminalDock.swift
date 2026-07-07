@@ -105,12 +105,7 @@ private struct PinnedTerminalCell: View {
     @EnvironmentObject var appState: AppState
 
     private var worktree: Worktree? {
-        for wts in appState.worktrees.values {
-            if let wt = wts.first(where: { $0.id == terminal.worktreeID }) {
-                return wt
-            }
-        }
-        return nil
+        appState.findWorktree(id: terminal.worktreeID)
     }
 
     var body: some View {
