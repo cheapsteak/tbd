@@ -266,7 +266,15 @@ struct AttachReplayOrchestrator: Sendable {
             }
             return outcome
         } catch {
-            await sendUnpause(client, paneID: paneID)
+            // Same generation scoping as the success path's `.superseded`
+            // skip (R11): a failing STALE sequence must not unpause either —
+            // its continue could land between a live successor's pause and
+            // captures, tearing the successor's capture. When we still own
+            // the pane, unpause as always; when superseded, the successor's
+            // own sequence (unpause on every exit path) owns the pause state.
+            if await supervisor.currentGeneration(server: server, paneID: paneID) == generation {
+                await sendUnpause(client, paneID: paneID)
+            }
             throw AttachReplayFailure(generation: generation, underlying: error)
         }
     }

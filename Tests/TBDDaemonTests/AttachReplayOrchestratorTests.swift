@@ -349,6 +349,34 @@ struct AttachReplayOrchestratorTests {
         #expect(recorder.writes.last == "refresh-client -A '%3:continue'")
     }
 
+    @Test("a STALE sequence's capture failure sends NO unpause once a successor owns the pane (R11)")
+    func staleCaptureFailureSkipsUnpause() async throws {
+        let (supervisor, orchestrator, recorder, client) = makeHarness()
+        let paneID = "%9"
+        let (readFD, generation) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+
+        let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+
+        // While gen-1's batch is in flight, a fast re-attach replaces the
+        // sink (gen 2). Gen-1's batch then fails with a real capture %error.
+        let (successorFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(successorFD) }
+        await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))   // pause
+        await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["gone"]))
+        await succeed(client, [[], [], [], [stateLine(paneID: paneID)], []])
+
+        let underlying = await expectFailure(generation: generation) { try await task.value }
+        #expect(underlying is AttachReplayError)
+        // The stale catch path must NOT unpause: its continue could land
+        // between the successor's pause and captures, tearing the successor's
+        // capture. The successor's own sequence owns the pane's pause state.
+        try await Task.sleep(for: .milliseconds(200))   // bounded negative check
+        #expect(!recorder.writes.contains { $0.hasSuffix(":continue'") },
+                "stale sequence unpaused a pane a successor now owns")
+    }
+
     @Test("a malformed pending-output escape fails the attach; unpause still sent")
     func malformedPendingFailsAttach() async throws {
         let (supervisor, orchestrator, recorder, client) = makeHarness()
