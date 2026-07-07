@@ -169,11 +169,13 @@ struct AttachRPCOrchestrationTests {
     }
 
     /// Feed the full happy-path reply set: pause, scrollback, screen, saved,
-    /// state, pending.
+    /// combined, state, pending. The non-alt assembly uses the COMBINED leg
+    /// verbatim (R8-M3), so it carries the history content these tests
+    /// assert on (screen leg empty → combined == history).
     private func feedCaptureReplies(
         _ client: TmuxControlCommandClient, paneID: String, history: [String]
     ) async {
-        for lines in [[], history, [], [], [stateLine(paneID: paneID)], [] as [String]] {
+        for lines in [[], history, [], [], history, [stateLine(paneID: paneID)], [] as [String]] {
             await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: lines))
         }
     }
@@ -613,10 +615,10 @@ struct AttachRPCOrchestrationTests {
         #expect((String(bytes: drain(fd2), encoding: .utf8) ?? "").contains("fresh-history"))
 
         // Gen 1's DELAYED capture reply is a %error → its sequence fails.
-        // (pause OK, scrollback %error, remaining four OK.)
+        // (pause OK, scrollback %error, remaining five OK.)
         await clientA.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         await clientA.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
-        for _ in 0..<4 {
+        for _ in 0..<5 {
             await clientA.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         }
         let response1 = await ready1.value
@@ -755,10 +757,11 @@ struct AttachRPCOrchestrationTests {
         let readyTask = Task { await router.handle(ready) }
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
 
-        // pause OK, then the scrollback capture %errors (dead pane).
+        // pause OK, then the scrollback capture %errors (dead pane);
+        // remaining five (screen, saved, combined, state, pending) OK.
         await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
-        for _ in 0..<4 {
+        for _ in 0..<5 {
             await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         }
 

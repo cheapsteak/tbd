@@ -136,8 +136,9 @@ struct AttachReplayOrchestratorTests {
         }
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
 
-        // ONE atomic stream write: pause FIRST, then the 5-command capture
-        // (three legs: pure scrollback / current screen / saved primary).
+        // ONE atomic stream write: pause FIRST, then the 6-command capture
+        // (four legs: pure scrollback / current screen / saved primary /
+        // combined history+screen — R8-M3).
         #expect(recorder.writes.count == 1)
         let batch = try #require(recorder.writes.first)
         #expect(batch == """
@@ -145,6 +146,7 @@ struct AttachReplayOrchestratorTests {
             capture-pane -peqJN -S -50000 -E -1 -q -t %1
             capture-pane -peqJN -t %1
             capture-pane -peqJN -a -q -t %1
+            capture-pane -peqJN -S -50000 -t %1
             list-panes -t %1 -F '\(PaneStateCapture.format)'
             capture-pane -p -P -C -t %1
             """)
@@ -156,8 +158,9 @@ struct AttachReplayOrchestratorTests {
             server: server, event: .output(paneID: paneID, bytes: Data("MID-SEQUENCE".utf8)))
 
         // Reply blocks in FIFO order: pause, scrollback, screen, saved,
-        // state, pending. Scrollback + screen recombine in order.
+        // combined, state, pending. Non-alt uses the combined leg verbatim.
         await succeed(client, [[], ["hist-one"], ["hist-two"], [],
+                               ["hist-one", "hist-two"],
                                [stateLine(paneID: paneID)], []])
 
         let outcome = try await task.value
@@ -198,7 +201,8 @@ struct AttachReplayOrchestratorTests {
         let (read2, _) = try await supervisor.attach(server: server, paneID: paneID)
         defer { Darwin.close(read2) }
 
-        await succeed(client, [[], ["hist"], [], [], [stateLine(paneID: paneID)], []])
+        await succeed(client, [[], ["hist"], [], [], ["hist"],
+                               [stateLine(paneID: paneID)], []])
         let outcome = try await task.value
         #expect(outcome == .superseded)
 
@@ -274,10 +278,11 @@ struct AttachReplayOrchestratorTests {
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
 
         // pause OK, scrollback capture returns %error (tolerated at the
-        // correlator level so the connection survives), rest succeed.
+        // correlator level so the connection survives), rest succeed
+        // (screen, saved, combined, state, pending).
         await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: []))
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["no such pane"]))
-        await succeed(client, [[], [], [stateLine(paneID: paneID)], []])
+        await succeed(client, [[], [], [], [stateLine(paneID: paneID)], []])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying as? AttachReplayError == .captureFailed(
@@ -298,7 +303,8 @@ struct AttachReplayOrchestratorTests {
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
 
         // Pending line with `\` not followed by three octal digits.
-        await succeed(client, [[], ["hist"], [], [], [stateLine(paneID: paneID)], ["bad\\9x"]])
+        await succeed(client, [[], ["hist"], [], [], ["hist"],
+                               [stateLine(paneID: paneID)], ["bad\\9x"]])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying is ReplayWriterError)
@@ -348,7 +354,10 @@ struct AttachReplayOrchestratorTests {
             #expect(recorder.writes.first?.contains("capture-pane -peqJN -S -3 -E -1 -q -t %9") == true)
 
             let history = (0..<lineCount).map { "line-\($0)" }
+            // Telemetry keys on the PURE-scrollback leg (index 1), not the
+            // combined one — the combined leg always carries screen rows too.
             await succeed(client, [[], history, ["screen"], [],
+                                   history + ["screen"],
                                    [stateLine(paneID: paneID, historySize: lineCount)], []])
             let outcome = try await task.value
             #expect(outcome == .ready)
@@ -370,8 +379,11 @@ struct AttachReplayOrchestratorTests {
         // QUIRK (live-probed, tmux 3.6a): on a pane with history_size == 0
         // the `-S -N -E -1` leg does NOT return empty — it clamps and returns
         // the first visible screen row. Feeding that duplicate here must NOT
-        // reach the replay when the state says the scrollback is empty.
+        // reach the replay when the state says the scrollback is empty. The
+        // COMBINED leg has no such quirk: with no history it is exactly the
+        // screen, and the non-alt path uses it verbatim (R8-M3).
         await succeed(client, [[], ["screen-row-one"], ["screen-row-one", "screen-row-two"], [],
+                               ["screen-row-one", "screen-row-two"],
                                [stateLine(paneID: paneID, historySize: 0)], []])
 
         let outcome = try await task.value
@@ -394,14 +406,18 @@ struct AttachReplayOrchestratorTests {
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
         let scrollback = ["h1", "h2"]
         let screen = ["s1", "s2"]
+        // The combined leg is what one tmux invocation would return for this
+        // pane: the scrollback rows followed by the screen rows — the exact
+        // legacy single-capture content.
         await succeed(client, [[], scrollback, screen, [],
+                               scrollback + screen,
                                [stateLine(paneID: paneID, historySize: 2)], []])
         let outcome = try await task.value
         #expect(outcome == .ready)
 
         // The old single `-S -N` capture returned scrollback rows followed by
-        // screen rows in one leg; the three-leg split must reassemble the
-        // exact same bytes for a non-alt pane.
+        // screen rows in one leg; the non-alt assembly (combined leg
+        // verbatim, R8-M3) must produce the exact same bytes.
         let state = try #require(try PaneStateCapture.state(
             forPane: paneID, in: [stateLine(paneID: paneID, historySize: 2)]))
         let legacy = try ReplayWriter.assemble(
@@ -409,6 +425,43 @@ struct AttachReplayOrchestratorTests {
             state: state, cols: state.width, rows: state.height)
         #expect(drain(readFD) == legacy,
                 "three-leg reassembly diverged from the legacy single-capture bytes")
+    }
+
+    @Test("non-alt: a soft wrap across the history/screen seam stays joined via the combined leg (R8-M3)")
+    func nonAltSeamSoftWrapStaysJoined() async throws {
+        let (supervisor, orchestrator, recorder, client) = makeHarness()
+        let paneID = "%17"
+        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+
+        let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
+        try await waitFor("capture batch write") { recorder.writes.count >= 1 }
+        // The batch carries a COMBINED history+screen capture (one tmux
+        // invocation, `-J` joins the seam) as its fourth capture leg.
+        let batch = try #require(recorder.writes.first)
+        #expect(batch.contains("capture-pane -peqJN -S -50000 -t %17"))
+
+        // A logical line soft-wraps across the scrollback/screen seam: the
+        // split legs each see half ("WRAP-HEAD" / "WRAP-TAIL"), so joining
+        // them with \r\n would insert a spurious hard break. The combined
+        // leg — joined by tmux itself — carries the whole line.
+        await succeed(client, [
+            [],                              // pause
+            ["above", "WRAP-HEAD"],          // pure scrollback (seam-cut)
+            ["WRAP-TAIL", "below"],          // current screen (seam-cut)
+            [],                              // saved primary (not alt)
+            ["above", "WRAP-HEADWRAP-TAIL", "below"],  // combined, tmux-joined
+            [stateLine(paneID: paneID, historySize: 2)],
+            [],                              // pending
+        ])
+        let outcome = try await task.value
+        #expect(outcome == .ready)
+
+        let text = (String(bytes: drain(readFD), encoding: .utf8) ?? "")
+        #expect(text.contains("above\r\nWRAP-HEADWRAP-TAIL\r\nbelow"),
+                "the seam-wrapped line must arrive joined (combined leg verbatim)")
+        #expect(!text.contains("WRAP-HEAD\r\nWRAP-TAIL"),
+                "the split legs' seam-cut halves must not reach a non-alt replay")
     }
 
     @Test("alt pane: scrollback + saved primary paint the primary screen; current screen paints the alt")
@@ -422,8 +475,11 @@ struct AttachReplayOrchestratorTests {
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
         // While alternate_on: historyLeg reaches the PRIMARY scrollback,
         // screenLeg returns the ALT content, savedLeg the saved primary
-        // viewport (the H1 regression: historyLeg used to be dropped).
+        // viewport (the H1 regression: historyLeg used to be dropped). The
+        // combined leg is fed a marker line to prove the ALT branch ignores
+        // it — it only reaches non-alt replays (R8-M3).
         await succeed(client, [[], ["OLD-SCROLLBACK"], ["ALT-NOW"], ["SAVED-VIEWPORT"],
+                               ["COMBINED-UNUSED"],
                                [altStateLine(paneID: paneID)], []])
         let outcome = try await task.value
         #expect(outcome == .ready)
@@ -441,6 +497,8 @@ struct AttachReplayOrchestratorTests {
         #expect(altOn.upperBound <= altRange.lowerBound)
         // The primary rows are contiguous lines (scrollback \r\n viewport).
         #expect(text.contains("OLD-SCROLLBACK\r\nSAVED-VIEWPORT"))
+        // The combined leg must not leak into an alt-screen replay.
+        #expect(!text.contains("COMBINED-UNUSED"))
     }
 
     @Test("pause %error is surfaced but the replay still runs and the gate opens (review M4)")
@@ -459,7 +517,8 @@ struct AttachReplayOrchestratorTests {
         // UNPAUSED — a possibly-torn replay that self-heals — so the sequence
         // must proceed to a ready gate, and the failure must be surfaced.
         await client.handle(.commandFailed(number: 0, fromClient: true, lines: ["bad refresh-client"]))
-        await succeed(client, [["hist"], ["screen"], [], [stateLine(paneID: paneID)], []])
+        await succeed(client, [["hist"], ["screen"], [], ["hist", "screen"],
+                               [stateLine(paneID: paneID)], []])
 
         let outcome = try await task.value
         #expect(outcome == .ready)
@@ -481,7 +540,8 @@ struct AttachReplayOrchestratorTests {
 
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
-        await succeed(client, [[], ["hist"], ["screen"], [], [stateLine(paneID: paneID)], []])
+        await succeed(client, [[], ["hist"], ["screen"], [], ["hist", "screen"],
+                               [stateLine(paneID: paneID)], []])
         let outcome = try await task.value
         #expect(outcome == .ready)
         #expect(failures.writes.isEmpty)
@@ -498,7 +558,8 @@ struct AttachReplayOrchestratorTests {
         let task = Task { try await orchestrator.performAttachReady(server: server, paneID: paneID) }
         try await waitFor("capture batch write") { recorder.writes.count >= 1 }
         // The state reply describes a DIFFERENT pane.
-        await succeed(client, [[], ["hist"], [], [], [stateLine(paneID: "%99")], []])
+        await succeed(client, [[], ["hist"], [], [], ["hist"],
+                               [stateLine(paneID: "%99")], []])
 
         let underlying = await expectFailure(generation: generation) { try await task.value }
         #expect(underlying as? AttachReplayError == .paneStateMissing)

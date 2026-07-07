@@ -201,6 +201,13 @@ struct AttachReplayOrchestrator: Sendable {
             // -a: the SAVED primary viewport while `alternate_on`;
             // -q: empty (not %error) when there is no saved screen.
             "capture-pane -peqJN -a -q -t \(paneID)",
+            // COMBINED history+screen in ONE invocation (review R8-M3): `-J`
+            // joins soft wraps only WITHIN a capture, so the split legs above
+            // hard-break a logical line that wraps across the scrollback/
+            // screen seam. Non-alt replays use this leg verbatim (identical
+            // to the pre-split single capture); the split legs remain for the
+            // alt mapping, which has no combined-capture equivalent.
+            "capture-pane -peqJN -S -\(historyDepth) -t \(paneID)",
             PaneStateCapture.listPanesCommand(target: paneID),
             "capture-pane -p -P -C -t \(paneID)",
         ]
@@ -271,8 +278,8 @@ struct AttachReplayOrchestrator: Sendable {
                 throw AttachReplayError.captureFailed(command: command)
             }
         }
-        let (historyLeg, screenLeg, savedLeg, stateLines, pending) =
-            (captured[0], captured[1], captured[2], captured[3], captured[4])
+        let (historyLeg, screenLeg, savedLeg, combinedLeg, stateLines, pending) =
+            (captured[0], captured[1], captured[2], captured[3], captured[4], captured[5])
 
         // Truncation telemetry (plan M4.4 fold-in): at >= depth lines the
         // scrollback capture almost certainly hit the history ceiling and
@@ -288,20 +295,23 @@ struct AttachReplayOrchestrator: Sendable {
         guard let state = try PaneStateCapture.state(forPane: paneID, in: stateLines) else {
             throw AttachReplayError.paneStateMissing
         }
-        // Leg recombination (review H1, verified live against tmux 3.6a):
-        // - historyLeg is the primary SCROLLBACK, reachable even during alt
-        //   mode — but it CLAMPS to the first screen row on a history-less
-        //   pane, so it is discarded when `history_size` == 0 (painting that
-        //   row twice otherwise).
-        // - screenLeg is the CURRENT screen: the primary screen normally
-        //   (appended after the scrollback — identical bytes to the old
-        //   single `-S` capture), the ALT content while `alternate_on`.
-        // - savedLeg is the `-a` saved primary VIEWPORT, meaningful only
-        //   while `alternate_on` (empty otherwise): it replaces screenLeg as
-        //   the primary screen's bottom rows in that case.
+        // Leg recombination (reviews H1 + R8-M3, verified live on tmux 3.6a):
+        // - NON-alt: use combinedLeg VERBATIM — one tmux invocation whose -J
+        //   joins soft wraps across the scrollback/screen seam, byte-identical
+        //   to the pre-split single capture (and immune to the history-less
+        //   clamp quirk: with no history it is exactly the screen).
+        // - ALT: the primary content must be stitched from historyLeg (pure
+        //   scrollback; reachable during alt, but CLAMPS to the first screen
+        //   row on a history-less pane, so discarded when history_size == 0)
+        //   + savedLeg (the -a saved primary viewport). ACCEPTED RESIDUAL: a
+        //   logical line soft-wrapping across THAT seam replays with a
+        //   spurious hard break — there is no combined capture that reaches
+        //   both regions while the pane is on the alt screen. Cosmetic,
+        //   narrow (exact seam alignment), no data loss.
+        //   screenLeg is the ALT content in this case.
         let scrollback = state.historySize > 0 ? historyLeg : []
         let replay = try ReplayWriter.assemble(
-            history: scrollback + (state.alternateOn ? savedLeg : screenLeg),
+            history: state.alternateOn ? scrollback + savedLeg : combinedLeg,
             altScreen: state.alternateOn ? screenLeg : nil,
             pending: pending,
             state: state,
