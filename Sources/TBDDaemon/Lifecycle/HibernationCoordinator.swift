@@ -72,6 +72,15 @@ public actor HibernationCoordinator {
     /// spawn two `claude --resume` processes into the same window.
     private var wakesInFlight: Set<UUID> = []
 
+    /// Tmux servers whose wake tmux-section currently holds the per-server
+    /// lock (see `withServerLock`). `wakesInFlight` only dedupes SAME-terminal
+    /// wakes; this serializes DIFFERENT terminals on the same server.
+    private var lockedServers: Set<String> = []
+
+    /// FIFO waiters per server, resumed one at a time on release so lock
+    /// ownership transfers in arrival order (no starvation, no thundering herd).
+    private var serverLockWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
     /// Invoked after EVERY `ensureServer` on the wake-recreate path (whether or
     /// not a server was actually created — the downstream control-mode
     /// `enableIfGated` is idempotent, so firing on an existing server is a
@@ -413,6 +422,79 @@ public actor HibernationCoordinator {
         let livePaneID: String
         let liveWindowID: String
 
+        // The whole decide-then-mutate tmux section (ownership check +
+        // windowExists + respawn/create/kill/persist) runs under the
+        // per-server lock: `wakesInFlight` above only dedupes wakes for the
+        // SAME terminal, while this closes the cross-terminal TOCTOU on a
+        // shared server (see `withServerLock`). The lock is NOT held around
+        // the delayed session-recapture Task below.
+        let outcome = await withServerLock(server) {
+            await self.wakeTmuxSection(
+                terminal: terminal, worktree: worktree, server: server,
+                windowID: windowID, paneID: paneID, spawnCommand: spawn.command,
+                env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows
+            )
+        }
+        switch outcome {
+        case .failed(let result):
+            return result
+        case .respawned(let newPaneID, let newWindowID):
+            livePaneID = newPaneID
+            liveWindowID = newWindowID
+        }
+
+        do {
+            try await db.terminals.clearHibernated(id: terminal.id)
+        } catch {
+            logger.warning("wake: failed to clear hibernated for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+        idleSince[terminal.id] = nil
+        // Carry the LIVE window/pane ids on the un-park broadcast so the app
+        // updates its cached row before (together with) the hibernated flip —
+        // otherwise the terminal view rebuilds keyed on the dead window and
+        // its failed attach re-parks the row (wake flap).
+        broadcastHibernation(
+            terminal: terminal, hibernated: false, keepWarm: terminal.keepWarm,
+            tmuxWindowID: liveWindowID, tmuxPaneID: livePaneID
+        )
+
+        // `claude --resume <id>` forks into a NEW session file; re-capture the
+        // fresh id so subsequent hibernate/wake reference the live session.
+        let termID = terminal.id
+        Task {
+            try? await Task.sleep(for: .seconds(5))
+            if let newID = await self.detector.captureSessionID(server: server, paneID: livePaneID) {
+                try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
+            }
+        }
+        logger.info("woke terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public))")
+        return .ok
+    }
+
+    /// Outcome of `wakeTmuxSection`: the live pane/window ids the rest of
+    /// `wake()` should reference, or the `WakeResult` to return verbatim.
+    private enum WakeTmuxOutcome {
+        case respawned(paneID: String, windowID: String)
+        case failed(WakeResult)
+    }
+
+    /// The decide-then-mutate tmux section of `wake()` — ownership check,
+    /// `windowExists`, and the in-place respawn OR recreate mutations. Must
+    /// only be entered under `withServerLock(server:)` (see the call site in
+    /// `wake()`), otherwise two concurrent wakes on the same server can
+    /// interleave across the awaits below and hijack each other's windows.
+    private func wakeTmuxSection(
+        terminal: Terminal,
+        worktree: Worktree,
+        server: String,
+        windowID: String,
+        paneID: String,
+        spawnCommand: String,
+        env: [String: String],
+        sensitiveEnv: [String: String],
+        cols: Int?,
+        rows: Int?
+    ) async -> WakeTmuxOutcome {
         // Post-reboot a fresh tmux server reissues window ids from @1 again,
         // so a stale parked row's window id can equal a window that ANOTHER
         // terminal's wake just created on the same server. `windowExists`
@@ -433,18 +515,17 @@ public actor HibernationCoordinator {
                     server: server,
                     windowID: windowID,
                     cwd: worktree.path,
-                    shellCommand: spawn.command,
+                    shellCommand: spawnCommand,
                     env: env,
                     sensitiveEnv: sensitiveEnv,
                     cols: cols,
                     rows: rows
                 )
-                livePaneID = paneID
-                liveWindowID = windowID
+                return .respawned(paneID: paneID, windowID: windowID)
             } catch {
                 // Leave the row hibernated so the next focus/menu retry can wake it.
                 logger.warning("wake: respawn-to-claude failed for terminal \(terminal.id, privacy: .public) window \(windowID, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                return .respawnFailed(reason: "failed to respawn claude in window \(windowID): \(error.localizedDescription)")
+                return .failed(.respawnFailed(reason: "failed to respawn claude in window \(windowID): \(error.localizedDescription)"))
             }
         } else {
             // The window is GONE — killed, the whole tmux server died (a
@@ -470,7 +551,7 @@ public actor HibernationCoordinator {
                     server: server,
                     session: "main",
                     cwd: worktree.path,
-                    shellCommand: spawn.command,
+                    shellCommand: spawnCommand,
                     env: env,
                     sensitiveEnv: sensitiveEnv,
                     cols: resolvedCols,
@@ -506,44 +587,16 @@ public actor HibernationCoordinator {
                     // was created fine; persisting the ids failed).
                     try? await tmux.killWindow(server: server, windowID: window.windowID)
                     logger.warning("wake: created window \(window.windowID, privacy: .public) but failed to persist tmux ids for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                    return .respawnFailed(reason: "recreated tmux window \(window.windowID), but persisting the new tmux ids failed: \(error.localizedDescription)")
+                    return .failed(.respawnFailed(reason: "recreated tmux window \(window.windowID), but persisting the new tmux ids failed: \(error.localizedDescription)"))
                 }
-                livePaneID = window.paneID
-                liveWindowID = window.windowID
                 logger.info("wake: window \(windowID, privacy: .public) was gone for terminal \(terminal.id, privacy: .public); recreated as \(window.windowID, privacy: .public) (pane \(window.paneID, privacy: .public))")
+                return .respawned(paneID: window.paneID, windowID: window.windowID)
             } catch {
                 // Leave the row hibernated so the next focus/menu retry can wake it.
                 logger.warning("wake: recreate-window failed for terminal \(terminal.id, privacy: .public) (old window \(windowID, privacy: .public)): \(error.localizedDescription, privacy: .public)")
-                return .respawnFailed(reason: "tmux window \(windowID) is gone and could not be recreated: \(error.localizedDescription)")
+                return .failed(.respawnFailed(reason: "tmux window \(windowID) is gone and could not be recreated: \(error.localizedDescription)"))
             }
         }
-
-        do {
-            try await db.terminals.clearHibernated(id: terminal.id)
-        } catch {
-            logger.warning("wake: failed to clear hibernated for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-        }
-        idleSince[terminal.id] = nil
-        // Carry the LIVE window/pane ids on the un-park broadcast so the app
-        // updates its cached row before (together with) the hibernated flip —
-        // otherwise the terminal view rebuilds keyed on the dead window and
-        // its failed attach re-parks the row (wake flap).
-        broadcastHibernation(
-            terminal: terminal, hibernated: false, keepWarm: terminal.keepWarm,
-            tmuxWindowID: liveWindowID, tmuxPaneID: livePaneID
-        )
-
-        // `claude --resume <id>` forks into a NEW session file; re-capture the
-        // fresh id so subsequent hibernate/wake reference the live session.
-        let termID = terminal.id
-        Task {
-            try? await Task.sleep(for: .seconds(5))
-            if let newID = await self.detector.captureSessionID(server: server, paneID: livePaneID) {
-                try? await self.db.terminals.updateSessionID(id: termID, sessionID: newID)
-            }
-        }
-        logger.info("woke terminal \(terminal.id, privacy: .public) (resume \(sessionID, privacy: .public))")
-        return .ok
     }
 
     // MARK: - Idle sweep (auto-hibernate)
@@ -697,6 +750,50 @@ public actor HibernationCoordinator {
     /// claim is necessarily the fresher one. Worktrees can share a per-repo
     /// server, so ownership is resolved across all worktrees with the same
     /// `tmuxServer` string, not just this terminal's worktree.
+    /// Run `body` while holding an exclusive async lock keyed by tmux server.
+    ///
+    /// Actors are reentrant across `await` points, and SocketServer dispatches
+    /// each RPC as its own Task (up to 8 in flight), so two concurrent wakes
+    /// for DIFFERENT terminals on the SAME server can interleave between the
+    /// ownership check, `windowExists`, and the respawn/create mutations —
+    /// e.g. terminal B's recreate mints a fresh post-reboot id equal to A's
+    /// stale one, then A's `windowExists` sees B's just-spawned window as
+    /// alive and the in-place respawn hijacks B's live session. A bare Set
+    /// could only REJECT a concurrent entrant; the FIFO waiter queue makes
+    /// this a true mutex that SERIALIZES them. Different servers never
+    /// serialize against each other.
+    ///
+    /// Release is structural (defer), so every path — success, error return,
+    /// or a throw out of `body` — unlocks. On release, ownership transfers to
+    /// the first waiter WITHOUT clearing `lockedServers`, so no third task can
+    /// barge in between resume and the waiter actually running.
+    ///
+    /// Package-internal (not `private`) so tests can drive the FIFO
+    /// mutual-exclusion semantics directly (mirrors `runExternalCommand`).
+    func withServerLock<T>(_ server: String, _ body: () async -> T) async -> T {
+        if lockedServers.contains(server) {
+            await withCheckedContinuation { continuation in
+                serverLockWaiters[server, default: []].append(continuation)
+            }
+            // Resumed by releaseServerLock: we now OWN the lock.
+        } else {
+            lockedServers.insert(server)
+        }
+        defer { releaseServerLock(server) }
+        return await body()
+    }
+
+    /// Hand the lock to the oldest waiter, or unlock if none are queued.
+    private func releaseServerLock(_ server: String) {
+        if var waiters = serverLockWaiters[server], !waiters.isEmpty {
+            let next = waiters.removeFirst()
+            serverLockWaiters[server] = waiters.isEmpty ? nil : waiters
+            next.resume() // lock ownership transfers; lockedServers stays set
+        } else {
+            lockedServers.remove(server)
+        }
+    }
+
     private func windowClaimedByAnotherTerminal(
         server: String, windowID: String, excluding terminalID: UUID
     ) async -> Bool {

@@ -413,6 +413,148 @@ struct HibernationCoordinatorTests {
                 "a non-colliding live window must not be recreated; got: \(joined)")
     }
 
+    // MARK: - Wake: cross-terminal serialization (per-server lock)
+    //
+    // Actors are reentrant across awaits and SocketServer runs RPCs
+    // concurrently, so two wakes for DIFFERENT terminals on the SAME server
+    // must be serialized by `withServerLock` — `wakesInFlight` only dedupes
+    // the same terminal. Both branches of the lock gate are covered: same
+    // server serializes (and loses no wake), different servers don't.
+
+    /// Two concurrent wakes, two parked terminals, SAME server, both windows
+    /// dead: both must succeed with DISTINCT fresh window ids and exactly two
+    /// new-window commands — no lost wake, no hijack, no deadlock.
+    @Test func concurrentWakesOnSameServerBothRecreateDistinctWindows() async throws {
+        let (db, wtID, terminalA) = try await setup()
+        try await db.terminals.setHibernated(id: terminalA, sessionID: "sess-1")
+        let terminalB = try await db.terminals.create(
+            worktreeID: wtID, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "claude", claudeSessionID: "sess-2", kind: .claude
+        )
+        try await db.terminals.setHibernated(id: terminalB.id, sessionID: "sess-2")
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorded.append($0) },
+            dryRunWindowIsDead: { _ in true }
+        )
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+
+        async let wakeA = coord.wake(terminalID: terminalA)
+        async let wakeB = coord.wake(terminalID: terminalB.id)
+        let (resultA, resultB) = await (wakeA, wakeB)
+        #expect(resultA == .ok)
+        #expect(resultB == .ok)
+
+        let afterA = try await db.terminals.get(id: terminalA)
+        let afterB = try await db.terminals.get(id: terminalB.id)
+        #expect(afterA?.isParked == false)
+        #expect(afterB?.isParked == false)
+        #expect(afterA?.tmuxWindowID.hasPrefix("@mock-") == true)
+        #expect(afterB?.tmuxWindowID.hasPrefix("@mock-") == true)
+        #expect(afterA?.tmuxWindowID != afterB?.tmuxWindowID,
+                "serialized wakes must mint DISTINCT windows; got \(String(describing: afterA?.tmuxWindowID)) and \(String(describing: afterB?.tmuxWindowID))")
+
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        let newWindowCount = joined.filter { $0.contains("new-window") }.count
+        #expect(newWindowCount == 2,
+                "expected exactly two new-window commands (one per wake); got \(newWindowCount) in: \(joined)")
+        #expect(!joined.contains { $0.contains("respawn-window") },
+                "dead windows must never be respawned into; got: \(joined)")
+    }
+
+    /// Two concurrent wakes on DIFFERENT servers: the per-server lock must
+    /// not serialize (or deadlock) across servers — both complete `.ok` and
+    /// each server saw its own new-window.
+    @Test func concurrentWakesOnDifferentServersDoNotSerialize() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(path: "/tmp/hib-repo", displayName: "test", defaultBranch: "main")
+        let wtA = try await db.worktrees.create(
+            repoID: repo.id, name: "wt-a", branch: "a",
+            path: "/tmp/hib-repo-a", tmuxServer: "tbd-hib-a"
+        )
+        let wtB = try await db.worktrees.create(
+            repoID: repo.id, name: "wt-b", branch: "b",
+            path: "/tmp/hib-repo-b", tmuxServer: "tbd-hib-b"
+        )
+        let terminalA = try await db.terminals.create(
+            worktreeID: wtA.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            label: "claude", claudeSessionID: "sess-1", kind: .claude
+        )
+        let terminalB = try await db.terminals.create(
+            worktreeID: wtB.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
+            label: "claude", claudeSessionID: "sess-2", kind: .claude
+        )
+        try await db.terminals.setHibernated(id: terminalA.id, sessionID: "sess-1")
+        try await db.terminals.setHibernated(id: terminalB.id, sessionID: "sess-2")
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorded.append($0) },
+            dryRunWindowIsDead: { _ in true }
+        )
+        let coord = HibernationCoordinator(db: db, tmux: tmux)
+
+        async let wakeA = coord.wake(terminalID: terminalA.id)
+        async let wakeB = coord.wake(terminalID: terminalB.id)
+        let (resultA, resultB) = await (wakeA, wakeB)
+        #expect(resultA == .ok, "different servers must not serialize/deadlock each other")
+        #expect(resultB == .ok, "different servers must not serialize/deadlock each other")
+
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(joined.contains { $0.contains("new-window") && $0.contains("-L tbd-hib-a") },
+                "server A must have recorded its own recreate; got: \(joined)")
+        #expect(joined.contains { $0.contains("new-window") && $0.contains("-L tbd-hib-b") },
+                "server B must have recorded its own recreate; got: \(joined)")
+    }
+
+    /// Focused lock-helper semantics: a second acquirer of the SAME key waits
+    /// until the holder releases; a DIFFERENT key proceeds immediately. Driven
+    /// by AsyncStream handshakes (no sleeps): A provably holds the lock, C
+    /// (other key) completes while A holds it, B (same key) only runs after A.
+    @Test func withServerLockSerializesSameKeyAndNotDifferentKeys() async throws {
+        let (db, _, _) = try await setup()
+        let coord = coordinator(db)
+        let events = RecordedTmuxCommands()
+        let (enteredStream, enteredCont) = AsyncStream.makeStream(of: Void.self)
+        let (releaseStream, releaseCont) = AsyncStream.makeStream(of: Void.self)
+
+        let taskA = Task {
+            await coord.withServerLock("s1") {
+                enteredCont.yield()
+                var it = releaseStream.makeAsyncIterator()
+                _ = await it.next()
+                events.append(["A-end"])
+            }
+        }
+        // Wait until A provably HOLDS the s1 lock.
+        var enteredIt = enteredStream.makeAsyncIterator()
+        _ = await enteredIt.next()
+
+        let taskB = Task {
+            await coord.withServerLock("s1") { events.append(["B-ran"]) }
+        }
+        let taskC = Task {
+            await coord.withServerLock("s2") { events.append(["C-ran"]) }
+        }
+        // A different key must proceed while s1 is held...
+        _ = await taskC.value
+        // ...and the same key must still be waiting.
+        #expect(!events.snapshot().contains(["B-ran"]),
+                "same-key acquirer must wait for the holder to release")
+
+        releaseCont.yield()
+        _ = await taskB.value
+        _ = await taskA.value
+        let snapshot = events.snapshot()
+        guard let aEnd = snapshot.firstIndex(of: ["A-end"]),
+              let bRan = snapshot.firstIndex(of: ["B-ran"]) else {
+            Issue.record("expected both A-end and B-ran to have run; got \(snapshot)")
+            return
+        }
+        #expect(aEnd < bRan, "B must only run after A releases; got \(snapshot)")
+    }
+
     /// Recreate FAILS (window dead + createWindow errors): result is
     /// `.respawnFailed` with a reason naming the dead window, the row STAYS
     /// parked for a later retry, and the tmux ids are unchanged.
