@@ -121,6 +121,10 @@ final class PaneFanout: @unchecked Sendable {
         var droppedEvents = 0
         var droppedBytes = 0
         var lastDropLog = Date.distantPast
+        /// Rate limiter for `route()`'s hard-write-error log, separate from
+        /// `lastDropLog` so a blast of overflow drops can't suppress the
+        /// hard-error diagnostic (or vice versa).
+        var lastWriteErrorLog = Date.distantPast
         /// Backpressure queue (Phase B M1): bytes the pipe could not accept
         /// yet, delivered IN ORDER by the async drain task. Bounded by
         /// `PaneFanout.queueCap`; scoped to this (key, generation) — a
@@ -678,8 +682,8 @@ final class PaneFanout: @unchecked Sendable {
                             let remainder = buf.count - offset
                             sink.droppedEvents += 1
                             sink.droppedBytes += remainder
-                            if Date().timeIntervalSince(sink.lastDropLog) > 1 {
-                                sink.lastDropLog = Date()
+                            if Date().timeIntervalSince(sink.lastWriteErrorLog) > 1 {
+                                sink.lastWriteErrorLog = Date()
                                 logger.error(
                                     "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) write errno=\(err) — dropped \(remainder) bytes")
                             }

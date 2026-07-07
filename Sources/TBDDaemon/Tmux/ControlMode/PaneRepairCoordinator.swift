@@ -195,6 +195,12 @@ actor PaneRepairCoordinator {
                     repair pipe broken (read end closed) for \(server, privacy: .public)/\(paneID, privacy: .public) \
                     gen=\(generation) — unpausing and aborting; the app-death detach path finishes the job
                     """)
+                // TOCTOU residual (accepted): the still-owner check and the
+                // continue send are not atomic — a successor can interpose
+                // between them, so this continue can land inside the
+                // successor's pause window in a vanishingly narrow race.
+                // Consequence: a torn capture that differentially self-heals,
+                // same class as the accepted pause-failure tear.
                 if await stillOwner(key, generation) {
                     await client.sendList([
                         TmuxCommand(text: continueCommand, tolerateErrors: true) { _ in }
@@ -213,7 +219,17 @@ actor PaneRepairCoordinator {
                 }
                 let interval = waited >= writableEscalationThreshold
                     ? writableSlowInterval : writableCheckInterval
-                try? await Task.sleep(for: interval)
+                // Cancellation bail (latent — the bridge's dispatch Tasks are
+                // never cancelled today): in a cancelled task `Task.sleep`
+                // throws immediately, which would turn this deadline-free
+                // wait into an unbounded busy-spin. Exit silently, like the
+                // superseded `nil` case above: send nothing — the sink stays
+                // `repairing`, and a later overflow signal or attach heals it.
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    return
+                }
             }
         }
 
