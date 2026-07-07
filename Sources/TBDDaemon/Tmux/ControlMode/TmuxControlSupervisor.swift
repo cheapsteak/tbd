@@ -199,8 +199,21 @@ actor TmuxControlSupervisor {
         serverName: String, connection: TmuxControlConnection
     ) async {
         guard await evictForTeardown(serverName: serverName, connection: connection) else { return }
-        stopConnection(connection)
+        await stopOffPool(connection)
         await finishTeardown(serverName: serverName)
+    }
+
+    /// Run one connection's blocking `stop()` on a GCD thread — NEVER on the
+    /// caller's task, which for `onFatalError`'s bare `Task {}` is a
+    /// cooperative-pool thread (R9-H1: the same fixed-width-executor hazard
+    /// R8-M2 fixed in `stopAll`, reachable here from any protocol violation).
+    private nonisolated func stopOffPool(_ connection: TmuxControlConnection) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                self.stopConnection(connection)
+                continuation.resume()
+            }
+        }
     }
 
     /// Post-`stop()` half of the teardown: the old tmux client process is
@@ -337,11 +350,25 @@ actor TmuxControlSupervisor {
         }
         // A stale drain from a superseded connection must not evict its
         // successor's entries — only clear the maps if we still own them.
-        if connections[serverName] === connection {
+        // Ownership also decides who stops the connection (R9-M1): on a
+        // NATURAL stream end (tmux server exited on its own) nothing else
+        // ever calls `stop()`, and the pty master fd is closed only inside
+        // it — every natural server death used to leak one fd for the life
+        // of the daemon. When we DON'T own the entry, a teardown/stopAll
+        // already evicted it and owns the stop (both paths and this cleanup
+        // run on this actor, so the handoff cannot race; `stop()` is
+        // idempotent regardless). No `stopping` mark needed here: the tmux
+        // process is already dead, so a racing successor cannot double-route
+        // output the way R6-M4's mid-SIGTERM window could.
+        let ownedAtStreamEnd = connections[serverName] === connection
+        if ownedAtStreamEnd {
             connections[serverName] = nil
             commandClients[serverName] = nil
         }
         await client.connectionClosed()  // fail any pending sends (this drain's client regardless of map ownership)
+        if ownedAtStreamEnd {
+            await stopOffPool(connection)  // release the pty fd (off-pool; blocking escalation)
+        }
         logger.info("tmux -CC event stream ended for \(serverName, privacy: .public)")
     }
 

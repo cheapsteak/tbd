@@ -219,6 +219,75 @@ struct TmuxControlSupervisorTeardownTests {
         stopGate.signal()  // pre-release the successor's stop
         await supervisor.stopAll()
     }
+
+    @Test("a fatal teardown's blocking stop runs OFF the cooperative pool (R9-H1)")
+    func fatalTeardownStopsOffCooperativePool() async throws {
+        let stub = try makeStubBinary()
+        defer { try? FileManager.default.removeItem(atPath: (stub as NSString).deletingLastPathComponent) }
+
+        // Record the dispatch queue the stop seam runs on. `onFatalError`
+        // fires the teardown from a bare `Task {}` — pre-fix the seam ran on
+        // Swift concurrency's fixed-width cooperative executor (queue label
+        // contains "cooperative"), where a blocked stop() starves every task
+        // in the daemon. Post-fix it must run on a GCD global queue.
+        let labelBox = TextBox()
+        let stopSeen = EventCounter()
+        let supervisor = TmuxControlSupervisor(
+            makeConnection: { TmuxControlConnection(serverName: $0, tmuxBinary: stub) },
+            stopConnection: { connection in
+                labelBox.set(String(cString: __dispatch_queue_get_label(nil)))
+                stopSeen.increment()
+                connection.stop()
+            })
+
+        await supervisor.ensureConnection(serverName: "srv-pool")
+        let client = try #require(await supervisor.command(server: "srv-pool"))
+        await client.handle(.commandSucceeded(number: 1, fromClient: true, lines: []))
+
+        #expect(await waitUntil({ stopSeen.count >= 1 }, timeout: .seconds(15)),
+                "fatal teardown never reached stop()")
+        let label = labelBox.get() ?? ""
+        #expect(!label.contains("cooperative"),
+                "blocking stop() ran on the cooperative pool (queue: \(label))")
+        await supervisor.stopAll()
+    }
+
+    @Test("a naturally-ended -CC stream still gets stop(): the pty fd is not leaked (R9-M1)")
+    func naturalStreamEndStopsTheConnection() async throws {
+        // Stub exits ON ITS OWN almost immediately: the event stream ends
+        // naturally (no fatal teardown, no stopAll). Pre-fix nothing ever
+        // called stop() on this path, leaking the pty master fd — it is
+        // closed only inside stop().
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-natural-stub-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stub = dir.appendingPathComponent("stub-tmux.sh").path
+        try "#!/bin/sh\nexec sleep 0.1\n".write(toFile: stub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stub)
+        defer { try? FileManager.default.removeItem(atPath: dir.path) }
+
+        let stopSeen = EventCounter()
+        let supervisor = TmuxControlSupervisor(
+            makeConnection: { TmuxControlConnection(serverName: $0, tmuxBinary: stub) },
+            stopConnection: { connection in
+                stopSeen.increment()
+                connection.stop()
+            })
+
+        await supervisor.ensureConnection(serverName: "srv-natural")
+        #expect(await waitUntil({ stopSeen.count == 1 }, timeout: .seconds(15)),
+                "natural stream end must stop() the connection to release its pty fd")
+        // The map entry is gone too (drain owned it at stream end).
+        #expect(await supervisor.command(server: "srv-natural") == nil)
+    }
+}
+
+/// Lock-boxed single string for cross-thread capture in seams.
+private final class TextBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String?
+    func set(_ newValue: String) { lock.lock(); value = newValue; lock.unlock() }
+    func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
 }
 
 /// Minimal thread-safe counter for cross-thread test signals.
