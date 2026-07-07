@@ -593,6 +593,23 @@ final class AppState: ObservableObject {
     /// Published so the Settings control-mode toggle re-renders after
     /// `setControlModeEnabled` refreshes it.
     @Published var daemonCapabilities: DaemonCapabilitiesResult?
+    /// How `refreshDaemonCapabilities()` fetches — injectable because
+    /// `DaemonClient` is concrete (no protocol), so state-level tests stub the
+    /// RPC here. Production default asks the daemon; nil result = fetch failed.
+    lazy var daemonCapabilitiesFetcher: @MainActor () async -> DaemonCapabilitiesResult? =
+        { [daemonClient] in try? await daemonClient.daemonCapabilities() }
+
+    /// Best-effort re-fetch of `daemonCapabilities` (R7-minor). Used by the
+    /// `.modelProfilesChanged` delta handler so a control-mode toggle from
+    /// ANOTHER client propagates here without waiting for a reconnect. Keeps
+    /// the last known value on failure: the delta fires for many config
+    /// changes, and a transient RPC hiccup must not nil out good capabilities
+    /// (new panes would silently fall back to grouped sessions).
+    func refreshDaemonCapabilities() async {
+        if let capabilities = await daemonCapabilitiesFetcher() {
+            daemonCapabilities = capabilities
+        }
+    }
     lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     lazy var legacyHooksCoordinator = LegacyHooksCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
     private var pollTimer: Timer?
@@ -887,6 +904,12 @@ final class AppState: ObservableObject {
             Task { [weak self] in
                 await self?.loadModelProfiles()
                 await self?.loadHibernationConfig()
+                // The daemon reuses this delta for config changes including
+                // the control-mode toggle (handleConfigSetControlMode), so
+                // refresh capabilities too — a toggle from ANOTHER client
+                // must reach this one without waiting for a reconnect
+                // (R7-minor). Best-effort: failure keeps the last value.
+                await self?.refreshDaemonCapabilities()
             }
         case .terminalSessionUpdated(let d):
             applyTerminalSessionDelta(d)
