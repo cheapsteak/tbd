@@ -55,6 +55,45 @@ struct ControlModeStreamReaderTests {
         Darwin.close(writeFD)
         try await Task.sleep(for: .milliseconds(200))
     }
+
+    @Test("registry removal is generation-scoped: a stale remove cannot stop a successor's reader (R10-4)")
+    func registryRemoveIsGenerationScoped() async throws {
+        var fds: [Int32] = [-1, -1]
+        try fds.withUnsafeMutableBufferPointer { buf in
+            _ = pipe(buf.baseAddress)
+        }
+        let writeFD = fds[1]
+
+        let registry = ControlModeReaderRegistry()
+        let fresh = await registry.registerReader(
+            routingKey: "wt/%1", fd: fds[0], generation: 2) { _ in }
+
+        // A stale cleanup (attach generation 1) lands after the fresh
+        // registration: it must NOT stop or forget the successor.
+        await registry.remove(routingKey: "wt/%1", generation: 1)
+        let survivor = await registry.reader(for: "wt/%1")
+        #expect(survivor === fresh, "stale remove stopped the successor's reader")
+
+        // The matching generation removes; a repeat is a no-op.
+        await registry.remove(routingKey: "wt/%1", generation: 2)
+        #expect(await registry.reader(for: "wt/%1") == nil)
+        await registry.remove(routingKey: "wt/%1", generation: 2)
+
+        // Generation-less registrations cannot be discriminated: any remove
+        // clears them (back-compat with attaches that vended no generation).
+        var fds2: [Int32] = [-1, -1]
+        try fds2.withUnsafeMutableBufferPointer { buf in
+            _ = pipe(buf.baseAddress)
+        }
+        let writeFD2 = fds2[1]
+        await registry.registerReader(routingKey: "wt/%2", fd: fds2[0]) { _ in }
+        await registry.remove(routingKey: "wt/%2", generation: 7)
+        #expect(await registry.reader(for: "wt/%2") == nil)
+
+        Darwin.close(writeFD)
+        Darwin.close(writeFD2)
+        try await Task.sleep(for: .milliseconds(200))
+    }
 }
 
 private actor ChunkInbox {

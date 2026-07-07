@@ -613,7 +613,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     try? await appState.daemonClient.paneDetach(
                         worktreeID: attach.worktreeID, paneID: attach.paneID,
                         generation: attach.generation)
-                    await appState.controlModeReaders.remove(routingKey: attach.routingKey)
+                    await appState.controlModeReaders.remove(
+                        routingKey: attach.routingKey, generation: attach.generation)
                 }
             }
         }
@@ -657,7 +658,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 controlModeAttach = (worktreeID, paneID, windowID, routingKey, generation)
                 let weakTV = WeakTerminalRef(terminalView)
                 await appState.controlModeReaders.registerReader(
-                    routingKey: routingKey, fd: fd) { chunk in
+                    routingKey: routingKey, fd: fd, generation: generation) { chunk in
                         let bytes = [UInt8](chunk)
                         DispatchQueue.main.async {
                             weakTV.view?.feed(byteArray: bytes[...])
@@ -809,7 +810,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Task {
                     try? await appState.daemonClient.paneDetach(
                         worktreeID: worktreeID, paneID: paneID, generation: failedGeneration)
-                    await appState.controlModeReaders.remove(routingKey: routingKey)
+                    await appState.controlModeReaders.remove(
+                        routingKey: routingKey, generation: failedGeneration)
                 }
                 await startTmuxClient(
                     terminalView: terminalView,
@@ -855,7 +857,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 try? await appState.daemonClient.paneDetach(
                     worktreeID: worktreeID, paneID: paneID, generation: generation)
                 if undo.removeReader {
-                    await appState.controlModeReaders.remove(routingKey: routingKey)
+                    await appState.controlModeReaders.remove(
+                        routingKey: routingKey, generation: generation)
                 }
             }
         }
