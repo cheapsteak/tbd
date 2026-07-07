@@ -227,7 +227,9 @@ struct WakePathGuardTests {
 
         let result = await router.hibernationCoordinator.wake(terminalID: terminal.id)
 
-        #expect(result == .notFound)
+        // Dedicated case carrying the missing path — the RPC layer surfaces it
+        // as an actionable message instead of a generic "Terminal not found".
+        #expect(result == .worktreeMissing(path: missingPath))
         // Row stays parked so a later retry (after the path is restored) works.
         #expect(try await db.terminals.get(id: terminal.id)?.hibernatedAt != nil)
     }
@@ -264,6 +266,76 @@ struct WakePathGuardTests {
         #expect(try String(
             contentsOf: derived.appendingPathComponent("sess-1.jsonl"), encoding: .utf8)
             == "parked transcript")
+    }
+}
+
+/// Wiring test for the `terminal.create` resume path: the handler must call
+/// `ensureSessionResumable` with the resumed session's STORED transcript path
+/// (from the sibling terminal row that owns the session) and the worktree's
+/// CURRENT path, so a wrong-argument regression can't stay green.
+@Suite("terminal.create pre-resume sync wiring")
+struct TerminalCreateResumeSyncWiringTests {
+    private func isolate() -> (URL, () -> Void) {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-create-resume-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        setenv("TBD_HOME", home.path, 1)
+        setenv("TBD_CLAUDE_HOST_HOME", home.appendingPathComponent("claude-host").path, 1)
+        return (home, {
+            unsetenv("TBD_HOME")
+            unsetenv("TBD_CLAUDE_HOST_HOME")
+            try? FileManager.default.removeItem(at: home)
+        })
+    }
+
+    @Test func terminalCreateResumeSyncsStoredTranscriptIntoDerivedDir() async throws {
+        let (home, cleanup) = isolate(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            configDirManager: ClaudeProfileConfigDirManager(
+                baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
+                hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)
+            )
+        )
+
+        let wtDir = home.appendingPathComponent("wt", isDirectory: true)
+        try FileManager.default.createDirectory(at: wtDir, withIntermediateDirectories: true)
+        let wt = try await db.worktrees.createScratch(
+            name: "wt", displayName: "wt", path: wtDir.path, tmuxServer: "tbd-test")
+
+        // Sibling terminal owns the session; its stored transcript lives under
+        // an OLD slug (as after a promote/move).
+        let sibling = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "claude", claudeSessionID: "sess-w", kind: .claude)
+        let ambientRoot = home.appendingPathComponent("claude-host/projects", isDirectory: true)
+        let oldSlugFile = ambientRoot.appendingPathComponent("-old-slug/sess-w.jsonl")
+        try FileManager.default.createDirectory(
+            at: oldSlugFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "moved transcript".write(to: oldSlugFile, atomically: true, encoding: .utf8)
+        try await db.terminals.updateSession(
+            id: sibling.id, sessionID: "sess-w", transcriptPath: oldSlugFile.path)
+        ClaudeProjectDirectory.clearCache()
+
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: wt.id, resumeSessionID: "sess-w")))
+        #expect(resp.success)
+
+        // The stored transcript was mirrored into the dir derived from the
+        // worktree's CURRENT path, where the cwd-scoped resume will look.
+        let derived = TranscriptProjectDirSync.derivedProjectDir(
+            worktreePath: wtDir.path, projectsRoot: ambientRoot)
+        #expect(try String(
+            contentsOf: derived.appendingPathComponent("sess-w.jsonl"), encoding: .utf8)
+            == "moved transcript")
+        // Live-session invariant: the sibling's stored path was NOT rewritten.
+        #expect(try await db.terminals.get(id: sibling.id)?.transcriptPath == oldSlugFile.path)
     }
 }
 

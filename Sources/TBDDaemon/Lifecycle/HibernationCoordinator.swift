@@ -21,6 +21,10 @@ public enum WakeResult: Equatable, Sendable {
     /// so a later retry can wake it; `reason` names the real failure instead
     /// of the misleading "Terminal not found".
     case respawnFailed(reason: String)
+    /// The worktree row exists but its directory is gone from disk — respawn
+    /// would silently land in $HOME. Carries the missing path so callers can
+    /// surface an actionable message instead of a generic "not found".
+    case worktreeMissing(path: String)
 }
 
 /// Owns session PARKING — the single unified "park a Claude session" feature
@@ -351,11 +355,9 @@ public actor HibernationCoordinator {
         // back to $HOME, and the resumed claude would neither find its session
         // (resume is cwd-scoped) nor belong to this worktree. Leave the row
         // parked so a retry after the path is restored can still wake it.
-        // (WakeResult's consumers switch exhaustively outside this change's
-        // scope, so reuse .notFound rather than adding a dedicated case.)
         guard FileManager.default.fileExists(atPath: worktree.path) else {
             logger.error("wake: worktree path missing on disk for terminal \(terminal.id, privacy: .public): \(worktree.path, privacy: .public) — refusing respawn (would fall back to $HOME)")
-            return .notFound
+            return .worktreeMissing(path: worktree.path)
         }
 
         wakesInFlight.insert(terminalID)
@@ -407,8 +409,10 @@ public actor HibernationCoordinator {
         // project dir; the cwd-scoped `claude --resume` below only checks the
         // dir derived from the CURRENT path. Mirror the jsonl (+ subagents)
         // there first — copy-if-newer, best-effort, never rewrites the row's
-        // transcriptPath.
-        TranscriptProjectDirSync.ensureSessionResumable(
+        // transcriptPath. Detached variant: the recursive copy must not run on
+        // this actor's serial executor; the await still completes before the
+        // respawn below.
+        await TranscriptProjectDirSync.ensureSessionResumableDetached(
             sessionID: sessionID,
             worktreePath: worktree.path,
             projectsRoot: TranscriptProjectDirSync.projectsRoot(

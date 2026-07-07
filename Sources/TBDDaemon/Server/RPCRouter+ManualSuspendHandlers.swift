@@ -52,6 +52,8 @@ extension RPCRouter {
             // The terminal row exists — the tmux respawn/recreate failed.
             // Surface the real failure, never "Terminal not found".
             return RPCResponse(error: reason)
+        case .worktreeMissing(let path):
+            return RPCResponse(error: "Worktree directory missing on disk: \(path). Restore the directory (or relocate the repo), then retry — the session stays parked and resumable.")
         }
     }
 

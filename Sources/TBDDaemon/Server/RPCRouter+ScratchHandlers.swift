@@ -84,10 +84,10 @@ extension RPCRouter {
         try await closeScratchTerminals(wt)
 
         // Move the folder to Trash — never rm -rf. Promoted rows already had
-        // their folder moved by promotion, so skip when promotedToRepoID != nil.
-        // (promotedToRepoID is nil for every row today — Task 8 introduces
-        // `scratch promote`, which will start setting it — so this branch is
-        // currently dead but load-bearing once promotion lands.)
+        // their folder moved by promotion (handleScratchPromote sets
+        // promotedToRepoID when it retires the row), so skip the trash for
+        // them: `wt.path` now names the promoted repo's location and trashing
+        // it would delete the user's real repo.
         if wt.promotedToRepoID == nil, FileManager.default.fileExists(atPath: wt.path) {
             var resulting: NSURL?
             do {
@@ -217,8 +217,6 @@ extension RPCRouter {
                 return RPCResponse(error: "Failed to register \(dest) as a repo: \(error.localizedDescription). The folder could NOT be moved back to \(wt.path) (\(moveBackError.localizedDescription)) — it currently still lives at \(dest); the scratch row was not marked promoted.")
             }
         }
-        try await db.worktrees.setPromotedToRepoID(id: wt.id, repoID: repo.id)
-
         // ---- Metadata migration (DB rows + project-dir snapshot only) ----
         // The promote RPC is typically issued BY a live Claude session running
         // in one of this scratch space's panes; the folder move above is a
@@ -231,17 +229,28 @@ extension RPCRouter {
         // guard only — addRepo unconditionally calls createMain, so the else
         // branch is unreachable short of DB corruption.
         if let mainWorktree = try await db.worktrees.list(repoID: repo.id, status: .main).first {
-            // Live panes live on the scratch tmux server — carry it over so
-            // they stay reachable from the new main worktree row. (Cosmetic
-            // that it's the shared scratch server; connectivity is what matters.)
-            try await db.worktrees.updateTmuxServer(id: mainWorktree.id, tmuxServer: wt.tmuxServer)
-            try await db.terminals.reparentTerminals(from: wt.id, to: mainWorktree.id)
-            try await db.worktrees.migrateTabState(from: wt.id, to: mainWorktree.id)
-            migrateClaudeProjectDirs(oldPath: wt.path, newPath: repo.path, terminals: migratedTerminals)
-
-            // Retire the scratch row: archived + promotedToRepoID (set above),
-            // so nothing can resolve its stale path as active again.
-            try await db.worktrees.archive(id: wt.id)
+            // ALL row mutations in ONE transaction (terminals re-parented, tab
+            // state migrated, main worktree inheriting the scratch tmux server
+            // so the live panes stay reachable, scratch row retired with its
+            // promotion pointer). A mid-sequence failure rolls everything back
+            // — the scratch row stays un-promoted and retryable, and no
+            // half-migrated state can leave `scratch.delete` free to tmux-kill
+            // live un-reparented terminals.
+            do {
+                try await db.worktrees.promoteScratchMigration(
+                    scratchID: wt.id,
+                    mainWorktreeID: mainWorktree.id,
+                    repoID: repo.id,
+                    tmuxServer: wt.tmuxServer
+                )
+            } catch {
+                scratchLogger.error("scratch.promote: row migration failed for \(wt.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return RPCResponse(error: "Registered \(dest) as a repo, but migrating the scratch space's sessions failed: \(error.localizedDescription). The scratch row and its terminals were left unchanged — live sessions keep running under the scratch space; the repo at \(dest) is registered and usable.")
+            }
+            // File copies stay OUTSIDE the transaction: idempotent
+            // copy-if-newer snapshots, safe to redo and useless to roll back.
+            await migrateClaudeProjectDirs(
+                oldPath: wt.path, newPath: repo.path, terminals: migratedTerminals)
 
             // .repoAdded was already broadcast by addRepo. Announce the moved
             // terminals under their new worktree, then the scratch row's exit
@@ -252,6 +261,11 @@ extension RPCRouter {
             }
             subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: wt.id)))
         } else {
+            // Set the promotion pointer even though nothing migrated: the
+            // folder DID move and the repo IS registered, so the row must not
+            // be promotable again (and scratch.delete must not trash the
+            // moved folder).
+            try await db.worktrees.setPromotedToRepoID(id: wt.id, repoID: repo.id)
             scratchLogger.error("scratch.promote: no main worktree found for repo \(repo.id, privacy: .public) — terminals left on scratch row \(wt.id, privacy: .public)")
         }
 
@@ -269,7 +283,9 @@ extension RPCRouter {
     /// the conversations. Best-effort by design: live sessions keep appending
     /// to their old transcript files, and the lazy Stop-hook / pre-resume sync
     /// converges anything written after this snapshot.
-    private func migrateClaudeProjectDirs(oldPath: String, newPath: String, terminals: [Terminal]) {
+    private func migrateClaudeProjectDirs(
+        oldPath: String, newPath: String, terminals: [Terminal]
+    ) async {
         var roots: [URL] = []
         var seen = Set<String>()
         func addRoot(_ url: URL) {
@@ -282,13 +298,18 @@ extension RPCRouter {
             addRoot(configDirManager.configDirectory(forProfileID: profileID)
                 .appendingPathComponent("projects", isDirectory: true))
         }
-        for root in roots {
-            guard let oldDir = ClaudeProjectDirectory.resolve(
-                worktreePath: oldPath, projectsBase: root) else { continue }
-            let newDir = TranscriptProjectDirSync.derivedProjectDir(
-                worktreePath: newPath, projectsRoot: root)
-            TranscriptProjectDirSync.syncDirectoryContents(from: oldDir, to: newDir)
-            scratchLogger.info("scratch.promote: snapshotted Claude project dir \(oldDir.path, privacy: .public) -> \(newDir.path, privacy: .public)")
-        }
+        // Detached: both the resolve (content scans) and the recursive copy
+        // are synchronous filesystem walks that must not block this handler's
+        // executor; the await preserves ordering for the caller.
+        await Task.detached {
+            for root in roots {
+                guard let oldDir = ClaudeProjectDirectory.resolve(
+                    worktreePath: oldPath, projectsBase: root) else { continue }
+                let newDir = TranscriptProjectDirSync.derivedProjectDir(
+                    worktreePath: newPath, projectsRoot: root)
+                TranscriptProjectDirSync.syncDirectoryContents(from: oldDir, to: newDir)
+                scratchLogger.info("scratch.promote: snapshotted Claude project dir \(oldDir.path, privacy: .public) -> \(newDir.path, privacy: .public)")
+            }
+        }.value
     }
 }

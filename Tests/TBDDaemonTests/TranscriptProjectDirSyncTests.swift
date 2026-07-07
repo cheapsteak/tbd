@@ -204,6 +204,53 @@ struct TranscriptProjectDirSyncTests {
         #expect(contents(derived.appendingPathComponent("sess-1.jsonl")) == "newer derived")
     }
 
+    // MARK: - locateSessionTranscript
+
+    @Test func locateSessionTranscriptFindsNewestCopyAcrossProjectDirs() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let root = dir.appendingPathComponent("projects", isDirectory: true)
+        try write("stale copy", to: root.appendingPathComponent("-old-slug-a/sess-1.jsonl"),
+                  mtime: Date(timeIntervalSinceNow: -600))
+        try write("fresh copy", to: root.appendingPathComponent("-old-slug-b/sess-1.jsonl"),
+                  mtime: Date())
+        try write("other session", to: root.appendingPathComponent("-old-slug-b/sess-2.jsonl"))
+
+        let located = TranscriptProjectDirSync.locateSessionTranscript(
+            sessionID: "sess-1", projectsRoot: root)
+        #expect(contents(try #require(located)) == "fresh copy")
+    }
+
+    @Test func locateSessionTranscriptReturnsNilWhenSessionAbsent() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let root = dir.appendingPathComponent("projects", isDirectory: true)
+        try write("other session", to: root.appendingPathComponent("-slug/sess-2.jsonl"))
+
+        #expect(TranscriptProjectDirSync.locateSessionTranscript(
+            sessionID: "sess-1", projectsRoot: root) == nil)
+    }
+
+    /// The moved-while-archived revive case: no terminal row survived to
+    /// store a transcript path, and the OLD munged dir doesn't resolve from
+    /// the worktree's CURRENT path — the by-session-ID scan must still find
+    /// and mirror the transcript.
+    @Test func ensureSessionResumableFallsBackToByIDScanWithoutStoredPath() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let root = dir.appendingPathComponent("projects", isDirectory: true)
+        let worktreePath = dir.appendingPathComponent("wt-new-location").path
+        try write("archived transcript", to: root.appendingPathComponent("-old-slug/sess-1.jsonl"))
+
+        TranscriptProjectDirSync.ensureSessionResumable(
+            sessionID: "sess-1", worktreePath: worktreePath,
+            projectsRoot: root, storedTranscriptPath: nil)
+
+        let derived = TranscriptProjectDirSync.derivedProjectDir(
+            worktreePath: worktreePath, projectsRoot: root)
+        #expect(contents(derived.appendingPathComponent("sess-1.jsonl")) == "archived transcript")
+    }
+
     @Test func ensureSessionResumableNoopsWithoutAnySource() throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

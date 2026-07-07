@@ -72,6 +72,20 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
         }
 
+        // Never parent a new terminal to an archived worktree row — its tmux
+        // state is torn down and nothing will ever show the tab. The promoted
+        // scratch case gets a pointer to where the sessions actually went.
+        // This early check gives a clear RPC error; the authoritative,
+        // race-proof guard lives inside `db.terminals.create` (same write
+        // transaction as the row insert), closing the window where a promote
+        // archives the row between this check and the insert below.
+        if worktree.status == .archived {
+            if let promotedRepoID = worktree.promotedToRepoID {
+                return RPCResponse(error: "This scratch space was promoted to a repo (\(promotedRepoID)). Its sessions moved to that repo's main worktree — create the terminal there instead.")
+            }
+            return RPCResponse(error: "Worktree is archived: \(worktree.displayName). Revive it before creating terminals.")
+        }
+
         // Never spawn into a missing directory: tmux's `-c` silently falls
         // back to $HOME when the cwd doesn't exist, producing a terminal that
         // looks alive but runs in the wrong place (classic after a stale
@@ -266,12 +280,13 @@ extension RPCRouter {
         // Pre-resume freshness: `claude --resume` only looks in the project
         // dir derived from the CURRENT cwd. If this session's transcript lives
         // elsewhere (worktree moved/promoted since it was written), mirror it
-        // into the derived dir first (copy-if-newer; best-effort). The stored
+        // into the derived dir first (copy-if-newer; best-effort; detached so
+        // the recursive copy never blocks this handler's executor). The stored
         // path, when a sibling terminal row owns this session, is authoritative.
         if let resumeID = params.resumeSessionID {
             let storedTranscriptPath = (try? await db.terminals.list(worktreeID: params.worktreeID))?
                 .first(where: { $0.claudeSessionID == resumeID })?.transcriptPath
-            TranscriptProjectDirSync.ensureSessionResumable(
+            await TranscriptProjectDirSync.ensureSessionResumableDetached(
                 sessionID: resumeID,
                 worktreePath: worktree.path,
                 projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
@@ -1001,8 +1016,9 @@ extension RPCRouter {
             // cwd slug. If the worktree's path changed since the transcript
             // was written (scratch promotion), the resumed claude — cwd-scoped
             // — looks in the dir derived from the CURRENT path instead. Make
-            // sure the session is fresh there too (copy-if-newer, best-effort).
-            TranscriptProjectDirSync.ensureSessionResumable(
+            // sure the session is fresh there too (copy-if-newer, best-effort,
+            // detached off this handler's executor).
+            await TranscriptProjectDirSync.ensureSessionResumableDetached(
                 sessionID: sessionID,
                 worktreePath: worktree.path,
                 projectsRoot: destConfigDir.appendingPathComponent("projects", isDirectory: true),
@@ -1699,7 +1715,8 @@ extension RPCRouter {
                 .resolvingSymlinksInPath().standardizedFileURL.path
             let derivedReal = derivedDir.resolvingSymlinksInPath().standardizedFileURL.path
             if sourceDirReal != derivedReal {
-                TranscriptProjectDirSync.syncSession(jsonl: source, intoProjectDir: derivedDir)
+                await TranscriptProjectDirSync.syncSessionDetached(
+                    jsonl: source, intoProjectDir: derivedDir)
             }
         }
 

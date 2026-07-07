@@ -95,6 +95,19 @@ public struct TerminalStore: Sendable {
     /// the tmux window is spawned (so it can be injected as `TBD_TERMINAL_ID`
     /// in the spawned env, used by the SessionStart hook bridge) can pre-mint
     /// a UUID and pass it here. Defaults to a fresh UUID otherwise.
+    ///
+    /// Refuses (throws) when the parent worktree row is a PROMOTED scratch
+    /// row (archived + `promotedToRepoID`) — re-validated inside the same
+    /// write transaction as the insert, so a concurrent `scratch.promote`
+    /// (which retires the row atomically with its terminal migration) can
+    /// never race a new terminal row onto it. Such an orphan row would
+    /// parent a live session to a retired worktree whose sessions moved —
+    /// the SessionStart-hook foreign-session class. Plain archived rows are
+    /// NOT rejected here: the revive flow legitimately spawns terminals
+    /// while the row is still `.archived` (it flips `.active`/`.creating`
+    /// only after the spawn succeeds, for crash consistency); the RPC
+    /// handler rejects user-driven creates on archived rows before spawn.
+    /// Promoted rows have no such flow — they are never revived.
     public func create(
         id: UUID = UUID(),
         worktreeID: UUID,
@@ -117,6 +130,11 @@ public struct TerminalStore: Sendable {
         )
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
+            if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),
+               worktree.status == WorktreeStatus.archived.rawValue,
+               worktree.promotedToRepoID != nil {
+                throw DatabaseError(message: "Worktree \(worktreeID) was promoted to a repo; create the terminal on that repo's main worktree instead")
+            }
             try record.insert(db)
         }
         return terminal

@@ -134,16 +134,47 @@ enum TranscriptProjectDirSync {
         syncDirectoryContents(from: sourceSubagents, to: destSubagents)
     }
 
+    /// Locate `<sessionID>.jsonl` anywhere under `projectsRoot` — one shallow
+    /// pass over the munged project directories, `fileExists` per dir. Session
+    /// IDs are UUIDs, so any hit IS this session; when copy-if-newer snapshots
+    /// have left multiple copies, the newest mtime wins. Used as the last
+    /// resort by `ensureSessionResumable` when neither the stored transcript
+    /// path nor the current path's resolved project dir has the file — the
+    /// moved-while-archived case, where the transcript still sits under a slug
+    /// derived from a path that no longer exists.
+    static func locateSessionTranscript(sessionID: String, projectsRoot: URL) -> URL? {
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(
+            at: projectsRoot, includingPropertiesForKeys: [.isDirectoryKey]) else { return nil }
+        var best: (url: URL, mtime: Date)?
+        for dir in dirs {
+            let values = try? dir.resourceValues(forKeys: [.isDirectoryKey])
+            guard values?.isDirectory == true else { continue }
+            let candidate = dir.appendingPathComponent("\(sessionID).jsonl")
+            guard fm.fileExists(atPath: candidate.path) else { continue }
+            let mtime = modificationDate(candidate.path) ?? .distantPast
+            if best == nil || mtime > best!.mtime {
+                best = (candidate, mtime)
+            }
+        }
+        return best?.url
+    }
+
     /// Before a daemon-driven `claude --resume <sessionID>` spawn with cwd
     /// `worktreePath`: ensure `<derived-project-dir>/<sessionID>.jsonl` exists
     /// and is at least as fresh as the best-known source transcript; sync
     /// (copy-if-newer) when it's missing or stale.
     ///
-    /// The source is the stored `terminal.transcriptPath` when it still exists
-    /// on disk; otherwise the session file inside the project dir
-    /// `ClaudeProjectDirectory.resolve` finds for the same path (which, when it
-    /// IS the derived dir, makes this a no-op). With no source at all this is a
-    /// no-op — the resume simply starts fresh, exactly as before.
+    /// Source resolution, in order:
+    /// 1. the stored `terminal.transcriptPath`, when it still exists on disk;
+    /// 2. the session file inside the project dir `ClaudeProjectDirectory
+    ///    .resolve` finds for the same path (which, when it IS the derived
+    ///    dir, makes this a no-op);
+    /// 3. a shallow by-session-ID scan across all of `projectsRoot`'s project
+    ///    dirs (`locateSessionTranscript`) — covers archived sessions whose
+    ///    worktree moved while no terminal row survived to store the path.
+    /// With no source at all this is a no-op — the resume simply starts fresh,
+    /// exactly as before.
     static func ensureSessionResumable(
         sessionID: String,
         worktreePath: String,
@@ -153,18 +184,59 @@ enum TranscriptProjectDirSync {
         let fm = FileManager.default
         let destDir = derivedProjectDir(worktreePath: worktreePath, projectsRoot: projectsRoot)
 
-        let source: URL?
+        var source: URL?
         if let path = storedTranscriptPath, !path.isEmpty, fm.fileExists(atPath: path) {
             source = URL(fileURLWithPath: path)
         } else if let resolved = ClaudeProjectDirectory.resolve(
             worktreePath: worktreePath, projectsBase: projectsRoot
-        ) {
-            let candidate = resolved.appendingPathComponent("\(sessionID).jsonl")
-            source = fm.fileExists(atPath: candidate.path) ? candidate : nil
+        ), fm.fileExists(atPath: resolved.appendingPathComponent("\(sessionID).jsonl").path) {
+            source = resolved.appendingPathComponent("\(sessionID).jsonl")
         } else {
-            source = nil
+            source = locateSessionTranscript(sessionID: sessionID, projectsRoot: projectsRoot)
         }
         guard let source else { return }
         syncSession(jsonl: source, intoProjectDir: destDir)
+    }
+
+    // MARK: - Off-executor variants
+
+    /// The synchronous entry points above do unbounded recursive filesystem
+    /// work. Callers running on an actor's serial executor (e.g.
+    /// `HibernationCoordinator.wake`) or inside RPC handler tasks must not
+    /// block their executor on that walk — this repo has shipped two
+    /// hang-class regressions from exactly this pattern. These wrappers hop
+    /// to a detached task; awaiting them preserves per-call ordering (the
+    /// sync completes before the dependent spawn) without monopolizing the
+    /// caller's executor.
+    static func ensureSessionResumableDetached(
+        sessionID: String,
+        worktreePath: String,
+        projectsRoot: URL,
+        storedTranscriptPath: String?
+    ) async {
+        await Task.detached {
+            ensureSessionResumable(
+                sessionID: sessionID,
+                worktreePath: worktreePath,
+                projectsRoot: projectsRoot,
+                storedTranscriptPath: storedTranscriptPath
+            )
+        }.value
+    }
+
+    /// Detached-task variant of `syncDirectoryContents` — see
+    /// `ensureSessionResumableDetached`.
+    static func syncDirectoryContentsDetached(from sourceDir: URL, to destDir: URL) async {
+        await Task.detached {
+            syncDirectoryContents(from: sourceDir, to: destDir)
+        }.value
+    }
+
+    /// Detached-task variant of `syncSession` — see
+    /// `ensureSessionResumableDetached`.
+    static func syncSessionDetached(jsonl source: URL, intoProjectDir destProjectDir: URL) async {
+        await Task.detached {
+            syncSession(jsonl: source, intoProjectDir: destProjectDir)
+        }.value
     }
 }

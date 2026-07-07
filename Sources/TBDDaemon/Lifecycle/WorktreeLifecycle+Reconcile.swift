@@ -131,9 +131,22 @@ extension WorktreeLifecycle {
         let correctTmuxServer = TmuxManager.serverName(forRepoPath: repo.path)
         var dbWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
 
-        // Fix stale tmux server names (e.g. after migration from UUID-based to path-based naming)
+        // Fix stale tmux server names (e.g. after migration from UUID-based to
+        // path-based naming). CAUTION: a non-canonical stored server is NOT
+        // automatically stale — a promoted scratch space's main worktree
+        // deliberately inherits the scratch tmux server its live sessions run
+        // on. Rewriting such a row would orphan those live windows: the next
+        // pass below probes the (empty) canonical server, concludes every
+        // window is dead, and parks/deletes terminals that are actually alive.
+        // So: canonicalize ONLY when the stored server has no live window for
+        // this worktree's terminals — the genuinely-stale case the self-heal
+        // was built for.
         let mainWorktrees = try await db.worktrees.list(repoID: repoID, status: .main)
         for wt in (dbWorktrees + mainWorktrees) where wt.tmuxServer != correctTmuxServer {
+            if await hasLiveWindow(server: wt.tmuxServer, worktreeID: wt.id) {
+                logger.info("reconcile: keeping non-canonical tmux server \(wt.tmuxServer, privacy: .public) for worktree \(wt.id, privacy: .public) — it has live windows (promoted-scratch inheritance)")
+                continue
+            }
             do {
                 try await db.worktrees.updateTmuxServer(id: wt.id, tmuxServer: correctTmuxServer)
             } catch {
@@ -223,8 +236,20 @@ extension WorktreeLifecycle {
         // Lazy recreate-on-demand keeps idle worktrees as cheap suspended rows.
         let allLiveWorktrees = try await db.worktrees.list(repoID: repoID, status: .active)
             + (try await db.worktrees.list(repoID: repoID, status: .main))
-        let serverAlive = await tmux.serverExists(server: correctTmuxServer)
+        // Probe the server each worktree row actually STORES, not the
+        // canonical name: after a scratch promote the main worktree's windows
+        // live on the inherited scratch server, and probing the canonical
+        // (empty) server would declare every live window dead. Cached per
+        // server name — rows overwhelmingly share one server.
+        var serverAliveByName: [String: Bool] = [:]
         for wt in allLiveWorktrees {
+            let serverAlive: Bool
+            if let cached = serverAliveByName[wt.tmuxServer] {
+                serverAlive = cached
+            } else {
+                serverAlive = await tmux.serverExists(server: wt.tmuxServer)
+                serverAliveByName[wt.tmuxServer] = serverAlive
+            }
             let terminals = try await db.terminals.list(worktreeID: wt.id)
             for terminal in terminals where terminal.suspendedAt == nil {
                 // After a reboot the server is gone, so every window is dead;
@@ -318,5 +343,21 @@ extension WorktreeLifecycle {
                 repoID: repo.id, path: repo.path, displayName: repo.displayName
             )))
         }
+    }
+
+    /// True when `server` is up AND hosts a live tmux window for at least one
+    /// of `worktreeID`'s terminal rows. Used by the stale-server self-heal to
+    /// distinguish a genuinely dead/renamed server (safe to canonicalize)
+    /// from a deliberately inherited one whose sessions are still running
+    /// (promoted scratch space). Early-exits on the first live window.
+    private func hasLiveWindow(server: String, worktreeID: UUID) async -> Bool {
+        guard await tmux.serverExists(server: server) else { return false }
+        let terminals = (try? await db.terminals.list(worktreeID: worktreeID)) ?? []
+        for terminal in terminals {
+            if await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID) {
+                return true
+            }
+        }
+        return false
     }
 }
