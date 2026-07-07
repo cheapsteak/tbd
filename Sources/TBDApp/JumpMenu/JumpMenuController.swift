@@ -43,16 +43,7 @@ final class JumpMenuController {
         // Snapshot all worktrees + unread + recents at open time. Mutations
         // arriving while the panel is visible don't affect the displayed
         // list — that's the design's "snapshot semantics" rule.
-        let snapshots = appState.worktrees.values
-            .flatMap { $0 }
-            .map { wt -> JumpMenuWorktreeSnapshot in
-                let repoName = appState.repos.first { $0.id == wt.repoID }?.displayName ?? "?"
-                return JumpMenuWorktreeSnapshot(
-                    id: wt.id,
-                    displayName: wt.displayName,
-                    repoName: repoName
-                )
-            }
+        let snapshots = Self.worktreeSnapshots(appState: appState)
 
         let vm = JumpMenuViewModel(
             worktrees: snapshots,
@@ -117,12 +108,28 @@ final class JumpMenuController {
         viewModel = nil
     }
 
+    /// Snapshot every live worktree for the jump menu: the repo-grouped dict
+    /// flattened, plus repo-less scratch spaces (which live only in
+    /// `scratchWorktrees` and would otherwise never be reachable via Cmd-K).
+    /// Scratch rows carry the Scratch section's label as their repo label.
+    static func worktreeSnapshots(appState: AppState) -> [JumpMenuWorktreeSnapshot] {
+        appState.allWorktrees.map { wt in
+            let repoName = appState.repos.first { $0.id == wt.repoID }?.displayName
+                ?? (wt.isScratch ? AppState.scratchSectionLabel : "?")
+            return JumpMenuWorktreeSnapshot(
+                id: wt.id,
+                displayName: wt.displayName,
+                repoName: repoName
+            )
+        }
+    }
+
     private func submit(_ row: JumpMenuRow) {
         guard let appState else { return }
-        // Filter against the live worktree map — the snapshot may be stale
-        // if a worktree was deleted while the panel was open.
-        let liveIDs = Set(appState.worktrees.values.flatMap { $0 }.map(\.id))
-        guard liveIDs.contains(row.id) else {
+        // Filter against live state — the snapshot may be stale if a worktree
+        // was deleted while the panel was open. findWorktree is scratch-aware,
+        // so a scratch row from the snapshot isn't rejected as stale here.
+        guard appState.findWorktree(id: row.id) != nil else {
             logger.debug("Submit on stale worktree id \(row.id, privacy: .public) — closing without jumping")
             close()
             return

@@ -208,6 +208,12 @@ final class AppState: ObservableObject {
     /// list.
     var archivedLookupOverride: ((UUID) async -> [Worktree])?
 
+    /// Test seam: when set, replaces the daemon rename RPC in
+    /// `renameWorktree(id:displayName:)`. Production code leaves this nil;
+    /// tests assign a closure to observe the RPC path (or throw from it to
+    /// exercise the rollback branch) without a live daemon.
+    var renameRPCOverride: (@MainActor (UUID, String) async throws -> Void)?
+
     /// True once `connectAndLoadInitialState()` has finished its initial
     /// `refreshAll()` and the worktree list is populated. Used by
     /// `navigateToWorktree(_:)` to detect cold-start clicks that arrive
@@ -242,7 +248,7 @@ final class AppState: ObservableObject {
     /// The first selected worktree, if any.
     var selectedWorktree: Worktree? {
         guard let id = selectedWorktreeIDs.first else { return nil }
-        return worktrees.values.flatMap { $0 }.first { $0.id == id }
+        return findWorktree(id: id)
     }
 
     /// All pinned terminals across all worktrees, sorted by pinnedAt.
@@ -1197,14 +1203,21 @@ final class AppState: ObservableObject {
         macNotificationManager.postIfEnabled(
             worktreeID: notification.worktreeID,
             message: notification.message,
-            worktrees: allWorktrees,
+            // Resolve the name here (scratch-aware) instead of handing over
+            // the whole materialized allWorktrees array for one lookup.
+            worktreeName: findWorktree(id: notification.worktreeID)?.displayName,
             type: notification.type,
             terminalID: notification.terminalID
         )
     }
 
-    private var allWorktrees: [Worktree] {
-        worktrees.values.flatMap { $0 }
+    /// Every worktree the app knows about: the repo-grouped dict flattened,
+    /// plus repo-less scratch spaces (which live only in `scratchWorktrees`).
+    /// Use this instead of re-flattening `worktrees.values` whenever a lookup
+    /// must also resolve scratch spaces (e.g. notification banner titles,
+    /// startup selection restore).
+    var allWorktrees: [Worktree] {
+        worktrees.values.flatMap { $0 } + scratchWorktrees
     }
 
     /// Runs `body` only if no poll cycle is currently in flight. Returns true if
@@ -1301,19 +1314,14 @@ final class AppState: ObservableObject {
             await refreshAll()
             // Restore persisted selection before notifying the daemon — the RPC
             // below captures `selectedWorktreeIDs` so the daemon learns the real
-            // selection from the previous session.
-            let allWorktreeIDs = worktrees.values.flatMap { $0 }.map(\.id)
-            restoreSavedSelection(validWorktreeIDs: allWorktreeIDs)
+            // selection from the previous session. `allWorktrees` includes
+            // scratch spaces (populated by refreshAll() above), so a persisted
+            // scratch selection survives relaunch instead of being filtered out.
+            restoreSavedSelection(validWorktreeIDs: allWorktrees.map(\.id))
             // Expand any repo whose worktree is now selected but was collapsed,
             // so the restored row is visible in the sidebar.
             for id in selectedWorktreeIDs {
-                if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
-                   let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
-                   let repoID = worktree.repoID,
-                   !repos[repoIdx].expanded {
-                    repos[repoIdx].expanded = true
-                    Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
-                }
+                expandRepoContaining(worktreeID: id)
             }
             await loadModelProfiles()
             await loadHibernationConfig()
@@ -1833,14 +1841,16 @@ final class AppState: ObservableObject {
     /// Pure target-selection for the pre-sleep suspend hook. Returns the
     /// worktree IDs to best-effort suspend before the machine sleeps:
     /// `[]` when auto-suspend is disabled, otherwise every worktree ID
-    /// (flattened across repos). No I/O — trivially unit-testable for both
-    /// gate branches without a live daemon.
+    /// (flattened across repos, plus repo-less scratch spaces — the daemon's
+    /// suspend handler is worktree-kind agnostic). No I/O — trivially
+    /// unit-testable for both gate branches without a live daemon.
     static func worktreeIDsToSuspendForSleep(
         worktrees: [UUID: [Worktree]],
+        scratchWorktrees: [Worktree],
         autoSuspendEnabled: Bool
     ) -> [UUID] {
         guard autoSuspendEnabled else { return [] }
-        return worktrees.values.flatMap { $0 }.map(\.id)
+        return worktrees.values.flatMap { $0 }.map(\.id) + scratchWorktrees.map(\.id)
     }
 
     /// Best-effort suspend of idle Claude terminals across all worktrees when
@@ -1865,6 +1875,7 @@ final class AppState: ObservableObject {
         let enabled = Self.autoSuspendClaudeEnabled(defaults: defaults)
         let ids = Self.worktreeIDsToSuspendForSleep(
             worktrees: worktrees,
+            scratchWorktrees: scratchWorktrees,
             autoSuspendEnabled: enabled
         )
         guard !ids.isEmpty else {

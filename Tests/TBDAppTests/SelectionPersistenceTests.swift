@@ -140,6 +140,33 @@ struct SelectionPersistenceTests {
         }
     }
 
+    @Test("persisted scratch-only selection survives relaunch via allWorktrees")
+    func restoreScratchOnlySelection() {
+        withIsolatedDefaults { defaults in
+            let scratchID = UUID()
+            writeSavedSelection([scratchID], to: defaults)
+
+            let state = AppState(userDefaults: defaults)
+            // Scratch spaces live only in `scratchWorktrees`, never the
+            // repo-grouped dict. connectAndLoadInitialState builds its valid-ID
+            // list from `allWorktrees`, exercised here as the same seam.
+            state.scratchWorktrees = [Worktree(
+                id: scratchID,
+                repoID: nil,
+                name: "scratch-1",
+                displayName: "Scratch 1",
+                branch: "main",
+                path: "/tmp/scratch-1",
+                tmuxServer: "tmux-\(scratchID.uuidString)"
+            )]
+
+            state.restoreSavedSelection(validWorktreeIDs: state.allWorktrees.map(\.id))
+
+            #expect(state.selectedWorktreeIDs == [scratchID])
+            #expect(state.selectionOrder == [scratchID])
+        }
+    }
+
     @Test("restoreSavedSelection is no-op when all saved IDs are stale")
     func restoreNoOpWhenAllStale() {
         withIsolatedDefaults { defaults in

@@ -15,7 +15,8 @@ extension AppState {
     ///
     /// - Exactly one worktree selected → that worktree's ID.
     /// - Multiple selected → the selected worktree whose UUID string sorts
-    ///   first alphabetically among those that still exist in `worktrees`.
+    ///   first alphabetically among those that still exist in `worktrees` or
+    ///   `scratchWorktrees` (scratch spaces live only in the latter).
     ///   Returns `nil` when none of the selected IDs exist (all stale).
     /// - No worktree selected but `selectedRepoID` set → the repo ID (the repo
     ///   header row is tagged with repo.id so scrolling to it works).
@@ -23,13 +24,16 @@ extension AppState {
     nonisolated static func sidebarRevealTarget(
         selectedWorktreeIDs: Set<UUID>,
         worktrees: [UUID: [Worktree]],
+        scratchWorktrees: [Worktree],
         selectedRepoID: UUID?
     ) -> UUID? {
         if selectedWorktreeIDs.count == 1 {
             return selectedWorktreeIDs.first
         } else if selectedWorktreeIDs.count > 1 {
             // Sort by uuidString for a stable, deterministic pick.
-            let allWorktreeIDs = Set(worktrees.values.flatMap { $0 }.map(\.id))
+            let allWorktreeIDs = Set(
+                worktrees.values.flatMap { $0 }.map(\.id) + scratchWorktrees.map(\.id)
+            )
             let candidates = selectedWorktreeIDs.filter { allWorktreeIDs.contains($0) }
             return candidates.min(by: { $0.uuidString < $1.uuidString })
         } else if let repoID = selectedRepoID {
@@ -47,19 +51,31 @@ extension AppState {
         guard let target = Self.sidebarRevealTarget(
             selectedWorktreeIDs: selectedWorktreeIDs,
             worktrees: worktrees,
+            scratchWorktrees: scratchWorktrees,
             selectedRepoID: selectedRepoID
         ) else { return }
 
-        // If the target is a worktree, expand its containing repo before scrolling.
-        if let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == target }),
-           let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
-           let repoID = worktree.repoID,
-           !repos[repoIdx].expanded {
-            repos[repoIdx].expanded = true
-            Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
-        }
+        // If the target is a worktree, expand its containing repo before
+        // scrolling (a repo-ID target matches no worktree row, so this no-ops).
+        expandRepoContaining(worktreeID: target)
 
         pendingScrollToWorktreeID = target
+    }
+
+    /// Expand the repo containing `worktreeID` (if collapsed) so its row is
+    /// part of the rendered sidebar list. Updates local state synchronously
+    /// (List rerender + scroll), persists via RPC fire-and-forget. No-op for
+    /// unknown IDs. Intentionally repo-scoped (dict-only, not `findWorktree`):
+    /// scratch spaces have no repo row to expand.
+    @MainActor
+    func expandRepoContaining(worktreeID: UUID) {
+        guard let worktree = worktrees.values.flatMap({ $0 }).first(where: { $0.id == worktreeID }),
+              let repoIdx = repos.firstIndex(where: { $0.id == worktree.repoID }),
+              let repoID = worktree.repoID,
+              !repos[repoIdx].expanded
+        else { return }
+        repos[repoIdx].expanded = true
+        Task { try? await daemonClient.setRepoExpanded(id: repoID, expanded: true) }
     }
 }
 
@@ -151,9 +167,18 @@ extension AppState {
         step: Int,
         excluding archivedID: UUID? = nil
     ) -> Int? {
+        // Built ONCE per walk and threaded through isUsableEntry — rebuilding
+        // it per entry made every selection change O(entries × worktrees).
+        // allWorktrees includes scratch spaces, so back/forward can land on a
+        // live scratch selection instead of skipping it as stale.
+        let existingWorktreeIDs = Set(allWorktrees.map(\.id))
         var index = start
         while index >= 0 && index < navigationEntries.count {
-            if isUsableEntry(navigationEntries[index], excluding: archivedID) { return index }
+            if isUsableEntry(
+                navigationEntries[index],
+                excluding: archivedID,
+                existingWorktreeIDs: existingWorktreeIDs
+            ) { return index }
             index += step
         }
         return nil
@@ -161,15 +186,19 @@ extension AppState {
 
     /// Whether a history entry is still a valid landing spot: worktree entries
     /// must not reference `archivedID` (when given) and every referenced
-    /// worktree must still exist; repo entries must reference a repo we still
+    /// worktree must still exist in `existingWorktreeIDs` (built once per walk
+    /// by `usableEntryIndex`); repo entries must reference a repo we still
     /// know about.
-    private func isUsableEntry(_ entry: NavigationEntry, excluding archivedID: UUID? = nil) -> Bool {
+    private func isUsableEntry(
+        _ entry: NavigationEntry,
+        excluding archivedID: UUID? = nil,
+        existingWorktreeIDs: Set<UUID>
+    ) -> Bool {
         switch entry {
         case .worktrees(let ids):
             guard !ids.isEmpty else { return false }
             if let archivedID, ids.contains(archivedID) { return false }
-            let existing = Set(worktrees.values.flatMap { $0 }.map(\.id))
-            return ids.allSatisfy { existing.contains($0) }
+            return ids.allSatisfy { existingWorktreeIDs.contains($0) }
         case .repo(let id):
             return repos.contains { $0.id == id }
         }

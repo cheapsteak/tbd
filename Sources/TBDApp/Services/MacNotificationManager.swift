@@ -78,13 +78,14 @@ final class MacNotificationManager: NSObject, UNUserNotificationCenterDelegate {
         enabled && isAvailable && !mockActive
     }
 
-    func postIfEnabled(worktreeID: UUID, message: String?, worktrees: [Worktree],
+    /// `worktreeName` is the caller-resolved display name (nil when the
+    /// worktree is unknown — the banner falls back to the raw UUID string).
+    func postIfEnabled(worktreeID: UUID, message: String?, worktreeName: String?,
                        type: NotificationType, terminalID: UUID? = nil) {
         guard Self.shouldPost(enabled: enabled, isAvailable: isAvailable, mockActive: MockMode.isActive()) else { return }
         requestPermissionIfNeeded()
 
-        let worktreeName = worktrees.first(where: { $0.id == worktreeID })?.displayName
-            ?? worktreeID.uuidString
+        let worktreeName = worktreeName ?? worktreeID.uuidString
 
         let truncatedMessage = Self.bannerBody(message: message, type: type)
 

@@ -104,16 +104,13 @@ private struct PinnedTerminalCell: View {
     let terminal: Terminal
     @EnvironmentObject var appState: AppState
 
-    private var worktree: Worktree? {
-        for wts in appState.worktrees.values {
-            if let wt = wts.first(where: { $0.id == terminal.worktreeID }) {
-                return wt
-            }
-        }
-        return nil
-    }
-
     var body: some View {
+        // Bind ONCE per render — findWorktree is a linear scan, and both the
+        // header and the terminal content read it. Must stay on findWorktree:
+        // scratch spaces live only in `scratchWorktrees`, never the
+        // repo-grouped dict, so a dict-only lookup leaves scratch pins stuck
+        // on "Loading..." forever.
+        let worktree = appState.findWorktree(id: terminal.worktreeID)
         VStack(spacing: 0) {
             // Header: pin icon + worktree name
             HStack(spacing: 4) {

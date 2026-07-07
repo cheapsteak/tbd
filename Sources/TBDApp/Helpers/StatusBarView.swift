@@ -8,11 +8,11 @@ struct StatusBarView: View {
     /// Transient "Copied" feedback shown after the left label copies a path.
     @State private var didCopy = false
 
-    private var selectedWorktreeInfo: (path: String, repoID: UUID?)? {
-        guard appState.selectedWorktreeIDs.count == 1,
-              let id = appState.selectedWorktreeIDs.first,
-              let worktree = appState.worktrees.values.flatMap({ $0 }).first(where: { $0.id == id }),
-              !worktree.path.isEmpty else { return nil }
+    /// Path + repo of the resolved single-selected worktree (nil when it has
+    /// no path yet). The caller resolves the selection once per body
+    /// evaluation and passes it in, so this never re-runs `findWorktree`.
+    private static func selectedWorktreeInfo(_ worktree: Worktree?) -> (path: String, repoID: UUID?)? {
+        guard let worktree, !worktree.path.isEmpty else { return nil }
         return (worktree.path, worktree.repoID)
     }
 
@@ -56,13 +56,17 @@ struct StatusBarView: View {
     /// Compute the left-side focus label for the status bar.
     ///
     /// - Single worktree selected: `"<repo name> / <worktree displayName>"`,
-    ///   or just `<worktree displayName>` when the repo lookup fails.
+    ///   or just `<worktree displayName>` when the repo lookup fails (or the
+    ///   worktree is a repo-less scratch space). The caller pre-resolves the
+    ///   selection via `AppState.findWorktree(id:)` — the scratch-aware
+    ///   lookup — and passes it as `selectedWorktree` (same seam
+    ///   `selectedWorktreeInfo` uses); `nil` means the lookup failed.
     /// - Multiple worktrees selected: `"<N> worktrees"`.
     /// - Repo selected, no worktree: the repo's `displayName`.
     /// - Nothing selected: `nil` (renders nothing on the left side).
     nonisolated static func focusLabel(
         selectedWorktreeIDs: Set<UUID>,
-        worktrees: [UUID: [Worktree]],
+        selectedWorktree: Worktree?,
         repos: [Repo],
         selectedRepoID: UUID?
     ) -> String? {
@@ -71,9 +75,8 @@ struct StatusBarView: View {
             guard let repoID = selectedRepoID,
                   let repo = repos.first(where: { $0.id == repoID }) else { return nil }
             return repo.displayName
-        } else if count == 1, let id = selectedWorktreeIDs.first {
-            let allWorktrees = worktrees.values.flatMap { $0 }
-            guard let wt = allWorktrees.first(where: { $0.id == id }) else { return nil }
+        } else if count == 1 {
+            guard let wt = selectedWorktree else { return nil }
             if let repo = repos.first(where: { $0.id == wt.repoID }) {
                 return "\(repo.displayName) / \(wt.displayName)"
             }
@@ -112,14 +115,21 @@ struct StatusBarView: View {
     }
 
     var body: some View {
+        // Resolve the single-selected worktree ONCE per body evaluation —
+        // focusLabel and both selectedWorktreeInfo consumers share it, instead
+        // of each re-running findWorktree per render.
+        let selected = appState.selectedWorktreeIDs.count == 1
+            ? appState.selectedWorktreeIDs.first.flatMap { appState.findWorktree(id: $0) }
+            : nil
+        let selectedInfo = Self.selectedWorktreeInfo(selected)
         HStack {
             if let label = Self.focusLabel(
                 selectedWorktreeIDs: appState.selectedWorktreeIDs,
-                worktrees: appState.worktrees,
+                selectedWorktree: selected,
                 repos: appState.repos,
                 selectedRepoID: appState.selectedRepoID
             ) {
-                let behavior = Self.leftLabelBehavior(selectedWorktreePath: selectedWorktreeInfo?.path)
+                let behavior = Self.leftLabelBehavior(selectedWorktreePath: selectedInfo?.path)
                 switch behavior {
                 case .copyPath(let path):
                     Button(action: { copyPath(path) }) {
@@ -138,7 +148,7 @@ struct StatusBarView: View {
                 }
             }
             Spacer()
-            if let info = selectedWorktreeInfo {
+            if let info = selectedInfo {
                 OpenInEditorButton(path: info.path, repoID: info.repoID)
             }
             let footer = footerLabel

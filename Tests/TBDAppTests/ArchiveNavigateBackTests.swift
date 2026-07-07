@@ -282,6 +282,31 @@ struct ArchiveNavigateBackTests {
         }
     }
 
+    // MARK: - navigateBack treats live scratch spaces as usable entries
+
+    @Test func navigateBack_landsOnLiveScratchEntry() {
+        withState { state in
+            let repoID = UUID()
+            let scratch = UUID()
+            let b = UUID()
+            state.worktrees = [repoID: [makeWorktree(id: b, repoID: repoID)]]
+            // Scratch spaces live only in `scratchWorktrees`; entry validation
+            // must include them or cmd+[ skips live scratch selections.
+            var scratchWT = makeWorktree(id: scratch, repoID: repoID)
+            scratchWT.repoID = nil
+            state.scratchWorktrees = [scratchWT]
+
+            // History: [scratch], [B].
+            state.selectedWorktreeIDs = [scratch]
+            state.selectedWorktreeIDs = [b]
+
+            state.navigateBack()
+
+            #expect(state.selectedWorktreeIDs == [scratch])
+            #expect(state.selectionOrder == [scratch])
+        }
+    }
+
     // MARK: - navigateForward skips stale entries
 
     @Test func navigateForward_skipsStaleEntries() {
