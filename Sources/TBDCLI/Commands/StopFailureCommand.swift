@@ -21,7 +21,7 @@ struct StopFailureCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let stdin = FileHandle.standardInput.readDataToEndOfFile()
-        let outcome = StopFailureMessage.computeOutcome(
+        let outcome = StopFailureMessage.computeOutcomeWithRetry(
             stdinData: stdin,
             readFile: { path in try? Data(contentsOf: URL(fileURLWithPath: path)) }
         )
@@ -70,11 +70,44 @@ enum StopFailureMessage {
     }
 
     /// Pure detection + message construction; every branch unit-testable.
+    ///
+    /// Zero-retry entry point onto `computeOutcomeWithRetry` — with
+    /// `maxRetries: 0` the retry loop body never executes and `waiter` is
+    /// never invoked, so this stays synchronous and fast (no sleeping),
+    /// giving byte-identical behavior to the pre-retry implementation for
+    /// every existing caller/test, while still picking up the payload-key
+    /// fix and payload-first detection (both pure, no retries needed).
     static func computeOutcome(
         stdinData: Data,
         readFile: (String) -> Data?,
         now: Date = Date(),
         timeZone: TimeZone = .current
+    ) -> Outcome {
+        computeOutcomeWithRetry(
+            stdinData: stdinData,
+            readFile: readFile,
+            now: now,
+            timeZone: timeZone,
+            maxRetries: 0
+        )
+    }
+
+    /// Full detection with a bounded retry backstop for the transcript-append
+    /// race: Claude Code's StopFailure hook fires ~0.28-0.5s before the
+    /// API-error record lands in the transcript JSONL, so a single read can
+    /// miss it. Order:
+    /// 1. Payload-first (race-free, no file I/O): `last_assistant_message`
+    ///    then `error_details`, whichever first yields a hard-limit hit.
+    /// 2. Transcript read, retried up to `maxRetries` times (`retryInterval`
+    ///    apart) until `RateLimitDetection.hasApiErrorRecord` sees a record.
+    static func computeOutcomeWithRetry(
+        stdinData: Data,
+        readFile: (String) -> Data?,
+        now: Date = Date(),
+        timeZone: TimeZone = .current,
+        waiter: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        maxRetries: Int = 6,
+        retryInterval: TimeInterval = 0.25
     ) -> Outcome {
         guard
             let payload = try? JSONSerialization.jsonObject(with: stdinData) as? [String: Any]
@@ -82,13 +115,30 @@ enum StopFailureMessage {
             return Outcome(message: nil, detectedLimit: nil)
         }
 
-        let errorType = (payload["error_type"] as? String) ?? "unknown"
+        let errorType = (payload["error"] as? String) ?? (payload["error_type"] as? String) ?? "unknown"
         let fallback = "Claude stopped: API error (\(errorType))"
 
-        guard
-            let transcriptPath = payload["transcript_path"] as? String,
-            let data = readFile(transcriptPath)
-        else {
+        // Payload-first: race-free, never touches the transcript file.
+        for key in ["last_assistant_message", "error_details"] {
+            if let candidate = payload[key] as? String,
+               let detected = RateLimitDetection.detect(messageText: candidate, now: now, timeZone: timeZone) {
+                return Outcome(message: detected.rawMessage, detectedLimit: detected)
+            }
+        }
+
+        guard let transcriptPath = payload["transcript_path"] as? String else {
+            return Outcome(message: fallback, detectedLimit: nil)
+        }
+
+        var data = readFile(transcriptPath)
+        var attempts = 0
+        while attempts < maxRetries && !(data.map(RateLimitDetection.hasApiErrorRecord(in:)) ?? false) {
+            waiter(retryInterval)
+            attempts += 1
+            data = readFile(transcriptPath)
+        }
+
+        guard let data else {
             return Outcome(message: fallback, detectedLimit: nil)
         }
 

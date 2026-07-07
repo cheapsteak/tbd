@@ -62,16 +62,29 @@ public enum RateLimitDetection {
         }
 
         // 2. Text fallback.
-        guard !text.isEmpty,
-              !isTransientMessage(text),
-              isHardLimitMessage(text),
-              let resetsAt = parseResetTime(from: text, now: now, defaultTimeZone: timeZone)
-        else { return nil }
+        return detect(messageText: text, now: now, timeZone: timeZone)
+    }
 
+    /// Text-only discrimination + parse — the single shared implementation
+    /// used both by the transcript-scanning entry point above (step 2, text
+    /// fallback) and directly by callers that already have a candidate
+    /// message string in hand (e.g. the CLI's payload-first race-avoidance
+    /// path, which checks `last_assistant_message` / `error_details` before
+    /// the transcript record has necessarily landed on disk).
+    public static func detect(
+        messageText: String,
+        now: Date,
+        timeZone: TimeZone
+    ) -> DetectedRateLimit? {
+        guard !messageText.isEmpty,
+              !isTransientMessage(messageText),
+              isHardLimitMessage(messageText),
+              let resetsAt = parseResetTime(from: messageText, now: now, defaultTimeZone: timeZone)
+        else { return nil }
         return DetectedRateLimit(
             resetsAt: resetsAt,
-            limitType: qualifier(in: text) ?? "unknown",
-            rawMessage: text
+            limitType: qualifier(in: messageText) ?? "unknown",
+            rawMessage: messageText
         )
     }
 
@@ -216,6 +229,15 @@ public enum RateLimitDetection {
             return (text: text, rateLimitInfo: obj["rate_limit_info"] as? [String: Any])
         }
         return nil
+    }
+
+    /// True when the transcript JSONL contains at least one
+    /// `isApiErrorMessage == true` record. Used by the CLI's StopFailure
+    /// retry loop to decide whether a transcript read is "good enough" yet —
+    /// Claude Code's hook fires 0.28-0.5s before this record is appended, so
+    /// a first read often predates it.
+    public static func hasApiErrorRecord(in data: Data) -> Bool {
+        lastApiErrorEntry(in: data) != nil
     }
 
     /// True when the newest timestamped transcript record is newer than

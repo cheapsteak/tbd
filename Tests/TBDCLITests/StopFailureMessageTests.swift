@@ -21,6 +21,29 @@ struct StopFailureMessageTests {
         return try! JSONSerialization.data(withJSONObject: obj)
     }
 
+    /// Build stdin using the real StopFailure hook's `error` key (not the
+    /// legacy `error_type` this test file's other helper uses), optionally
+    /// with `last_assistant_message` / `error_details` for payload-first
+    /// detection tests.
+    private static func stdinWithExtras(
+        error: String? = nil,
+        transcriptPath: String? = nil,
+        lastAssistantMessage: String? = nil,
+        errorDetails: String? = nil
+    ) -> Data {
+        var obj: [String: Any] = ["hook_event_name": "StopFailure"]
+        if let error { obj["error"] = error }
+        if let transcriptPath { obj["transcript_path"] = transcriptPath }
+        if let lastAssistantMessage { obj["last_assistant_message"] = lastAssistantMessage }
+        if let errorDetails { obj["error_details"] = errorDetails }
+        return try! JSONSerialization.data(withJSONObject: obj)
+    }
+
+    /// Simple call-counting box for closures captured in synchronous test bodies.
+    private final class CallCounter {
+        var count = 0
+    }
+
     @Test func sessionLimitReturnsVerbatimText() {
         let text = "You've hit your session limit · resets 3pm (America/Toronto)"
         let result = StopFailureMessage.compute(
@@ -109,6 +132,94 @@ struct StopFailureMessageTests {
     @Test func missingTranscriptHasFallbackMessageNoDetection() {
         let outcome = StopFailureMessage.computeOutcome(
             stdinData: Self.stdin(errorType: "rate_limit", transcriptPath: "/missing.jsonl"),
+            readFile: { _ in nil },
+            now: Date(), timeZone: TimeZone(identifier: "UTC")!)
+        #expect(outcome.message == "Claude stopped: API error (rate_limit)")
+        #expect(outcome.detectedLimit == nil)
+    }
+
+    // MARK: - Payload-first detection (race-free, no transcript read)
+
+    @Test func payloadFirstViaLastAssistantMessageSkipsTranscriptRead() {
+        let text = "You've hit your session limit · resets 3pm (UTC)"
+        let counter = CallCounter()
+        let outcome = StopFailureMessage.computeOutcomeWithRetry(
+            stdinData: Self.stdinWithExtras(
+                error: "rate_limit",
+                transcriptPath: "/irrelevant.jsonl",
+                lastAssistantMessage: text),
+            readFile: { (_: String) -> Data? in counter.count += 1; return nil },
+            now: Date(timeIntervalSince1970: 1_783_173_600),
+            timeZone: TimeZone(identifier: "UTC")!)
+        #expect(counter.count == 0)
+        #expect(outcome.message == text)
+        #expect(outcome.detectedLimit != nil)
+        #expect(outcome.detectedLimit!.rawMessage == text)
+    }
+
+    @Test func payloadFirstViaErrorDetailsSkipsTranscriptRead() {
+        let text = "You've hit your session limit · resets 3pm (UTC)"
+        let counter = CallCounter()
+        let outcome = StopFailureMessage.computeOutcomeWithRetry(
+            stdinData: Self.stdinWithExtras(
+                error: "rate_limit",
+                transcriptPath: "/irrelevant.jsonl",
+                lastAssistantMessage: "just a plain non-matching message",
+                errorDetails: text),
+            readFile: { (_: String) -> Data? in counter.count += 1; return nil },
+            now: Date(timeIntervalSince1970: 1_783_173_600),
+            timeZone: TimeZone(identifier: "UTC")!)
+        #expect(counter.count == 0)
+        #expect(outcome.message == text)
+        #expect(outcome.detectedLimit != nil)
+        #expect(outcome.detectedLimit!.rawMessage == text)
+    }
+
+    // MARK: - Retry backstop (transcript-append race)
+
+    @Test func retryCatchesLateArrivingApiErrorRecord() {
+        let text = "You've hit your session limit · resets 3pm (UTC)"
+        let staleData = Data((#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"# + "\n").utf8)
+        let readyData = Self.transcript(text: text)
+        let counter = CallCounter()
+        let outcome = StopFailureMessage.computeOutcomeWithRetry(
+            stdinData: Self.stdinWithExtras(error: "rate_limit", transcriptPath: "/x.jsonl"),
+            readFile: { _ in
+                counter.count += 1
+                return counter.count < 3 ? staleData : readyData
+            },
+            now: Date(timeIntervalSince1970: 1_783_173_600),
+            timeZone: TimeZone(identifier: "UTC")!,
+            waiter: { _ in },
+            maxRetries: 6,
+            retryInterval: 0.001)
+        #expect(counter.count == 3)
+        #expect(outcome.message == text)
+        #expect(outcome.detectedLimit != nil)
+        #expect(outcome.detectedLimit!.rawMessage == text)
+    }
+
+    @Test func retryExhaustionFallsBackToLegacyMessage() {
+        let staleData = Data((#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}"# + "\n").utf8)
+        let counter = CallCounter()
+        let outcome = StopFailureMessage.computeOutcomeWithRetry(
+            stdinData: Self.stdinWithExtras(error: "rate_limit", transcriptPath: "/x.jsonl"),
+            readFile: { _ in counter.count += 1; return staleData },
+            now: Date(),
+            timeZone: TimeZone(identifier: "UTC")!,
+            waiter: { _ in },
+            maxRetries: 6,
+            retryInterval: 0.001)
+        #expect(outcome.message == "Claude stopped: API error (rate_limit)")
+        #expect(outcome.detectedLimit == nil)
+        #expect(counter.count == 7)  // 1 initial + 6 retries
+    }
+
+    // MARK: - `error` key fallback (real StopFailure payload key)
+
+    @Test func errorKeyIsUsedWhenErrorTypeAbsent() {
+        let outcome = StopFailureMessage.computeOutcome(
+            stdinData: Self.stdinWithExtras(error: "rate_limit", transcriptPath: "/missing.jsonl"),
             readFile: { _ in nil },
             now: Date(), timeZone: TimeZone(identifier: "UTC")!)
         #expect(outcome.message == "Claude stopped: API error (rate_limit)")
