@@ -44,6 +44,11 @@ struct TmuxControlModeBridge: Sendable {
     /// clients; injectable so orchestration tests can substitute a fake-backed
     /// client (same seam shape as the input router / resize coordinator).
     let commandProvider: @Sendable (String) async -> TmuxControlCommandClient?
+    /// Heals steady-state queue overflows with the Phase B M3 pause+recapture
+    /// repair cycle. A reference type (actor) shared across every copy of
+    /// this value struct, wired to `PaneFanout.onOverflowRepair` in this
+    /// init; injectable seam like `inputRouter`/`resizeCoordinator`.
+    let repairCoordinator: PaneRepairCoordinator
 
     init(supervisor: TmuxControlSupervisor,
          tmuxVersion: TmuxVersion?,
@@ -53,7 +58,8 @@ struct TmuxControlModeBridge: Sendable {
          inputRouter: ControlModeInputRouter? = nil,
          resizeCoordinator: ControlModeResizeCoordinator? = nil,
          persistedFlagProvider: @escaping @Sendable () async -> Bool = { false },
-         commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil) {
+         commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil,
+         repairCoordinator: PaneRepairCoordinator? = nil) {
         self.supervisor = supervisor
         self.tmuxVersion = tmuxVersion
         self.environment = environment
@@ -80,6 +86,15 @@ struct TmuxControlModeBridge: Sendable {
         let coordinator = self.resizeCoordinator
         supervisor.setLayoutChangeFilter { server, windowID in
             coordinator.shouldApplyLayoutChange(server: server, windowID: windowID)
+        }
+        // Wire the M3 overflow-repair signal, also BEFORE any connection
+        // starts (same startup guarantee as the layout filter): the very
+        // first routed byte can already overflow a wedged pipe.
+        self.repairCoordinator = repairCoordinator
+            ?? PaneRepairCoordinator(supervisor: supervisor, commandProvider: self.commandProvider)
+        let repair = self.repairCoordinator
+        supervisor.fanout.onOverflowRepair = { key, generation in
+            Task { await repair.repairIfNeeded(key: key, generation: generation) }
         }
     }
 

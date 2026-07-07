@@ -154,31 +154,158 @@ struct PaneFanoutFlowControlTests {
         #expect(fanout.flowStats(key: key)?.droppedBytes == 0)
     }
 
-    @Test("queue cap overflow drops whole incoming chunks; delivered stream is an intact prefix")
-    func capOverflowDropsWholeChunksPrefixIntact() throws {
+    /// Thread-safe recorder of overflow-repair signals.
+    private final class SignalRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _signals: [(PaneKey, UInt64)] = []
+        func record(_ key: PaneKey, _ generation: UInt64) {
+            lock.lock(); _signals.append((key, generation)); lock.unlock()
+        }
+        var signals: [(PaneKey, UInt64)] { lock.lock(); defer { lock.unlock() }; return _signals }
+    }
+
+    @Test("steady-state queue overflow enters repair: queue cleared, nothing counted dropped, signal fired exactly once")
+    func steadyStateOverflowEntersRepair() throws {
         let fanout = PaneFanout()
+        let signals = SignalRecorder()
+        fanout.onOverflowRepair = { key, generation in signals.record(key, generation) }
         let key = PaneKey(server: server, paneID: "%3")
         let (readFD, gen) = try fanout.attach(key: key)
         defer { Darwin.close(readFD) }
         setNonblocking(readFD)
         fanout.markReady(key: key, generation: gen)
 
-        // 320 KB with no reader: ~64 KB lands in the pipe, 128 KB fills the
-        // queue to its cap, the rest must overflow-drop (whole chunks only).
-        let total = patterned(count: 320 * 1024)
-        routeChunks(fanout, paneID: "%3", data: total)
+        // Route 32 KB chunks into the unread pipe until the cap overflows
+        // (~64 KB pipe + 128 KB queue → the 7th chunk): the M3 hook must NOT
+        // drop — it clears the queue (everything queued is already in pane
+        // history; the repair's capture supersedes it), flips `repairing`,
+        // and signals the repair coordinator exactly once.
+        let chunk = patterned(count: Self.chunkSize)
+        var entered = false
+        for _ in 0..<32 {
+            fanout.route(server: server, event: .output(paneID: "%3", bytes: chunk))
+            if fanout.flowStats(key: key)?.repairing == true {
+                entered = true
+                break
+            }
+        }
+        #expect(entered, "overflow on a ready, unfenced sink must enter repairing")
 
         let stats = try #require(fanout.flowStats(key: key))
-        #expect(stats.overflowEvents > 0, "routing past the cap must record overflow")
-        #expect(stats.droppedEvents >= stats.overflowEvents)
-        #expect(stats.droppedBytes > 0)
-        #expect(stats.queuedBytes <= PaneFanout.queueCap, "queue must never exceed its cap")
+        #expect(stats.queuedBytes == 0, "the queue must be CLEARED at repair entry — the capture supersedes it")
+        #expect(stats.droppedBytes == 0, "nothing counts as dropped at repair entry")
+        #expect(stats.droppedEvents == 0)
+        #expect(signals.signals.count == 1, "exactly one overflow-repair signal")
+        #expect(signals.signals.first?.0 == key)
+        #expect(signals.signals.first?.1 == gen)
 
-        let received = readUntilQuiescent(fanout, key: key, fd: readFD)
-        #expect(!received.isEmpty)
-        #expect(received.count < total.count, "overflow means not everything was delivered")
-        #expect(received == total.prefix(received.count),
-                "delivered bytes must be an intact prefix of the routed stream — no mid-stream holes")
+        // While repairing (pre-pause window of the repair cycle): routed
+        // bytes are dropped WITH counters — they are in the pane's history,
+        // the repair's capture will include them — and never re-signal.
+        let probe = Data("WHILE-REPAIRING".utf8)
+        fanout.route(server: server, event: .output(paneID: "%3", bytes: probe))
+        let after = try #require(fanout.flowStats(key: key))
+        #expect(after.droppedEvents == 1)
+        #expect(after.droppedBytes == probe.count)
+        #expect(after.queuedBytes == 0, "repairing bytes must not queue — the drain is not fence-parked here")
+        #expect(signals.signals.count == 1, "a repairing sink must not re-signal")
+    }
+
+    @Test("repair fence lifecycle: beginRepairFence requires repairing, endRepair flushes and counts, abortRepair unfreezes")
+    func repairFenceLifecycle() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%10")
+        let (readFD, gen) = try fanout.attach(key: key)
+        defer { Darwin.close(readFD) }
+        setNonblocking(readFD)
+        fanout.markReady(key: key, generation: gen)
+
+        // Not repairing → beginRepairFence refused (arming it on a healthy
+        // stream would freeze it).
+        #expect(fanout.beginRepairFence(key: key, generation: gen) == false,
+                "beginRepairFence must require a repairing sink")
+
+        // Drive the sink into repairing via a steady-state overflow.
+        let chunk = patterned(count: Self.chunkSize)
+        for _ in 0..<32 where fanout.flowStats(key: key)?.repairing != true {
+            fanout.route(server: server, event: .output(paneID: "%10", bytes: chunk))
+        }
+        try #require(fanout.flowStats(key: key)?.repairing == true)
+
+        // Generation-checked: wrong generation refused, right one arms.
+        #expect(fanout.beginRepairFence(key: key, generation: gen + 1) == false)
+        #expect(fanout.endRepair(key: key, generation: gen + 1) == false)
+        #expect(fanout.beginRepairFence(key: key, generation: gen))
+
+        // Fenced-while-repairing: routed bytes queue (post-continue bytes of
+        // the repair), nothing reaches the pipe until endRepair.
+        drainPipe(readFD)
+        let fenced = Data("REPAIR-FENCED".utf8)
+        fanout.route(server: server, event: .output(paneID: "%10", bytes: fenced))
+        #expect(try #require(fanout.flowStats(key: key)).queuedBytes == fenced.count)
+        usleep(100_000)
+        var probe = [UInt8](repeating: 0, count: 64)
+        let n = probe.withUnsafeMutableBytes { Darwin.read(readFD, $0.baseAddress, $0.count) }
+        #expect(n < 0 && errno == EAGAIN, "repair-fenced bytes must stay parked until endRepair")
+
+        // endRepair: clears fence + repairing, counts the repair, flushes.
+        #expect(fanout.endRepair(key: key, generation: gen))
+        let received = readAll(fd: readFD, expected: fenced.count)
+        #expect(received == fenced, "endRepair must flush the fenced bytes intact")
+        let stats = try #require(fanout.flowStats(key: key))
+        #expect(stats.repairing == false)
+        #expect(stats.repairs == 1)
+
+        // Second cycle → abortRepair: clears repairing (failure path), the
+        // stream resumes (direct writes work again), no repair counted.
+        for _ in 0..<32 where fanout.flowStats(key: key)?.repairing != true {
+            fanout.route(server: server, event: .output(paneID: "%10", bytes: chunk))
+        }
+        try #require(fanout.flowStats(key: key)?.repairing == true)
+        fanout.abortRepair(key: key, generation: gen + 1)  // wrong gen: no-op
+        #expect(fanout.flowStats(key: key)?.repairing == true)
+        fanout.abortRepair(key: key, generation: gen)
+        let aborted = try #require(fanout.flowStats(key: key))
+        #expect(aborted.repairing == false)
+        #expect(aborted.repairs == 1, "an aborted repair must not count as completed")
+        drainPipe(readFD)
+        fanout.route(server: server, event: .output(paneID: "%10", bytes: Data("POST-ABORT".utf8)))
+        let resumed = readAll(fd: readFD, expected: "POST-ABORT".utf8.count)
+        #expect(String(decoding: resumed, as: UTF8.self) == "POST-ABORT")
+    }
+
+    @Test("isPipeWritable: false while full, true after the reader drains, nil on stale generation or missing sink")
+    func pipeWritableProbe() throws {
+        let fanout = PaneFanout()
+        let key = PaneKey(server: server, paneID: "%11")
+        let (readFD, gen) = try fanout.attach(key: key)
+        defer { Darwin.close(readFD) }
+        setNonblocking(readFD)
+        fanout.markReady(key: key, generation: gen)
+
+        #expect(fanout.isPipeWritable(key: key, generation: gen) == true,
+                "a fresh pipe must be writable")
+        // Fill the pipe (direct writes land until EAGAIN queues the rest).
+        routeChunks(fanout, paneID: "%11", data: patterned(count: 160 * 1024))
+        #expect(fanout.isPipeWritable(key: key, generation: gen) == false,
+                "a full pipe must probe unwritable")
+        // The reader catches up.
+        _ = readAll(fd: readFD, expected: 160 * 1024)
+        #expect(fanout.isPipeWritable(key: key, generation: gen) == true)
+
+        // Stale generation / missing sink → nil (repair must abort silently).
+        #expect(fanout.isPipeWritable(key: key, generation: gen + 1) == nil)
+        #expect(fanout.isPipeWritable(
+            key: PaneKey(server: server, paneID: "%none"), generation: 1) == nil)
+    }
+
+    /// Read `fd` until EAGAIN.
+    private func drainPipe(_ fd: Int32) {
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if n <= 0 { break }
+        }
     }
 
     @Test("generation scoping: a superseded sink's queued bytes die with it")
@@ -310,9 +437,11 @@ struct PaneFanoutFlowControlTests {
         #expect(fanout.armFence(key: key, generation: gen2))
     }
 
-    @Test("fence overflow: chunks past the queue cap drop whole with overflow telemetry (M1 semantics; M3 heals the residual)")
+    @Test("fence overflow: chunks past the queue cap drop whole with overflow telemetry — and do NOT signal repair (M1 semantics)")
     func fenceOverflowDropsWholeChunks() throws {
         let fanout = PaneFanout()
+        let signals = SignalRecorder()
+        fanout.onOverflowRepair = { key, generation in signals.record(key, generation) }
         let key = PaneKey(server: server, paneID: "%9")
         let (readFD, gen) = try fanout.attach(key: key)
         defer { Darwin.close(readFD) }
@@ -328,6 +457,11 @@ struct PaneFanoutFlowControlTests {
         #expect(stats.queuedBytes == PaneFanout.queueCap, "queue must fill to its cap, never past it")
         #expect(stats.overflowEvents == 1)
         #expect(stats.droppedBytes == 32 * 1024, "the overflowing chunk drops WHOLE")
+        // A fenced overflow must NOT enter the repair cycle: a repair-during-
+        // fence would race the in-flight attach/repair sequence on the same
+        // pane's pause state. Bounded residual, M1 drop preserved.
+        #expect(signals.signals.isEmpty, "fenced overflow must not signal repair")
+        #expect(stats.repairing == false)
 
         // markReady flushes the intact prefix; the overflow residual is the
         // M3 repair cycle's to heal.

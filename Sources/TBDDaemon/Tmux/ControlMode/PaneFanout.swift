@@ -31,15 +31,21 @@ enum PaneReplayWriteError: Error, Equatable {
     case writeFailed(errno: Int32)
 }
 
-/// Locked snapshot of one pane's flow-control counters (Phase B M1) — test
-/// visibility plus diagnostics. `droppedEvents`/`droppedBytes` count ONLY
-/// overflow and not-ready drops; plain EAGAIN no longer drops (it queues).
+/// Locked snapshot of one pane's flow-control counters (Phase B M1/M3) —
+/// test visibility plus diagnostics. `droppedEvents`/`droppedBytes` count
+/// ONLY fenced-overflow, not-ready, and mid-repair drops; plain EAGAIN no
+/// longer drops (it queues), and a steady-state overflow enters the repair
+/// cycle instead of dropping.
 struct PaneFlowStats: Equatable {
     let queuedBytes: Int
     let droppedBytes: Int
     let droppedEvents: Int
     let overflowEvents: Int
     let queuedHighWater: Int
+    /// An M3 overflow-repair cycle is underway for this sink.
+    let repairing: Bool
+    /// Completed (endRepair'd) repair cycles on this sink.
+    let repairs: Int
 }
 
 /// Outcome of the generation-checked `PaneFanout.acknowledge`.
@@ -119,11 +125,20 @@ final class PaneFanout: @unchecked Sendable {
         /// Rate limiter for the backpressure-enter / drain-recovery logs
         /// (`lastDropLog` covers the drop logs).
         var lastFlowLog = Date.distantPast
+        /// An M3 overflow-repair cycle is underway (Phase B M3, issue #376):
+        /// the queue was cleared at overflow (its content is already in pane
+        /// history; the repair's capture supersedes it) and the repair
+        /// coordinator owns the pane's pause state until `endRepair` /
+        /// `abortRepair`. While set (and not fenced), routed output is
+        /// dropped with counters — pre-pause bytes the capture will include.
+        var repairing = false
+        /// Completed repair cycles (telemetry + the live heal test).
+        var repairs = 0
     }
 
-    /// Per-pane backpressure queue cap. Beyond this, incoming chunks are
-    /// dropped whole (see `enqueueLocked`) — the M3 pause+repair cycle
-    /// replaces that drop later.
+    /// Per-pane backpressure queue cap. Beyond this, a steady-state sink
+    /// enters the M3 pause+repair cycle (see `enqueueLocked`); a fenced or
+    /// already-repairing sink still drops incoming chunks whole.
     static let queueCap = 128 * 1024
 
     private let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
@@ -132,6 +147,17 @@ final class PaneFanout: @unchecked Sendable {
     private var nextGeneration: UInt64 = 0
     /// %output events dropped because no attach was registered for their pane.
     private var unattachedDrops = 0
+    private var _onOverflowRepair: (@Sendable (PaneKey, UInt64) -> Void)?
+
+    /// M3 overflow-repair signal — fired (strictly OUTSIDE the lock, from
+    /// `route()`'s tail) when a steady-state queue overflow flips a sink into
+    /// `repairing`. Installed ONCE at bridge init, BEFORE any connection
+    /// starts (the same guarantee the supervisor's layout filter relies on);
+    /// lock-protected like the filter's box so the reader threads see it.
+    var onOverflowRepair: (@Sendable (PaneKey, UInt64) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onOverflowRepair }
+        set { lock.lock(); _onOverflowRepair = newValue; lock.unlock() }
+    }
 
     /// Allocate a pipe for `key`, remember the (nonblocking) write end, and
     /// return the read end (plus this attach's generation) for the caller to
@@ -425,7 +451,95 @@ final class PaneFanout: @unchecked Sendable {
             droppedBytes: sink.droppedBytes,
             droppedEvents: sink.droppedEvents,
             overflowEvents: sink.overflowEvents,
-            queuedHighWater: sink.queuedHighWater)
+            queuedHighWater: sink.queuedHighWater,
+            repairing: sink.repairing,
+            repairs: sink.repairs)
+    }
+
+    // MARK: - M3 repair cycle (Phase B)
+
+    /// Arm the REPAIR fence — the repair cycle's twin of `armFence`:
+    /// generation-checked, and additionally requires the sink to be
+    /// mid-repair (`repairing`): the fence parks post-continue output behind
+    /// the repair replay exactly like the attach fence, and arming it on a
+    /// non-repairing sink would freeze a healthy stream behind a flush that
+    /// never comes. Call ONLY at a provably-silent moment — the repair's
+    /// pause reply is in hand and the pane delivers nothing while paused.
+    /// Mismatch / missing / not-repairing → `false`, nothing touched.
+    @discardableResult
+    func beginRepairFence(key: PaneKey, generation: UInt64) -> Bool {
+        lock.lock()
+        guard let sink = sinks[key], sink.generation == generation, sink.repairing else {
+            lock.unlock()
+            logger.info(
+                "fanout repair fence refused \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
+            return false
+        }
+        sinks[key]?.fenced = true
+        lock.unlock()
+        logger.debug(
+            "fanout repair fence armed \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
+        return true
+    }
+
+    /// Complete a repair cycle: clear the fence and `repairing`, count the
+    /// repair, and arm the drain so the fenced bytes (everything the pane
+    /// emitted since the atomic batch's continue) flush strictly after the
+    /// repair replay `writeReplay` already put in the pipe — the same
+    /// zero-seam flush as `markReady`'s. Generation-checked: mismatch or
+    /// missing sink → `false`, nothing touched (the successor owns itself).
+    @discardableResult
+    func endRepair(key: PaneKey, generation: UInt64) -> Bool {
+        lock.lock()
+        guard var sink = sinks[key], sink.generation == generation else {
+            lock.unlock()
+            return false
+        }
+        sink.fenced = false
+        sink.repairing = false
+        sink.repairs += 1
+        armDrainIfNeededLocked(&sink, key: key)
+        sinks[key] = sink
+        lock.unlock()
+        logger.debug(
+            "fanout repair complete \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
+        return true
+    }
+
+    /// Failure-path exit from a repair cycle the caller still owns: clear
+    /// `repairing` (and the fence if armed), keep whatever is queued (likely
+    /// nothing — the overflow cleared it) and arm the drain for it. The
+    /// stream resumes with a possible hole; a pane frozen forever behind a
+    /// fence that never flushes is worse than a hole. Generation-checked
+    /// no-op on mismatch/missing.
+    func abortRepair(key: PaneKey, generation: UInt64) {
+        lock.lock()
+        guard var sink = sinks[key], sink.generation == generation else {
+            lock.unlock()
+            return
+        }
+        sink.fenced = false
+        sink.repairing = false
+        armDrainIfNeededLocked(&sink, key: key)
+        sinks[key] = sink
+        lock.unlock()
+        logger.info(
+            "fanout repair aborted \(key.server, privacy: .public)/\(key.paneID, privacy: .public) gen=\(generation)")
+    }
+
+    /// Nonblocking writability probe of `key`'s pipe (`poll` POLLOUT,
+    /// timeout 0) — the repair coordinator's reader-catch-up gate: the
+    /// recapture+continue must not run until the app has drained the pipe,
+    /// or the repair replay would just re-overflow it. Held under the lock
+    /// (same fd-close safety discipline as every write path). `nil` when the
+    /// sink is gone or superseded — the repair must abort silently.
+    func isPipeWritable(key: PaneKey, generation: UInt64) -> Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let sink = sinks[key], sink.generation == generation else { return nil }
+        var pollFD = pollfd(fd: sink.writeFD, events: Int16(POLLOUT), revents: 0)
+        let result = Darwin.poll(&pollFD, 1, 0)
+        return result > 0 && (pollFD.revents & Int16(POLLOUT)) != 0
     }
 
     /// Hot path — called on the reader thread for every output event.
@@ -436,6 +550,25 @@ final class PaneFanout: @unchecked Sendable {
     /// queued (bounded by `queueCap`) and an async drain task delivers it in
     /// order; while ANY bytes are queued, new chunks go straight to the queue
     /// so live bytes can never overtake queued ones.
+    ///
+    /// Behavior table (M1 queue + M2 fence + M3 repair):
+    ///  - no sink → count an unattached drop.
+    ///  - fenced (ANY ready state) → enqueue, NEVER arm the drain: a fence
+    ///    (attach M2, or repair M3) parks bytes behind a replay-in-flight;
+    ///    `markReady` / `endRepair` clears it and arms the flush.
+    ///  - !ready && !fenced → drop (pre-fence attach window: the bytes are
+    ///    in the attach's capture; delivering them too would duplicate).
+    ///  - ready && repairing && !fenced → drop with counters, no per-chunk
+    ///    log: pre-pause bytes of the repair cycle — the repair's capture
+    ///    includes them, so nothing is lost.
+    ///  - ready && queue non-empty → enqueue + arm drain (M1 ordering).
+    ///  - ready && queue empty → direct write; EAGAIN remainder → enqueue +
+    ///    arm drain (M1).
+    /// A steady-state queue overflow (ready, unfenced, not repairing) enters
+    /// the M3 repair cycle instead of dropping — see `enqueueLocked`; the
+    /// `onOverflowRepair` signal fires AFTER the lock is released (the
+    /// handler hops onto the repair coordinator, and callbacks under a hot
+    /// lock are a deadlock invitation).
     func route(server: String, event: TmuxControlEvent) {
         let paneID: String
         let bytes: Data
@@ -451,78 +584,117 @@ final class PaneFanout: @unchecked Sendable {
         }
         let key = PaneKey(server: server, paneID: paneID)
 
+        // Generation to fire `onOverflowRepair` for, collected under the
+        // lock and fired at function end OUTSIDE it.
+        var repairSignal: UInt64?
         lock.lock()
-        defer { lock.unlock() }
-        guard var sink = sinks[key] else {
-            unattachedDrops += 1
-            return
-        }
-        guard sink.ready else {
+        if var sink = sinks[key] {
             if sink.fenced {
-                // Attach-fence window (M2): the pane's attach sequence owns
-                // the seam from the pause reply to markReady — queue (M1 cap
-                // + overflow telemetry apply unchanged) WITHOUT arming the
-                // drain. The queue must stay parked behind the closed gate
-                // until the replay lands: `writeReplay` writes the pipe
-                // directly, and a live drain would interleave fenced bytes
-                // into the replay. `markReady` clears the fence and arms it.
-                enqueueLocked(bytes, into: &sink, key: key)
+                // Fence window (attach M2 or repair M3): the pane's sequence
+                // owns the seam up to markReady/endRepair — queue (M1 cap +
+                // overflow telemetry apply unchanged) WITHOUT arming the
+                // drain. The queue must stay parked behind the replay:
+                // `writeReplay` writes the pipe directly, and a live drain
+                // would interleave fenced bytes into the replay.
+                // (`enqueueLocked` can never enter repair here — its repair
+                // branch requires an UNFENCED sink.)
+                _ = enqueueLocked(bytes, into: &sink, key: key)
                 sinks[key] = sink
-            } else {
+            } else if !sink.ready {
                 // Pre-fence not-ready window (attach → pause reply): dropped
                 // — those bytes are in the attach's capture, not lost;
                 // delivering them too would duplicate them.
                 sink.droppedEvents += 1
                 sinks[key] = sink
-            }
-            return
-        }
-
-        if sink.queuedBytes > 0 {
-            // Order preservation: bytes must NEVER overtake queued bytes —
-            // while the queue is non-empty, everything goes through it.
-            enqueueLocked(bytes, into: &sink, key: key)
-        } else {
-            // Partial-write loop: nonblocking write() may legally return a
-            // short count. On EAGAIN (or a short write) the UNWRITTEN
-            // remainder is queued — the delivered prefix stays intact and
-            // the queued continuation follows it in order.
-            let buf = [UInt8](bytes)
-            var offset = 0
-            while offset < buf.count {
-                let written = buf[offset...].withUnsafeBytes { Darwin.write(sink.writeFD, $0.baseAddress, $0.count) }
-                if written > 0 {
-                    offset += written
-                    continue
-                }
-                if written < 0 && errno == EINTR { continue }
-                if written < 0 && errno == EAGAIN {
-                    enqueueLocked(Data(buf[offset...]), into: &sink, key: key)
+            } else if sink.repairing {
+                // Repair window before the repair fence arms (overflow →
+                // pause reply): these bytes are pre-pause — already in the
+                // pane's history, so the repair's capture includes them.
+                // Counted, never logged per-chunk, never re-signaled.
+                sink.droppedEvents += 1
+                sink.droppedBytes += bytes.count
+                sinks[key] = sink
+            } else {
+                if sink.queuedBytes > 0 {
+                    // Order preservation: bytes must NEVER overtake queued
+                    // bytes — while the queue is non-empty, everything goes
+                    // through it.
+                    if enqueueLocked(bytes, into: &sink, key: key) {
+                        repairSignal = sink.generation
+                    }
                 } else {
-                    logger.error(
-                        "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) write errno=\(errno)")
+                    // Partial-write loop: nonblocking write() may legally
+                    // return a short count. On EAGAIN (or a short write) the
+                    // UNWRITTEN remainder is queued — the delivered prefix
+                    // stays intact and the queued continuation follows it in
+                    // order.
+                    let buf = [UInt8](bytes)
+                    var offset = 0
+                    while offset < buf.count {
+                        let written = buf[offset...].withUnsafeBytes {
+                            Darwin.write(sink.writeFD, $0.baseAddress, $0.count)
+                        }
+                        if written > 0 {
+                            offset += written
+                            continue
+                        }
+                        if written < 0 && errno == EINTR { continue }
+                        if written < 0 && errno == EAGAIN {
+                            if enqueueLocked(Data(buf[offset...]), into: &sink, key: key) {
+                                repairSignal = sink.generation
+                            }
+                        } else {
+                            logger.error(
+                                "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) write errno=\(errno)")
+                        }
+                        break
+                    }
                 }
-                break
+                armDrainIfNeededLocked(&sink, key: key)
+                sinks[key] = sink
             }
+        } else {
+            unattachedDrops += 1
         }
-        armDrainIfNeededLocked(&sink, key: key)
-        sinks[key] = sink
+        lock.unlock()
+        if let generation = repairSignal {
+            // Property getter re-takes the lock briefly; the callback itself
+            // runs with NO fanout lock held.
+            onOverflowRepair?(key, generation)
+        }
     }
 
     /// Append `data` to the sink's backpressure queue — MUST be called with
     /// `lock` held. Chunks are enqueued (and, on overflow, dropped) WHOLE:
     /// splitting what we enqueue would put a fragment mid-queue whose
-    /// continuation is lost, corrupting escape sequences; dropping the entire
-    /// incoming chunk keeps everything delivered + queued an intact prefix.
-    /// The overflow drop here is the M3 hook point — the pause+repair cycle
-    /// (tmux flow control + recapture) replaces it later. That includes the
-    /// FENCED window's residual (M2): a blast pane can exceed the cap while
-    /// the replay is still being assembled, and the chunks dropped here are
-    /// then missing between the replay and the flushed queue — M3's repair
-    /// cycle owns healing that; M2 adds no extra behavior for it.
-    private func enqueueLocked(_ data: Data, into sink: inout Sink, key: PaneKey) {
-        guard !data.isEmpty else { return }
+    /// continuation is lost, corrupting escape sequences.
+    ///
+    /// Overflow (Phase B M3, issue #376):
+    ///  - STEADY STATE (ready, unfenced, not repairing): enter the repair
+    ///    cycle instead of dropping — clear the queue (everything queued is
+    ///    already in the pane's history; the repair's capture supersedes it,
+    ///    so NOTHING counts as dropped), flip `repairing`, and return `true`
+    ///    so `route()` fires `onOverflowRepair` once the lock is released.
+    ///  - FENCED or already REPAIRING: keep the M1 whole-chunk drop +
+    ///    telemetry — a bounded residual: a repair started during a fence
+    ///    would race the in-flight attach/repair sequence on the same pane's
+    ///    pause state, so the fenced window accepts the (rare) hole instead.
+    ///
+    /// Returns whether the sink just ENTERED the repair cycle.
+    private func enqueueLocked(_ data: Data, into sink: inout Sink, key: PaneKey) -> Bool {
+        guard !data.isEmpty else { return false }
         if sink.queuedBytes + data.count > Self.queueCap {
+            if sink.ready && !sink.fenced && !sink.repairing {
+                sink.repairing = true
+                sink.queue.removeAll()
+                sink.queuedBytes = 0
+                if Date().timeIntervalSince(sink.lastFlowLog) > 1 {
+                    sink.lastFlowLog = Date()
+                    logger.info(
+                        "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) queue overflow — entering repair")
+                }
+                return true
+            }
             sink.overflowEvents += 1
             sink.droppedEvents += 1
             sink.droppedBytes += data.count
@@ -532,7 +704,7 @@ final class PaneFanout: @unchecked Sendable {
                 logger.info(
                     "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) queue overflow — dropped \(dropped) bytes total (\(events) events, \(overflows) overflows)")
             }
-            return
+            return false
         }
         let wasEmpty = sink.queuedBytes == 0
         sink.queue.append(data)
@@ -544,6 +716,7 @@ final class PaneFanout: @unchecked Sendable {
             logger.info(
                 "fanout \(key.server, privacy: .public)/\(key.paneID, privacy: .public) backpressure — pipe full, queued \(queued) bytes")
         }
+        return false
     }
 
     /// Spawn the drain task for `sink` if its queue is non-empty and no drain
@@ -591,10 +764,14 @@ final class PaneFanout: @unchecked Sendable {
     /// One locked drain pass — the synchronous half of `drainQueue`.
     private func drainPass(key: PaneKey, generation: UInt64) -> DrainPassResult {
         lock.lock()
-        guard var sink = sinks[key], sink.generation == generation, sink.ready else {
-            // Only a still-live sink at OUR generation gets its flag
-            // cleared (`ready` never reverts once set — that arm is
-            // defensive only).
+        guard var sink = sinks[key], sink.generation == generation, sink.ready, !sink.fenced else {
+            // Only a still-live sink at OUR generation gets its flag cleared
+            // (`ready` never reverts once set — that arm is defensive only).
+            // FENCED stands the drain down too (M3): the repair fence arms on
+            // a READY sink, and a straggler drain task from pre-overflow
+            // backpressure would otherwise flush fence-parked bytes into the
+            // pipe AHEAD of the repair replay. `endRepair`/`markReady` clears
+            // the fence and re-arms the drain for the ordered flush.
             if let current = sinks[key], current.generation == generation {
                 sinks[key]!.drainArmed = false
             }

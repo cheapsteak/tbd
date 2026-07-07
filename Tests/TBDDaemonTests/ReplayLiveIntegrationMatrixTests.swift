@@ -544,6 +544,107 @@ struct ReplayLiveIntegrationMatrixTests {
 
         await supervisor.stopAll()
     }
+
+    // MARK: - Scenario 5: firehose overflow → pause+recapture repair (Phase B M3)
+
+    /// Thread-safe done-flag for cross-task drain coordination.
+    private final class FlagBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    @Test("firehose overflow heals via the repair cycle: SEQ gapless and monotonic after the last reset prelude")
+    func firehoseOverflowRepairHeals() async throws {
+        guard await controlModeTmuxAvailable() else { return }
+        let server = "tbd-repair-\(UUID().uuidString.prefix(8))"
+        defer { tmux(["-L", server, "kill-server"]) }
+
+        // FULL-BLAST monotonic counter — no throttle: during the deliberate
+        // 2 s reader stall below the pane out-emits the unread pipe by far,
+        // overflowing the ~64 KB pipe + 128 KB queue, which must enter the
+        // M3 repair cycle (pause → wait for the reader → recapture + atomic
+        // continue → replay → fence flush) instead of dropping.
+        let script = "i=0; while :; do printf 'SEQ %07d\\n' $i; i=$((i+1)); done"
+        let paneID = try bootstrap(
+            server: server, script: script,
+            extraServerArgs: ["set-option", "-g", "history-limit", "50000", ";"])
+        try await poll("counter emitting") {
+            // Full blast: the counter races past any fixed value before the
+            // first capture — any SEQ token proves the firehose is live.
+            tmuxCapture(["-L", server, "capture-pane", "-p", "-t", paneID])?
+                .contains("SEQ ") == true
+        }
+
+        let supervisor = TmuxControlSupervisor()
+        await supervisor.ensureConnection(serverName: server)
+        _ = try await awaitClient(supervisor, server: server)
+
+        let (readFD, _) = try await supervisor.attach(server: server, paneID: paneID)
+        defer { Darwin.close(readFD) }
+        makeNonblocking(readFD)
+        let provider: @Sendable (String) async -> TmuxControlCommandClient? =
+            { [supervisor] in await supervisor.command(server: $0) }
+        let orchestrator = AttachReplayOrchestrator(supervisor: supervisor, commandProvider: provider)
+        // A REAL repair coordinator wired through onOverflowRepair exactly as
+        // the bridge wires it at daemon startup.
+        let coordinator = PaneRepairCoordinator(supervisor: supervisor, commandProvider: provider)
+        supervisor.fanout.onOverflowRepair = { key, generation in
+            Task { await coordinator.repairIfNeeded(key: key, generation: generation) }
+        }
+
+        // Phase 1: read concurrently while the attach runs (its replay write
+        // needs the reader), until the attach outcome lands.
+        let attachDone = FlagBox()
+        async let phase1 = drain(fd: readFD, deadline: .seconds(30)) { _ in attachDone.get() }
+        let outcome = try await orchestrator.performAttachReady(server: server, paneID: paneID)
+        #expect(outcome == .ready)
+        attachDone.set()
+        var accumulated = await phase1
+
+        // Phase 2: deliberately do NOT read for ~2 s — the overflow window.
+        // The repair fires, pauses the pane, and parks in its reader-catch-up
+        // wait until phase 3 starts reading.
+        try await Task.sleep(for: .seconds(2))
+
+        // Phase 3: read continuously until at least one repair completed and
+        // the healed stream carries enough post-repair tokens to judge.
+        let key = PaneKey(server: server, paneID: paneID)
+        let fanout = supervisor.fanout
+        let phase1Prefix = accumulated
+        accumulated += await drain(fd: readFD, deadline: .seconds(45)) { [self] data in
+            guard (fanout.flowStats(key: key)?.repairs ?? 0) >= 1 else { return false }
+            let text = String(decoding: phase1Prefix + data, as: UTF8.self)
+            guard let last = text.range(of: ReplayWriter.resetPrelude, options: .backwards)
+            else { return false }
+            let healed = strippingEscapes(String(text[last.upperBound...]))
+            return tokens(in: healed, label: "SEQ").count >= 30
+        }
+        let text = String(decoding: accumulated, as: UTF8.self)
+
+        // (a) At least one repair completed — both in the counters and as a
+        // second reset prelude in the byte stream (attach replay + repair
+        // replay each begin with one).
+        let stats = try #require(fanout.flowStats(key: key), "sink vanished mid-test")
+        #expect(stats.repairs >= 1, "the overflow never triggered a completed repair")
+        let preludeCount = text.components(separatedBy: ReplayWriter.resetPrelude).count - 1
+        #expect(preludeCount >= 2,
+                "expected the repair's reset prelude in the stream (found \(preludeCount))")
+
+        // (b) The heal proof: after the LAST reset prelude — the final repair
+        // replay — SEQ tokens are gapless and monotonic through the end of
+        // the accumulated stream: recapture tail ⊕ fence flush ⊕ live, with
+        // no hole where the overflow used to drop.
+        let last = try #require(text.range(of: ReplayWriter.resetPrelude, options: .backwards))
+        let healed = tokens(in: strippingEscapes(String(text[last.upperBound...])), label: "SEQ")
+        #expect(healed.count >= 30, "healed stream too short to prove anything (\(healed.count) tokens)")
+        let violations = sequenceViolations(healed).joined(separator: "; ")
+        #expect(violations.isEmpty,
+                "LOSS/DUP after the repair replay — the overflow hole was not healed: \(violations)")
+
+        await supervisor.stopAll()
+    }
 }
 
 private enum MatrixError: Error {
