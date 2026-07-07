@@ -113,21 +113,34 @@ final class TmuxControlConnection: @unchecked Sendable {
     /// releases the pty slave, then wait for the reader to observe EOF before
     /// closing the primary fd.
     ///
-    /// Order matters. Terminating tmux first makes the child release the pty
-    /// slave, which delivers EOF to the primary and lets the reader's blocked
-    /// `read()` return cleanly. Only then is it safe to `close()` the primary —
-    /// closing it while the reader is still parked in `read()` would leak the
-    /// reader thread on Darwin. If tmux ignores SIGTERM for 500 ms, escalate to
-    /// SIGKILL (uncatchable — the child cannot resist it), then wait up to a
-    /// further 1.5 s for the reader to exit. `eventContinuation.finish()` is
-    /// called only by the reader thread at the end of `readLoop`, so any
-    /// trailing bytes decoded from the final `read()` are delivered first.
+    /// Order matters, twice over:
+    ///
+    /// 1. The child is signalled BEFORE `ioLock` is touched (R7-H1). A wedged
+    ///    `sendCommand` — tmux stopped draining the pty, the kernel input
+    ///    queue filled — parks inside `write()` HOLDING `ioLock`. Taking the
+    ///    lock first would deadlock `stop()` behind it forever, and killing
+    ///    the child is the only thing that unwedges such a write: the child's
+    ///    exit tears the pty down, the parked `write()` fails with `EIO`
+    ///    (verified empirically — a pty master is a character device, so no
+    ///    SIGPIPE), and the writer releases the lock. Signalling needs no
+    ///    lock: `process` is immutable after `start()` and only
+    ///    `terminate()`/`isRunning` are used here.
+    /// 2. Terminating tmux first also makes the child release the pty slave,
+    ///    which delivers EOF to the primary and lets the reader's blocked
+    ///    `read()` return cleanly. Only then is it safe to `close()` the
+    ///    primary — closing it while the reader is still parked in `read()`
+    ///    would leak the reader thread on Darwin. If tmux ignores SIGTERM for
+    ///    500 ms, escalate to SIGKILL (uncatchable — the child cannot resist
+    ///    it), then wait up to a further 1.5 s for the reader to exit.
+    ///
+    /// A `sendCommand` racing this window may still write into the dying pty:
+    /// the bytes are either discarded with the pty or fail with `EIO`, whose
+    /// error path calls `process.terminate()` only under `isRunning` — a
+    /// no-op once the child is gone, so a stop-in-progress cannot be fought.
+    /// `eventContinuation.finish()` is called only by the reader thread at
+    /// the end of `readLoop`, so any trailing bytes decoded from the final
+    /// `read()` are delivered first.
     func stop() {
-        ioLock.lock()
-        let fd = primaryFD
-        primaryFD = -1
-        ioLock.unlock()
-
         if process.isRunning {
             process.terminate()
             if readerExited.wait(timeout: .now() + .milliseconds(500)) == .timedOut {
@@ -145,6 +158,13 @@ final class TmuxControlConnection: @unchecked Sendable {
                 _ = readerExited.wait(timeout: .now() + .milliseconds(1500))
             }
         }
+
+        // The child is gone (or never ran), so any wedged write has already
+        // failed and released `ioLock` — taking it now is bounded.
+        ioLock.lock()
+        let fd = primaryFD
+        primaryFD = -1
+        ioLock.unlock()
 
         if fd >= 0 { Darwin.close(fd) }
     }
