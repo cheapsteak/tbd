@@ -329,6 +329,56 @@ struct CreationPlaceholderRenameTests {
         #expect(state.worktrees[repoID]?.first?.displayName == "typed-name")
     }
 
+    /// After the swap carries the typed name onto the daemon row,
+    /// `createWorktree` persists it through `renameWorktree(id:displayName:)`
+    /// (wt.id is daemon-known and non-pending, so it takes the full RPC path).
+    /// A failed persist must surface via the "Rename failed:" alert — the old
+    /// inline `daemonClient.renameWorktree` call's catch only logged, so a
+    /// non-connection RPC failure silently lost the name. Drives the persist
+    /// sub-sequence the create path runs post-swap; the full `createWorktree`
+    /// isn't wired to a seam (its `daemonClient.createWorktree` has no
+    /// override), so this reproduces the post-swap state directly.
+    @Test func createPathPersistRollsBackAndAlertsWhenRenameRPCFails() async {
+        let suiteName = "TBDAppTests.CreationPlaceholderRename.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let state = AppState(userDefaults: defaults)
+
+        struct RenameError: Error {}
+        let repoID = UUID()
+        let placeholderID = UUID()
+        var placeholder = makeWorktree(id: placeholderID, repoID: repoID, status: .creating)
+        placeholder.displayName = "delicate-coyote"
+        state.worktrees = [repoID: [placeholder]]
+        state.pendingWorktreeIDs = [placeholderID]
+
+        // User renames the row mid-creation (local-only placeholder branch).
+        await state.renameWorktree(id: placeholderID, displayName: "typed-name")
+
+        // Daemon confirms creation: swap carries the typed name onto the real
+        // daemon row and the placeholder leaves `pendingWorktreeIDs` (as
+        // createWorktree's `defer` does).
+        let daemonRow = makeWorktree(id: UUID(), repoID: repoID, status: .creating)
+        state.pendingWorktreeIDs.remove(placeholderID)
+        let swap = state.replaceCreationPlaceholder(
+            repoID: repoID,
+            placeholderID: placeholderID,
+            placeholderName: "delicate-coyote",
+            with: daemonRow
+        )
+        #expect(swap?.typedName == "typed-name")
+
+        // createWorktree now persists the carried rename through renameWorktree.
+        // A failed RPC must alert, not silently log like the old inline call.
+        state.renameRPCOverride = { _, _ in throw RenameError() }
+        if let typedName = swap?.typedName {
+            await state.renameWorktree(id: daemonRow.id, displayName: typedName)
+        }
+
+        #expect(state.alertMessage?.hasPrefix("Rename failed:") == true)
+        #expect(state.alertIsError == true)
+    }
+
     @Test func untouchedPlaceholderKeepsDaemonRowName() {
         withState { state in
             let repoID = UUID()

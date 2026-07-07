@@ -78,19 +78,16 @@ extension AppState {
                     // Persist the carried rename now that a daemon-known row
                     // exists (the placeholder's id never reached the daemon,
                     // so renameWorktree's placeholder branch could only apply
-                    // it locally).
+                    // it locally). Route through renameWorktree rather than an
+                    // inline daemonClient call: wt.id is daemon-known and NOT
+                    // in pendingWorktreeIDs, so it takes the full RPC path —
+                    // optimistic apply (idempotent; the swap already carried
+                    // the name), post-success re-apply to beat an interleaved
+                    // poll revert, and rollback + "Rename failed:" alert on
+                    // failure. The old inline call's catch only logged, so a
+                    // non-connection RPC failure silently lost the name.
                     if let typedName = swap.typedName {
-                        do {
-                            try await daemonClient.renameWorktree(id: wt.id, displayName: typedName)
-                            // Re-apply after success: a poll snapshot captured
-                            // before the daemon row updated can land while the
-                            // RPC was in flight and revert the name for a full
-                            // poll interval. Idempotent.
-                            applyLocalRename(id: wt.id, displayName: typedName)
-                        } catch {
-                            logger.error("Failed to persist rename typed during creation: \(error)")
-                            handleConnectionError(error)
-                        }
+                        await renameWorktree(id: wt.id, displayName: typedName)
                     }
                 }
             } catch {
