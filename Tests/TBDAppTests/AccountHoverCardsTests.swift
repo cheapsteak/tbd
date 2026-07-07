@@ -124,6 +124,31 @@ struct ClaudeTabCardTests {
         #expect(card?.rows.map(\.label) == ["Spawned"])
     }
 
+    // The "Show usage tooltip on Claude tabs" setting gate
+    // (AppState.showClaudeTabUsageTooltipKey), both branches. Pure `enabled:`
+    // parameter — no UserDefaults involved.
+    @Test func settingEnabledProducesCardForClaudeTerminal() {
+        let card = AccountHoverCards.claudeTabCard(terminal: claudeTerminal(),
+                                                   profiles: [], timeZone: utc,
+                                                   enabled: true)
+        #expect(card != nil)
+        // Ungated behavior is unchanged: same content as the default-argument path.
+        #expect(card == AccountHoverCards.claudeTabCard(terminal: claudeTerminal(),
+                                                        profiles: [], timeZone: utc))
+    }
+
+    @Test func settingDisabledSuppressesCardEvenForClaudeTerminal() {
+        let gmail = entry(name: "Gmail", loginIdentity: "g@gmail.com",
+                          usageSnapshot: gmailSnapshot)
+        let terminal = claudeTerminal(profileID: gmail.profile.id)
+        #expect(AccountHoverCards.claudeTabCard(terminal: terminal,
+                                                profiles: [gmail], timeZone: utc,
+                                                enabled: false) == nil)
+        #expect(AccountHoverCards.claudeTabCard(terminal: claudeTerminal(),
+                                                profiles: [], timeZone: utc,
+                                                enabled: false) == nil)
+    }
+
     @Test func profileWithoutSnapshotGetsNoUsageRows() {
         let work = entry(name: "Work", loginIdentity: "a@b.co", usageSnapshot: nil)
         let card = AccountHoverCards.claudeTabCard(

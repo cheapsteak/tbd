@@ -475,6 +475,8 @@ private struct TabBarItem: View {
     @State private var dropEdge: DropEdge? = nil
     @State private var measuredWidth: CGFloat = 100
     @AppStorage("codeViewer.showSidebar") private var showSidebar = false
+    @AppStorage(AppState.showClaudeTabUsageTooltipKey)
+    private var showClaudeTabUsageTooltip: Bool = true
     @EnvironmentObject private var appState: AppState
 
     private var showClose: Bool {
@@ -509,12 +511,14 @@ private struct TabBarItem: View {
     /// Hover card describing which account this session runs on: pinned
     /// email + profile name (or the ambient-drift note for NULL-profile legacy
     /// sessions), current 5h/weekly usage, and spawn time. nil (no card)
-    /// for non-Claude tabs.
+    /// for non-Claude tabs, or when the "Show usage tooltip on Claude tabs"
+    /// setting is off.
     private var accountHoverCard: HoverCardModel? {
         guard let terminal else { return nil }
         return AccountHoverCards.claudeTabCard(
             terminal: terminal,
-            profiles: appState.modelProfiles
+            profiles: appState.modelProfiles,
+            enabled: showClaudeTabUsageTooltip
         )
     }
 
