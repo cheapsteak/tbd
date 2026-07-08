@@ -637,8 +637,11 @@ public final class Daemon: Sendable {
             self.daywatchRunner = runner
             rpcRouter.daywatchRunner = runner
             // Boot-reconcile: if nightwatch mode was persisted, restart the loop.
-            if let config = try? await database.config.get() {
+            do {
+                let config = try await database.config.get()
                 await runner.apply(mode: config.nightwatchMode)
+            } catch {
+                reconcileLogger.error("Failed to restore daywatch mode on boot: \(String(describing: error), privacy: .public)")
             }
 
             // 13. Periodic git status refresh (branch sync, conflict detection).

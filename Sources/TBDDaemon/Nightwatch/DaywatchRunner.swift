@@ -22,7 +22,8 @@ public struct ProcessDaywatchExecutor: DaywatchExecuting {
         self.skillDir = skillDir
     }
 
-    /// Run tick.py; return exit code.
+    /// Run tick.py with a 5-minute timeout; return exit code.
+    /// Uses terminationHandler to avoid blocking a Swift-concurrency thread indefinitely.
     public func runTick() async -> Int32 {
         let tickPath = skillDir + "/scripts/tick.py"
         let process = Process()
@@ -31,56 +32,60 @@ public struct ProcessDaywatchExecutor: DaywatchExecuting {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus
-        } catch {
-            logger.error("Failed to run tick.py: \(error.localizedDescription, privacy: .public)")
-            return -1
-        }
-    }
+        let exitCode = await withCheckedContinuation { continuation in
+            // Use a final class to hold the mutable state safely across async boundaries.
+            // The lock protects the check-and-set of `finished` so that exactly one
+            // of {terminationHandler, timeout} resumes the continuation (no double-resume).
+            struct LockState {
+                var finished = false
+            }
+            final class State: @unchecked Sendable {
+                let lock = os.OSAllocatedUnfairLock(initialState: LockState())
+            }
+            let state = State()
 
-    /// Wake the judge: spawn `claude --model claude-sonnet-5 <prompt>`.
-    /// Sets up working directory to the skill dir and provides absolute queue paths.
-    /// Safe no-op if `claude` binary is not found.
-    public func wakeJudge(act: Bool) async {
-        let prompt = act
-            ? "Run the nightwatch judge: process \(skillDir)/queue/decisions.jsonl and fire approved actions."
-            : "Run the nightwatch judge: process \(skillDir)/queue/decisions.jsonl and batch to \(skillDir)/queue/for-adam.md (act=false)."
+            process.terminationHandler = { p in
+                state.lock.withLock { s in
+                    if !s.finished {
+                        s.finished = true
+                        continuation.resume(returning: p.terminationStatus)
+                    }
+                }
+            }
 
-        // Find claude binary in standard locations
-        let claudePath = findExecutable("claude")
-        guard !claudePath.isEmpty && claudePath != "/usr/bin/env" else {
-            logger.warning("claude binary not found; judge wake is a no-op")
-            return
-        }
+            do {
+                try process.run()
+            } catch {
+                logger.error("Failed to run tick.py: \(error.localizedDescription, privacy: .public)")
+                continuation.resume(returning: -1)
+                return
+            }
 
-        let judge = Process()
-        judge.executableURL = URL(fileURLWithPath: claudePath)
-        judge.arguments = ["-p", prompt, "--model", "claude-sonnet-5"]
-        judge.currentDirectoryURL = URL(fileURLWithPath: skillDir)
-        judge.standardOutput = FileHandle.nullDevice
-        judge.standardError = FileHandle.nullDevice
-
-        do {
-            try judge.run()
-            // Don't wait — let it run detached.
-        } catch {
-            logger.warning("Failed to wake judge: \(error.localizedDescription, privacy: .public)")
-            // Best-effort; don't crash.
-        }
-    }
-
-    /// Helper: find an executable in standard locations.
-    /// Returns the full path if found, or an empty string otherwise.
-    private func findExecutable(_ name: String) -> String {
-        for path in ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/usr/bin/\(name)"] {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return path
+            // Set up a 5-minute deadline. The timeout Task's check-and-set is also protected
+            // by the lock, so only one of {termination, timeout} will successfully resume.
+            Task {
+                try await Task.sleep(for: .seconds(5 * 60))
+                state.lock.withLock { s in
+                    if !s.finished {
+                        s.finished = true
+                        logger.warning("tick.py exceeded 5-minute deadline; killed")
+                        process.terminate()
+                        continuation.resume(returning: -2)
+                    }
+                }
             }
         }
-        return ""
+
+        return exitCode
+    }
+
+    /// Judgment queuing intentional interim no-op: ticks detect and record judgment requirements (exit 10),
+    /// but daemon does NOT spawn a judge subprocess yet. Actuation is deferred to Phase A visible-worker
+    /// rewrite, which will spawn TBD workers through the daemon's real primitives (ClaudeSpawnCommandBuilder,
+    /// WorktreeLifecycle), providing proper plugin-dir, cwd, and permission posture instead of this interim
+    /// headless approach. Removes token-burn loop and hardcoded prompt/model/policy-in-mechanism.
+    public func wakeJudge(act: Bool) async {
+        logger.notice("Judgment queued (act=\(act, privacy: .public)); actuation deferred to Phase A visible-worker rewrite.")
     }
 }
 
