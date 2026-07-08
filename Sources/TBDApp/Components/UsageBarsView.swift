@@ -163,6 +163,7 @@ private struct UsageBarRow: View {
 
 // MARK: - Preview
 
+#if XCODE_PREVIEWS
 #Preview("Usage bars") {
     // Fixed clock so the previewed markers land deterministically.
     let now = Date(timeIntervalSince1970: 1_720_000_000)
@@ -205,3 +206,4 @@ private struct UsageBarRow: View {
     .frame(width: 220)
     .padding()
 }
+#endif

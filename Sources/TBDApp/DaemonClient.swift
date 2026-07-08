@@ -146,43 +146,18 @@ actor DaemonClient {
         }
     }
 
-    /// Find the tbdd binary by checking several locations.
+    /// Find the TBDDaemon binary by checking sibling and source-worktree locations.
     private func findTbddBinary() -> String? {
-        // 1. Same directory as the running app binary
-        if let execURL = Bundle.main.executableURL {
-            let siblingURL = execURL.deletingLastPathComponent().appendingPathComponent("tbdd")
-            if FileManager.default.isExecutableFile(atPath: siblingURL.path) {
-                return siblingURL.path
-            }
-        }
+        let sourceWorktreePath = SourceWorktreePathResolver.resolve(
+            bundleURL: Bundle.main.bundleURL,
+            executablePath: Bundle.main.executablePath
+        )
+        let candidates = DaemonCandidateFinder.daemonCandidatePaths(
+            appExecutablePath: Bundle.main.executablePath,
+            sourceWorktreePath: sourceWorktreePath
+        )
 
-        // 2. Try `which tbdd` via shell
-        let whichProcess = Process()
-        let pipe = Pipe()
-        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        whichProcess.arguments = ["which", "tbdd"]
-        whichProcess.standardOutput = pipe
-        whichProcess.standardError = FileHandle.nullDevice
-        do {
-            try whichProcess.run()
-            whichProcess.waitUntilExit()
-            if whichProcess.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let path, FileManager.default.isExecutableFile(atPath: path) {
-                    return path
-                }
-            }
-        } catch {
-            // Fall through
-        }
-
-        // 3. Common paths
-        let commonPaths = [
-            "/usr/local/bin/tbdd",
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/tbdd").path,
-        ]
-        for path in commonPaths {
+        for path in candidates {
             if FileManager.default.isExecutableFile(atPath: path) {
                 return path
             }

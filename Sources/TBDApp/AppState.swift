@@ -1396,14 +1396,15 @@ final class AppState: ObservableObject {
             try? FileManager.default.removeItem(atPath: TBDConstants.socketPath)
         }
 
-        // Find TBDDaemon binary next to this executable
-        let selfPath = ProcessInfo.processInfo.arguments.first ?? ""
-        let siblingPath = (selfPath as NSString).deletingLastPathComponent + "/TBDDaemon"
-
-        let candidates = [
-            siblingPath,
-            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("TBDDaemon").path,
-        ].compactMap { $0 }
+        // Find TBDDaemon binary using sibling and source-worktree candidates
+        let sourceWorktreePath = SourceWorktreePathResolver.resolve(
+            bundleURL: Bundle.main.bundleURL,
+            executablePath: Bundle.main.executablePath
+        )
+        let candidates = DaemonCandidateFinder.daemonCandidatePaths(
+            appExecutablePath: Bundle.main.executablePath,
+            sourceWorktreePath: sourceWorktreePath
+        )
 
         var tbddPath: String?
         for path in candidates {
@@ -1414,7 +1415,12 @@ final class AppState: ObservableObject {
         }
 
         guard let path = tbddPath else {
-            showAlert("Could not find TBDDaemon binary", isError: true)
+            let candidateList = candidates.isEmpty
+                ? "no candidates found"
+                : "tried: " + candidates.joined(separator: ", ")
+            let message = "Could not find TBDDaemon binary (\(candidateList)). "
+                + "Try running scripts/restart.sh from your worktree."
+            showAlert(message, isError: true)
             return
         }
 
