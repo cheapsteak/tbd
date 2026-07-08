@@ -189,6 +189,15 @@ struct SingleWorktreeView: View {
 
                 Divider()
 
+                // Thin banner when the active tab's terminal has a scheduled
+                // auto-resume: the wide "⏳ resumes ..." text used to live in
+                // the tab label (inflating tab width), now shown here once
+                // per active tab instead of per background tab.
+                if let resumeAt = activeTabTerminal?.pendingResumeAt {
+                    ScheduledResumeBanner(resumeAt: resumeAt)
+                    Divider()
+                }
+
                 // Thin header while a blocking pre-session hook runs and the
                 // user is watching it: the worktree is still `.creating`, so
                 // explain why no agent terminal exists yet.
@@ -291,8 +300,40 @@ struct SingleWorktreeView: View {
         return tabs[min(activeTabIndex, tabs.count - 1)]
     }
 
+    /// The active tab's terminal, if any — used to decide whether to show
+    /// the scheduled-resume banner. Resolved the same way TabBar resolves
+    /// each tab's terminal via `terminalForTab`.
+    private var activeTabTerminal: Terminal? {
+        guard let tabID = activeTab?.id, let terminalID = terminalID(for: tabID) else { return nil }
+        return appState.terminals[worktreeID]?.first { $0.id == terminalID }
+    }
+
     private func closeTab(at index: Int) {
         appState.closeTab(worktreeID: worktreeID, index: index)
+    }
+}
+
+// MARK: - ScheduledResumeBanner
+
+/// Slim header bar shown when the active tab's terminal has a scheduled
+/// auto-resume (session limit hit, TBD will type "continue" at `resumeAt`).
+/// Replaces the wide per-tab label text that used to inflate tab width;
+/// background tabs still signal via a bare "⏳" glyph in the tab label.
+private struct ScheduledResumeBanner: View {
+    let resumeAt: Date
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("⏳ Auto-resume scheduled — TBD types \"continue\" at \(ResumeTimeFormatter.string(from: resumeAt))")
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.15))
     }
 }
 
