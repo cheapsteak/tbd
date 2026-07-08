@@ -226,6 +226,19 @@ public enum TerminalActivityState: String, Codable, Sendable {
     case idle
     case waitingForUser = "waiting_for_user"
 }
+
+/// WHO parked a session — persisted alongside `hibernatedAt` so an explicit
+/// user park can be distinguished from an automatic one (and survive the
+/// wake-on-focus sweep, which must not silently undo a manual park).
+public enum HibernateReason: String, Codable, Sendable {
+    /// Idle-sweep auto-hibernation.
+    case auto
+    /// Explicit user "Hibernate now" (terminal.hibernate RPC or the legacy
+    /// terminal.suspend shim). Excluded from wake-on-focus.
+    case manual
+    /// Crash-recovery / reconcile parking (window or server gone).
+    case recovery
+}
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var worktreeID: UUID
@@ -253,6 +266,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// from `suspendedAt` (which kills the tmux window's program entirely and
     /// snapshots the pane); a hibernated terminal keeps its live window.
     public var hibernatedAt: Date?
+    /// WHO parked this session (see `HibernateReason`). Stamped together with
+    /// `hibernatedAt` at park time and cleared with it on wake. `nil` on
+    /// legacy rows parked before the column existed (pre-v46) — treated like
+    /// `.auto`, i.e. still eligible for wake-on-focus.
+    public var hibernateReason: HibernateReason?
     /// User pin that exempts this terminal from auto-hibernation. `false` =
     /// eligible for the idle timer; `true` = the daemon never auto-hibernates
     /// it (manual "Hibernate now" still works). Persisted per-terminal.
@@ -272,6 +290,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 kind: TerminalKind? = nil,
                 activityState: TerminalActivityState = .unknown,
                 hibernatedAt: Date? = nil,
+                hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
                 pendingResumeAt: Date? = nil) {
         self.id = id
@@ -289,6 +308,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.kind = kind
         self.activityState = activityState
         self.hibernatedAt = hibernatedAt
+        self.hibernateReason = hibernateReason
         self.keepWarm = keepWarm
         self.pendingResumeAt = pendingResumeAt
     }
@@ -297,7 +317,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case id, worktreeID, tmuxWindowID, tmuxPaneID, label, createdAt
         case pinnedAt, claudeSessionID, suspendedAt, suspendedSnapshot, profileID, transcriptPath, kind
         case activityState
-        case hibernatedAt, keepWarm, pendingResumeAt
+        case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -317,6 +337,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         kind = try c.decodeIfPresent(TerminalKind.self, forKey: .kind)
         activityState = try c.decodeIfPresent(TerminalActivityState.self, forKey: .activityState) ?? .unknown
         hibernatedAt = try c.decodeIfPresent(Date.self, forKey: .hibernatedAt)
+        hibernateReason = try c.decodeIfPresent(HibernateReason.self, forKey: .hibernateReason)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
         pendingResumeAt = try c.decodeIfPresent(Date.self, forKey: .pendingResumeAt)
     }

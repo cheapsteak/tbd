@@ -24,6 +24,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var kind: String?
     var activityState: String?
     var hibernatedAt: Date?
+    var hibernateReason: String?
     var keepWarm: Bool?
     var pendingResumeAt: Date?
 
@@ -43,6 +44,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.kind = terminal.kind?.rawValue
         self.activityState = terminal.activityState.rawValue
         self.hibernatedAt = terminal.hibernatedAt
+        self.hibernateReason = terminal.hibernateReason?.rawValue
         self.keepWarm = terminal.keepWarm
         self.pendingResumeAt = terminal.pendingResumeAt
     }
@@ -75,6 +77,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             kind: kind.flatMap(TerminalKind.init(rawValue:)),
             activityState: activityState.flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown,
             hibernatedAt: hibernatedAt,
+            hibernateReason: hibernateReason.flatMap(HibernateReason.init(rawValue:)),
             keepWarm: keepWarm ?? false,
             pendingResumeAt: pendingResumeAt
         )
@@ -258,6 +261,7 @@ public struct TerminalStore: Sendable {
             record.suspendedAt = nil
             record.suspendedSnapshot = nil
             record.hibernatedAt = nil
+            record.hibernateReason = nil
             record.label = TerminalLabel.shell
             record.kind = TerminalKind.shell.rawValue
             record.activityState = TerminalActivityState.unknown.rawValue
@@ -308,13 +312,19 @@ public struct TerminalStore: Sendable {
     /// orthogonal to which timestamp wins) so the app can show the frozen pane as
     /// the backdrop while the session is parked / waking. Pass `nil` to leave any
     /// existing snapshot untouched.
-    public func setHibernated(id: UUID, sessionID: String, snapshot: String? = nil, at date: Date = Date()) async throws {
+    ///
+    /// `reason` records WHO parked the session (idle sweep / manual action /
+    /// crash-recovery reconcile) — see `HibernateReason`. It is stamped
+    /// unconditionally (a re-park overwrites any stale reason); `nil` keeps
+    /// legacy semantics (the row is still eligible for wake-on-focus).
+    public func setHibernated(id: UUID, sessionID: String, snapshot: String? = nil, reason: HibernateReason? = nil, at date: Date = Date()) async throws {
         try await writer.write { db in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
             record.claudeSessionID = sessionID
             record.hibernatedAt = date
+            record.hibernateReason = reason?.rawValue
             if let snapshot {
                 record.suspendedSnapshot = snapshot
             }
@@ -337,6 +347,7 @@ public struct TerminalStore: Sendable {
             }
             record.hibernatedAt = nil
             record.suspendedAt = nil
+            record.hibernateReason = nil
             try record.update(db)
         }
     }

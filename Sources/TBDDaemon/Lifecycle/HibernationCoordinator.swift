@@ -183,7 +183,7 @@ public actor HibernationCoordinator {
         guard terminal.isManuallyHibernatable else {
             return .notEligible(reason: manualBlockReason(terminal))
         }
-        return await performHibernate(terminal: terminal)
+        return await performHibernate(terminal: terminal, reason: .manual)
     }
 
     /// The reason a manual hibernate was refused, for the RPC error string.
@@ -204,7 +204,11 @@ public actor HibernationCoordinator {
     /// (typed-but-unsent input, transcript-tail validity) that the DB row can't
     /// express. After the kill it verifies the claude process is gone and the
     /// pane's shell survived, and logs any orphaned claude children.
-    private func performHibernate(terminal: Terminal) async -> HibernateResult {
+    ///
+    /// `reason` records WHO parked the session (`.manual` from the explicit
+    /// "Hibernate now" entry points, `.auto` from the idle sweep) — persisted
+    /// so the app's wake-on-focus can skip manual parks.
+    private func performHibernate(terminal: Terminal, reason: HibernateReason) async -> HibernateResult {
         guard !hibernatesInFlight.contains(terminal.id) else {
             return .alreadyHibernated
         }
@@ -286,7 +290,8 @@ public actor HibernationCoordinator {
 
         do {
             try await db.terminals.setHibernated(
-                id: terminal.id, sessionID: sessionID, snapshot: capturedSnapshot, at: now()
+                id: terminal.id, sessionID: sessionID, snapshot: capturedSnapshot,
+                reason: reason, at: now()
             )
         } catch {
             logger.warning("hibernate: failed to mark hibernated for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -705,7 +710,7 @@ public actor HibernationCoordinator {
                 }
                 if let pending = pendingKillSince[terminal.id] {
                     if reference.timeIntervalSince(pending) >= Self.killDebounce {
-                        _ = await performHibernate(terminal: terminal)
+                        _ = await performHibernate(terminal: terminal, reason: .auto)
                     }
                 } else {
                     pendingKillSince[terminal.id] = reference
