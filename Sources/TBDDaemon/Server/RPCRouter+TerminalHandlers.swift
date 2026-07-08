@@ -1333,11 +1333,24 @@ extension RPCRouter {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
         }
 
-        try await tmux.sendKeys(
-            server: worktree.tmuxServer,
-            paneID: terminal.tmuxPaneID,
-            text: params.text
-        )
+        // Deliver the body as an EXPLICIT bracketed paste (load-buffer +
+        // paste-buffer -d -p) rather than raw `send-keys -l`. For payloads
+        // larger than the pty buffer (~1 KB) the pty splits `send-keys -l` into
+        // multiple rapid reads, which a TUI's non-bracketed paste-burst
+        // detection mistakes for a paste and coalesces — absorbing the trailing
+        // Enter so nothing submits. The explicit `ESC[201~` terminator puts the
+        // Enter provably outside the paste. tmux emits the wrappers iff the pane
+        // has bracketed-paste mode on — agent TUIs and modern interactive shells
+        // both enable it at the prompt; cooked-mode consumers get bare bytes and
+        // behave as before. Skip an empty body entirely (don't paste an empty
+        // buffer) but still press Enter below if requested.
+        if !params.text.isEmpty {
+            try await tmux.pasteText(
+                server: worktree.tmuxServer,
+                paneID: terminal.tmuxPaneID,
+                bytes: Data(params.text.utf8)
+            )
+        }
 
         if params.submit == true {
             try await tmux.sendKey(
