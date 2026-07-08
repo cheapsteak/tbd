@@ -616,9 +616,13 @@ public final class Daemon: Sendable {
                             (type, message) = (.limitReached, "Auto-resumed Claude after the limit reset")
                         }
                     case .failed(let reason):
-                        let noun = resume.limitType == ScheduledResume.apiErrorLimitType ? "Auto-continue" : "Auto-resume"
-                        (type, message) = (.attentionNeeded,
-                            "\(noun) failed — \(reason). Claude may still be parked.")
+                        if resume.limitType == ScheduledResume.apiErrorLimitType {
+                            (type, message) = (.attentionNeeded,
+                                "Auto-continue failed — \(reason). Claude may still be stopped on an API error.")
+                        } else {
+                            (type, message) = (.attentionNeeded,
+                                "Auto-resume failed — \(reason). Claude may still be parked at the limit screen.")
+                        }
                     }
                     guard let notification = try? await database.notifications.create(
                         worktreeID: resume.worktreeID, type: type,
