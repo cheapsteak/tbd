@@ -63,6 +63,9 @@ struct ScratchArchiveReviveRPCTests {
         let (router, _) = makeRouter(db: db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: "with-terminal")))
         let wt = try created.decodeResult(Worktree.self)
+        // The scratch.create RPC now auto-spawns a default primary agent terminal;
+        // clear it so this test controls its own terminal fixture.
+        try await db.terminals.deleteForWorktree(worktreeID: wt.id)
 
         let terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
