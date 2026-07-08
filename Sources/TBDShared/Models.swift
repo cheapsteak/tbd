@@ -796,6 +796,13 @@ public struct ScheduledResume: Codable, Sendable, Identifiable, Equatable {
     }
 }
 
+extension ScheduledResume {
+    /// `limitType` sentinel for rows scheduled from a transient API-error
+    /// classification (as opposed to a hard usage-limit hit) — distinguishes
+    /// the two in the scheduler/actuator's gating logic.
+    public static let apiErrorLimitType = "api_error"
+}
+
 public struct Note: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
     public var worktreeID: UUID
