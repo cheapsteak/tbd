@@ -68,6 +68,9 @@ struct ScratchPromoteMigrationTests {
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
         try gitInitCommit(at: wt.path)
+        // The scratch.create RPC now auto-spawns a default primary agent terminal;
+        // clear it so this test controls its own terminal fixture.
+        try await db.terminals.deleteForWorktree(worktreeID: wt.id)
 
         // Two live-ish terminals, a labeled tab, an order, and a selection.
         let t1 = try await db.terminals.create(
@@ -125,6 +128,9 @@ struct ScratchPromoteMigrationTests {
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
         try gitInitCommit(at: wt.path)
+        // The scratch.create RPC now auto-spawns a default primary agent terminal;
+        // clear it so this test controls its own terminal fixture.
+        try await db.terminals.deleteForWorktree(worktreeID: wt.id)
 
         // One ambient terminal and one profile-pinned terminal.
         let profileID = UUID()
