@@ -123,7 +123,14 @@ Responsibilities, in order:
    `tbd worktree list --json` (test seam: `RECLAIM_WT_JSON` fixture) for each
    worktree's `path`, `status`, and `liveClaudeSessionCount`. Only
    `status == "active"` worktrees are considered; archived ones are already
-   reclaimed by `git worktree remove`.
+   reclaimed by `git worktree remove`. **Scope to SwiftPM worktrees only:**
+   `tbd worktree list` spans *every* repo TBD manages (longeye-app,
+   longeye-docs, agent-channels, …), so skip any worktree lacking a
+   `Package.swift`. That file's presence is the exact discriminator — a
+   worktree cannot produce a SwiftPM `.build`/`index-build` without it — so it
+   correctly gates both the config seeding and the GC tiers, and never lets the
+   reaper seed a `.sourcekit-lsp` config into a non-Swift project. (This gap was
+   caught by a live dry-run: fixture-injected tests could not surface it.)
 
 2. **Per worktree with a `.build`, apply the safety gate then the tiers:**
 
