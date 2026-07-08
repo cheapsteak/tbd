@@ -21,9 +21,9 @@ struct StopFailureMessageTests {
     /// a fixed instant must pass a matching `timestamp` explicitly, since the
     /// retry/detection path is recency-gated (records must be newer than
     /// `now - 10s`).
-    private static func transcript(text: String, timestamp: Date = Date()) -> Data {
+    private static func transcript(text: String, timestamp: Date = Date(), error: String = "rate_limit") -> Data {
         let line = """
-        {"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":429,"error":"rate_limit","timestamp":"\(Self.iso(timestamp))","message":{"role":"assistant","content":[{"type":"text","text":"\(text)"}]}}
+        {"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":429,"error":"\(error)","timestamp":"\(Self.iso(timestamp))","message":{"role":"assistant","content":[{"type":"text","text":"\(text)"}]}}
         """
         return Data((line + "\n").utf8)
     }
@@ -321,5 +321,109 @@ struct StopFailureMessageTests {
             now: Date(), timeZone: TimeZone(identifier: "UTC")!)
         #expect(outcome.message == "Claude stopped: API error (rate_limit)")
         #expect(outcome.detectedLimit == nil)
+    }
+
+    // MARK: - Transient API-error detection (Task 6)
+
+    /// Payload-first transient: a connection-closed `last_assistant_message`
+    /// classifies as `connection_closed`, keeps the verbatim text, and never
+    /// touches the transcript file.
+    @Test func payloadFirstTransientViaLastAssistantMessageSkipsTranscriptRead() {
+        let text = "API Error: Connection closed mid-response"
+        let counter = CallCounter()
+        let outcome = StopFailureMessage.computeOutcomeWithRetry(
+            stdinData: Self.stdinWithExtras(
+                error: "server_error",
+                transcriptPath: "/irrelevant.jsonl",
+                lastAssistantMessage: text),
+            readFile: { (_: String) -> Data? in counter.count += 1; return nil },
+            now: Date(timeIntervalSince1970: 1_783_173_600),
+            timeZone: TimeZone(identifier: "UTC")!)
+        #expect(counter.count == 0)
+        #expect(outcome.message == text)
+        #expect(outcome.detectedLimit == nil)
+        #expect(outcome.detectedTransient?.errorClass == "connection_closed")
+        #expect(outcome.detectedTransient?.rawMessage == text)
+    }
+
+    /// Hard-limit precedence: a session-limit `last_assistant_message` with a
+    /// parseable reset must be a detected LIMIT, never a transient — the
+    /// payload-first hard-limit loop runs before the transient loop.
+    @Test func hardLimitPayloadPrecedesTransient() {
+        let text = "You've hit your session limit · resets 3pm (UTC)"
+        let outcome = StopFailureMessage.computeOutcomeWithRetry(
+            stdinData: Self.stdinWithExtras(
+                error: "rate_limit",
+                transcriptPath: "/irrelevant.jsonl",
+                lastAssistantMessage: text),
+            readFile: { (_: String) -> Data? in nil },
+            now: Date(timeIntervalSince1970: 1_783_173_600),
+            timeZone: TimeZone(identifier: "UTC")!)
+        #expect(outcome.detectedLimit != nil)
+        #expect(outcome.detectedTransient == nil)
+    }
+
+    /// Transcript transient: no payload text keys, but the recent transcript
+    /// record carries connection-closed text + `"error":"server_error"` — the
+    /// transient is detected after passing the recency retry gate.
+    @Test func transcriptTransientDetectedAfterRetryGate() {
+        let text = "API Error: Connection closed mid-response"
+        let now = Date(timeIntervalSince1970: 1_783_173_600)
+        let outcome = StopFailureMessage.computeOutcome(
+            stdinData: Self.stdinWithExtras(error: "server_error", transcriptPath: "/x.jsonl"),
+            readFile: { _ in Self.transcript(text: text, timestamp: now, error: "server_error") },
+            now: now,
+            timeZone: TimeZone(identifier: "UTC")!)
+        #expect(outcome.detectedLimit == nil)
+        #expect(outcome.detectedTransient?.errorClass == "connection_closed")
+        #expect(outcome.message == text)
+    }
+
+    /// ErrorField-only on exhaustion: payload `error: "server_error"`, no text
+    /// keys, and the transcript never gains a recent record before retries
+    /// exhaust — the `server_error` field alone still counts as transient, and
+    /// the message is the synthesized fallback.
+    @Test func errorFieldOnlyTransientOnRetryExhaustion() {
+        let counter = CallCounter()
+        let outcome = StopFailureMessage.computeOutcomeWithRetry(
+            stdinData: Self.stdinWithExtras(error: "server_error", transcriptPath: "/x.jsonl"),
+            readFile: { _ in counter.count += 1; return nil },
+            now: Date(timeIntervalSince1970: 1_783_173_600),
+            timeZone: TimeZone(identifier: "UTC")!,
+            waiter: { _ in },
+            maxRetries: 2,
+            retryInterval: 0.001)
+        #expect(outcome.detectedLimit == nil)
+        #expect(outcome.detectedTransient?.errorClass == "server_error")
+        #expect(outcome.message == "Claude stopped: API error (server_error)")
+    }
+
+    /// Negative: an unknown error field with no text is neither a limit nor a
+    /// transient — the legacy fallback message is byte-identical.
+    @Test func unknownErrorNoTextIsNotTransient() {
+        let outcome = StopFailureMessage.computeOutcome(
+            stdinData: Self.stdinWithExtras(error: "unknown"),
+            readFile: { _ in nil },
+            now: Date(timeIntervalSince1970: 1_783_173_600),
+            timeZone: TimeZone(identifier: "UTC")!)
+        #expect(outcome.detectedLimit == nil)
+        #expect(outcome.detectedTransient == nil)
+        #expect(outcome.message == "Claude stopped: API error (unknown)")
+    }
+
+    /// Negative: an OAuth/401 wording in `last_assistant_message` is a
+    /// permanent auth failure — the exclusion guard wins even though the text
+    /// also contains a connection-closed phrase, so both detections are nil and
+    /// the message falls through to the legacy fallback.
+    @Test func oauthTextIsExcludedFromTransient() {
+        let text = "OAuth token expired · connection closed mid-response"
+        let outcome = StopFailureMessage.computeOutcome(
+            stdinData: Self.stdinWithExtras(error: "authentication_error", lastAssistantMessage: text),
+            readFile: { _ in nil },
+            now: Date(timeIntervalSince1970: 1_783_173_600),
+            timeZone: TimeZone(identifier: "UTC")!)
+        #expect(outcome.detectedLimit == nil)
+        #expect(outcome.detectedTransient == nil)
+        #expect(outcome.message == "Claude stopped: API error (authentication_error)")
     }
 }

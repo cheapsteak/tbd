@@ -29,6 +29,9 @@ struct StopFailureCommand: AsyncParsableCommand {
         if let detected = outcome.detectedLimit, reportToDaemon(detected) {
             return  // daemon owns the limit_reached notification
         }
+        if let transient = outcome.detectedTransient, reportTransientToDaemon(transient) {
+            return  // daemon owns messaging (scheduled / gave-up / latch)
+        }
         if let message = outcome.message {
             print(message)
         }
@@ -56,6 +59,33 @@ struct StopFailureCommand: AsyncParsableCommand {
             return false
         }
     }
+
+    /// Fire the transientApiErrorDetected RPC. Returns the daemon's
+    /// `handled` flag: `true` means the daemon owns user messaging (scheduled
+    /// a retry / gave up / latch-silenced) so the CLI prints nothing; `false`
+    /// (toggle off or unknown terminal) falls through to the legacy print.
+    /// Mirrors `reportToDaemon`: silent on every failure — the hook must never
+    /// wedge Claude.
+    private func reportTransientToDaemon(_ detected: DetectedTransientError) -> Bool {
+        guard let terminalIDString = ProcessInfo.processInfo.environment["TBD_TERMINAL_ID"],
+              let terminalID = UUID(uuidString: terminalIDString) else {
+            return false
+        }
+        let client = SocketClient()
+        guard client.isDaemonRunning else { return false }
+        do {
+            let result = try client.call(
+                method: RPCMethod.claudeTransientApiErrorDetected,
+                params: TransientApiErrorDetectedParams(
+                    terminalID: terminalID,
+                    errorClass: detected.errorClass,
+                    rawMessage: detected.rawMessage),
+                resultType: TransientApiErrorDetectedResult.self)
+            return result.handled
+        } catch {
+            return false
+        }
+    }
 }
 
 // MARK: - Pure core (testable)
@@ -67,6 +97,21 @@ enum StopFailureMessage {
         let message: String?
         /// Non-nil when the transcript's last API error is a schedulable hard limit.
         let detectedLimit: DetectedRateLimit?
+        /// Non-nil when the last API error is an allowlisted transient (5xx /
+        /// overloaded / network blip) the daemon may auto-retry. Mutually
+        /// exclusive with `detectedLimit` (hard limits always win). Defaulted so
+        /// existing construction sites (and their tests) stay untouched.
+        let detectedTransient: DetectedTransientError?
+
+        init(
+            message: String?,
+            detectedLimit: DetectedRateLimit?,
+            detectedTransient: DetectedTransientError? = nil
+        ) {
+            self.message = message
+            self.detectedLimit = detectedLimit
+            self.detectedTransient = detectedTransient
+        }
     }
 
     /// Pure detection + message construction; every branch unit-testable.
@@ -124,7 +169,10 @@ enum StopFailureMessage {
         let errorType = (payload["error"] as? String) ?? (payload["error_type"] as? String) ?? "unknown"
         let fallback = "Claude stopped: API error (\(errorType))"
 
-        // Payload-first: race-free, never touches the transcript file.
+        // Payload-first hard-limit: race-free, never touches the transcript
+        // file. Hard limits ALWAYS take precedence over transient errors, so
+        // this loop runs to completion over both keys before the transient
+        // loop below even starts.
         for key in ["last_assistant_message", "error_details"] {
             if let candidate = payload[key] as? String,
                let detected = RateLimitDetection.detect(messageText: candidate, now: now, timeZone: timeZone) {
@@ -132,8 +180,29 @@ enum StopFailureMessage {
             }
         }
 
-        guard let transcriptPath = payload["transcript_path"] as? String else {
+        // Payload-first transient: same keys, still race-free. Only reached when
+        // no key was a hard limit.
+        for key in ["last_assistant_message", "error_details"] {
+            if let candidate = payload[key] as? String,
+               let transient = TransientErrorDetection.detect(messageText: candidate, errorField: errorType) {
+                return Outcome(message: transient.rawMessage, detectedLimit: nil, detectedTransient: transient)
+            }
+        }
+
+        // Shared errorField-only transient backstop: when no usable text is
+        // available (no transcript path, or the transcript never yields a
+        // recent record), a `server_error` error field alone still counts as a
+        // transient — Claude Code sometimes omits display text for that class.
+        // Miss → the unchanged legacy fallback outcome.
+        func transientFallbackOutcome() -> Outcome {
+            if let transient = TransientErrorDetection.detect(messageText: nil, errorField: errorType) {
+                return Outcome(message: fallback, detectedLimit: nil, detectedTransient: transient)
+            }
             return Outcome(message: fallback, detectedLimit: nil)
+        }
+
+        guard let transcriptPath = payload["transcript_path"] as? String else {
+            return transientFallbackOutcome()
         }
 
         // Recency floor for the transcript-append race: the StopFailure hook
@@ -156,18 +225,31 @@ enum StopFailureMessage {
         }
 
         guard let data else {
-            return Outcome(message: fallback, detectedLimit: nil)
+            return transientFallbackOutcome()
         }
 
-        // Single scan: derive both the detected limit and the display
-        // message from the SAME floor-gated record — one parse of `data`
-        // instead of two independent full-file scans for the same result.
+        // Single scan: derive the detected limit, the display message, AND the
+        // record's `error` field from the SAME floor-gated record — one parse
+        // of `data` instead of independent full-file scans for the same result.
         guard let scan = RateLimitDetection.detectWithText(
             transcriptData: data, now: now, timeZone: timeZone, newerThan: recencyFloor
         ) else {
-            return Outcome(message: fallback, detectedLimit: nil)
+            return transientFallbackOutcome()
         }
-        return Outcome(message: scan.text ?? fallback, detectedLimit: scan.detectedLimit)
+
+        // Hard limit always wins.
+        if let detectedLimit = scan.detectedLimit {
+            return Outcome(message: scan.text ?? fallback, detectedLimit: detectedLimit)
+        }
+        // Else classify the scanned record as a transient, keying off the
+        // record's own `error` field (falling back to the payload `errorType`).
+        if let transient = TransientErrorDetection.detect(
+            messageText: scan.text, errorField: scan.errorClass ?? errorType
+        ) {
+            return Outcome(message: scan.text ?? fallback, detectedLimit: nil, detectedTransient: transient)
+        }
+        // Neither limit nor transient — today's plain notify-only shape.
+        return Outcome(message: scan.text ?? fallback, detectedLimit: nil)
     }
 
     /// Legacy entry point — existing tests exercise this shape.
