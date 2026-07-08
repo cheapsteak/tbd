@@ -88,5 +88,78 @@ test_ensure_lsp_config_noop_when_present() {
   rm -rf "$wt"
 }
 
+# helper: build a fake worktree with index-build + debug build files aged relative to NOW
+_mk_worktree() { # dir now index_age debug_age
+  local d="$1" now="$2" iage="$3" dage="$4"
+  mkdir -p "$d/.build/index-build" "$d/.build/arm64-apple-macosx/debug"
+  : > "$d/.build/index-build/idx.o";        touch_age "$d/.build/index-build/idx.o" "$now" "$iage"
+  : > "$d/.build/arm64-apple-macosx/debug/app.o"; touch_age "$d/.build/arm64-apple-macosx/debug/app.o" "$now" "$dage"
+}
+NO_PS='printf ""'   # ps seam that matches nothing
+
+test_plan_skips_when_no_build_dir() {
+  local d; d="$(mktmpd)"
+  local out; out="$(RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  assert_eq "no .build -> no output" "" "$out"
+  rm -rf "$d"
+}
+
+test_plan_fresh_skips_both_tiers() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_worktree "$d" "$now" 60 60   # 1 min old — fresh
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  assert_eq "fresh -> SKIP fresh" "SKIP fresh $d" "$out"
+  rm -rf "$d"
+}
+
+test_plan_stale_index_only_is_tier1() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_worktree "$d" "$now" 25000 60   # index ~7h old, debug fresh
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  assert_eq "stale index only -> tier1" "PLAN tier1 $d" "$out"
+  rm -rf "$d"
+}
+
+test_plan_stale_whole_build_no_session_is_tier2() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_worktree "$d" "$now" 200000 200000   # both > 48h
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  assert_eq "stale whole build, no session -> tier2" "PLAN tier2 $d" "$out"
+  rm -rf "$d"
+}
+
+test_plan_stale_build_with_live_session_falls_to_tier1() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_worktree "$d" "$now" 200000 200000   # both stale, but session present
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 1)"
+  assert_eq "stale build + live session -> tier1 (keep debug)" "PLAN tier1 $d" "$out"
+  rm -rf "$d"
+}
+
+test_plan_active_build_hard_skips() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  _mk_worktree "$d" "$now" 200000 200000
+  local ps="printf '%s\n' \"711 /usr/bin/swift-frontend -c $d/Sources/A.swift\""
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$ps" plan_worktree "$d" 0)"
+  assert_eq "active build -> hard skip" "SKIP active-build $d" "$out"
+  rm -rf "$d"
+}
+
+test_list_worktrees_tsv_active_only_with_sessions() {
+  local j; j="$(mktmpd)/wt.json"
+  cat > "$j" <<'JSON'
+[
+  {"path":"/w/active-a","status":"active","liveClaudeSessionCount":2},
+  {"path":"/w/active-b","status":"active"},
+  {"path":"/w/archived","status":"archived","liveClaudeSessionCount":0}
+]
+JSON
+  local out; out="$(RECLAIM_WT_JSON="$j" list_worktrees_tsv)"
+  assert_contains "active-a with session count" "$out" "/w/active-a	2"
+  assert_contains "active-b defaults to 0" "$out" "/w/active-b	0"
+  assert_missing  "archived excluded" "$out" "/w/archived"
+  rm -rf "$(dirname "$j")"
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
 exit $FAIL

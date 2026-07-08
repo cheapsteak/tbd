@@ -53,6 +53,43 @@ ensure_lsp_config() {
   printf '{\n  "backgroundIndexing": false\n}\n' > "$cfg"
 }
 
+# list_worktrees_tsv -> "<path>\t<liveSessions>" for each active worktree
+list_worktrees_tsv() {
+  _worktree_json | jq -r '.[] | select(.status == "active") | [.path, (.liveClaudeSessionCount // 0)] | @tsv'
+}
+
+# plan_worktree WORKTREE_PATH LIVE_SESSIONS -> one decision line (or nothing if no .build)
+plan_worktree() {
+  local wt="$1" sessions="$2"
+  local build="$wt/.build"
+  [[ -d "$build" ]] || return 0
+
+  if has_active_build "$wt"; then
+    echo "SKIP active-build $wt"
+    return 0
+  fi
+
+  local now t1 t2 dbg_m idx_m
+  now="$(_now)"; t1="$RECLAIM_T1_SECONDS"; t2="$RECLAIM_T2_SECONDS"
+
+  # Tier 2 first (deleting the whole .build subsumes Tier 1). Measured on the
+  # debug build, which Tier 1 never touches, so the clock is independent.
+  dbg_m="$(newest_mtime "$build/arm64-apple-macosx")"
+  if [[ -n "$dbg_m" ]] && (( now - dbg_m >= t2 )) && (( sessions == 0 )); then
+    echo "PLAN tier2 $wt"
+    return 0
+  fi
+
+  # Tier 1: index-build measured on its own subtree.
+  idx_m="$(newest_mtime "$build/index-build")"
+  if [[ -n "$idx_m" ]] && (( now - idx_m >= t1 )); then
+    echo "PLAN tier1 $wt"
+    return 0
+  fi
+
+  echo "SKIP fresh $wt"
+}
+
 main() {
   : # filled in Task 5
 }
