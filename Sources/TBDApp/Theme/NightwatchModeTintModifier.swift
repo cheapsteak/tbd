@@ -8,15 +8,20 @@ struct NightwatchModeTintModifier: ViewModifier {
     let mode: NightwatchMode
     let experimentalEnabled: Bool
 
+    /// Resolves the tint color based on mode and experimental flag.
+    /// Returns nil when the feature is disabled or the mode has no tint.
+    static func resolvedTint(mode: NightwatchMode, experimentalEnabled: Bool) -> Color? {
+        guard experimentalEnabled else { return nil }
+        return tintColor(for: mode)
+    }
+
     func body(content: Content) -> some View {
-        if experimentalEnabled {
+        if let tintColor = Self.resolvedTint(mode: mode, experimentalEnabled: experimentalEnabled) {
             ZStack {
                 // Tint wash overlay — very low opacity (0.05) for subtlety
-                if let tintColor = tintColor(for: mode) {
-                    tintColor
-                        .opacity(0.05)
-                        .ignoresSafeArea()
-                }
+                tintColor
+                    .opacity(0.05)
+                    .ignoresSafeArea()
                 content
             }
         } else {
