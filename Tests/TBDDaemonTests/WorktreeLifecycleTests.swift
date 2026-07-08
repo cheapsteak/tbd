@@ -1121,16 +1121,6 @@ func testLiveSessionSurvivesReconcile() async throws {
     #expect(parkedTerminal.isParked, "Terminal should be marked as parked")
     #expect(parkedTerminal.hibernatedAt != nil, "Terminal should have hibernatedAt set")
 
-    // Run reconciliation — should NOT re-park the terminal
-    // The reconcile loop skips parked terminals via the 'where !terminal.isParked' filter,
-    // so even if the window appears dead, a parked terminal stays parked.
-    try await lifecycle.reconcile(repoID: repo.id)
-
-    // After reconciliation, the terminal should still be hibernated
-    let postReconcileTerminal = try #require(await db.terminals.get(id: terminal.id))
-    #expect(postReconcileTerminal.hibernatedAt != nil,
-            "Parked terminal should remain hibernated after reconcile")
-
     // Now simulate reconcileOnStartup() finding the window alive with Claude running
     let tmux = TmuxManager(
         dryRun: true,
@@ -1148,6 +1138,28 @@ func testLiveSessionSurvivesReconcile() async throws {
             "hibernatedAt should be cleared for still-running sessions")
     #expect(afterStartupTerminal.suspendedAt == nil,
             "suspendedAt should be cleared for still-running sessions")
+
+    // Now test the main reconcile loop's safety check: call reconcile() with the window
+    // appearing dead but Claude still running. The safety check should prevent re-parking
+    // a still-running session.
+    let lifecycleWithDeadWindow = WorktreeLifecycle(
+        db: db,
+        git: git,
+        tmux: TmuxManager(
+            dryRun: true,
+            dryRunWindowIsDead: { _ in true },  // Window appears dead
+            dryRunPaneCurrentCommand: { _, _ in "claude" }  // But Claude is still running
+        ),
+        hooks: HookResolver()
+    )
+    try await lifecycleWithDeadWindow.reconcile(repoID: repo.id)
+
+    // After reconcile with dead window but live Claude process, terminal should NOT be re-parked
+    let afterReconcileTerminal = try #require(await db.terminals.get(id: terminal.id))
+    #expect(!afterReconcileTerminal.isParked,
+            "Terminal should remain un-parked when window is dead but Claude is still running (safety check)")
+    #expect(afterReconcileTerminal.hibernatedAt == nil,
+            "hibernatedAt should remain cleared despite dead window")
 }
 
 // MARK: - Helpers
