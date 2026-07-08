@@ -34,5 +34,31 @@ test_newest_mtime_empty_for_empty_dir() {
   rm -rf "$d"
 }
 
+test_has_active_build_true_when_swift_proc_matches() {
+  local ps_out='901 /usr/bin/swift-frontend -c /Users/x/tbd/worktrees/tbd/w1/Sources/A.swift'
+  RECLAIM_PS_CMD="printf '%s\n' \"$ps_out\"" \
+    has_active_build "/Users/x/tbd/worktrees/tbd/w1" \
+    && assert_eq "active build detected" "yes" "yes" \
+    || assert_eq "active build detected" "yes" "no"
+}
+
+test_has_active_build_false_when_no_swift_proc() {
+  local ps_out='902 /bin/zsh -l'
+  if RECLAIM_PS_CMD="printf '%s\n' \"$ps_out\"" has_active_build "/Users/x/tbd/worktrees/tbd/w1"; then
+    assert_eq "no active build" "no" "yes"
+  else
+    assert_eq "no active build" "no" "no"
+  fi
+}
+
+test_has_active_build_false_when_swift_proc_other_worktree() {
+  local ps_out='903 /usr/bin/swiftc /Users/x/tbd/worktrees/tbd/OTHER/Sources/A.swift'
+  if RECLAIM_PS_CMD="printf '%s\n' \"$ps_out\"" has_active_build "/Users/x/tbd/worktrees/tbd/w1"; then
+    assert_eq "swift proc in other worktree ignored" "no" "yes"
+  else
+    assert_eq "swift proc in other worktree ignored" "no" "no"
+  fi
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
 exit $FAIL

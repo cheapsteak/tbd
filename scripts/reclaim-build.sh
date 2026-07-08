@@ -33,6 +33,12 @@ newest_mtime() {
   { find "$dir" -type f -print0 2>/dev/null | xargs -0 stat -f '%m' 2>/dev/null | sort -rn | head -1; } || true
 }
 
+# has_active_build WORKTREE_PATH -> exit 0 if a swift build process references it
+has_active_build() {
+  local wt="$1"
+  _ps_lines | grep -Ei 'swift-build|swift-frontend|swiftc|swift-driver' | grep -Fq -- "$wt"
+}
+
 main() {
   : # filled in Task 5
 }
