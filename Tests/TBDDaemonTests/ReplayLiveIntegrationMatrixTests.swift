@@ -126,23 +126,66 @@ struct ReplayLiveIntegrationMatrixTests {
 
     /// Read `fd` (nonblocking) until `condition` holds on the accumulated
     /// bytes, EOF, cancellation, or the deadline. Bursts drain without
-    /// sleeping; EAGAIN sleeps a poll slice.
+    /// waiting; when nothing is ready the read loop parks in `poll(2)`.
+    ///
+    /// The read loop runs on a DEDICATED `Thread`, not on the Swift
+    /// Concurrency cooperative pool, and that placement is load-bearing.
+    /// The pane's replay write (attach via `AttachReplayOrchestrator`,
+    /// repair via `PaneRepairCoordinator`) runs a synchronous, wall-clock
+    /// 5 s-deadlined `poll`/`write` against the ~64 KB vended pipe; if this
+    /// reader stalls the pipe stays full and the producer blows its
+    /// deadline with `PaneReplayWriteError.deadlineExceeded`. An earlier
+    /// version drained on the cooperative executor and yielded on EAGAIN
+    /// via `Task.sleep`; under CI CPU oversubscription the executor was
+    /// saturated, this reader Task wasn't scheduled promptly, the pipe
+    /// overflowed, and the producer's deadline fired — a pure test-harness
+    /// flake (the `firehoseOverflowRepairHeals` scenario went red with
+    /// `deadlineExceeded`). In production the reader is a real client, and
+    /// a genuinely stalled reader SHOULD surface as backpressure, so the
+    /// fix belongs here, not in the producer. A dedicated thread is immune
+    /// to executor starvation: the kernel schedules it independently of
+    /// the concurrency runtime. `withCheckedContinuation` bridges the
+    /// blocking loop back to this `async` signature so no caller changes.
+    /// Cancellation is honoured cooperatively (a stop flag flipped from the
+    /// task-cancellation handler) and, as a backstop, strictly bounded by
+    /// `deadline`.
     private func drain(fd: Int32, deadline: Duration = .seconds(15),
                        until condition: @escaping @Sendable (Data) -> Bool) async -> Data {
-        var accumulated = Data()
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        let end = ContinuousClock.now + deadline
-        while ContinuousClock.now < end && !Task.isCancelled {
-            let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
-            if n > 0 {
-                accumulated.append(contentsOf: buffer[0..<n])
-                if condition(accumulated) { break }
-                continue
+        let stop = FlagBox()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Data, Never>) in
+                let thread = Thread {
+                    var accumulated = Data()
+                    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+                    let end = ContinuousClock.now + deadline
+                    while ContinuousClock.now < end && !stop.get() {
+                        // Park up to a 50 ms slice waiting for readable bytes
+                        // so the loop neither busy-spins nor oversleeps the
+                        // deadline. fd is already nonblocking (see caller).
+                        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                        _ = withUnsafeMutablePointer(to: &pfd) { Darwin.poll($0, 1, 50) }
+
+                        let n = buffer.withUnsafeMutableBytes {
+                            Darwin.read(fd, $0.baseAddress, $0.count)
+                        }
+                        if n > 0 {
+                            accumulated.append(contentsOf: buffer[0..<n])
+                            if condition(accumulated) { break }
+                        } else if n == 0 {
+                            break  // EOF — write end closed
+                        }
+                        // n < 0: EAGAIN — the poll above already waited; loop
+                        // and re-check the deadline.
+                    }
+                    continuation.resume(returning: accumulated)
+                }
+                thread.name = "replay-drain"
+                thread.stackSize = 512 * 1024
+                thread.start()
             }
-            if n == 0 { break }  // EOF — write end closed
-            try? await Task.sleep(for: .milliseconds(20))
+        } onCancel: {
+            stop.set()
         }
-        return accumulated
     }
 
     // MARK: - Byte-stream analysis helpers

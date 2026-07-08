@@ -444,105 +444,28 @@ public struct GitManager: Sendable {
                      executable: String = "/usr/bin/git") async throws -> String {
         let timeout = subprocessTimeout
         let commandDescription = "git " + arguments.joined(separator: " ")
-        // Single-resume guard shared by the termination handler, the timeout
-        // timer, and the spawn-failure path (mirrors TmuxManager.runExternalCommand).
-        let state = ContinuationGuard()
-        let timeoutNanos = UInt64(max(0, timeout.components.seconds)) * 1_000_000_000
-            + UInt64(max(0, timeout.components.attoseconds / 1_000_000_000))
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            let stdoutAccumulator = PipeDataAccumulator()
-            let stderrAccumulator = PipeDataAccumulator()
-
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = arguments
-            process.currentDirectoryURL = URL(fileURLWithPath: directory)
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            // Watchdog: a wedged git child (a `git fetch` was once stuck 95 min)
-            // is escalated SIGTERM → SIGKILL and the call throws GitTimeoutError.
-            let timer = DispatchSource.makeTimerSource(queue: .global())
-            timer.schedule(deadline: .now() + .nanoseconds(Int(min(timeoutNanos, UInt64(Int.max)))))
-            timer.setEventHandler {
-                guard state.claim() else { return }
-                timer.cancel()
-                // Stop draining and close the parent read ends NOW (mirrors
-                // TmuxManager.runExternalCommand). The kill below reaches only
-                // the DIRECT child; grandchildren it forked inherit the pipe
-                // write ends, so EOF may never come — waiting for it would
-                // leak the FDs and handler closures for their lifetime.
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
-                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
-                let pid = process.processIdentifier
-                if pid > 0 {
-                    kill(pid, SIGTERM)
-                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(500)) {
-                        if process.isRunning { kill(pid, SIGKILL) }
-                    }
-                }
-                logger.warning("git subprocess timed out after \(timeout, privacy: .public): \(commandDescription, privacy: .public)")
-                continuation.resume(throwing: GitTimeoutError(command: commandDescription, timeout: timeout))
+        // All the mechanism (starvation-proof watchdog thread, authoritative
+        // deadline, incremental pipe draining, no-EOF-wait, single-resume
+        // guard) lives in the shared `runBoundedProcess`; this only maps the
+        // outcome to GitError/GitTimeoutError. A wedged git child (a `git fetch`
+        // was once stuck 95 min) is escalated SIGTERM → SIGKILL there and
+        // surfaces here as GitTimeoutError.
+        switch try await runBoundedProcess(
+            executable: executable,
+            arguments: arguments,
+            currentDirectory: directory,
+            timeout: timeout
+        ) {
+        case .timedOut:
+            logger.warning("git subprocess timed out after \(timeout, privacy: .public): \(commandDescription, privacy: .public)")
+            throw GitTimeoutError(command: commandDescription, timeout: timeout)
+        case let .completed(status, stdoutData, stderrData):
+            let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+            if status != 0 {
+                throw GitError(command: commandDescription, exitCode: status, stderr: stderr)
             }
-
-            // Drain pipes incrementally to prevent deadlock when output exceeds the
-            // OS pipe buffer (~64KB). Without this, the child process blocks on
-            // write and `terminationHandler` never fires.
-            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-                if !stdoutAccumulator.readAvailable(from: handle) {
-                    handle.readabilityHandler = nil
-                }
-            }
-            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-                if !stderrAccumulator.readAvailable(from: handle) {
-                    handle.readabilityHandler = nil
-                }
-            }
-
-            process.terminationHandler = { _ in
-                // Detach handlers; `finish` blocks on the same lock the readability
-                // handler holds, so any in-flight read+append completes before we snapshot.
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-                let stdoutData = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
-                let stderrData = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
-
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-
-                guard state.claim() else { return }  // timer already won → timed out
-                timer.cancel()
-
-                if process.terminationStatus != 0 {
-                    continuation.resume(throwing: GitError(
-                        command: commandDescription,
-                        exitCode: process.terminationStatus,
-                        stderr: stderr
-                    ))
-                } else {
-                    continuation.resume(returning: stdout)
-                }
-            }
-
-            do {
-                try process.run()
-                timer.resume()
-            } catch {
-                // Spawn failed: no child will ever write — detach the drain
-                // handlers and close the read ends so nothing lingers.
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
-                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
-                guard state.claim() else { return }
-                timer.cancel()
-                continuation.resume(throwing: error)
-            }
+            return stdout
         }
     }
 
