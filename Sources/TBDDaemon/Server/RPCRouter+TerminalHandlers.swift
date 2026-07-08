@@ -1358,9 +1358,71 @@ extension RPCRouter {
                 paneID: terminal.tmuxPaneID,
                 key: "Enter"
             )
+
+            // If text was non-empty, verify the submit and retry if the message
+            // got stuck as [Pasted text]. This is Option 3 from submit-reliability.md:
+            // bounded verify-and-retry scoped to the [Pasted text] signature.
+            // The transient race (pane not at prompt) is rare and mitigated by the
+            // retry loop; if the issue persists after 3 attempts, log and return
+            // success anyway (do not change RPC contract / exit code).
+            if !params.text.isEmpty {
+                await verifyAndRetrySubmit(
+                    server: worktree.tmuxServer,
+                    paneID: terminal.tmuxPaneID,
+                    textLength: params.text.count
+                )
+            }
         }
 
         return .ok()
+    }
+
+    /// Verify that a submit succeeded by checking the pane output. If the
+    /// composer still shows [Pasted text, retry Enter with bounded attempts.
+    /// Best-effort; never throws or fails the RPC.
+    private func verifyAndRetrySubmit(
+        server: String,
+        paneID: String,
+        textLength: Int
+    ) async {
+        var retryCount = 0
+        for delay in submitVerifyDelays {
+            try? await Task.sleep(for: delay)
+
+            // Capture pane output; failure is silent (best-effort verification).
+            guard let paneText = try? await tmux.capturePaneOutput(server: server, paneID: paneID) else {
+                return
+            }
+
+            // Find the last line starting with "❯" (Claude's composer prompt).
+            // Transcript echoes also use ❯ but the composer is always the bottom-most,
+            // so search from the end to scope correctly.
+            let lines = paneText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            if let lastComposerIdx = lines.lastIndex(where: { $0.starts(with: "❯") }),
+               lines[lastComposerIdx].contains("[Pasted text") {
+                // The paste is stuck in the composer. Retry Enter.
+                retryCount += 1
+                logger.warning(
+                    "terminal.send submit verification: [Pasted text] detected in composer (attempt \(retryCount, privacy: .public)), retrying Enter (text length: \(textLength, privacy: .public) bytes)"
+                )
+                try? await tmux.sendKey(server: server, paneID: paneID, key: "Enter")
+            } else {
+                // The composer is clear (no [Pasted text] in the bottom ❯ line, or no ❯ line at all).
+                // The submit succeeded; stop retrying.
+                if retryCount > 0 {
+                    logger.debug(
+                        "terminal.send submit verification: composer clear after \(retryCount, privacy: .public) retries"
+                    )
+                }
+                return
+            }
+        }
+
+        // All retries exhausted and [Pasted text] still there. Log a warning but return success
+        // (the RPC contract remains unchanged; Option 4 exit-code semantics are deferred).
+        logger.warning(
+            "terminal.send submit verification: [Pasted text] persisted after \(self.submitVerifyDelays.count, privacy: .public) retries (text length: \(textLength, privacy: .public) bytes); returning success anyway"
+        )
     }
 
     // MARK: - Main Area Size Broadcast
