@@ -611,12 +611,10 @@ private struct TabBarItem: View {
                             .foregroundStyle(isParked ? .tertiary : (isSelected ? .primary : .secondary))
                     }
 
-                    if let resumeAt = terminal?.pendingResumeAt {
-                        Text("⏳ resumes \(ResumeTimeFormatter.string(from: resumeAt))")
+                    if terminal?.pendingResumeAt != nil {
+                        Text("⏳")
                             .font(.system(size: 9))
                             .foregroundStyle(.orange)
-                            .lineLimit(1)
-                            .fixedSize()
                             .padding(.leading, 4)
                             .help("Session limit hit — TBD will type \"continue\" at this time. Right-click to cancel.")
                     }
