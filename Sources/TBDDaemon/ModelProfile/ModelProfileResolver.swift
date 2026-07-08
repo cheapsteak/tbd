@@ -74,7 +74,24 @@ public struct ModelProfileResolver: Sendable {
         )
     }
 
-    public func resolve(repoID: UUID?) async throws -> ResolvedModelProfile? {
+    /// Resolve the model profile for a spawn.
+    ///
+    /// `override` is an explicit per-creation profile id (e.g. chosen in the
+    /// sidebar `+` profile picker). When non-nil AND it resolves, it wins over
+    /// EVERY tier of the precedence chain below. A nil `override` (the default)
+    /// preserves the exact pre-existing precedence: repo override → scratch
+    /// override → global default → none.
+    public func resolve(repoID: UUID?, override overrideID: UUID? = nil) async throws -> ResolvedModelProfile? {
+        // Step 0: explicit per-creation override — highest priority. If the
+        // row/keychain is missing we log and fall through to the normal chain
+        // rather than fail the spawn.
+        if let overrideID {
+            if let resolved = try await loadResolved(id: overrideID) {
+                return resolved
+            }
+            logger.warning("explicit profile override \(overrideID, privacy: .public) is missing; falling back to precedence chain")
+        }
+
         // Step 1: per-repo override.
         if let repoID, let repo = try await repos.get(id: repoID),
            let overrideID = repo.profileOverrideID {

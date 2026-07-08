@@ -33,7 +33,12 @@ struct RepoSectionView: View {
     @State private var isChevronHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
     @State private var showRemoveConfirm = false
-    @State private var showBranchPicker = false
+    // PROTOTYPE: model-profile picker on the `+` button (long-press + Option-click).
+    @State private var showProfilePicker = false
+    // Set when a long-press opens the profile picker, so the Button's own tap
+    // action (which fires on finger-up, after the long-press's onEnded) doesn't
+    // ALSO create a default worktree. Reset on the next plain click.
+    @State private var longPressTriggered = false
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -134,15 +139,38 @@ struct RepoSectionView: View {
             Spacer()
 
             Group {
-                if isSectionHovered || showBranchPicker {
+                if isSectionHovered || showProfilePicker {
                     SectionHeaderPlusButton(
-                        help: "New worktree (\u{2325}-click to pick existing branch)",
+                        // Long-press or Option-click opens the unified profile
+                        // picker; its "Choose a branch…" row drills into the
+                        // (former standalone) branch picker.
+                        help: "New worktree (long-press or \u{2325}-click to pick a model profile)",
                         action: handlePlusButton
                     )
                     .disabled(repo.status == .missing)
-                    .popover(isPresented: $showBranchPicker, arrowEdge: .trailing) {
-                        BranchPickerView(repoID: repo.id)
+                    // Long-press (~0.3s) opens the profile picker. `.simultaneousGesture`
+                    // runs ALONGSIDE the Button's tap recognizer, so a plain click still
+                    // fires `handlePlusButton` (create-with-default) and long-press doesn't
+                    // swallow it — the guard flag prevents a create on the long-press release.
+                    .simultaneousGesture(
+                        LongPressGesture(minimumDuration: 0.3)
+                            .onEnded { _ in
+                                guard repo.status != .missing else { return }
+                                longPressTriggered = true
+                                showProfilePicker = true
+                            }
+                    )
+                    .popover(isPresented: $showProfilePicker, arrowEdge: .trailing) {
+                        WorktreeProfilePickerView(repoID: repo.id)
                             .environmentObject(appState)
+                    }
+                    // Safety net for the orphaned-flag cases: if the long-press
+                    // opened the picker but no follow-up tap on `+` ever cleared
+                    // the flag (press released off-button, or picker dismissed /
+                    // a profile chosen), clear it when the popover closes so the
+                    // next plain click isn't swallowed by the guard.
+                    .onChange(of: showProfilePicker) { _, isShown in
+                        if !isShown { longPressTriggered = false }
                     }
                 } else {
                     Color.clear
@@ -219,10 +247,17 @@ struct RepoSectionView: View {
     }
 
     private func handlePlusButton() {
-        // Option-click opens the existing-branch picker; plain click creates
-        // a fresh `tbd/*` worktree (existing behavior).
+        // A long-press already handled this interaction (it opened the profile
+        // picker and set the flag); the Button's tap fires on finger-up right
+        // after, so consume it here instead of creating a default worktree.
+        if longPressTriggered {
+            longPressTriggered = false
+            return
+        }
+        // Option-click (like long-press) opens the unified model-profile
+        // picker; branch selection now lives inside it under "Choose a branch…".
         if NSEvent.modifierFlags.contains(.option) {
-            showBranchPicker = true
+            showProfilePicker = true
         } else {
             createWorktree()
         }

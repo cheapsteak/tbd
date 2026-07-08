@@ -56,6 +56,34 @@ enum ProfileUsagePresentation {
         }
     }
 
+    // MARK: - Pace projection
+
+    /// The 5-hour rolling session window, in seconds — the denominator for the
+    /// 5h bar's time marker.
+    static let sessionWindow: TimeInterval = 5 * 60 * 60
+    /// The 7-day weekly window, in seconds — the denominator for the wk bar's
+    /// time marker.
+    static let weeklyWindow: TimeInterval = 7 * 24 * 60 * 60
+
+    /// How far through a usage window we are right now, as a `0...1` fraction —
+    /// the position of the "time marker" tick on a usage bar. Derived from the
+    /// window's reset instant: `elapsed = duration - timeRemaining`.
+    ///
+    /// Returns nil (draw no marker) when there is no reset date, the duration
+    /// is non-positive, or the reset is already at/behind `now` — the latter
+    /// means the period is over and the daemon simply hasn't refreshed a new
+    /// window yet, so there is no meaningful "now" position to draw. `now` is
+    /// injectable for deterministic tests/previews.
+    static func elapsedFraction(resetsAt: Date?,
+                                windowDuration: TimeInterval,
+                                now: Date = Date()) -> Double? {
+        guard let resetsAt, windowDuration > 0 else { return nil }
+        let remaining = resetsAt.timeIntervalSince(now)
+        guard remaining > 0 else { return nil }
+        let elapsed = windowDuration - remaining
+        return min(max(elapsed / windowDuration, 0), 1)
+    }
+
     // MARK: - Formatting fragments
 
     /// "76%" — usage percents render as whole numbers everywhere.

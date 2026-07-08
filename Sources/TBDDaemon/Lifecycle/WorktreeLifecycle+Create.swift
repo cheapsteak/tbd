@@ -180,7 +180,7 @@ extension WorktreeLifecycle {
     /// When `existingBranchRef` is non-nil, the worktree is checked out from
     /// that existing ref (local or `origin/*`) — no fresh branch is created.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, overrideProfileID: UUID? = nil) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.get(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -284,7 +284,8 @@ extension WorktreeLifecycle {
                         skipClaude: skipClaude,
                         initialPrompt: initialPrompt,
                         cols: cols, rows: rows,
-                        completionAction: .markActive
+                        completionAction: .markActive,
+                        overrideProfileID: overrideProfileID
                     )
                 }
                 return .preSessionPending(phase3: phase3)
@@ -299,7 +300,8 @@ extension WorktreeLifecycle {
                 initialPrompt: initialPrompt,
                 cols: cols,
                 rows: rows,
-                preSessionTerminalID: nil
+                preSessionTerminalID: nil,
+                overrideProfileID: overrideProfileID
             )
 
             // 6. Update status to active
@@ -416,7 +418,8 @@ extension WorktreeLifecycle {
         initialPrompt: String? = nil,
         cols: Int? = nil,
         rows: Int? = nil,
-        preSessionTerminalID: UUID?
+        preSessionTerminalID: UUID?,
+        overrideProfileID: UUID? = nil
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
@@ -445,7 +448,9 @@ extension WorktreeLifecycle {
         )
         await controlMode?.enableIfGated(serverName: tmuxServer)
 
-        // Resolve model profile (repo override → global default → none).
+        // Resolve model profile. An explicit per-creation `overrideProfileID`
+        // (chosen in the sidebar `+` profile picker) wins over the precedence
+        // chain (repo override → global default → none); nil preserves it.
         // Failures here must NOT break worktree creation — fall back to keychain login.
         let needsResolvedClaudeProfile = !skipClaude && (
             primaryTerminalKind == .claude || !archivedSessions.isEmpty
@@ -453,7 +458,7 @@ extension WorktreeLifecycle {
         var resolvedProfile: ResolvedModelProfile? = nil
         if needsResolvedClaudeProfile, let resolver = modelProfileResolver {
             do {
-                resolvedProfile = try await resolver.resolve(repoID: repo?.id)
+                resolvedProfile = try await resolver.resolve(repoID: repo?.id, override: overrideProfileID)
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
