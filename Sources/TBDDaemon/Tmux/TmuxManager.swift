@@ -609,22 +609,10 @@ public struct TmuxManager: Sendable {
 
     /// Runs an external command with a hard timeout, draining stdout/stderr.
     /// On timeout the child is signalled SIGTERM, then SIGKILL after a short
-    /// grace, and the call throws `TmuxError.timedOut` — never hangs. The
-    /// continuation is guarded by a lock so exactly one of {termination,
-    /// timeout, spawn-failure} resumes it, satisfying the single-resume
-    /// contract even when the process exits concurrently with the timer.
-    ///
-    /// Both pipes are drained incrementally via `readabilityHandler` while the
-    /// child runs: a macOS pipe buffer is 64KB, so a child emitting more (e.g.
-    /// `ps -Ao` on a busy machine, ~72KB) would otherwise block writing to the
-    /// full pipe while we wait for it to exit — a mutual deadlock resolved only
-    /// by the timeout, turning every large-output call into a spurious failure.
-    /// The drain never waits for pipe EOF: real call sites run
-    /// `[shell, "-ic", cmd]`, and rc files can fork background grandchildren
-    /// that inherit the write ends, so EOF may never arrive after the direct
-    /// child dies. Termination and timeout both snapshot what has already
-    /// arrived and close the parent read ends — no thread, FD, or closure
-    /// outlives the call.
+    /// grace, and the call throws `TmuxError.timedOut` — never hangs. All the
+    /// mechanism (starvation-proof watchdog thread, authoritative deadline,
+    /// incremental pipe draining, no-EOF-wait, single-resume guard) lives in
+    /// the shared `runBoundedProcess`; this only maps the outcome to `TmuxError`.
     ///
     /// Package-internal (not `private`) so timeout tests can drive it directly
     /// against a real slow binary (`/bin/sleep`) without a tmux server.
@@ -635,110 +623,24 @@ public struct TmuxManager: Sendable {
         label: String,
         timeout: Duration
     ) async throws -> String {
-        // Single-resume guard shared between the termination handler and the
-        // timeout timer. Whichever fires first wins; the loser is a no-op.
-        let state = ContinuationGuard()
         let commandDescription = "\(label) " + arguments.joined(separator: " ")
-        let timeoutNanos = UInt64(max(0, timeout.components.seconds)) * 1_000_000_000
-            + UInt64(max(0, timeout.components.attoseconds / 1_000_000_000))
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            let stdoutAccumulator = PipeDataAccumulator()
-            let stderrAccumulator = PipeDataAccumulator()
-
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = arguments
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-
-            // Drain both pipes incrementally as chunks arrive (mirrors
-            // GitManager.run): no thread parks for the subprocess's lifetime,
-            // and a child emitting more than the 64KB pipe buffer never
-            // deadlocks against an undrained pipe.
-            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-                if !stdoutAccumulator.readAvailable(from: handle) {
-                    handle.readabilityHandler = nil
-                }
+        switch try await runBoundedProcess(
+            executable: executable,
+            arguments: arguments,
+            currentDirectory: nil,
+            timeout: timeout
+        ) {
+        case .timedOut:
+            logger.warning("subprocess timed out after \(timeout, privacy: .public): \(commandDescription, privacy: .public)")
+            throw TmuxError.timedOut(command: commandDescription, timeout: timeout)
+        case let .completed(status, stdoutData, stderrData):
+            let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+            let output = stdout.isEmpty ? stderr : stdout
+            if status != 0 {
+                throw TmuxError.commandFailed(command: commandDescription, status: status, output: output)
             }
-            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-                if !stderrAccumulator.readAvailable(from: handle) {
-                    handle.readabilityHandler = nil
-                }
-            }
-
-            // Watchdog timer: on fire, escalate SIGTERM → SIGKILL and resume
-            // with a timeout error (if the process hasn't already exited).
-            let timer = DispatchSource.makeTimerSource(queue: .global())
-            timer.schedule(deadline: .now() + .nanoseconds(Int(min(timeoutNanos, UInt64(Int.max)))))
-            timer.setEventHandler {
-                guard state.claim() else { return }
-                timer.cancel()
-                // Stop draining and close the parent read ends NOW. The kill
-                // below reaches only the DIRECT child; grandchildren forked by
-                // the shell's rc files inherit the pipe write ends, so EOF may
-                // never come — waiting for it would leak the FDs and handler
-                // closures for the grandchildren's lifetime.
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
-                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
-                let pid = process.processIdentifier
-                if pid > 0 {
-                    kill(pid, SIGTERM)
-                    // Give it a brief grace to exit on SIGTERM, then SIGKILL.
-                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(500)) {
-                        if process.isRunning { kill(pid, SIGKILL) }
-                    }
-                }
-                logger.warning("subprocess timed out after \(timeout, privacy: .public): \(commandDescription, privacy: .public)")
-                continuation.resume(throwing: TmuxError.timedOut(command: commandDescription, timeout: timeout))
-            }
-
-            process.terminationHandler = { _ in
-                // The direct child exited; everything it wrote is already in
-                // the kernel pipe buffers. `finish` snapshots that WITHOUT
-                // waiting for EOF — EOF is NOT guaranteed here, because
-                // grandchildren may still hold the write ends open — and
-                // closes the parent read ends.
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-                let stdoutData = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
-                let stderrData = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
-                let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-                let output = stdout.isEmpty ? stderr : stdout
-
-                guard state.claim() else { return }  // timer already won → timed out
-                timer.cancel()
-
-                if process.terminationStatus != 0 {
-                    continuation.resume(throwing: TmuxError.commandFailed(
-                        command: commandDescription,
-                        status: process.terminationStatus,
-                        output: output
-                    ))
-                } else {
-                    continuation.resume(returning: stdout)
-                }
-            }
-
-            do {
-                try process.run()
-                timer.resume()
-            } catch {
-                // Spawn failed: no child will ever write — detach the drain
-                // handlers and close the read ends so nothing lingers.
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-                _ = stdoutAccumulator.finish(handle: stdoutPipe.fileHandleForReading)
-                _ = stderrAccumulator.finish(handle: stderrPipe.fileHandleForReading)
-                guard state.claim() else { return }
-                timer.cancel()
-                continuation.resume(throwing: error)
-            }
+            return stdout
         }
     }
 }
