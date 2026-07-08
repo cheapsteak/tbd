@@ -1092,6 +1092,64 @@ import Testing
     #expect(after == nil, "stale codex terminal must be deleted, not suspended via Claude semantics")
 }
 
+@Test("Live sessions survive daemon startup reconciliation")
+func testLiveSessionSurvivesReconcile() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let git = GitManager()
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    // Create a worktree and terminal
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: git,
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+    let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    let terminals = try await db.terminals.list(worktreeID: worktree.id)
+    let terminal = try #require(terminals.first)
+
+    // Simulate hibernation: mark the terminal as hibernated (as if it was parked before restart)
+    let sessionID = UUID().uuidString
+    try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
+
+    // Verify the terminal is parked
+    var parkedTerminal = try #require(await db.terminals.get(id: terminal.id))
+    #expect(parkedTerminal.isParked, "Terminal should be marked as parked")
+    #expect(parkedTerminal.hibernatedAt != nil, "Terminal should have hibernatedAt set")
+
+    // Run reconciliation — should NOT re-park the terminal
+    // The reconcile loop skips parked terminals via the 'where !terminal.isParked' filter,
+    // so even if the window appears dead, a parked terminal stays parked.
+    try await lifecycle.reconcile(repoID: repo.id)
+
+    // After reconciliation, the terminal should still be hibernated
+    let postReconcileTerminal = try #require(await db.terminals.get(id: terminal.id))
+    #expect(postReconcileTerminal.hibernatedAt != nil,
+            "Parked terminal should remain hibernated after reconcile")
+
+    // Now simulate reconcileOnStartup() finding the window alive with Claude running
+    let tmux = TmuxManager(
+        dryRun: true,
+        dryRunWindowIsDead: { _ in false },  // Window is alive
+        dryRunPaneCurrentCommand: { _, _ in "claude" }  // Claude process running
+    )
+    let hibernationCoordinator = HibernationCoordinator(db: db, tmux: tmux)
+    await hibernationCoordinator.reconcileOnStartup()
+
+    // After startup reconciliation with live process, the terminal should be UN-PARKED
+    let afterStartupTerminal = try #require(await db.terminals.get(id: terminal.id))
+    #expect(!afterStartupTerminal.isParked,
+            "Terminal should be un-parked after startup reconciliation found process alive")
+    #expect(afterStartupTerminal.hibernatedAt == nil,
+            "hibernatedAt should be cleared for still-running sessions")
+    #expect(afterStartupTerminal.suspendedAt == nil,
+            "suspendedAt should be cleared for still-running sessions")
+}
+
 // MARK: - Helpers
 
 /// Thread-safe collector for TmuxManager dryRun recorded args.
