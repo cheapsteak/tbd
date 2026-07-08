@@ -266,6 +266,19 @@ extension WorktreeLifecycle {
                 }
                 guard !windowAlive else { continue }
 
+                // Extra safety: If this is a Claude-resumable terminal, double-check
+                // that the process is truly gone before parking. If Claude is still
+                // running, leave the terminal active — the next reconcile can reassess.
+                if terminal.isClaudeResumable {
+                    if let cmd = try? await tmux.paneCurrentCommand(server: wt.tmuxServer, paneID: terminal.tmuxPaneID),
+                       ClaudeStateDetector.isClaudeProcess(cmd) {
+                        // Claude is still running in this pane despite windowExists returning false.
+                        // This shouldn't happen, but don't park if it's true.
+                        logger.warning("reconcile: terminal \(terminal.id, privacy: .public) window marked dead but claude process still running — skipping park")
+                        continue
+                    }
+                }
+
                 if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
                     // Resumable Claude session: park it. The unified park/wake
                     // machinery rebuilds a window from the session ID on demand.
