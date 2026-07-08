@@ -425,6 +425,11 @@ public actor HibernationCoordinator {
             sessionKey: terminal.id.uuidString
         )
         let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+        // Pre-accept Claude's folder-trust dialog for scratch spaces so a wake
+        // onto a fresh isolated profile dir (never seeded before) doesn't re-prompt.
+        // Self-gates on isScratch; a cheap no-op once already trusted.
+        ClaudeTrustSeeder.ensureTrustedForScratch(
+            worktree: worktree, profileConfigDir: profileConfigDir)
         // Pre-resume freshness: if the worktree was moved/promoted while this
         // session was parked, its transcript still lives under the OLD munged
         // project dir; the cwd-scoped `claude --resume` below only checks the
