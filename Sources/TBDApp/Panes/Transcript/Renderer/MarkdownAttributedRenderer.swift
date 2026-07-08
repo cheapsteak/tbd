@@ -130,6 +130,21 @@ extension AttributedStringVisitor: @preconcurrency MarkupVisitor {
         NSAttributedString(string: text.string)
     }
 
+    // SoftBreak (a single newline inside a paragraph) and LineBreak (an explicit
+    // hard break) are leaf nodes with no children. Without these methods they fall
+    // through to `defaultVisit`, which iterates zero children and returns an EMPTY
+    // string — silently dropping the user's line breaks (e.g. "then?\nor" → "then?or").
+    // We emit "\n" to preserve the typed line breaks, matching GitHub-comment / chat
+    // rendering. (trimTrailingNewlines still strips a trailing run at block end, so a
+    // break at a paragraph's end never doubles into a blank line.)
+    mutating func visitSoftBreak(_ softBreak: Markdown.SoftBreak) -> NSAttributedString {
+        NSAttributedString(string: "\n")
+    }
+
+    mutating func visitLineBreak(_ lineBreak: Markdown.LineBreak) -> NSAttributedString {
+        NSAttributedString(string: "\n")
+    }
+
     mutating func visitStrong(_ s: Strong) -> NSAttributedString { traited(s, .bold) }
 
     mutating func visitEmphasis(_ e: Emphasis) -> NSAttributedString { traited(e, .italic) }

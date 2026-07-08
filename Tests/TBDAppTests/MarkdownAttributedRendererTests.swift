@@ -208,6 +208,51 @@ struct MarkdownAttributedRendererTests {
         #expect(foundTableAttachment)
     }
 
+    // MARK: - Soft / hard line breaks
+
+    @Test("a single newline inside a paragraph is preserved, not dropped or turned into a space")
+    func softBreakPreservesNewline() {
+        // swift-markdown parses a lone newline within a paragraph as a SoftBreak
+        // leaf node; without visitSoftBreak it fell through to defaultVisit and
+        // vanished entirely ("line one\nline two" -> "line oneline two"). (#129)
+        let joined = MarkdownAttributedRenderer.renderBlocks("line one\nline two")
+            .compactMap { block -> String? in
+                if case .prose(let s) = block { return s.string }
+                return nil
+            }
+            .joined()
+        #expect(joined.contains("line one\nline two"))
+    }
+
+    @Test("an explicit hard line break renders a newline")
+    func hardLineBreakRendersNewline() {
+        // Two trailing spaces before the newline make a Markdown hard break
+        // (LineBreak leaf node). It must also emit "\n".
+        let joined = MarkdownAttributedRenderer.renderBlocks("line one  \nline two")
+            .compactMap { block -> String? in
+                if case .prose(let s) = block { return s.string }
+                return nil
+            }
+            .joined()
+        #expect(joined.contains("line one\nline two"))
+    }
+
+    @Test("blank-line-separated paragraphs still render as separate paragraphs")
+    func doubleNewlineStillSeparatesParagraphs() {
+        // Regression guard: adding SoftBreak/LineBreak handling must not disturb
+        // the existing paragraph-terminator behavior. A blank line still yields two
+        // paragraphs, present and separated by a newline.
+        let joined = MarkdownAttributedRenderer.renderBlocks("para one\n\npara two")
+            .compactMap { block -> String? in
+                if case .prose(let s) = block { return s.string }
+                return nil
+            }
+            .joined()
+        #expect(joined.contains("para one"))
+        #expect(joined.contains("para two"))
+        #expect(joined.contains("para one\npara two"))
+    }
+
     // MARK: - Block splitting (renderBlocks)
 
     @Test("renderBlocks: prose-only markdown is one prose block, no table block")
