@@ -296,6 +296,7 @@ struct ContentView: View {
                 appState.focusTerminalAfterSelectionChange(worktreeID: id)
             }
         }
+        .nightwatchModeTint(appState.nightwatchMode)
     }
 
     // MARK: - Empty State
