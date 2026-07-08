@@ -366,7 +366,7 @@ struct StopFailureMessageTests {
     /// Transcript transient: no payload text keys, but the recent transcript
     /// record carries connection-closed text + `"error":"server_error"` — the
     /// transient is detected after passing the recency retry gate.
-    @Test func transcriptTransientDetectedAfterRetryGate() {
+    @Test func transcriptTransientDetectedViaScan() {
         let text = "API Error: Connection closed mid-response"
         let now = Date(timeIntervalSince1970: 1_783_173_600)
         let outcome = StopFailureMessage.computeOutcome(

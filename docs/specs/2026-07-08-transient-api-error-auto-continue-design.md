@@ -146,7 +146,11 @@ Same choke points as the parent, plus toggle scoping:
 - Settings toggle under the existing one: "Auto-continue after transient
   API errors (connection drops, server errors)" — default off.
 - Notifications: toggle on → "API error — auto-continue in 60s
-  (attempt 2/4)"; toggle off → today's error notification, unchanged.
+  (attempt 2/4)"; toggle off → an error notification carrying the verbatim
+  error text when the payload or transcript yields it (previously a
+  synthesized "Claude stopped: API error (…)" fallback could appear when the
+  transcript record was missing), otherwise the legacy fallback — behavior
+  otherwise unchanged.
 - Terminal badge reuses the existing `pendingResumeAt` badge
   ("⏳ resumes 2:34pm").
 

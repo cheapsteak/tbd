@@ -52,4 +52,10 @@ import Testing
     @Test func timeoutWordingIsTransient() {
         #expect(TransientErrorDetection.detect(messageText: "API Error: Request timed out.", errorField: nil)?.errorClass == "timeout")
     }
+
+    @Test func unmatchedTextWithServerErrorClassFallsBackToClassRetry() {
+        let text = "API Error: something novel went sideways"
+        let d = TransientErrorDetection.detect(messageText: text, errorField: "server_error")
+        #expect(d == DetectedTransientError(errorClass: "server_error", rawMessage: text))
+    }
 }
