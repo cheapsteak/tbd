@@ -167,7 +167,13 @@ public actor HibernationCoordinator {
     public func setKeepWarm(terminalID: UUID, keepWarm: Bool) async -> Bool {
         guard let terminal = try? await db.terminals.get(id: terminalID) else { return false }
         try? await db.terminals.setKeepWarm(id: terminalID, keepWarm: keepWarm)
-        broadcastHibernation(terminal: terminal, hibernated: terminal.isHibernated, keepWarm: keepWarm)
+        // Carry the row's persisted snapshot/reason: on a parked row this
+        // re-broadcast has hibernated == true, and the app's in-place apply
+        // would otherwise wipe both from its cached row.
+        broadcastHibernation(
+            terminal: terminal, hibernated: terminal.isHibernated, keepWarm: keepWarm,
+            suspendedSnapshot: terminal.isHibernated ? terminal.suspendedSnapshot : nil,
+            hibernateReason: terminal.isHibernated ? terminal.hibernateReason : nil)
         return true
     }
 
@@ -183,7 +189,7 @@ public actor HibernationCoordinator {
         guard terminal.isManuallyHibernatable else {
             return .notEligible(reason: manualBlockReason(terminal))
         }
-        return await performHibernate(terminal: terminal)
+        return await performHibernate(terminal: terminal, reason: .manual)
     }
 
     /// The reason a manual hibernate was refused, for the RPC error string.
@@ -204,7 +210,11 @@ public actor HibernationCoordinator {
     /// (typed-but-unsent input, transcript-tail validity) that the DB row can't
     /// express. After the kill it verifies the claude process is gone and the
     /// pane's shell survived, and logs any orphaned claude children.
-    private func performHibernate(terminal: Terminal) async -> HibernateResult {
+    ///
+    /// `reason` records WHO parked the session (`.manual` from the explicit
+    /// "Hibernate now" entry points, `.auto` from the idle sweep) — persisted
+    /// so the app's wake-on-focus can skip manual parks.
+    private func performHibernate(terminal: Terminal, reason: HibernateReason) async -> HibernateResult {
         guard !hibernatesInFlight.contains(terminal.id) else {
             return .alreadyHibernated
         }
@@ -286,7 +296,8 @@ public actor HibernationCoordinator {
 
         do {
             try await db.terminals.setHibernated(
-                id: terminal.id, sessionID: sessionID, snapshot: capturedSnapshot, at: now()
+                id: terminal.id, sessionID: sessionID, snapshot: capturedSnapshot,
+                reason: reason, at: now()
             )
         } catch {
             logger.warning("hibernate: failed to mark hibernated for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -297,7 +308,13 @@ public actor HibernationCoordinator {
         _ = try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)
         idleSince[terminal.id] = nil
         pendingKillSince[terminal.id] = nil
-        broadcastHibernation(terminal: terminal, hibernated: true, keepWarm: terminal.keepWarm)
+        // The delta must carry the just-captured snapshot and the park reason:
+        // the app's parked view materializes on this flip reading its cached
+        // row, and wake-on-focus filters on the cached reason — the refetch
+        // that would eventually bring both lands after the view is built.
+        broadcastHibernation(
+            terminal: terminal, hibernated: true, keepWarm: terminal.keepWarm,
+            suspendedSnapshot: capturedSnapshot, hibernateReason: reason)
         logger.info("hibernated terminal \(terminal.id, privacy: .public) (session \(sessionID, privacy: .public))")
         return .ok
     }
@@ -705,7 +722,7 @@ public actor HibernationCoordinator {
                 }
                 if let pending = pendingKillSince[terminal.id] {
                     if reference.timeIntervalSince(pending) >= Self.killDebounce {
-                        _ = await performHibernate(terminal: terminal)
+                        _ = await performHibernate(terminal: terminal, reason: .auto)
                     }
                 } else {
                     pendingKillSince[terminal.id] = reference
@@ -874,9 +891,16 @@ public actor HibernationCoordinator {
         }
     }
 
+    /// `suspendedSnapshot`/`hibernateReason` ride hibernate broadcasts (and
+    /// keep-warm re-broadcasts on a parked row) because the app applies this
+    /// delta to its cached row IN PLACE: the parked view materializes on the
+    /// `hibernated` flip and reads the row's snapshot once, and wake-on-focus
+    /// reads the row's reason — a later refetch is too late. Wake broadcasts
+    /// leave them nil.
     private func broadcastHibernation(
         terminal: Terminal, hibernated: Bool, keepWarm: Bool,
-        tmuxWindowID: String? = nil, tmuxPaneID: String? = nil
+        tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
+        suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil
     ) {
         subscriptions?.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
             terminalID: terminal.id,
@@ -884,7 +908,9 @@ public actor HibernationCoordinator {
             hibernated: hibernated,
             keepWarm: keepWarm,
             tmuxWindowID: tmuxWindowID,
-            tmuxPaneID: tmuxPaneID
+            tmuxPaneID: tmuxPaneID,
+            suspendedSnapshot: suspendedSnapshot,
+            hibernateReason: hibernateReason
         )))
     }
 }

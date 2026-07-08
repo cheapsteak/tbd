@@ -134,8 +134,17 @@ extension AppState {
     /// terminal when it is itself parked; (2) otherwise the first parked
     /// terminal; (3) nil when none are parked. Extracted as a pure function so
     /// the fan-out choice is unit-tested without a live `DaemonClient`.
+    ///
+    /// Manually-parked sessions (`hibernateReason == .manual`) are excluded
+    /// UP FRONT — before the focused-match and the `.first` fallback — so an
+    /// explicit "Hibernate now" is never silently undone by navigating back to
+    /// the worktree. They wake only via the explicit affordances (parked-pane
+    /// click, Wake menu). nil-reason (legacy), auto, and recovery parks still
+    /// focus-wake.
     func terminalIDToWakeOnFocus(worktreeID: UUID) -> UUID? {
-        let parked = (terminals[worktreeID] ?? []).filter { $0.isParked }
+        let parked = (terminals[worktreeID] ?? []).filter {
+            $0.isParked && $0.hibernateReason != .manual
+        }
         guard !parked.isEmpty else { return nil }
         if let focusedID = terminalIDForAutofocus(worktreeID: worktreeID),
            parked.contains(where: { $0.id == focusedID }) {

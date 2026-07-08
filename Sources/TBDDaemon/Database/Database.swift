@@ -804,6 +804,18 @@ public final class TBDDatabase: Sendable {
                 type: .boolean, defaults: false)
         }
 
+        // WHO parked a session (`auto` idle sweep / `manual` "Hibernate now" /
+        // `recovery` crash-recovery reconcile — see `HibernateReason`), so an
+        // explicit user park is not silently undone by wake-on-focus. Nullable
+        // TEXT: legacy parked rows stay NULL and keep the old behavior (focus
+        // still wakes them). (Authored as v46 on the feature branch; renumbered
+        // on rebase as upstream took v46 first — never shipped to a live
+        // database under the old name, so renaming is safe.)
+        migrator.registerMigration("v47_hibernate_reason") { db in
+            try db.addColumnIfMissing(
+                table: "terminal", column: "hibernateReason", type: .text)
+        }
+
         return migrator
     }
 }

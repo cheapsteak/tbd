@@ -50,9 +50,29 @@ public struct TerminalHibernationDelta: Codable, Sendable {
     /// nil default so payloads from older daemons still decode.
     public let tmuxWindowID: String?
     public let tmuxPaneID: String?
+    /// The ANSI pane snapshot captured just before the park's kill, carried on
+    /// hibernate so the app updates its cached row together with the
+    /// `hibernated` flip. Without it, the parked TerminalPanelView — which
+    /// materializes the instant `isParked` flips and reads `initialSnapshot`
+    /// from the cached row ONCE at creation — sees a still-nil
+    /// `suspendedSnapshot` and shows a blank pane; the snapshot arriving in
+    /// the later `refreshTerminals` refetch never reaches the already-built
+    /// view. Nil on wake deltas (the daemon's `clearHibernated` keeps the DB
+    /// snapshot, so the app keeps its cached one too). Optional with a nil
+    /// default so payloads from older daemons still decode.
+    public let suspendedSnapshot: String?
+    /// WHO parked the session (`.manual` / `.auto` / `.recovery`), carried on
+    /// hibernate so the cached row has it between the delta and the next
+    /// refetch. Wake-on-focus filters on this reason; without it a focus
+    /// event landing in that gap could wrongly auto-wake a just-manually-
+    /// parked session. Nil on wake deltas (the apply clears it, matching
+    /// `clearHibernated`). Optional with a nil default so payloads from older
+    /// daemons still decode.
+    public let hibernateReason: HibernateReason?
     public init(
         terminalID: UUID, worktreeID: UUID, hibernated: Bool, keepWarm: Bool,
-        tmuxWindowID: String? = nil, tmuxPaneID: String? = nil
+        tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
+        suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil
     ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
@@ -60,6 +80,8 @@ public struct TerminalHibernationDelta: Codable, Sendable {
         self.keepWarm = keepWarm
         self.tmuxWindowID = tmuxWindowID
         self.tmuxPaneID = tmuxPaneID
+        self.suspendedSnapshot = suspendedSnapshot
+        self.hibernateReason = hibernateReason
     }
 }
 

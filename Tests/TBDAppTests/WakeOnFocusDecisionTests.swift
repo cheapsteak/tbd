@@ -15,6 +15,17 @@ struct WakeOnFocusDecisionTests {
                  hibernatedAt: parked ? Date() : nil)
     }
 
+    private func parkedTerminal(_ id: UUID, reason: HibernateReason?) -> Terminal {
+        Terminal(id: id, worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                 hibernatedAt: Date(), hibernateReason: reason)
+    }
+
+    /// Focus `terminalID`'s tab in `wt` so `terminalIDForAutofocus` resolves it.
+    private func focus(_ state: AppState, worktreeID wt: UUID, terminalID: UUID) {
+        state.tabs[wt] = [Tab(id: UUID(), content: .terminal(terminalID: terminalID), label: nil)]
+        state.activeTabIndices[wt] = 0
+    }
+
     /// Branch 1: the focused terminal is itself parked → wake exactly it (not
     /// merely the first parked row).
     @Test func wakesTheFocusedParkedTerminal() {
@@ -54,6 +65,78 @@ struct WakeOnFocusDecisionTests {
         state.terminals[wt] = [terminal(UUID(), parked: false), terminal(UUID(), parked: false)]
 
         #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == nil)
+    }
+
+    // MARK: - Manual-park exclusion (hibernateReason)
+    //
+    // An explicit "Hibernate now" (`hibernateReason == .manual`) must NOT be
+    // silently undone by navigating back to the worktree: focus-wake skips it
+    // at BOTH decision points (the focused-terminal match and the `.first`
+    // fallback). Auto, recovery, and legacy nil-reason parks keep the old
+    // behavior and still wake on focus.
+
+    /// A manually-parked session is skipped even when it is the FOCUSED
+    /// terminal — and with nothing else parked, nothing is woken at all.
+    @Test func skipsManuallyParkedTerminalEvenWhenFocused() {
+        let state = AppState()
+        let wt = UUID()
+        let manual = UUID()
+        state.terminals[wt] = [parkedTerminal(manual, reason: .manual)]
+        focus(state, worktreeID: wt, terminalID: manual)
+
+        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == nil)
+    }
+
+    /// An auto-parked (idle-sweep) session still wakes on focus.
+    @Test func wakesAutoParkedTerminalOnFocus() {
+        let state = AppState()
+        let wt = UUID()
+        let auto = UUID()
+        state.terminals[wt] = [parkedTerminal(auto, reason: .auto)]
+        focus(state, worktreeID: wt, terminalID: auto)
+
+        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == auto)
+    }
+
+    /// A recovery-parked (crash-recovery reconcile) session still wakes on focus.
+    @Test func wakesRecoveryParkedTerminalOnFocus() {
+        let state = AppState()
+        let wt = UUID()
+        let recovery = UUID()
+        state.terminals[wt] = [parkedTerminal(recovery, reason: .recovery)]
+        focus(state, worktreeID: wt, terminalID: recovery)
+
+        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == recovery)
+    }
+
+    /// A legacy parked row with NO reason (pre-v46) still wakes on focus —
+    /// the old behavior is preserved for rows the migration can't attribute.
+    @Test func wakesLegacyNilReasonParkedTerminalOnFocus() {
+        let state = AppState()
+        let wt = UUID()
+        let legacy = UUID()
+        state.terminals[wt] = [parkedTerminal(legacy, reason: nil)]
+        focus(state, worktreeID: wt, terminalID: legacy)
+
+        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == legacy)
+    }
+
+    /// Mixed worktree: a manual park and an auto park coexist. The manual one
+    /// is FIRST in the list (a naive `.first` fallback would pick it) and also
+    /// FOCUSED (a naive focused-match would pick it) — the auto one must be
+    /// chosen anyway, proving the exclusion applies at both decision points.
+    @Test func mixedManualAndAutoParkedChoosesTheAutoOne() {
+        let state = AppState()
+        let wt = UUID()
+        let manual = UUID()
+        let auto = UUID()
+        state.terminals[wt] = [
+            parkedTerminal(manual, reason: .manual),
+            parkedTerminal(auto, reason: .auto),
+        ]
+        focus(state, worktreeID: wt, terminalID: manual)
+
+        #expect(state.terminalIDToWakeOnFocus(worktreeID: wt) == auto)
     }
 
     // MARK: - Wake-failure alert coalescing (modal-spam fix)

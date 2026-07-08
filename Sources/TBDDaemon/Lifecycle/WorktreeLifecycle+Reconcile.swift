@@ -285,7 +285,7 @@ extension WorktreeLifecycle {
                     // Deleting here would orphan the transcript and the session
                     // would vanish from TBD. Write the authoritative `hibernatedAt`
                     // column so `wake()` (which un-parks any parked row) can resume it.
-                    try? await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
+                    try? await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID, reason: .recovery)
                     logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public) gone, session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
                     // Plain shell / Codex: nothing resumable to preserve, delete.
