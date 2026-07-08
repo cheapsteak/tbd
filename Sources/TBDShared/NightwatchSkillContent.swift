@@ -95,7 +95,7 @@ and fleet-derived capacity, classifies every agent deterministically, and emits:
 Exit code 0 = nothing needs Opus (silent-ok).  Exit code 10 = judgment items queued.
 Run with --prs to also gate open PRs (makes gh calls — skip during GitHub rate crunch).
 """
-import subprocess, os, re, json, time, sys
+import subprocess, os, re, json, time, sys, fcntl
 
 HOME = os.path.expanduser("~")
 DB = f"{HOME}/tbd/state.db"
@@ -235,6 +235,16 @@ def fleet():
     return out
 
 def main():
+    # Prevent concurrent tick runs (e.g. DaywatchRunner loop + launchd scheduler both active).
+    # Acquire an exclusive lock on a lock file; if already held, another tick is running — exit silently.
+    lock_path = f"{SKILL}/queue/tick.lock"
+    try:
+        lock_file = open(lock_path, 'w')
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        # Lock is already held by another tick — exit 0 silently (another instance is active).
+        sys.exit(0)
+
     rep = {
         "ts": int(time.time()),
         "daemon": daemon_health(),

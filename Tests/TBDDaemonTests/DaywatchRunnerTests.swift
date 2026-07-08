@@ -27,10 +27,6 @@ actor FakeDaywatchExecutor: DaywatchExecuting {
     func wakeJudge(act: Bool) async {
         judgeWakeCalls.append(JudgeWakeCall(act: act))
     }
-
-    func setTickExitCode(_ code: Int32) {
-        self.tickExitCode = code
-    }
 }
 
 // MARK: - Tests

@@ -125,6 +125,7 @@ public actor DaywatchRunner {
     public func apply(mode: NightwatchMode) async {
         let wasRunning = currentMode != .off
         let shouldRun = mode != .off
+        let previousMode = currentMode
 
         currentMode = mode
 
@@ -138,7 +139,7 @@ public actor DaywatchRunner {
             // Stop the loop
             loopTask?.cancel()
             loopTask = nil
-            logger.info("Stopped daywatch runner (was in mode \(self.currentMode.rawValue, privacy: .public))")
+            logger.info("Stopped daywatch runner (was in mode \(previousMode.rawValue, privacy: .public))")
         }
         // else: no-op (already in desired state)
     }
