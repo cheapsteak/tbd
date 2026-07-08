@@ -235,14 +235,12 @@ def fleet():
     return out
 
 def main():
-    # Create the queue dir BEFORE opening the lock file. On a fresh install queue/
-    # does not exist yet (PluginDirWriter only makes scripts/ + config/), so opening
-    # the lock would raise FileNotFoundError — caught below as "lock held" — and tick.py
-    # would silently exit 0 forever, never reaching the later makedirs. Create it first.
-    os.makedirs(QUEUE, exist_ok=True)
-    # Prevent concurrent tick runs (e.g. DaywatchRunner loop + launchd scheduler both active).
-    # Acquire an exclusive lock on a lock file; if already held, another tick is running — exit silently.
-    lock_path = f"{SKILL}/queue/tick.lock"
+    # Prevent concurrent tick runs across BOTH schedulers — the in-daemon DaywatchRunner
+    # loop and the launchd scheduler.sh heartbeat. They execute DIFFERENT tick.py copies
+    # from different install trees (AppSupport plugin dir vs ~/.claude), so a lock under
+    # each copy's own queue/ dir would never contend. Use a single machine-global lock path
+    # that every copy computes identically; /tmp always exists, so no bootstrap dir is needed.
+    lock_path = "/tmp/nightwatch-tick.lock"
     try:
         lock_file = open(lock_path, 'w')
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
