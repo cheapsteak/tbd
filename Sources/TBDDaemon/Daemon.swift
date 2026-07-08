@@ -66,6 +66,7 @@ public final class Daemon: Sendable {
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
     /// on shutdown; `nil` in mock mode.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
+    public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
     /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
     /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
@@ -629,6 +630,20 @@ public final class Daemon: Sendable {
             rpcRouter.limitResumeScheduler = resumeScheduler
             await resumeScheduler.start()
 
+            // 12e. Start daywatch runner (autonomous fleet babysitter loop).
+            let skillDir = PluginDirWriter.pluginDirPath + "/skills/nightwatch"
+            let executor = ProcessDaywatchExecutor(skillDir: skillDir)
+            let runner = DaywatchRunner(executor: executor)
+            self.daywatchRunner = runner
+            rpcRouter.daywatchRunner = runner
+            // Boot-reconcile: if nightwatch mode was persisted, restart the loop.
+            do {
+                let config = try await database.config.get()
+                await runner.apply(mode: config.nightwatchMode)
+            } catch {
+                reconcileLogger.error("Failed to restore daywatch mode on boot: \(String(describing: error), privacy: .public)")
+            }
+
             // 13. Periodic git status refresh (branch sync, conflict detection).
             // 10s foreground, 60s background (GitPollCadence.statusInterval);
             // per-worktree conflict checks are additionally dirty-gated inside
@@ -699,6 +714,11 @@ public final class Daemon: Sendable {
 
         if let resumeScheduler = limitResumeScheduler {
             await resumeScheduler.stop()
+        }
+
+        // Stop daywatch runner.
+        if let runner = daywatchRunner {
+            await runner.apply(mode: .off)
         }
 
         // Stop any tmux control-mode connections (no-op when the gate is off).

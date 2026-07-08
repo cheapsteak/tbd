@@ -744,12 +744,26 @@ public actor HibernationCoordinator {
         for terminal in allTerminals where terminal.isParked {
             guard let worktree = try? await db.worktrees.get(id: terminal.worktreeID) else { continue }
             let server = worktree.tmuxServer
-            let alive = await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID)
-            if alive,
-               let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: terminal.tmuxPaneID),
-               ClaudeStateDetector.isClaudeProcess(cmd) {
-                try? await db.terminals.clearHibernated(id: terminal.id)
-                logger.info("startup: cleared stale parked state for still-running terminal \(terminal.id, privacy: .public)")
+
+            // Check if the window still exists AND is running claude
+            let serverAlive = await tmux.serverExists(server: server)
+            guard serverAlive else { continue }
+
+            let windowAlive = await tmux.windowExists(server: server, windowID: terminal.tmuxWindowID)
+            guard windowAlive else { continue }
+
+            // Verify the pane is still running a Claude process
+            guard let cmd = try? await tmux.paneCurrentCommand(server: server, paneID: terminal.tmuxPaneID),
+                  ClaudeStateDetector.isClaudeProcess(cmd) else {
+                continue
+            }
+
+            // Window and process are alive — clear the parked state
+            do {
+                try await db.terminals.clearHibernated(id: terminal.id)
+                logger.info("startup: cleared stale parked state for still-running terminal \(terminal.id, privacy: .public) — window \(terminal.tmuxWindowID, privacy: .public), process alive")
+            } catch {
+                logger.warning("startup: failed to clear parked state for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
     }

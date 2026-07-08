@@ -95,7 +95,7 @@ and fleet-derived capacity, classifies every agent deterministically, and emits:
 Exit code 0 = nothing needs Opus (silent-ok).  Exit code 10 = judgment items queued.
 Run with --prs to also gate open PRs (makes gh calls — skip during GitHub rate crunch).
 """
-import subprocess, os, re, json, time, sys
+import subprocess, os, re, json, time, sys, fcntl
 
 HOME = os.path.expanduser("~")
 DB = f"{HOME}/tbd/state.db"
@@ -235,6 +235,19 @@ def fleet():
     return out
 
 def main():
+    # Prevent concurrent tick runs across BOTH schedulers — the in-daemon DaywatchRunner
+    # loop and the launchd scheduler.sh heartbeat. They execute DIFFERENT tick.py copies
+    # from different install trees (AppSupport plugin dir vs ~/.claude), so a lock under
+    # each copy's own queue/ dir would never contend. Use a single machine-global lock path
+    # that every copy computes identically; /tmp always exists, so no bootstrap dir is needed.
+    lock_path = "/tmp/nightwatch-tick.lock"
+    try:
+        lock_file = open(lock_path, 'w')
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        # Lock is already held by another tick — exit 0 silently (another instance is active).
+        sys.exit(0)
+
     rep = {
         "ts": int(time.time()),
         "daemon": daemon_health(),
