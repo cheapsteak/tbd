@@ -36,10 +36,11 @@ test_newest_mtime_empty_for_empty_dir() {
 
 test_has_active_build_true_when_swift_proc_matches() {
   local ps_out='901 /usr/bin/swift-frontend -c /Users/x/tbd/worktrees/tbd/w1/Sources/A.swift'
-  RECLAIM_PS_CMD="printf '%s\n' \"$ps_out\"" \
-    has_active_build "/Users/x/tbd/worktrees/tbd/w1" \
-    && assert_eq "active build detected" "yes" "yes" \
-    || assert_eq "active build detected" "yes" "no"
+  if RECLAIM_PS_CMD="printf '%s\n' \"$ps_out\"" has_active_build "/Users/x/tbd/worktrees/tbd/w1"; then
+    assert_eq "active build detected" "yes" "yes"
+  else
+    assert_eq "active build detected" "yes" "no"
+  fi
 }
 
 test_has_active_build_false_when_no_swift_proc() {
