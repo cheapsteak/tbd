@@ -85,6 +85,20 @@ if [ ! -f "$BUNDLE_ICON" ] || [ "$SOURCE_ICON" -nt "$BUNDLE_ICON" ]; then
     cp "$SOURCE_ICON" "$BUNDLE_ICON"
 fi
 
+# Copy the TBD_TBDApp.bundle (resource bundle with localized strings and assets).
+# SPM produces it in .build/arm64-apple-macosx/debug; it must be in the .app bundle
+# or app launch fails with "could not load resource bundle".
+# NOTE: $BUILD_DIR is a symlink to arm64-apple-macosx/debug, so we reach the bundle
+# via $BUILD_DIR/TBD_TBDApp.bundle, not by composing a path with ../arm64-apple-macosx/debug.
+SOURCE_RESOURCE_BUNDLE="$BUILD_DIR/TBD_TBDApp.bundle"
+BUNDLE_RESOURCE_BUNDLE="$BUNDLE_RESOURCES/TBD_TBDApp.bundle"
+if [ -d "$SOURCE_RESOURCE_BUNDLE" ]; then
+    rm -rf "$BUNDLE_RESOURCE_BUNDLE"
+    cp -R "$SOURCE_RESOURCE_BUNDLE" "$BUNDLE_RESOURCE_BUNDLE"
+else
+    echo "warning: TBD_TBDApp.bundle not found at $SOURCE_RESOURCE_BUNDLE" >&2
+fi
+
 # Stash the source worktree path inside the bundle so the running app can
 # show it in the status bar — it can no longer infer this from its own
 # exec path now that it runs from /Applications instead of .build/.
