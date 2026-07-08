@@ -176,18 +176,17 @@ struct HibernationCoordinatorTests {
     @Test func parkPersistsPaneSnapshot() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         // Inject a non-empty ANSI capture via the capturePane dryRun hook; the
-        // park path reads it through `capturePaneWithAnsi`.
+        // park path reads it through `capturePaneWithAnsi` (which consults the
+        // same hook in dryRun) and must persist it into `suspendedSnapshot`.
         let tmux = TmuxManager(dryRun: true, dryRunCapturePane: { _, _ in "FROZEN PANE" })
-        // capturePaneWithAnsi returns "" in dryRun regardless of the hook, so
-        // this test asserts the write PATH is exercised (snapshot param wired)
-        // by checking setHibernated persists whatever capture returns. Since
-        // dryRun capturePaneWithAnsi is "", the snapshot ends up nil — so we
-        // instead assert the DB path directly with an explicit snapshot.
-        _ = tmux
-        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1", snapshot: "FROZEN PANE")
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager())
+
+        let result = await coord.manualHibernate(terminalID: terminalID)
+        #expect(result == .ok)
         let after = try await db.terminals.get(id: terminalID)
         #expect(after?.suspendedSnapshot == "FROZEN PANE",
-                "the snapshot param must persist into suspendedSnapshot")
+                "the captured pane must persist into suspendedSnapshot")
         #expect(after?.hibernatedAt != nil)
     }
 
@@ -709,6 +708,102 @@ struct HibernationCoordinatorTests {
         #expect(try await db.terminals.get(id: terminalID)?.keepWarm == false)
     }
 
+    // MARK: - Broadcast delta contents (snapshot + reason ride the delta)
+    //
+    // The app applies `terminalHibernationChanged` to its cached row IN PLACE;
+    // the parked view materializes on that flip and reads the row's
+    // `suspendedSnapshot` once, and wake-on-focus reads `hibernateReason` — so
+    // the hibernate delta must CARRY both (a later refetch is too late).
+
+    /// Manual park: the published delta carries the just-captured ANSI
+    /// snapshot and the `.manual` reason alongside `hibernated: true`.
+    @Test func manualHibernatePublishesSnapshotAndReasonOnDelta() async throws {
+        let (db, _, terminalID) = try await setup(activityState: .idle)
+        let recorder = RecordedHibernationDeltas()
+        let tmux = TmuxManager(dryRun: true, dryRunCapturePane: { _, _ in "FROZEN PANE" })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux,
+            subscriptions: recorder.subscriptions(),
+            configDirManager: isolatedConfigDirManager())
+
+        let result = await coord.manualHibernate(terminalID: terminalID)
+        #expect(result == .ok)
+
+        let delta = recorder.snapshot().last
+        #expect(delta?.hibernated == true)
+        #expect(delta?.suspendedSnapshot == "FROZEN PANE",
+                "the hibernate delta must carry the captured snapshot — the parked view reads the cached row at the flip")
+        #expect(delta?.hibernateReason == .manual,
+                "the hibernate delta must carry the park reason — wake-on-focus filters on it before the refetch")
+    }
+
+    /// Wake: the un-park delta publishes nil snapshot/reason (the app clears
+    /// its cached reason; the DB keeps the snapshot per `clearHibernated`).
+    @Test func wakePublishesNilSnapshotAndReasonOnDelta() async throws {
+        let (db, _, terminalID) = try await setup()
+        let recorder = RecordedHibernationDeltas()
+        let tmux = TmuxManager(dryRun: true, dryRunCapturePane: { _, _ in "FROZEN PANE" })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux,
+            subscriptions: recorder.subscriptions(),
+            configDirManager: isolatedConfigDirManager())
+
+        _ = await coord.manualHibernate(terminalID: terminalID)
+        let wake = await coord.wake(terminalID: terminalID)
+        #expect(wake == .ok)
+
+        let delta = recorder.snapshot().last
+        #expect(delta?.hibernated == false)
+        #expect(delta?.suspendedSnapshot == nil)
+        #expect(delta?.hibernateReason == nil)
+    }
+
+    /// Keep-warm toggle on an ALREADY PARKED row re-broadcasts
+    /// `hibernated: true` — it must carry the row's persisted snapshot and
+    /// reason, or the in-place apply would wipe them from the cached row.
+    @Test func keepWarmOnParkedRowRebroadcastsRowSnapshotAndReason() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(
+            id: terminalID, sessionID: "sess-1",
+            snapshot: "FROZEN PANE", reason: .manual)
+        let recorder = RecordedHibernationDeltas()
+        let coord = HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true),
+            subscriptions: recorder.subscriptions(),
+            configDirManager: isolatedConfigDirManager())
+
+        let ok = await coord.setKeepWarm(terminalID: terminalID, keepWarm: true)
+        #expect(ok)
+
+        let delta = recorder.snapshot().last
+        #expect(delta?.hibernated == true)
+        #expect(delta?.keepWarm == true)
+        #expect(delta?.suspendedSnapshot == "FROZEN PANE",
+                "a keep-warm re-broadcast on a parked row must not wipe the cached snapshot")
+        #expect(delta?.hibernateReason == .manual,
+                "a keep-warm re-broadcast on a parked row must not wipe the cached reason")
+    }
+
+    /// Keep-warm toggle on a LIVE (non-parked) row: `hibernated: false` with
+    /// nil snapshot/reason — nothing parked, nothing to carry.
+    @Test func keepWarmOnLiveRowPublishesNilSnapshotAndReason() async throws {
+        let (db, _, terminalID) = try await setup()
+        let recorder = RecordedHibernationDeltas()
+        let coord = HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true),
+            subscriptions: recorder.subscriptions(),
+            configDirManager: isolatedConfigDirManager())
+
+        let ok = await coord.setKeepWarm(terminalID: terminalID, keepWarm: true)
+        #expect(ok)
+
+        let delta = recorder.snapshot().last
+        #expect(delta?.hibernated == false)
+        #expect(delta?.keepWarm == true)
+        #expect(delta?.suspendedSnapshot == nil)
+        #expect(delta?.hibernateReason == nil)
+    }
+
     // MARK: - Idle sweep gating
 
     @Test func sweepDoesNotHibernateWhenFeatureDisabled() async throws {
@@ -788,6 +883,38 @@ struct RPCRouterWakeErrorMappingTests {
                 "the RPC error must name the gone window; got: \(resp.error ?? "nil")")
         #expect(try await db.terminals.get(id: terminal.id)?.isParked == true,
                 "the row must stay parked so a retry can wake it")
+    }
+}
+
+/// Thread-safe collector of `terminalHibernationChanged` deltas published
+/// through a real `StateSubscriptionManager` — the same wire the app's
+/// subscription receives, so these tests assert the actual encoded payload.
+private final class RecordedHibernationDeltas: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deltas: [TerminalHibernationDelta] = []
+
+    /// A subscription manager whose (kept-alive) subscriber records every
+    /// hibernation delta into this collector.
+    func subscriptions() -> StateSubscriptionManager {
+        let manager = StateSubscriptionManager()
+        manager.addSubscriber { [weak self] data in
+            if let decoded = try? JSONDecoder().decode(StateDelta.self, from: data),
+               case .terminalHibernationChanged(let delta) = decoded {
+                self?.record(delta)
+            }
+            return true
+        }
+        return manager
+    }
+
+    private func record(_ delta: TerminalHibernationDelta) {
+        lock.lock(); defer { lock.unlock() }
+        deltas.append(delta)
+    }
+
+    func snapshot() -> [TerminalHibernationDelta] {
+        lock.lock(); defer { lock.unlock() }
+        return deltas
     }
 }
 

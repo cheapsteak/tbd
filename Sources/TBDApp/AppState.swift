@@ -1082,9 +1082,19 @@ final class AppState: ObservableObject {
         terminals[delta.worktreeID]?[idx].profileID = delta.newProfileID
     }
 
-    /// Hibernate / wake / keep-warm change: update `hibernatedAt` + `keepWarm`
-    /// on the row in place so the whisper indicator and action menu re-render
-    /// without a full terminal refetch.
+    /// Hibernate / wake / keep-warm change: update `hibernatedAt`, `keepWarm`,
+    /// `suspendedSnapshot`, and `hibernateReason` on the row in place so the
+    /// whisper indicator and action menu re-render without a full terminal
+    /// refetch. Snapshot and reason must land WITH the `hibernated` flip: the
+    /// parked TerminalPanelView materializes the instant `isParked` flips
+    /// (identity `id-tmuxWindowID-isParked`) and reads `initialSnapshot` from
+    /// this cached row once at creation — a snapshot arriving only in the
+    /// later refetch shows a blank parked pane — and wake-on-focus filters on
+    /// the cached `hibernateReason`, so a focus event in the delta-to-refetch
+    /// gap must not auto-wake a just-manually-parked session. On wake the
+    /// reason is cleared but the snapshot is KEPT, matching the daemon's
+    /// `clearHibernated` (the woken view shows the frozen pane while the live
+    /// tmux client reconnects).
     private func applyTerminalHibernationDelta(_ delta: TerminalHibernationDelta) {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
@@ -1102,6 +1112,16 @@ final class AppState: ObservableObject {
         }
         terminals[delta.worktreeID]?[idx].hibernatedAt = delta.hibernated ? Date() : nil
         terminals[delta.worktreeID]?[idx].keepWarm = delta.keepWarm
+        if delta.hibernated {
+            // Parked: the delta carries the just-captured snapshot + reason
+            // (nil from an older daemon — same blank-pane behavior as before).
+            terminals[delta.worktreeID]?[idx].suspendedSnapshot = delta.suspendedSnapshot
+            terminals[delta.worktreeID]?[idx].hibernateReason = delta.hibernateReason
+        } else {
+            // Woken: clear the reason, keep the snapshot (clearHibernated
+            // semantics — reconnect backdrop, overwritten on the next park).
+            terminals[delta.worktreeID]?[idx].hibernateReason = nil
+        }
     }
 
     /// Update the in-place usage entry for a single profile. If no match,

@@ -31,7 +31,8 @@ public struct TmuxManager: Sendable {
     /// Without it, dryRun reports every window as alive, which makes paths
     /// like the pre-session `.paneKilled` short-circuit untestable.
     public let dryRunWindowIsDead: (@Sendable (String) -> Bool)?
-    /// Optional test hook consulted by `capturePaneOutput` in dryRun mode:
+    /// Optional test hook consulted by `capturePaneOutput` and
+    /// `capturePaneWithAnsi` in dryRun mode:
     /// (server, paneID) → pane text. Without it, dryRun captures return "",
     /// which reads as "pane not ready" to the auto-login pump.
     public let dryRunCapturePane: (@Sendable (String, String) -> String)?
@@ -484,7 +485,9 @@ public struct TmuxManager: Sendable {
 
     /// Capture pane content with ANSI escape sequences preserved for snapshot display.
     public func capturePaneWithAnsi(server: String, paneID: String) async throws -> String {
-        if dryRun { return "" }
+        // dryRun consults the same capture hook as `capturePaneOutput` so tests
+        // can exercise the park path's snapshot capture end-to-end.
+        if dryRun { return dryRunCapturePane?(server, paneID) ?? "" }
         let args = Self.capturePaneWithAnsiCommand(server: server, paneID: paneID)
         return try await runTmux(args)
     }
