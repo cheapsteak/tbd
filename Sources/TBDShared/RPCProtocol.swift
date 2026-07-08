@@ -105,6 +105,7 @@ public enum RPCMethod {
     public static let cleanup = "cleanup"
     public static let claudeSetSpawnPreferences = "claude.setSpawnPreferences"
     public static let claudeRateLimitDetected = "claude.rateLimitDetected"
+    public static let claudeTransientApiErrorDetected = "claude.transientApiErrorDetected"
     public static let terminalSuspend = "terminal.suspend"
     public static let terminalResume = "terminal.resume"
     public static let worktreeSuspend = "worktree.suspend"
@@ -166,6 +167,7 @@ public enum RPCMethod {
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
     public static let configSetAutoResumeOnLimitReset = "config.setAutoResumeOnLimitReset"
+    public static let configSetAutoResumeOnApiError = "config.setAutoResumeOnApiError"
     public static let configSetScratchInstructions = "config.setScratchInstructions"
     public static let configSetScratchRenamePrompt = "config.setScratchRenamePrompt"
     public static let configSetScratchProfileOverride = "config.setScratchProfileOverride"
@@ -500,6 +502,7 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let autoArchiveOnMergeDefault: Bool
     public let nightwatchMode: NightwatchMode
     public let autoResumeOnLimitReset: Bool
+    public let autoResumeOnApiError: Bool
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -507,7 +510,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         globalEnvOverrides: [String: String] = [:],
         autoArchiveOnMergeDefault: Bool = false,
         nightwatchMode: NightwatchMode = .off,
-        autoResumeOnLimitReset: Bool = false
+        autoResumeOnLimitReset: Bool = false,
+        autoResumeOnApiError: Bool = false
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -516,6 +520,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
         self.nightwatchMode = nightwatchMode
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
+        self.autoResumeOnApiError = autoResumeOnApiError
     }
 
     public init(from decoder: Decoder) throws {
@@ -536,6 +541,8 @@ public struct ModelProfileListResult: Codable, Sendable {
             NightwatchMode.self, forKey: .nightwatchMode) ?? .off
         autoResumeOnLimitReset = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnLimitReset) ?? false
+        autoResumeOnApiError = try c.decodeIfPresent(
+            Bool.self, forKey: .autoResumeOnApiError) ?? false
     }
 }
 
@@ -1042,6 +1049,14 @@ public struct ConfigSetAutoResumeOnLimitResetParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setAutoResumeOnApiError` — the transient-API-error
+/// auto-continue gate (default OFF). Disabling cancels only pending
+/// `api_error`-scoped resumes (session-limit rows are untouched).
+public struct ConfigSetAutoResumeOnApiErrorParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setScratchInstructions` — the global scratch-space
 /// system-prompt override. `nil` (or blank) resets to the built-in default.
 public struct ConfigSetScratchInstructionsParams: Codable, Sendable {
@@ -1512,6 +1527,29 @@ public struct RateLimitDetectedParams: Codable, Sendable {
         self.limitType = limitType
         self.rawMessage = rawMessage
     }
+}
+
+/// Params for `claude.transientApiErrorDetected` — sent by `tbd hooks
+/// stop-failure` when the turn died on an allowlisted transient API error
+/// (5xx / overloaded / network blip) rather than a hard usage limit.
+public struct TransientApiErrorDetectedParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let errorClass: String
+    public let rawMessage: String
+    public init(terminalID: UUID, errorClass: String, rawMessage: String) {
+        self.terminalID = terminalID
+        self.errorClass = errorClass
+        self.rawMessage = rawMessage
+    }
+}
+
+/// Result for `claude.transientApiErrorDetected`.
+/// `handled == true` → the daemon owns user messaging (scheduled / gave-up /
+/// latch-silenced); the CLI prints nothing. `handled == false` → toggle off
+/// or unknown terminal; the CLI falls back to the legacy error print.
+public struct TransientApiErrorDetectedResult: Codable, Sendable {
+    public let handled: Bool
+    public init(handled: Bool) { self.handled = handled }
 }
 
 /// Params for `terminal.cancelScheduledResume` — explicit user cancel from

@@ -159,6 +159,37 @@ public actor LimitResumeScheduler {
         return inserted
     }
 
+    /// Insert a pending api_error row firing at now + delay. NO slack/jitter
+    /// — `slack`/`jitterProvider` above defend against N panes independently
+    /// waking at the SAME shared reset second (a hard usage-limit reset is a
+    /// clock-time coincidence across terminals); a transient API error has
+    /// no such shared instant — each terminal's failures are already
+    /// scattered in time — and `TransientResumeBackoff`'s ladder already
+    /// diverges repeat offenders from one-off blips, so adding jitter on top
+    /// would only blur the backoff steps without buying anything (spec
+    /// 2026-07-08 §Backoff). Same double-send latch as `schedule` via
+    /// `store.insertPending`.
+    public func scheduleTransient(
+        terminalID: UUID, worktreeID: UUID, claudeSessionID: String?,
+        delay: TimeInterval, rawMessage: String
+    ) async -> ScheduledResume? {
+        let now = clock.now()
+        let fireAt = now.addingTimeInterval(delay)
+        let row = ScheduledResume(
+            terminalID: terminalID, worktreeID: worktreeID,
+            claudeSessionID: claudeSessionID,
+            resetsAt: fireAt, fireAt: fireAt,
+            limitType: ScheduledResume.apiErrorLimitType, rawMessage: rawMessage,
+            createdAt: now)
+        guard let inserted = try? await store.insertPending(row) else {
+            logger.info("scheduleTransient: no pending row created for terminal \(terminalID.uuidString, privacy: .public) (latch or store error)")
+            return nil
+        }
+        logger.info("scheduleTransient: resume for terminal \(terminalID.uuidString, privacy: .public) at \(fireAt.description, privacy: .public) (delay \(delay, privacy: .public)s)")
+        wake()
+        return inserted
+    }
+
     // MARK: - Loop
 
     private func runLoop() async {
@@ -220,7 +251,10 @@ public actor LimitResumeScheduler {
 
         // Belt-and-braces gate check: toggle-off should already have
         // cancelled pending rows; if one slipped through, cancel silently.
-        let enabled = (try? await config.get())?.autoResumeOnLimitReset ?? false
+        // The row's own limitType picks which toggle governs it — api_error
+        // rows follow autoResumeOnApiError, everything else follows
+        // autoResumeOnLimitReset (spec 2026-07-08 §Gating).
+        let enabled = ((try? await config.get())?.autoResumeEnabled(forLimitType: row.limitType)) ?? false
         guard enabled else {
             if await setStatusWithRetry(id: row.id, status: .cancelled, terminalID: row.terminalID, context: "toggle-off") {
                 inFlightOrFired.remove(row.id)

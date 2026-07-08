@@ -424,6 +424,10 @@ final class AppState: ObservableObject {
     /// Daemon-side (not @AppStorage) because the daemon must act while the
     /// app is closed.
     @Published var autoResumeOnLimitReset: Bool = false
+    /// Daemon-persisted gate for transient-API-error auto-continue (default
+    /// OFF). Daemon-side (not @AppStorage) because the daemon must act while
+    /// the app is closed.
+    @Published var autoResumeOnApiError: Bool = false
     /// Terminals where the user has dismissed the proxy-unreachable banner.
     /// Cleared on app relaunch (in-memory only — banners are advisory).
     @Published var dismissedProxyWarnings: Set<UUID> = []

@@ -21,6 +21,11 @@ struct FakeRateLimitCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Terminal ID (defaults to TBD_TERMINAL_ID)")
     var terminal: String?
 
+    @Flag(
+        name: .long,
+        help: "Fabricate a transient API error instead of a usage limit (--resets-in is ignored — the daemon owns the retry delay)")
+    var apiError = false
+
     mutating func run() async throws {
         let idString = terminal
             ?? ProcessInfo.processInfo.environment["TBD_TERMINAL_ID"]
@@ -33,6 +38,19 @@ struct FakeRateLimitCommand: AsyncParsableCommand {
             print("fake-rate-limit: daemon is not running")
             return
         }
+
+        if apiError {
+            let result = try client.call(
+                method: RPCMethod.claudeTransientApiErrorDetected,
+                params: TransientApiErrorDetectedParams(
+                    terminalID: terminalID,
+                    errorClass: "debug",
+                    rawMessage: "debug: fake transient API error"),
+                resultType: TransientApiErrorDetectedResult.self)
+            print("fake-rate-limit: transient API error reported; handled=\(result.handled)")
+            return
+        }
+
         let resetsAt = Date().addingTimeInterval(TimeInterval(resetsIn))
         try client.callVoid(
             method: RPCMethod.claudeRateLimitDetected,

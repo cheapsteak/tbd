@@ -38,6 +38,9 @@ extension AppState {
             if result.autoResumeOnLimitReset != autoResumeOnLimitReset {
                 autoResumeOnLimitReset = result.autoResumeOnLimitReset
             }
+            if result.autoResumeOnApiError != autoResumeOnApiError {
+                autoResumeOnApiError = result.autoResumeOnApiError
+            }
         } catch {
             logger.error("Failed to list model profiles: \(error, privacy: .public)")
             handleConnectionError(error)
@@ -182,6 +185,17 @@ extension AppState {
             autoResumeOnLimitReset = enabled
         } catch {
             logger.error("Failed to set auto-resume gate: \(error, privacy: .public)")
+            showAlert("Failed to set auto-resume: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    /// Set the global transient-API-error auto-continue gate.
+    func setAutoResumeOnApiError(_ enabled: Bool) async {
+        do {
+            try await daemonClient.setAutoResumeOnApiError(enabled)
+            autoResumeOnApiError = enabled
+        } catch {
+            logger.error("Failed to set auto-resume-on-API-error gate: \(error, privacy: .public)")
             showAlert("Failed to set auto-resume: \(error.localizedDescription)", isError: true)
         }
     }

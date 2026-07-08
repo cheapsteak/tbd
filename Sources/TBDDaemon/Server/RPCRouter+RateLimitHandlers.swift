@@ -52,14 +52,56 @@ extension RPCRouter {
             message = "Session limit hit — resets \(ResumeTimeFormatter.string(from: params.resetsAt))"
         }
 
+        try await notify(terminal: terminal, type: .limitReached, message: message)
+        return .ok()
+    }
+
+    /// A transient API error killed a turn (spec 2026-07-08). Gate OFF → not
+    /// handled: the CLI keeps its legacy error print, behavior unchanged.
+    /// Gate ON → schedule an auto-continue with backoff, or give up past the
+    /// cap. `handled` tells the CLI whether the daemon owns user messaging.
+    func handleTransientApiErrorDetected(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TransientApiErrorDetectedParams.self, from: paramsData)
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            logger.debug("transientApiErrorDetected: unknown terminal \(params.terminalID.uuidString, privacy: .public) — ignoring")
+            return try RPCResponse(result: TransientApiErrorDetectedResult(handled: false))
+        }
+        let enabled = (try? await db.config.get())?.autoResumeOnApiError ?? false
+        guard enabled, let scheduler = limitResumeScheduler else {
+            return try RPCResponse(result: TransientApiErrorDetectedResult(handled: false))
+        }
+
+        let attempts = (try? await db.scheduledResumes.countRecentApiErrorAttempts(
+            terminalID: terminal.id,
+            since: Date().addingTimeInterval(-TransientResumeBackoff.lookback))) ?? 0
+
+        guard let delay = TransientResumeBackoff.delay(consecutiveAttempts: attempts) else {
+            try await notify(terminal: terminal, type: .attentionNeeded,
+                message: "Auto-continue gave up after \(TransientResumeBackoff.maxAttempts) attempts — \(params.rawMessage)")
+            return try RPCResponse(result: TransientApiErrorDetectedResult(handled: true))
+        }
+        guard let _ = await scheduler.scheduleTransient(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID,
+            claudeSessionID: terminal.claudeSessionID,
+            delay: delay, rawMessage: params.rawMessage)
+        else {
+            return try RPCResponse(result: TransientApiErrorDetectedResult(handled: true)) // latch: no duplicate notification
+        }
+        try await notify(terminal: terminal, type: .error,
+            message: "\(params.rawMessage) — auto-continue in \(TransientResumeBackoff.copy(forDelay: delay)) (attempt \(attempts + 1)/\(TransientResumeBackoff.maxAttempts))")
+        return try RPCResponse(result: TransientApiErrorDetectedResult(handled: true))
+    }
+
+    /// Create a notification and broadcast its delta — the create+broadcast
+    /// block shared by the rate-limit and transient-API-error handlers.
+    private func notify(terminal: Terminal, type: NotificationType, message: String) async throws {
         let notification = try await db.notifications.create(
-            worktreeID: terminal.worktreeID, type: .limitReached,
+            worktreeID: terminal.worktreeID, type: type,
             message: message, terminalID: terminal.id)
         subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
             notificationID: notification.id, worktreeID: notification.worktreeID,
             type: notification.type, message: notification.message,
             terminalID: notification.terminalID)))
-        return .ok()
     }
 
     /// Explicit user cancel ("Cancel scheduled resume" context-menu item).

@@ -159,18 +159,20 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// alive → user-already-continued → Claude foreground → copy-mode.
     /// Foreground is checked before copy-mode so a dead/backgrounded shell
     /// classifies `.failed` rather than endlessly rescheduling on a stale
-    /// copy-mode flag. Two additional checks (0a global toggle, 1b row
+    /// copy-mode flag. Two additional checks (0a the row's own limitType-aware toggle, 1b row
     /// status) run on every pass too — they aren't in the spec's numbered
     /// list but close the same "state changed during a prior attempt's ~20s
     /// verify window" gap the spec's steps 1-4 already cover for the other
     /// cancellation reasons.
     private func checkEligibility(_ resume: ScheduledResume) async -> EligibilityCheckResult {
-        // 0a. Toggle-off-mid-flight: the global gate can be switched off
-        //     while a prior attempt's ~20s verify window is running. This
-        //     check runs on EVERY call to `checkEligibility` (the initial
-        //     pass and every attempt>1 re-check in `actuate`), so attempt 2
-        //     never fires after the user turns auto-resume off mid-flight.
-        guard (try? await db.config.get())?.autoResumeOnLimitReset ?? false else {
+        // 0a. Toggle-off-mid-flight: the row's own gate — autoResumeOnApiError
+        //     for api_error rows, autoResumeOnLimitReset for everything else
+        //     (spec 2026-07-08 §Gating) — can be switched off while a prior
+        //     attempt's ~20s verify window is running. This check runs on
+        //     EVERY call to `checkEligibility` (the initial pass and every
+        //     attempt>1 re-check in `actuate`), so attempt 2 never fires
+        //     after the user turns the row's gate off mid-flight.
+        guard ((try? await db.config.get())?.autoResumeEnabled(forLimitType: resume.limitType)) ?? false else {
             return .notEligible(.cancelledExternally)
         }
 

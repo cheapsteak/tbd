@@ -44,25 +44,31 @@ public enum RateLimitDetection {
     }
 
     /// Single-scan variant of `detect(transcriptData:)` that also returns the
-    /// matched record's verbatim text, so a caller needing both the detected
-    /// limit AND the display message (e.g. the CLI's StopFailure hook) parses
-    /// the transcript exactly once instead of running two independent
-    /// full-file scans for the same record.
+    /// matched record's verbatim text and top-level `error` field, so a
+    /// caller needing the detected limit, the display message, AND the error
+    /// class (e.g. the CLI's StopFailure hook, feeding both rate-limit
+    /// scheduling and transient-error classification) parses the transcript
+    /// exactly once instead of running independent full-file scans for the
+    /// same record.
     public static func detectWithText(
         transcriptData: Data,
         now: Date = Date(),
         timeZone: TimeZone = .current,
         newerThan floor: Date? = nil
-    ) -> (text: String?, detectedLimit: DetectedRateLimit?)? {
+    ) -> (text: String?, errorClass: String?, detectedLimit: DetectedRateLimit?)? {
         guard let entry = lastApiErrorEntry(in: transcriptData, newerThan: floor) else { return nil }
-        return (text: entry.text, detectedLimit: detect(entry: entry, now: now, timeZone: timeZone))
+        return (
+            text: entry.text,
+            errorClass: entry.errorClass,
+            detectedLimit: detect(entry: entry, now: now, timeZone: timeZone)
+        )
     }
 
     /// Shared entry→DetectedRateLimit derivation used by both `detect(transcriptData:)`
     /// (via `detectWithText`) so there is exactly one implementation of the
     /// structured/text-fallback decision.
     private static func detect(
-        entry: (text: String?, rateLimitInfo: [String: Any]?),
+        entry: (text: String?, errorClass: String?, rateLimitInfo: [String: Any]?),
         now: Date,
         timeZone: TimeZone
     ) -> DetectedRateLimit? {
@@ -251,7 +257,7 @@ public enum RateLimitDetection {
     static func lastApiErrorEntry(
         in data: Data,
         newerThan floor: Date? = nil
-    ) -> (text: String?, rateLimitInfo: [String: Any]?)? {
+    ) -> (text: String?, errorClass: String?, rateLimitInfo: [String: Any]?)? {
         guard let contents = String(data: data, encoding: .utf8) else { return nil }
         for line in contents.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
             guard let lineData = line.data(using: .utf8),
@@ -277,7 +283,11 @@ public enum RateLimitDetection {
                     }
                 }
             }
-            return (text: text, rateLimitInfo: obj["rate_limit_info"] as? [String: Any])
+            return (
+                text: text,
+                errorClass: obj["error"] as? String,
+                rateLimitInfo: obj["rate_limit_info"] as? [String: Any]
+            )
         }
         return nil
     }

@@ -22,13 +22,21 @@ import Testing
         terminalID = terminal.id
     }
 
-    private func makeResume(fireAt: Date = Date().addingTimeInterval(90)) -> ScheduledResume {
+    private func makeResume(
+        fireAt: Date = Date().addingTimeInterval(90),
+        limitType: String = "session",
+        createdAt: Date = Date(),
+        status: ScheduledResumeStatus = .pending,
+        terminalID overrideTerminalID: UUID? = nil
+    ) -> ScheduledResume {
         ScheduledResume(
-            terminalID: terminalID, worktreeID: worktreeID,
+            terminalID: overrideTerminalID ?? terminalID, worktreeID: worktreeID,
             claudeSessionID: "sess-1",
             resetsAt: Date().addingTimeInterval(60), fireAt: fireAt,
-            limitType: "session",
-            rawMessage: "You've hit your session limit · resets 3pm (UTC)")
+            limitType: limitType,
+            rawMessage: "You've hit your session limit · resets 3pm (UTC)",
+            createdAt: createdAt,
+            status: status)
     }
 
     @Test func insertPendingSetsTerminalBadgeAndRoundTrips() async throws {
@@ -145,6 +153,87 @@ import Testing
         #expect(count == 2)
         #expect(try await db.scheduledResumes.pending().isEmpty)
         #expect(try await db.terminals.get(id: terminal2.id)?.pendingResumeAt == nil)
+    }
+
+    @Test func countRecentApiErrorAttemptsFiltersTerminalTypeStatusAndWindow() async throws {
+        let now = Date()
+        let since = now.addingTimeInterval(-30 * 60)
+
+        // Right terminal, api_error, sent, within window -> counts.
+        try await db.scheduledResumes.insertAudit(makeResume(
+            limitType: ScheduledResume.apiErrorLimitType,
+            createdAt: now.addingTimeInterval(-5 * 60), status: .sent))
+        // Right terminal, api_error, failed, within window -> counts.
+        try await db.scheduledResumes.insertAudit(makeResume(
+            limitType: ScheduledResume.apiErrorLimitType,
+            createdAt: now.addingTimeInterval(-10 * 60), status: .failed))
+        // Right terminal, api_error, sent, but outside the window -> excluded.
+        try await db.scheduledResumes.insertAudit(makeResume(
+            limitType: ScheduledResume.apiErrorLimitType,
+            createdAt: now.addingTimeInterval(-45 * 60), status: .sent))
+        // Right terminal, api_error, cancelled, within window -> not a failed attempt, excluded.
+        try await db.scheduledResumes.insertAudit(makeResume(
+            limitType: ScheduledResume.apiErrorLimitType,
+            createdAt: now.addingTimeInterval(-2 * 60), status: .cancelled))
+        // Wrong terminal, api_error, pending -> excluded.
+        let terminal2 = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2")
+        _ = try await db.scheduledResumes.insertPending(makeResume(
+            limitType: ScheduledResume.apiErrorLimitType,
+            createdAt: now, terminalID: terminal2.id))
+        // Right terminal, sent, within window, but wrong limitType -> excluded.
+        try await db.scheduledResumes.insertAudit(makeResume(
+            limitType: "session",
+            createdAt: now.addingTimeInterval(-1 * 60), status: .sent))
+
+        let count = try await db.scheduledResumes.countRecentApiErrorAttempts(
+            terminalID: terminalID, since: since)
+        #expect(count == 2)
+    }
+
+    @Test func cancelAllPendingScopedToApiErrorOnly() async throws {
+        let resumeA = makeResume(limitType: ScheduledResume.apiErrorLimitType)
+        _ = try await db.scheduledResumes.insertPending(resumeA)
+        let terminalB = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2")
+        let resumeB = makeResume(limitType: "session", terminalID: terminalB.id)
+        _ = try await db.scheduledResumes.insertPending(resumeB)
+
+        let count = try await db.scheduledResumes.cancelAllPending(scope: .apiErrorOnly)
+        #expect(count == 1)
+        #expect(try await db.scheduledResumes.get(id: resumeA.id)?.status == .cancelled)
+        #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt == nil)
+        #expect(try await db.scheduledResumes.get(id: resumeB.id)?.status == .pending)
+        #expect(try await db.terminals.get(id: terminalB.id)?.pendingResumeAt != nil)
+    }
+
+    @Test func cancelAllPendingScopedToLimitOnly() async throws {
+        let resumeA = makeResume(limitType: ScheduledResume.apiErrorLimitType)
+        _ = try await db.scheduledResumes.insertPending(resumeA)
+        let terminalB = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2")
+        let resumeB = makeResume(limitType: "session", terminalID: terminalB.id)
+        _ = try await db.scheduledResumes.insertPending(resumeB)
+
+        let count = try await db.scheduledResumes.cancelAllPending(scope: .limitOnly)
+        #expect(count == 1)
+        #expect(try await db.scheduledResumes.get(id: resumeB.id)?.status == .cancelled)
+        #expect(try await db.terminals.get(id: terminalB.id)?.pendingResumeAt == nil)
+        #expect(try await db.scheduledResumes.get(id: resumeA.id)?.status == .pending)
+        #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt != nil)
+    }
+
+    @Test func cancelAllPendingDefaultScopeCancelsBothScopes() async throws {
+        let resumeA = makeResume(limitType: ScheduledResume.apiErrorLimitType)
+        _ = try await db.scheduledResumes.insertPending(resumeA)
+        let terminalB = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2")
+        let resumeB = makeResume(limitType: "session", terminalID: terminalB.id)
+        _ = try await db.scheduledResumes.insertPending(resumeB)
+
+        let count = try await db.scheduledResumes.cancelAllPending(scope: .all)
+        #expect(count == 2)
+        #expect(try await db.scheduledResumes.pending().isEmpty)
     }
 
     @Test func pendingOrderedByFireAt() async throws {

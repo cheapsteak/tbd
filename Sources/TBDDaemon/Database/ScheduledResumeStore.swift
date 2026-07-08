@@ -49,6 +49,13 @@ struct ScheduledResumeRecord: Codable, FetchableRecord, PersistableRecord, Senda
     }
 }
 
+/// Which pending rows a bulk cancel targets (toggle-off scoping, spec §Cancellation).
+public enum ResumeCancelScope: Sendable {
+    case all
+    case apiErrorOnly     // limitType == ScheduledResume.apiErrorLimitType
+    case limitOnly        // limitType != ScheduledResume.apiErrorLimitType
+}
+
 /// CRUD for scheduled session-limit resumes. The single `pending` row per
 /// terminal is the double-send latch (spec §State); every transition that
 /// creates/moves/ends a pending row also syncs `terminal.pendingResumeAt`
@@ -191,13 +198,21 @@ public struct ScheduledResumeStore: Sendable {
         }
     }
 
-    /// Cancel every pending row (global toggle switched off). Returns count.
+    /// Cancel pending rows matching `scope` (global toggle switched off). Returns count.
     @discardableResult
-    public func cancelAllPending() async throws -> Int {
+    public func cancelAllPending(scope: ResumeCancelScope = .all) async throws -> Int {
         try await writer.write { db in
-            let records = try ScheduledResumeRecord
+            var query = ScheduledResumeRecord
                 .filter(Column("status") == ScheduledResumeStatus.pending.rawValue)
-                .fetchAll(db)
+            switch scope {
+            case .all:
+                break
+            case .apiErrorOnly:
+                query = query.filter(Column("limitType") == ScheduledResume.apiErrorLimitType)
+            case .limitOnly:
+                query = query.filter(Column("limitType") != ScheduledResume.apiErrorLimitType)
+            }
+            let records = try query.fetchAll(db)
             for var record in records {
                 record.status = ScheduledResumeStatus.cancelled.rawValue
                 try record.update(db)
@@ -206,6 +221,22 @@ public struct ScheduledResumeStore: Sendable {
                     arguments: [record.terminalID])
             }
             return records.count
+        }
+    }
+
+    /// Count `sent`/`failed` attempts for a terminal's api-error-classified
+    /// resumes since a cutoff — the consecutive-attempt gate (spec
+    /// §Backoff). Pending/cancelled rows are never attempts: a still-armed
+    /// or user-cancelled row hasn't fired yet.
+    public func countRecentApiErrorAttempts(terminalID: UUID, since: Date) async throws -> Int {
+        try await writer.read { db in
+            try ScheduledResumeRecord
+                .filter(Column("terminalID") == terminalID.uuidString)
+                .filter(Column("limitType") == ScheduledResume.apiErrorLimitType)
+                .filter([ScheduledResumeStatus.sent.rawValue, ScheduledResumeStatus.failed.rawValue]
+                    .contains(Column("status")))
+                .filter(Column("createdAt") > since)
+                .fetchCount(db)
         }
     }
 }

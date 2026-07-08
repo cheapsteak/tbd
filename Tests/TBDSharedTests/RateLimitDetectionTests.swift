@@ -159,6 +159,24 @@ struct RateLimitDetectionTests {
             newerThan: Self.now.addingTimeInterval(600), in: data))
     }
 
+    // MARK: - errorClass surfacing
+
+    @Test func detectWithTextSurfacesErrorClassFromRecord() {
+        let obj: [String: Any] = [
+            "type": "assistant",
+            "isApiErrorMessage": true,
+            "timestamp": "2026-07-03T14:00:00.123Z",
+            "error": "server_error",
+            "message": ["role": "assistant",
+                        "content": [["type": "text", "text": "API Error: Connection closed mid-response."]]]
+        ]
+        let lineData = try! JSONSerialization.data(withJSONObject: obj)
+        let line = String(data: lineData, encoding: .utf8)!
+        let scan = RateLimitDetection.detectWithText(
+            transcriptData: Self.transcript([line]), now: Self.now, timeZone: Self.utc)
+        #expect(scan?.errorClass == "server_error")
+    }
+
     // MARK: - ResumeTimeFormatter
 
     @Test func formatterDropsZeroMinutes() {

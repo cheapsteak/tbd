@@ -65,5 +65,68 @@ import Testing
         let json = #"{"profiles":[],"globalEnvOverrides":{},"autoArchiveOnMergeDefault":false}"#
         let result = try JSONDecoder().decode(ModelProfileListResult.self, from: Data(json.utf8))
         #expect(result.autoResumeOnLimitReset == false)
+        #expect(result.autoResumeOnApiError == false)
+    }
+
+    @Test func apiErrorListResultCarriesFlag() async throws {
+        try await db.config.setAutoResumeOnApiError(true)
+        let response = await router.handle(RPCRequest(method: RPCMethod.modelProfileList))
+        #expect(response.success)
+        let result = try response.decodeResult(ModelProfileListResult.self)
+        #expect(result.autoResumeOnApiError == true)
+    }
+
+    // Seed one pending `session` row and one pending `api_error` row on two
+    // separate terminals, then assert each toggle's off-path cancels only its
+    // own scope (spec: per-toggle scoped cancel).
+    private func seedTwoPendingRows() async throws -> (session: UUID, apiError: UUID) {
+        let repo = try await db.repos.create(
+            path: "/tmp/arc2-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "b",
+            path: "/tmp/arc2-wt-\(UUID().uuidString)", tmuxServer: "tbd-arc2")
+        let sessionTerminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1")
+        let apiErrorTerminal = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@2", tmuxPaneID: "%2")
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: sessionTerminal.id, worktreeID: wt.id,
+            resetsAt: Date(), fireAt: Date().addingTimeInterval(60),
+            limitType: "session", rawMessage: "m"))
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: apiErrorTerminal.id, worktreeID: wt.id,
+            resetsAt: Date(), fireAt: Date().addingTimeInterval(60),
+            limitType: ScheduledResume.apiErrorLimitType, rawMessage: "m"))
+        return (sessionTerminal.id, apiErrorTerminal.id)
+    }
+
+    @Test func disableApiErrorCancelsApiErrorRowNotSession() async throws {
+        try await db.config.setAutoResumeOnLimitReset(true)
+        try await db.config.setAutoResumeOnApiError(true)
+        let (session, apiError) = try await seedTwoPendingRows()
+
+        let request = try RPCRequest(
+            method: RPCMethod.configSetAutoResumeOnApiError,
+            params: ConfigSetAutoResumeOnApiErrorParams(enabled: false))
+        let response = await router.handle(request)
+        #expect(response.success)
+        #expect(try await db.config.get().autoResumeOnApiError == false)
+        #expect(try await db.scheduledResumes.pending(terminalID: apiError) == nil)
+        #expect(try await db.scheduledResumes.pending(terminalID: session) != nil)
+    }
+
+    @Test func disableLimitResetCancelsSessionRowNotApiError() async throws {
+        try await db.config.setAutoResumeOnLimitReset(true)
+        try await db.config.setAutoResumeOnApiError(true)
+        let (session, apiError) = try await seedTwoPendingRows()
+
+        let request = try RPCRequest(
+            method: RPCMethod.configSetAutoResumeOnLimitReset,
+            params: ConfigSetAutoResumeOnLimitResetParams(enabled: false))
+        let response = await router.handle(request)
+        #expect(response.success)
+        #expect(try await db.config.get().autoResumeOnLimitReset == false)
+        #expect(try await db.scheduledResumes.pending(terminalID: session) == nil)
+        #expect(try await db.scheduledResumes.pending(terminalID: apiError) != nil)
     }
 }
