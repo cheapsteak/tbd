@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Tests for scripts/reclaim-build.sh — run: bash scripts/reclaim-build.test.sh
+# shellcheck disable=SC2329 # helpers/test_* are dispatched dynamically via `declare -F`/"$t" below
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
+source "$HERE/reclaim-build.sh"   # source-guard prevents main() from running
+
+FAIL=0
+assert_eq()       { if [[ "$2" == "$3" ]]; then echo "ok   - $1"; else echo "FAIL - $1: expected [$2] got [$3]"; FAIL=1; fi; }
+assert_contains() { if [[ "$2" == *"$3"* ]]; then echo "ok   - $1"; else echo "FAIL - $1: [$2] lacks [$3]"; FAIL=1; fi; }
+assert_missing()  { if [[ "$2" != *"$3"* ]]; then echo "ok   - $1"; else echo "FAIL - $1: [$2] unexpectedly has [$3]"; FAIL=1; fi; }
+mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/reclaim-test.XXXXXX"; }
+# set a file's mtime to N seconds before epoch NOW
+touch_age()       { local f="$1" now="$2" age="$3"; touch -t "$(date -r "$((now - age))" +%Y%m%d%H%M.%S)" "$f"; }
+
+test_newest_mtime_returns_newest_file() {
+  local d; d="$(mktmpd)"
+  : > "$d/old"; : > "$d/new"
+  touch -t 202601010000.00 "$d/old"
+  touch -t 202606010000.00 "$d/new"
+  local expected; expected="$(stat -f '%m' "$d/new")"
+  assert_eq "newest_mtime picks the newest file" "$expected" "$(newest_mtime "$d")"
+  rm -rf "$d"
+}
+
+test_newest_mtime_empty_for_missing_dir() {
+  assert_eq "newest_mtime empty for missing dir" "" "$(newest_mtime /no/such/dir/here)"
+}
+
+test_newest_mtime_empty_for_empty_dir() {
+  local d; d="$(mktmpd)"
+  assert_eq "newest_mtime empty for empty dir" "" "$(newest_mtime "$d")"
+  rm -rf "$d"
+}
+
+for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
+exit $FAIL
