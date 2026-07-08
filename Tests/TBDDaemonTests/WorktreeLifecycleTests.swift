@@ -1098,46 +1098,65 @@ func testReconcileDeadWindowLiveClaudeNotParked() async throws {
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let realTmux = TmuxManager()
+
+    // Create a TmuxManager with seams to:
+    // 1. Force windowExists to return false for the test window
+    // 2. Return a Claude version string when paneCurrentCommand is called
+    // This simulates the safety check scenario: window reports dead, but
+    // Claude process is still running.
+    let tmux = TmuxManager(
+        realModeWindowExistsOverride: { server, windowID in
+            if windowID == "@live-claude-window" {
+                return false  // Simulate dead window
+            }
+            return nil
+        },
+        realModePaneCurrentCommandOverride: { server, paneID in
+            if paneID == "%live-claude-pane" {
+                return "2.1.86"  // Return Claude version string (matches isClaudeProcess regex)
+            }
+            return nil
+        }
+    )
+
     let lifecycle = WorktreeLifecycle(
-        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
+        db: db, git: GitManager(), tmux: tmux, hooks: HookResolver()
     )
 
     let repo = try await db.repos.create(
         path: repoDir.path, displayName: "test", defaultBranch: "main"
     )
     let serverName = TmuxManager.serverName(forRepoPath: repo.path)
-    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
+    _ = try await tmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
 
     let wt = try await db.worktrees.create(
         repoID: repo.id, name: "wt", branch: "main",
         path: repoDir.path, tmuxServer: serverName
     )
 
-    // Create a Claude terminal with a dead window ID to simulate window-dead scenario
     let sessionID = UUID().uuidString
+    // Create a terminal with the test window/pane IDs that our seams will override
     let terminal = try await db.terminals.create(
         worktreeID: wt.id,
-        tmuxWindowID: "@dead-window", tmuxPaneID: "%dead-pane",
+        tmuxWindowID: "@live-claude-window", tmuxPaneID: "%live-claude-pane",
         label: "claude", claudeSessionID: sessionID, kind: .claude
     )
 
     do {
         try await lifecycle.reconcile(repoID: repo.id)
     } catch {
-        try? await realTmux.killServer(server: serverName)
+        try? await tmux.killServer(server: serverName)
         throw error
     }
 
     let afterReconcile = try await db.terminals.get(id: terminal.id)
-    try? await realTmux.killServer(server: serverName)
+    try? await tmux.killServer(server: serverName)
 
-    // Regression test for the dead-window cleanup safety check at WorktreeLifecycle+Reconcile.swift:269-280.
-    // A Claude-resumable terminal with a dead window should be parked (to preserve the session),
-    // not deleted. The safety check ensures that even if window verification fails or returns
-    // unexpected results, a terminal with claudeSessionID is preserved via parking, not lost via deletion.
-    #expect(afterReconcile != nil, "Claude terminal must NOT be deleted when window is dead")
-    #expect(afterReconcile?.isParked == true, "Claude terminal must be parked (preserving session for wake)")
+    // The safety check at WorktreeLifecycle+Reconcile.swift:272-279 should detect
+    // that a Claude process is still running in the pane despite windowExists returning false.
+    // Result: the terminal should NOT be parked (the safety check skips parking).
+    #expect(afterReconcile != nil, "Claude terminal must NOT be deleted or parked when live claude is detected")
+    #expect(afterReconcile?.isParked == false, "Claude terminal must NOT be parked — the safety check detected live claude process")
     #expect(afterReconcile?.claudeSessionID == sessionID, "Session ID must be preserved")
 }
 

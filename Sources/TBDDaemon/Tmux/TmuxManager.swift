@@ -57,6 +57,15 @@ public struct TmuxManager: Sendable {
     /// it, dryRun respawnWindow always succeeds, which makes the wake path's
     /// respawn-failure branch (`WakeResult.respawnFailed`) untestable.
     public let dryRunRespawnWindowError: (@Sendable (String) -> Error?)?
+    /// Optional test hook for real (non-dryRun) mode: override the result of
+    /// `windowExists(server:windowID:)`. Allows tests to force a window as dead
+    /// while still having a live process running in the pane (for testing the
+    /// safety check in reconcile).
+    public let realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)?
+    /// Optional test hook for real (non-dryRun) mode: override the result of
+    /// `paneCurrentCommand(server:paneID:)`. Allows tests to return a specific
+    /// command string without relying on tmux's actual pane_current_command.
+    public let realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)?
 
     // Thread-safe counter for generating unique mock IDs
     private final class Counter: Sendable {
@@ -71,7 +80,7 @@ public struct TmuxManager: Sendable {
         }
     }
 
-    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
+    public init(dryRun: Bool = false, dryRunRecorder: (@Sendable ([String]) -> Void)? = nil, dryRunWindowIsDead: (@Sendable (String) -> Bool)? = nil, dryRunListWindows: (@Sendable (String, String) -> [(windowID: String, paneID: String)])? = nil, dryRunCapturePane: (@Sendable (String, String) -> String)? = nil, dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)? = nil, dryRunCreateWindowError: (@Sendable (String) -> Error?)? = nil, dryRunRespawnWindowError: (@Sendable (String) -> Error?)? = nil, realModeWindowExistsOverride: (@Sendable (String, String) -> Bool?)? = nil, realModePaneCurrentCommandOverride: (@Sendable (String, String) -> String?)? = nil, subprocessTimeout: Duration = TmuxManager.commandTimeout) {
         self.dryRun = dryRun
         self.subprocessTimeout = subprocessTimeout
         self.counter = Counter()
@@ -82,6 +91,8 @@ public struct TmuxManager: Sendable {
         self.dryRunPaneCurrentCommand = dryRunPaneCurrentCommand
         self.dryRunCreateWindowError = dryRunCreateWindowError
         self.dryRunRespawnWindowError = dryRunRespawnWindowError
+        self.realModeWindowExistsOverride = realModeWindowExistsOverride
+        self.realModePaneCurrentCommandOverride = realModePaneCurrentCommandOverride
     }
 
     // MARK: - Static Command Builders
@@ -578,6 +589,9 @@ public struct TmuxManager: Sendable {
 
     public func paneCurrentCommand(server: String, paneID: String) async throws -> String {
         if dryRun { return dryRunPaneCurrentCommand?(server, paneID) ?? "zsh" }
+        if let override = realModePaneCurrentCommandOverride?(server, paneID) {
+            return override
+        }
         let args = Self.paneCurrentCommandQuery(server: server, paneID: paneID)
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -651,6 +665,9 @@ public struct TmuxManager: Sendable {
     /// Check whether a tmux window exists by querying list-panes.
     public func windowExists(server: String, windowID: String) async -> Bool {
         if dryRun { return !(dryRunWindowIsDead?(windowID) ?? false) }
+        if let override = realModeWindowExistsOverride?(server, windowID) {
+            return override
+        }
         do {
             let args = ["-L", server, "list-panes", "-t", windowID]
             _ = try await runTmux(args)
