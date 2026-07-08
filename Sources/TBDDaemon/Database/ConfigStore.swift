@@ -26,6 +26,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var auto_hibernate_enabled: Bool?
     var hibernate_idle_minutes: Int?
     var control_mode_enabled: Bool?
+    var auto_resume_on_api_error: Bool?
 
     func toModel() -> Config {
         Config(
@@ -43,7 +44,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
                 .flatMap(NightwatchMode.init(rawValue:)) ?? .off,
             autoHibernateEnabled: auto_hibernate_enabled ?? true,
             hibernateIdleMinutes: hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes,
-            controlModeEnabled: control_mode_enabled ?? false
+            controlModeEnabled: control_mode_enabled ?? false,
+            autoResumeOnApiError: auto_resume_on_api_error ?? false
         )
     }
 }
@@ -137,6 +139,16 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET auto_resume_on_limit_reset = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the transient API-error auto-resume gate (default OFF).
+    public func setAutoResumeOnApiError(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_resume_on_api_error = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

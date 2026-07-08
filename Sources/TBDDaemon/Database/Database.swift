@@ -796,6 +796,14 @@ public final class TBDDatabase: Sendable {
                 type: .boolean, defaults: false)
         }
 
+        // `config.auto_resume_on_api_error` gates transient API-error auto-continue
+        // (spec 2026-07-08, default OFF) — sibling of auto_resume_on_limit_reset.
+        migrator.registerMigration("v46_auto_resume_api_error") { db in
+            try db.addColumnIfMissing(
+                table: "config", column: "auto_resume_on_api_error",
+                type: .boolean, defaults: false)
+        }
+
         return migrator
     }
 }

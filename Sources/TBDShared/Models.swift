@@ -692,6 +692,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// gate is `env || flag` (a truthy `TBD_TMUX_CONTROL_MODE` is the
     /// developer override) AND tmux >= 3.2; applies to newly created panes.
     public var controlModeEnabled: Bool
+    /// Global gate for transient-API-error auto-resume (spec 2026-07-08).
+    /// Sibling of `autoResumeOnLimitReset` but governs `ScheduledResume` rows
+    /// classified as `ScheduledResume.apiErrorLimitType` rather than a hard
+    /// usage-limit hit. Default OFF.
+    public var autoResumeOnApiError: Bool
 
     /// Default idle-timeout for auto-hibernation, in minutes.
     public static let defaultHibernateIdleMinutes = 30
@@ -708,7 +713,8 @@ public struct Config: Codable, Sendable, Equatable {
                 nightwatchMode: NightwatchMode = .off,
                 autoHibernateEnabled: Bool = true,
                 hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
-                controlModeEnabled: Bool = false) {
+                controlModeEnabled: Bool = false,
+                autoResumeOnApiError: Bool = false) {
         self.defaultProfileID = defaultProfileID
         self.primaryAgentPreference = primaryAgentPreference
         self.envSettingOverrides = envSettingOverrides
@@ -722,6 +728,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.autoHibernateEnabled = autoHibernateEnabled
         self.hibernateIdleMinutes = hibernateIdleMinutes
         self.controlModeEnabled = controlModeEnabled
+        self.autoResumeOnApiError = autoResumeOnApiError
     }
 
     public init(from decoder: Decoder) throws {
@@ -749,6 +756,17 @@ public struct Config: Codable, Sendable, Equatable {
             ?? Config.defaultHibernateIdleMinutes
         controlModeEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .controlModeEnabled) ?? false
+        autoResumeOnApiError = try c.decodeIfPresent(
+            Bool.self, forKey: .autoResumeOnApiError) ?? false
+    }
+}
+
+public extension Config {
+    /// Which auto-resume gate governs a `scheduled_resumes` row: the
+    /// transient-API-error gate for `ScheduledResume.apiErrorLimitType` rows,
+    /// or the hard usage-limit gate for everything else (session/debug/weekly).
+    func autoResumeEnabled(forLimitType limitType: String) -> Bool {
+        limitType == ScheduledResume.apiErrorLimitType ? autoResumeOnApiError : autoResumeOnLimitReset
     }
 }
 

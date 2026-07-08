@@ -44,6 +44,45 @@ import GRDB
         #expect(config.autoResumeOnLimitReset == false)
     }
 
+    @Test func configAutoResumeOnApiErrorDefaultsFalseThenSettable() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let config = try await db.config.get()
+        #expect(config.autoResumeOnApiError == false)
+
+        try await db.config.setAutoResumeOnApiError(true)
+        let updated = try await db.config.get()
+        #expect(updated.autoResumeOnApiError == true)
+    }
+
+    @Test func configJSONWithoutAutoResumeOnApiErrorDecodesFalse() throws {
+        // decode-compat rule: pre-v46 payloads have no autoResumeOnApiError.
+        let json = """
+        {"primaryAgentPreference":"claude","envSettingOverrides":{},"envOverrides":{},
+         "autoArchiveOnMergeDefault":false,"autoResumeOnLimitReset":false,
+         "nightwatchMode":"off","autoHibernateEnabled":true,"hibernateIdleMinutes":30,
+         "controlModeEnabled":false}
+        """
+        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
+        #expect(config.autoResumeOnApiError == false)
+    }
+
+    @Test func autoResumeEnabledForLimitTypeFollowsCorrectGate() {
+        var config = Config()
+        config.autoResumeOnApiError = false
+        config.autoResumeOnLimitReset = true
+        #expect(config.autoResumeEnabled(forLimitType: ScheduledResume.apiErrorLimitType) == false)
+        #expect(config.autoResumeEnabled(forLimitType: "session") == true)
+        #expect(config.autoResumeEnabled(forLimitType: "debug") == true)
+        #expect(config.autoResumeEnabled(forLimitType: "weekly") == true)
+
+        config.autoResumeOnApiError = true
+        config.autoResumeOnLimitReset = false
+        #expect(config.autoResumeEnabled(forLimitType: ScheduledResume.apiErrorLimitType) == true)
+        #expect(config.autoResumeEnabled(forLimitType: "session") == false)
+        #expect(config.autoResumeEnabled(forLimitType: "debug") == false)
+        #expect(config.autoResumeEnabled(forLimitType: "weekly") == false)
+    }
+
     @Test func oldTerminalJSONStillDecodes() throws {
         // decode-compat rule: pre-v38 payloads have no pendingResumeAt.
         let json = """
