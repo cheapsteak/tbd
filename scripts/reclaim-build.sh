@@ -112,8 +112,10 @@ main() {
       [[ "$action" == "PLAN" ]] || continue
       if has_active_build "$path"; then log "skip (now active): $path"; continue; fi
       case "$tier" in
-        tier1) rm -rf "$path/.build/index-build" && log "reclaimed index-build: $path" ;;
-        tier2) rm -rf "$path/.build"              && log "reclaimed .build: $path" ;;
+        tier1)
+          if rm -rf "$path/.build/index-build"; then log "reclaimed index-build: $path"; else log "rm failed: $path"; fi ;;
+        tier2)
+          if rm -rf "$path/.build"; then log "reclaimed .build: $path"; else log "rm failed: $path"; fi ;;
       esac
     done < "$plan_file"
   fi

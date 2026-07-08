@@ -213,6 +213,8 @@ test_write_plist_contains_label_interval_and_script() {
   assert_contains "plist has label"        "$body" "com.tbd.reclaim-build"
   assert_contains "plist hourly interval"  "$body" "<integer>3600</integer>"
   assert_contains "plist runs the script"  "$body" "/repo/scripts/reclaim-build.sh"
+  assert_contains "plist sets launchd PATH" "$body" "<key>PATH</key>"
+  assert_contains "plist PATH includes homebrew" "$body" "/opt/homebrew/bin"
   rm -rf "$(dirname "$out")"
 }
 

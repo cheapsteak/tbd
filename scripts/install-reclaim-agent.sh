@@ -21,6 +21,8 @@ write_plist() { # OUT_PATH SCRIPT_PATH
     <string>/bin/bash</string>
     <string>${script}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:${HOME}/.local/bin:/usr/bin:/bin</string></dict>
   <key>StartInterval</key><integer>3600</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>${HOME}/Library/Logs/tbd-reclaim-build.log</string>
