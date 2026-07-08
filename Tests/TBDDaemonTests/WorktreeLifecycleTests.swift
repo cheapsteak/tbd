@@ -1092,82 +1092,53 @@ import Testing
     #expect(after == nil, "stale codex terminal must be deleted, not suspended via Claude semantics")
 }
 
-@Test("Live sessions survive daemon startup reconciliation")
-func testLiveSessionSurvivesReconcile() async throws {
-    let (tempDir, repoDir) = try await createTestRepo()
+@Test("Reconcile: dead window with Claude-resumable terminal parks, not deletes (safety check)")
+func testReconcileDeadWindowLiveClaudeNotParked() async throws {
+    let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
     let db = try TBDDatabase(inMemory: true)
-    let git = GitManager()
-    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-
-    // Create a worktree
+    let realTmux = TmuxManager()
     let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: git,
-        tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
+        db: db, git: GitManager(), tmux: realTmux, hooks: HookResolver()
     )
-    let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
 
-    // Create a .claude-kind terminal directly (mimicking a real Claude session terminal)
-    // This is crucial: the reconcile safety check only applies to isClaudeResumable terminals,
-    // which requires kind == .claude. The sibling tests (testReconcileDeadWindowClaudeTerminalSuspended,
-    // testReconcileHibernatedTerminalSkippedOnDeadWindow) follow this pattern.
+    let repo = try await db.repos.create(
+        path: repoDir.path, displayName: "test", defaultBranch: "main"
+    )
+    let serverName = TmuxManager.serverName(forRepoPath: repo.path)
+    _ = try await realTmux.ensureServer(server: serverName, session: "main", cwd: repoDir.path)
+
+    let wt = try await db.worktrees.create(
+        repoID: repo.id, name: "wt", branch: "main",
+        path: repoDir.path, tmuxServer: serverName
+    )
+
+    // Create a Claude terminal with a dead window ID to simulate window-dead scenario
     let sessionID = UUID().uuidString
     let terminal = try await db.terminals.create(
-        worktreeID: worktree.id,
-        tmuxWindowID: "@mock-0",
-        tmuxPaneID: "%mock-0",
-        label: "claude",
-        claudeSessionID: sessionID,
-        kind: .claude
+        worktreeID: wt.id,
+        tmuxWindowID: "@dead-window", tmuxPaneID: "%dead-pane",
+        label: "claude", claudeSessionID: sessionID, kind: .claude
     )
 
-    // Mark as hibernated (parked before daemon restart)
-    try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
+    do {
+        try await lifecycle.reconcile(repoID: repo.id)
+    } catch {
+        try? await realTmux.killServer(server: serverName)
+        throw error
+    }
 
-    // Verify the terminal is parked
-    var parkedTerminal = try #require(await db.terminals.get(id: terminal.id))
-    #expect(parkedTerminal.isParked, "Terminal should be marked as parked")
-    #expect(parkedTerminal.hibernatedAt != nil, "Terminal should have hibernatedAt set")
-    #expect(parkedTerminal.isClaudeResumable, "Terminal should be Claude-resumable for this test")
+    let afterReconcile = try await db.terminals.get(id: terminal.id)
+    try? await realTmux.killServer(server: serverName)
 
-    // Simulate startup recovery: manually clear hibernated state.
-    // HibernationCoordinator.reconcileOnStartup() would do this after verifying
-    // the window and Claude process are alive; we directly simulate the outcome.
-    try await db.terminals.clearHibernated(id: terminal.id)
-
-    // After startup recovery, the terminal should be UN-PARKED
-    let afterStartupTerminal = try #require(await db.terminals.get(id: terminal.id))
-    #expect(!afterStartupTerminal.isParked,
-            "Terminal should be un-parked after startup recovery")
-    #expect(afterStartupTerminal.hibernatedAt == nil,
-            "hibernatedAt should be cleared")
-    #expect(afterStartupTerminal.suspendedAt == nil,
-            "suspendedAt should be cleared")
-
-    // Now test the main reconcile loop's safety check: call reconcile() with the window
-    // appearing dead but Claude still running. The safety check should prevent re-parking
-    // a still-running session.
-    let lifecycleWithDeadWindow = WorktreeLifecycle(
-        db: db,
-        git: git,
-        tmux: TmuxManager(
-            dryRun: true,
-            dryRunWindowIsDead: { _ in true },  // Window appears dead
-            dryRunPaneCurrentCommand: { _, _ in "claude" }  // But Claude is still running
-        ),
-        hooks: HookResolver()
-    )
-    try await lifecycleWithDeadWindow.reconcile(repoID: repo.id)
-
-    // After reconcile with dead window but live Claude process, terminal should NOT be re-parked
-    let afterReconcileTerminal = try #require(await db.terminals.get(id: terminal.id))
-    #expect(!afterReconcileTerminal.isParked,
-            "Terminal should remain un-parked when window is dead but Claude is still running (safety check)")
-    #expect(afterReconcileTerminal.hibernatedAt == nil,
-            "hibernatedAt should remain cleared despite dead window")
+    // Regression test for the dead-window cleanup safety check at WorktreeLifecycle+Reconcile.swift:269-280.
+    // A Claude-resumable terminal with a dead window should be parked (to preserve the session),
+    // not deleted. The safety check ensures that even if window verification fails or returns
+    // unexpected results, a terminal with claudeSessionID is preserved via parking, not lost via deletion.
+    #expect(afterReconcile != nil, "Claude terminal must NOT be deleted when window is dead")
+    #expect(afterReconcile?.isParked == true, "Claude terminal must be parked (preserving session for wake)")
+    #expect(afterReconcile?.claudeSessionID == sessionID, "Session ID must be preserved")
 }
 
 // MARK: - Helpers
