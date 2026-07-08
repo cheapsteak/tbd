@@ -102,13 +102,6 @@ struct TabBar: View {
     var body: some View {
         HStack(spacing: 0) {
             ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
-                if index > 0 {
-                    // Subtle vertical divider between tabs (iTerm2-style)
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(width: 1, height: 18)
-                }
-
                 TabBarItem(
                     tab: tab,
                     index: index,
@@ -119,11 +112,6 @@ struct TabBar: View {
                     onClose: { onCloseTab(index) }
                 )
             }
-
-            // Divider before + button
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(width: 1, height: 18)
 
             AddTabButton(
                 profiles: appState.modelProfiles,
@@ -645,7 +633,12 @@ private struct TabBarItem: View {
             .opacity(showClose ? 1 : 0)
             .animation(.easeInOut(duration: 0.12), value: showClose)
         }
-        .frame(minHeight: 28)
+        // Stretch to the tab bar's full height (30px) so the bottom-aligned
+        // active indicator seats flush against the divider below the strip.
+        // Without maxHeight the 28px item center-aligns in the 30px bar,
+        // leaving a ~1px sliver under the indicator. Content stays centered,
+        // so the label doesn't shift on select/deselect.
+        .frame(minHeight: 28, maxHeight: .infinity)
         .background(
             isSelected
                 ? Color(nsColor: .controlBackgroundColor)
@@ -656,6 +649,15 @@ private struct TabBarItem: View {
                 Color.clear.preference(key: TabWidthPreference.self, value: geo.size.width)
             }
         )
+        // Active-tab indicator: a bottom lip drawn as an overlay so it never
+        // participates in layout — the tab content must not shift on selection.
+        .overlay(alignment: .bottom) {
+            if isSelected {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(height: 2)
+            }
+        }
         .onPreferenceChange(TabWidthPreference.self) { measuredWidth = $0 }
         .animation(.easeInOut(duration: 0.1), value: isHovering)
         // nil = no card (non-Claude tabs).
