@@ -27,21 +27,17 @@ struct StatusBarView: View {
 
     /// Pure helper extracted so tests can exercise it without a real bundle.
     /// Tries the sidecar file first, then the exec-path heuristic.
+    /// Delegates to SourceWorktreePathResolver for the actual resolution logic.
     static func resolveSourceWorktreePath(
         bundleURL: URL,
         executablePath: String?,
         sidecarReader: (URL) -> String? = { try? String(contentsOf: $0, encoding: .utf8) }
     ) -> String? {
-        let sidecarURL = bundleURL.appendingPathComponent("Contents/SourceWorktreePath.txt")
-        if let raw = sidecarReader(sidecarURL) {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        if let execPath = executablePath,
-           let buildRange = execPath.range(of: "/.build/", options: .backwards) {
-            return String(execPath[..<buildRange.lowerBound])
-        }
-        return nil
+        SourceWorktreePathResolver.resolve(
+            bundleURL: bundleURL,
+            executablePath: executablePath,
+            sidecarReader: sidecarReader
+        )
     }
 
     private var footerLabel: (text: String, tooltip: String?) {
