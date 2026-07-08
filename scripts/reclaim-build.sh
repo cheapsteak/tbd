@@ -102,6 +102,7 @@ main() {
   local wt sessions
   while IFS=$'\t' read -r wt sessions; do
     [[ -n "$wt" ]] || continue
+    [[ -f "$wt/Package.swift" ]] || continue   # only SwiftPM-package worktrees produce .build/index-build
     ensure_lsp_config "$wt" "$dry"
     plan_worktree "$wt" "$sessions"
   done < <(list_worktrees_tsv) | tee "$plan_file" >&2

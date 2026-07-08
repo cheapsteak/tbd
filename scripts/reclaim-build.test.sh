@@ -92,6 +92,7 @@ test_ensure_lsp_config_noop_when_present() {
 _mk_worktree() { # dir now index_age debug_age
   local d="$1" now="$2" iage="$3" dage="$4"
   mkdir -p "$d/.build/index-build" "$d/.build/arm64-apple-macosx/debug"
+  : > "$d/Package.swift"
   : > "$d/.build/index-build/idx.o";        touch_age "$d/.build/index-build/idx.o" "$now" "$iage"
   : > "$d/.build/arm64-apple-macosx/debug/app.o"; touch_age "$d/.build/arm64-apple-macosx/debug/app.o" "$now" "$dage"
 }
@@ -216,6 +217,27 @@ test_write_plist_contains_label_interval_and_script() {
   assert_contains "plist sets launchd PATH" "$body" "<key>PATH</key>"
   assert_contains "plist PATH includes homebrew" "$body" "/opt/homebrew/bin"
   rm -rf "$(dirname "$out")"
+}
+
+test_main_skips_worktree_without_package_swift() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/swift-wt" b="$root/nonswift-wt"
+  _mk_worktree "$a" "$now" 200000 200000   # has Package.swift, tier2-eligible
+  # b: active, stale .build, but NO Package.swift -> must be skipped entirely
+  mkdir -p "$b/.build/arm64-apple-macosx/debug"
+  : > "$b/.build/arm64-apple-macosx/debug/app.o"
+  touch_age "$b/.build/arm64-apple-macosx/debug/app.o" "$now" 200000
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[
+  {"path":"$a","status":"active","liveClaudeSessionCount":0},
+  {"path":"$b","status":"active","liveClaudeSessionCount":0}
+]
+JSON
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
+  assert_contains "swift worktree planned" "$out" "PLAN tier2 $a"
+  assert_missing "non-swift worktree skipped entirely" "$out" "$b"
+  rm -rf "$root"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
