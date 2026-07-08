@@ -610,7 +610,12 @@ private struct TabBarItem: View {
             .opacity(showClose ? 1 : 0)
             .animation(.easeInOut(duration: 0.12), value: showClose)
         }
-        .frame(minHeight: 28)
+        // Stretch to the tab bar's full height (30px) so the bottom-aligned
+        // active indicator seats flush against the divider below the strip.
+        // Without maxHeight the 28px item center-aligns in the 30px bar,
+        // leaving a ~1px sliver under the indicator. Content stays centered,
+        // so the label doesn't shift on select/deselect.
+        .frame(minHeight: 28, maxHeight: .infinity)
         .background(
             isSelected
                 ? Color(nsColor: .controlBackgroundColor)
