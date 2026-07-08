@@ -149,6 +149,12 @@ struct GeneralSettingsTab: View {
                     set: { newValue in Task { await appState.setAutoResumeOnLimitReset(newValue) } }
                 ))
                 .help("When a session hits the usage limit, TBD schedules a resume for the reset time and types \"continue\" into the pane. Off by default; detection and notifications run regardless.")
+                Toggle("Auto-continue after transient API errors",
+                       isOn: Binding(
+                    get: { appState.autoResumeOnApiError },
+                    set: { newValue in Task { await appState.setAutoResumeOnApiError(newValue) } }
+                ))
+                .help("When a turn dies on a transient API error (connection drop, server error, overload), TBD types \"continue\" after a backoff (60s, 2m, 5m, 10m) and gives up after 4 straight failures. Off by default. Auth and billing errors are never retried.")
                 Toggle("Show usage tooltip on Claude tabs", isOn: $showClaudeTabUsageTooltip)
                     .help("Show a hover card on Claude tabs with the session's account, profile, 5h/weekly usage, and spawn time.")
             }

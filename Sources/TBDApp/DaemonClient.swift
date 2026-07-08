@@ -778,6 +778,14 @@ actor DaemonClient {
         )
     }
 
+    /// Set the global transient-API-error auto-continue gate.
+    func setAutoResumeOnApiError(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetAutoResumeOnApiError,
+            params: ConfigSetAutoResumeOnApiErrorParams(enabled: enabled)
+        )
+    }
+
     /// Set the global scratch-space system-prompt override. Nil or blank resets to the built-in default.
     func setScratchInstructions(_ instructions: String?) async throws {
         try await callVoidAsync(
