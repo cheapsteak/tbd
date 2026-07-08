@@ -252,6 +252,32 @@ public struct TmuxManager: Sendable {
         ["-L", server, "send-keys", "-t", paneID, key]
     }
 
+    /// Load a temp file's bytes into a uniquely named tmux paste buffer. The
+    /// path is passed as a distinct argv element (no shell), so spaces are safe.
+    public static func loadBufferCommand(server: String, bufferName: String, path: String) -> [String] {
+        ["-L", server, "load-buffer", "-b", bufferName, path]
+    }
+
+    /// Paste a named buffer into a pane WITH `-p` (bracketed-paste authority
+    /// handed to tmux) and `-d` (delete the buffer after pasting). tmux wraps
+    /// the payload in `ESC[200~`/`ESC[201~` iff the pane has bracketed-paste
+    /// mode enabled — which agent TUIs (Claude Code, Codex) AND modern
+    /// interactive shells (zsh, bash ≥4.4, fish) all do at their prompt — and
+    /// emits bare bytes otherwise (a cooked-mode consumer, e.g. a program
+    /// reading stdin). Note `-d`/no-`-r`: like the GUI `PasteExecutor` path,
+    /// tmux replaces interior LF with CR in the pasted body; this is the proven
+    /// paste behavior we deliberately match, and is inside the brackets so it
+    /// does not affect the separate trailing Enter.
+    public static func pasteBufferCommand(server: String, bufferName: String, paneID: String) -> [String] {
+        ["-L", server, "paste-buffer", "-d", "-p", "-b", bufferName, "-t", paneID]
+    }
+
+    /// Delete a named paste buffer (best-effort cleanup when `paste-buffer -d`
+    /// never ran because the paste itself failed).
+    public static func deleteBufferCommand(server: String, bufferName: String) -> [String] {
+        ["-L", server, "delete-buffer", "-b", bufferName]
+    }
+
     public static func listWindowsCommand(server: String, session: String) -> [String] {
         ["-L", server, "list-windows", "-t", session, "-F", "#{window_id} #{pane_id}"]
     }
@@ -474,6 +500,67 @@ public struct TmuxManager: Sendable {
             return
         }
         try await runTmux(args)
+    }
+
+    /// Deliver `bytes` to a pane as an EXPLICIT bracketed paste over the plain
+    /// `tmux -L` subprocess path: write to a temp file, `load-buffer` it into a
+    /// uniquely named buffer, then `paste-buffer -d -p` into the pane. tmux
+    /// surrounds the payload with `ESC[200~`/`ESC[201~` iff the pane enabled
+    /// bracketed-paste mode (agent TUIs), and emits bare bytes for plain shells
+    /// — so a subsequent separate `Enter` keystroke lands provably OUTSIDE the
+    /// paste and can't be absorbed by a TUI's paste-burst coalescing window
+    /// (the root cause of `--submit` silently dropping large messages).
+    ///
+    /// Mirrors `PasteExecutor.paste` (the GUI paste path) but over `runTmux`
+    /// rather than the `-CC` control command client, so it stays consistent with
+    /// `handleTerminalSend`'s existing plain-subprocess tmux usage and adds no
+    /// coupling to control mode. The temp file is removed in all paths; a paste
+    /// failure best-effort deletes the orphaned buffer before rethrowing so the
+    /// caller surfaces the error.
+    public func pasteText(server: String, paneID: String, bytes: Data) async throws {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-paste-\(UUID().uuidString)")
+        let path = tempURL.path
+        // Note: no quote/newline guard is needed here (unlike PasteExecutor,
+        // which single-quotes the path INTO a tmux command string). `runTmux`
+        // passes `path` as a distinct argv element with no shell, so any bytes
+        // in a FileManager temp path are safe.
+        // Unique buffer per call so concurrent pastes never clobber each other.
+        let bufferName = "tbd-paste-\(UUID().uuidString.prefix(8))"
+        let loadArgs = Self.loadBufferCommand(server: server, bufferName: bufferName, path: path)
+        let pasteArgs = Self.pasteBufferCommand(server: server, bufferName: bufferName, paneID: paneID)
+
+        if dryRun {
+            // Record the intended argv without touching the filesystem.
+            dryRunRecorder?(loadArgs)
+            dryRunRecorder?(pasteArgs)
+            return
+        }
+
+        // Register cleanup BEFORE the write so a mid-write throw still removes
+        // any partial temp file (PasteExecutor's "removed in all paths").
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try bytes.write(to: tempURL)
+
+        try await runTmux(loadArgs)
+        do {
+            try await runTmux(pasteArgs)
+        } catch {
+            // load-buffer succeeded but paste-buffer threw (e.g. the pane died
+            // between the two awaits). `-d` would have deleted the buffer on
+            // success; since it didn't run, best-effort delete before rethrowing
+            // so the uniquely named buffer doesn't linger on the server.
+            do {
+                try await runTmux(Self.deleteBufferCommand(server: server, bufferName: bufferName))
+            } catch let cleanupError {
+                logger.debug("""
+                    delete-buffer cleanup failed for \(bufferName, privacy: .public): \
+                    \(String(describing: cleanupError), privacy: .public) — the buffer may \
+                    linger on the tmux server (original paste error is rethrown)
+                    """)
+            }
+            throw error
+        }
     }
 
     public func capturePaneOutput(server: String, paneID: String) async throws -> String {
