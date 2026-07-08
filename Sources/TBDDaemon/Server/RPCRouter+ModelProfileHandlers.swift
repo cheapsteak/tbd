@@ -58,7 +58,8 @@ extension RPCRouter {
             globalEnvOverrides: config.envOverrides,
             autoArchiveOnMergeDefault: config.autoArchiveOnMergeDefault,
             nightwatchMode: config.nightwatchMode,
-            autoResumeOnLimitReset: config.autoResumeOnLimitReset
+            autoResumeOnLimitReset: config.autoResumeOnLimitReset,
+            autoResumeOnApiError: config.autoResumeOnApiError
         ))
     }
 

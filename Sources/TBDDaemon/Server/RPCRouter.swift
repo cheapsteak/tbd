@@ -212,6 +212,8 @@ public final class RPCRouter: Sendable {
                 return try await handleSetClaudeSpawnPreferences(request.paramsData)
             case RPCMethod.claudeRateLimitDetected:
                 return try await handleRateLimitDetected(request.paramsData)
+            case RPCMethod.claudeTransientApiErrorDetected:
+                return try await handleTransientApiErrorDetected(request.paramsData)
             case RPCMethod.terminalCancelScheduledResume:
                 return try await handleCancelScheduledResume(request.paramsData)
             case RPCMethod.attachRequest:
@@ -323,6 +325,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetAutoArchiveDefault(request.paramsData)
             case RPCMethod.configSetAutoResumeOnLimitReset:
                 return try await handleConfigSetAutoResumeOnLimitReset(request.paramsData)
+            case RPCMethod.configSetAutoResumeOnApiError:
+                return try await handleConfigSetAutoResumeOnApiError(request.paramsData)
             case RPCMethod.configSetScratchInstructions:
                 return try await handleConfigSetScratchInstructions(request.paramsData)
             case RPCMethod.configSetScratchRenamePrompt:
