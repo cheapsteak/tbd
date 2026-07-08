@@ -479,6 +479,32 @@ enum SwapProfileMenu {
     }
 }
 
+// MARK: - TabParkMenuModel
+
+/// Pure decision behind the tab context menu's per-terminal park affordance:
+/// which of Hibernate / Wake (if either) the menu should offer for a tab's
+/// terminal. The two states are mutually exclusive by definition —
+/// `isManuallyHibernatable` requires the terminal NOT be parked — so at most
+/// one item ever shows. Extracted from the view so each branch is
+/// unit-testable without SwiftUI (same pattern as `RowActionMenu`).
+enum TabParkMenuModel {
+    enum ParkAction: Equatable {
+        /// Terminal is live and manually hibernatable → offer "Hibernate".
+        case hibernate
+        /// Terminal is parked (hibernated or legacy-suspended) → offer "Wake".
+        case wake
+    }
+
+    /// nil = show neither item (no terminal, non-Claude terminal, or a Claude
+    /// session that is mid-turn / waiting on a permission prompt).
+    static func action(for terminal: Terminal?) -> ParkAction? {
+        guard let terminal else { return nil }
+        if terminal.isManuallyHibernatable { return .hibernate }
+        if terminal.isParked { return .wake }
+        return nil
+    }
+}
+
 // MARK: - TabBarItem
 
 private struct TabBarItem: View {
@@ -818,10 +844,39 @@ private struct TabBarItem: View {
                 Label("Fork Session", systemImage: "arrow.triangle.branch")
             }
 
-            // Park (formerly the Suspend/Resume play/pause button) is a
-            // row-level action now (WorktreeRowView). A scheduled auto-resume
-            // can still be pending on a live session that hit its limit, so
-            // keep the cancel affordance here (#341).
+            // Park (formerly the Suspend/Resume play/pause button) lives here
+            // as per-terminal Hibernate/Wake items — THIS tab's session only,
+            // unlike the worktree row's action which sweeps every session in
+            // the worktree. A scheduled auto-resume can still be pending on a
+            // live session that hit its limit, so keep the cancel affordance
+            // here too (#341).
+            switch TabParkMenuModel.action(for: terminal) {
+            case .hibernate:
+                Button {
+                    guard let terminalID = terminal?.id else { return }
+                    Task { await appState.hibernateTerminal(terminalID: terminalID, worktreeID: worktreeID) }
+                } label: {
+                    Label("Hibernate", systemImage: "moon.zzz")
+                }
+            case .wake:
+                Button {
+                    guard let terminalID = terminal?.id else { return }
+                    Task {
+                        // Explicit user action → surface the failure (single
+                        // wake, so the coalescer yields the bare message).
+                        if let failure = await appState.wakeTerminal(
+                            terminalID: terminalID, worktreeID: worktreeID, userInitiated: true
+                        ), let message = AppState.coalescedWakeFailureMessage(failures: [failure]) {
+                            appState.showAlert(message, isError: true)
+                        }
+                    }
+                } label: {
+                    Label("Wake", systemImage: "sun.max")
+                }
+            case nil:
+                EmptyView()
+            }
+
             if terminal?.pendingResumeAt != nil {
                 Button {
                     guard let terminalID = terminal?.id else { return }
