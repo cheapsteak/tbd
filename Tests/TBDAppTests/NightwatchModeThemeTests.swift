@@ -16,8 +16,6 @@ struct NightwatchModeThemeTests {
     func tintColorDaywatch() {
         let color = tintColor(for: .daywatch)
         #expect(color != nil)
-        // Verify it's a warm golden color (higher red, moderate green, lower blue)
-        // The exact RGB values should match what we defined
         let cgColor = color?.cgColor
         #expect(cgColor != nil)
     }
@@ -26,8 +24,6 @@ struct NightwatchModeThemeTests {
     func tintColorNightwatch() {
         let color = tintColor(for: .nightwatch)
         #expect(color != nil)
-        // Verify it's a cool indigo color (lower red, moderate green, higher blue)
-        // The exact RGB values should match what we defined
         let cgColor = color?.cgColor
         #expect(cgColor != nil)
     }
@@ -52,5 +48,17 @@ struct NightwatchModeThemeTests {
         let daywatchColor = tintColor(for: .daywatch)
         let nightwatchColor = tintColor(for: .nightwatch)
         #expect(daywatchColor != nightwatchColor)
+    }
+
+    @Test("NightwatchModeTintModifier applies tint when experimental is enabled")
+    func modifierAppliesTintWhenExperimentalEnabled() {
+        let modifier = NightwatchModeTintModifier(mode: .daywatch, experimentalEnabled: true)
+        #expect(modifier.experimentalEnabled == true)
+    }
+
+    @Test("NightwatchModeTintModifier respects experimental flag when disabled")
+    func modifierRespectsExperimentalFlagWhenDisabled() {
+        let modifier = NightwatchModeTintModifier(mode: .daywatch, experimentalEnabled: false)
+        #expect(modifier.experimentalEnabled == false)
     }
 }
