@@ -50,12 +50,24 @@ extension AppState {
 
     /// Update the in-memory active tab index for a worktree AND persist the
     /// underlying tab.id to the daemon. Use this anywhere the UI changes the
-    /// active selection so the choice survives a restart.
+    /// active selection so the choice survives a restart. Also auto-wakes parked
+    /// resumable terminals in the newly-activated tab, so the user sees them
+    /// unfrozen when they click over.
     func setActiveTab(worktreeID: UUID, tabIndex: Int) {
         activeTabIndices[worktreeID] = tabIndex
         guard let arr = tabs[worktreeID], arr.indices.contains(tabIndex) else { return }
         // Activating a tab clears its unread-completion bold.
         unreadTerminals.subtract(terminalIDs(in: arr[tabIndex]))
+
+        // Auto-wake parked terminals in the activated tab (the spawn-storm fix:
+        // one terminal at a time, never a parallel fan-out).
+        let toWake = terminalIDsToWakeOnTabActivation(worktreeID: worktreeID, tabIndex: tabIndex)
+        Task {
+            for terminalID in toWake {
+                _ = await wakeTerminal(terminalID: terminalID, worktreeID: worktreeID, userInitiated: false)
+            }
+        }
+
         let tabID = arr[tabIndex].id
         Task {
             do {

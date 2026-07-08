@@ -1135,7 +1135,7 @@ final class AppState: ObservableObject {
     /// reason is cleared but the snapshot is KEPT, matching the daemon's
     /// `clearHibernated` (the woken view shows the frozen pane while the live
     /// tmux client reconnects).
-    private func applyTerminalHibernationDelta(_ delta: TerminalHibernationDelta) {
+    func applyTerminalHibernationDelta(_ delta: TerminalHibernationDelta) {
         guard let idx = terminals[delta.worktreeID]?.firstIndex(where: { $0.id == delta.terminalID }) else {
             return
         }
@@ -1167,6 +1167,7 @@ final class AppState: ObservableObject {
             // Woken: clear the reason, keep the snapshot (clearHibernated
             // semantics — reconnect backdrop, overwritten on the next park).
             terminals[delta.worktreeID]?[idx].hibernateReason = nil
+            terminals[delta.worktreeID]?[idx].suspendedAt = nil
         }
     }
 

@@ -171,9 +171,10 @@ extension AppState {
     ///
     /// Strategy: wake ONLY the terminal that autofocus will surface (the active
     /// tab's terminal). The rest stay hibernated until the user actually
-    /// navigates to them (selecting their tab re-invokes this hook). If the
-    /// focused terminal can't be resolved to a parked row, fall back to waking
-    /// at most one parked terminal — never a parallel fan-out.
+    /// navigates to them (activating their tab re-invokes this hook via
+    /// `setActiveTab`). If the focused terminal can't be resolved to a parked
+    /// row, fall back to waking at most one parked terminal — never a parallel
+    /// fan-out.
     func wakeHibernatedTerminalsOnFocus(worktreeID: UUID) {
         guard let target = terminalIDToWakeOnFocus(worktreeID: worktreeID) else { return }
         // Wake exactly one; never a parallel fan-out (see the storm rationale above).
@@ -182,9 +183,12 @@ extension AppState {
 
     /// Pure decision behind `wakeHibernatedTerminalsOnFocus`: the single parked
     /// terminal (if any) to wake on focus. Three branches — (1) the focused
-    /// terminal when it is itself parked; (2) otherwise the first parked
-    /// terminal; (3) nil when none are parked. Extracted as a pure function so
-    /// the fan-out choice is unit-tested without a live `DaemonClient`.
+    /// terminal when it is itself parked AND resumable; (2) otherwise the first
+    /// parked resumable terminal; (3) nil when none are parked/resumable.
+    /// Extracted as a pure function so the fan-out choice is unit-tested without
+    /// a live `DaemonClient`. Filters to `isClaudeResumable` to skip unresumable
+    /// rows (e.g. legacy parked shell-kind rows with no claudeSessionID, which
+    /// would fail "No session ID to resume" and shadow wakeable rows forever).
     ///
     /// Manually-parked sessions (`hibernateReason == .manual`) are excluded
     /// UP FRONT — before the focused-match and the `.first` fallback — so an
@@ -194,7 +198,7 @@ extension AppState {
     /// focus-wake.
     func terminalIDToWakeOnFocus(worktreeID: UUID) -> UUID? {
         let parked = (terminals[worktreeID] ?? []).filter {
-            $0.isParked && $0.hibernateReason != .manual
+            $0.isParked && $0.isClaudeResumable && $0.hibernateReason != .manual
         }
         guard !parked.isEmpty else { return nil }
         if let focusedID = terminalIDForAutofocus(worktreeID: worktreeID),
@@ -202,5 +206,20 @@ extension AppState {
             return focusedID
         }
         return parked.first?.id
+    }
+
+    /// Pure decision for tab activation: the parked-and-resumable terminal ID(s)
+    /// rendered by the newly-activated tab. Returns all such terminals in the
+    /// tab's split layout — at most one tab, never a cross-tab fan-out. Empty
+    /// when the tab has no terminals, none are parked, or none are resumable.
+    /// Called by `setActiveTab` to wake only what the user is about to see,
+    /// never a parallel spawn storm.
+    func terminalIDsToWakeOnTabActivation(worktreeID: UUID, tabIndex: Int) -> [UUID] {
+        guard let worktreeTabs = tabs[worktreeID], worktreeTabs.indices.contains(tabIndex) else { return [] }
+        let tab = worktreeTabs[tabIndex]
+        let terminalIDsInTab = terminalIDs(in: tab)
+        return (terminals[worktreeID] ?? [])
+            .filter { terminalIDsInTab.contains($0.id) && $0.isParked && $0.isClaudeResumable && $0.hibernateReason != .manual }
+            .map { $0.id }
     }
 }
