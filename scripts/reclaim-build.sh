@@ -39,6 +39,20 @@ has_active_build() {
   _ps_lines | grep -Ei 'swift-build|swift-frontend|swiftc|swift-driver' | grep -Fq -- "$wt"
 }
 
+# ensure_lsp_config WORKTREE_PATH DRY -> seed backgroundIndexing:false if absent
+ensure_lsp_config() {
+  local wt="$1" dry="$2"
+  local cfg="$wt/.sourcekit-lsp/config.json"
+  if [[ -f "$cfg" ]]; then
+    echo "SKIP lsp-config-exists $wt"
+    return 0
+  fi
+  echo "SEED lsp-config $wt"
+  [[ "$dry" == "true" ]] && return 0
+  mkdir -p "$wt/.sourcekit-lsp"
+  printf '{\n  "backgroundIndexing": false\n}\n' > "$cfg"
+}
+
 main() {
   : # filled in Task 5
 }

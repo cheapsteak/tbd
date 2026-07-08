@@ -61,5 +61,32 @@ test_has_active_build_false_when_swift_proc_other_worktree() {
   fi
 }
 
+test_ensure_lsp_config_seeds_when_absent() {
+  local wt; wt="$(mktmpd)"
+  local out; out="$(ensure_lsp_config "$wt" false)"
+  assert_contains "seeds when absent (output)" "$out" "SEED lsp-config"
+  assert_eq "config file written" "true" "$([[ -f "$wt/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
+  assert_contains "config disables bg indexing" "$(cat "$wt/.sourcekit-lsp/config.json")" '"backgroundIndexing": false'
+  rm -rf "$wt"
+}
+
+test_ensure_lsp_config_dry_run_writes_nothing() {
+  local wt; wt="$(mktmpd)"
+  local out; out="$(ensure_lsp_config "$wt" true)"
+  assert_contains "dry-run still reports SEED" "$out" "SEED lsp-config"
+  assert_eq "dry-run writes no file" "false" "$([[ -f "$wt/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
+  rm -rf "$wt"
+}
+
+test_ensure_lsp_config_noop_when_present() {
+  local wt; wt="$(mktmpd)"
+  mkdir -p "$wt/.sourcekit-lsp"
+  printf '{ "someOtherKey": true }\n' > "$wt/.sourcekit-lsp/config.json"
+  local out; out="$(ensure_lsp_config "$wt" false)"
+  assert_contains "no-op when present (output)" "$out" "SKIP lsp-config-exists"
+  assert_contains "existing config untouched" "$(cat "$wt/.sourcekit-lsp/config.json")" '"someOtherKey": true'
+  rm -rf "$wt"
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
 exit $FAIL
