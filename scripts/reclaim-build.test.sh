@@ -161,5 +161,48 @@ JSON
   rm -rf "$(dirname "$j")"
 }
 
+test_main_dry_run_plans_but_deletes_nothing() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/active-a" b="$root/active-b"
+  _mk_worktree "$a" "$now" 200000 200000   # fully stale, no session -> tier2
+  _mk_worktree "$b" "$now" 25000 60         # index stale only -> tier1
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[
+  {"path":"$a","status":"active","liveClaudeSessionCount":0},
+  {"path":"$b","status":"active","liveClaudeSessionCount":0}
+]
+JSON
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' bash "$HERE/reclaim-build.sh" --dry-run 2>&1)"
+  assert_contains "dry-run plans tier2 for a" "$out" "PLAN tier2 $a"
+  assert_contains "dry-run plans tier1 for b" "$out" "PLAN tier1 $b"
+  assert_eq "dry-run keeps a/.build" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  assert_eq "dry-run keeps b/index-build" "true" "$([[ -d "$b/.build/index-build" ]] && echo true || echo false)"
+  assert_eq "dry-run seeds no lsp config" "false" "$([[ -f "$a/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_main_real_run_reclaims_and_seeds() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/active-a" b="$root/active-b"
+  _mk_worktree "$a" "$now" 200000 200000   # tier2 -> whole .build deleted
+  _mk_worktree "$b" "$now" 25000 60         # tier1 -> only index-build deleted
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[
+  {"path":"$a","status":"active","liveClaudeSessionCount":0},
+  {"path":"$b","status":"active","liveClaudeSessionCount":0}
+]
+JSON
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
+  assert_eq "tier2 removed a/.build"          "false" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  assert_eq "tier1 removed b/index-build"     "false" "$([[ -d "$b/.build/index-build" ]] && echo true || echo false)"
+  assert_eq "tier1 kept b debug build"        "true"  "$([[ -d "$b/.build/arm64-apple-macosx" ]] && echo true || echo false)"
+  assert_eq "seeded lsp config in a"          "true"  "$([[ -f "$a/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
+  assert_eq "seeded lsp config in b"          "true"  "$([[ -f "$b/.sourcekit-lsp/config.json" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
 exit $FAIL

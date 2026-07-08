@@ -90,8 +90,39 @@ plan_worktree() {
   echo "SKIP fresh $wt"
 }
 
+_avail_kb() { df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}'; }
+
 main() {
-  : # filled in Task 5
+  local dry=false
+  [[ "${1:-}" == "--dry-run" ]] && dry=true
+
+  local avail_before; avail_before="$(_avail_kb)"
+  local plan_file; plan_file="$(mktemp)"
+
+  local wt sessions
+  while IFS=$'\t' read -r wt sessions; do
+    [[ -n "$wt" ]] || continue
+    ensure_lsp_config "$wt" "$dry"
+    plan_worktree "$wt" "$sessions"
+  done < <(list_worktrees_tsv) | tee "$plan_file" >&2
+
+  if [[ "$dry" != "true" ]]; then
+    local action tier path
+    while read -r action tier path; do
+      [[ "$action" == "PLAN" ]] || continue
+      if has_active_build "$path"; then log "skip (now active): $path"; continue; fi
+      case "$tier" in
+        tier1) rm -rf "$path/.build/index-build" && log "reclaimed index-build: $path" ;;
+        tier2) rm -rf "$path/.build"              && log "reclaimed .build: $path" ;;
+      esac
+    done < "$plan_file"
+  fi
+
+  local avail_after; avail_after="$(_avail_kb)"
+  rm -f "$plan_file"
+  if [[ -n "${avail_before:-}" && -n "${avail_after:-}" ]]; then
+    log "df delta: $(( (avail_after - avail_before) / 1024 )) MiB freed on /System/Volumes/Data"
+  fi
 }
 
 # --- entrypoint (strict mode only when executed, not when sourced) -----------
