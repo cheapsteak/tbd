@@ -315,6 +315,57 @@ struct ModelProfileResolverTests {
         #expect(result?.profileID == global.id)
     }
 
+    // MARK: - Explicit per-creation override (sidebar `+` profile picker)
+
+    @Test("explicit override wins over repo override, scratch override, and global default")
+    func resolve_explicitOverride_winsOverEverything() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let override = try await db.modelProfiles.create(name: "Chosen", kind: .apiKey)
+        let repoOverride = try await db.modelProfiles.create(name: "Repo", kind: .apiKey)
+        let global = try await db.modelProfiles.create(name: "Global", kind: .apiKey)
+        try await db.config.setDefaultProfileID(global.id)
+        let repo = try await makeRepo(db, override: repoOverride.id)
+        box.map[override.id.uuidString] = "secret-chosen"
+        box.map[repoOverride.id.uuidString] = "secret-repo"
+        box.map[global.id.uuidString] = "secret-global"
+
+        let result = try await resolver.resolve(repoID: repo.id, override: override.id)
+        #expect(result?.profileID == override.id)
+        #expect(result?.secret == "secret-chosen")
+    }
+
+    @Test("nil override falls through to the existing precedence chain unchanged")
+    func resolve_nilOverride_preservesPrecedence() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let repoOverride = try await db.modelProfiles.create(name: "Repo", kind: .apiKey)
+        let global = try await db.modelProfiles.create(name: "Global", kind: .apiKey)
+        try await db.config.setDefaultProfileID(global.id)
+        let repo = try await makeRepo(db, override: repoOverride.id)
+        box.map[repoOverride.id.uuidString] = "secret-repo"
+        box.map[global.id.uuidString] = "secret-global"
+
+        // Explicit-nil call must be byte-for-byte identical to the no-arg form:
+        // the repo override still wins.
+        let result = try await resolver.resolve(repoID: repo.id, override: nil)
+        #expect(result?.profileID == repoOverride.id)
+        #expect(result?.secret == "secret-repo")
+    }
+
+    @Test("explicit override missing/keychain-less falls back to the precedence chain")
+    func resolve_explicitOverride_missing_fallsBackToChain() async throws {
+        let (db, box, resolver) = try makeHarness()
+        let global = try await db.modelProfiles.create(name: "Global", kind: .apiKey)
+        try await db.config.setDefaultProfileID(global.id)
+        let repo = try await makeRepo(db)
+        box.map[global.id.uuidString] = "secret-global"
+
+        // Override points at a profile id that doesn't exist — must not fail the
+        // spawn; falls through to the global default.
+        let result = try await resolver.resolve(repoID: repo.id, override: UUID())
+        #expect(result?.profileID == global.id)
+        #expect(result?.secret == "secret-global")
+    }
+
     @Test("scratchProfileOverrideID does not leak into repo-scoped resolution")
     func resolve_repoScoped_ignoresScratchOverride() async throws {
         let (db, box, resolver) = try makeHarness()

@@ -1,11 +1,27 @@
 import SwiftUI
 import TBDShared
 
-/// Popover content rendered when the user option-clicks the `+` button next
-/// to a repo in the sidebar. Lists local + `origin/*` branches with a
-/// text-field filter; selecting one creates a worktree from that existing
-/// branch instead of auto-generating a `tbd/*` name.
+/// Standalone popover wrapper around `BranchListView`. Retained as a named
+/// view type for any future call site that wants the branch list as its own
+/// popover; branch selection itself lives in `BranchListView` so there is a
+/// single source of truth (also embedded as page 2 of
+/// `WorktreeProfilePickerView`).
 struct BranchPickerView: View {
+    let repoID: UUID
+
+    var body: some View {
+        BranchListView(repoID: repoID)
+            .frame(width: 300, height: 400)
+    }
+}
+
+/// Searchable local + `origin/*` branch list. Selecting a branch creates a
+/// worktree from that existing branch (default model resolution — no profile
+/// override) and dismisses the enclosing popover. Frameless on purpose so
+/// hosts control sizing: `BranchPickerView` gives it a fixed popover frame,
+/// while `WorktreeProfilePickerView`'s branch page lets it fill the space left
+/// under the back bar.
+struct BranchListView: View {
     let repoID: UUID
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -59,8 +75,8 @@ struct BranchPickerView: View {
                     }
                 }
             }
+            Spacer(minLength: 0)
         }
-        .frame(width: 300, height: 400)
         .task {
             isLoading = true
             loadError = false
@@ -85,6 +101,7 @@ struct BranchPickerView: View {
 
     private func pick(_ branch: BranchInfo) {
         dismiss()
+        // Branch selection always uses the default model (no profile override).
         appState.createWorktree(repoID: repoID, existingBranch: branch)
     }
 
@@ -95,7 +112,7 @@ struct BranchPickerView: View {
     }
 }
 
-private struct BranchPickerRow: View {
+struct BranchPickerRow: View {
     let branch: BranchInfo
     let onSelect: () -> Void
 

@@ -215,6 +215,70 @@ struct SeverityLevelTests {
     }
 }
 
+// MARK: - Pace projection: elapsed-time fraction
+
+@Suite("ProfileUsagePresentation — elapsedFraction")
+struct ElapsedFractionTests {
+    /// Fixed instant so no test touches the wall clock.
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    @Test func windowConstantsAreFiveHoursAndSevenDays() {
+        #expect(ProfileUsagePresentation.sessionWindow == 5 * 60 * 60)
+        #expect(ProfileUsagePresentation.weeklyWindow == 7 * 24 * 60 * 60)
+    }
+
+    @Test func noResetDateYieldsNil() {
+        #expect(ProfileUsagePresentation.elapsedFraction(
+            resetsAt: nil,
+            windowDuration: ProfileUsagePresentation.sessionWindow,
+            now: now) == nil)
+    }
+
+    @Test func nonPositiveWindowDurationYieldsNil() {
+        // A zero/negative denominator has no meaningful fraction.
+        #expect(ProfileUsagePresentation.elapsedFraction(
+            resetsAt: now.addingTimeInterval(3600),
+            windowDuration: 0,
+            now: now) == nil)
+    }
+
+    @Test func resetBehindNowMeansPeriodOverYieldsNil() {
+        // reset already passed → the daemon just hasn't rolled a new window yet.
+        #expect(ProfileUsagePresentation.elapsedFraction(
+            resetsAt: now.addingTimeInterval(-100),
+            windowDuration: ProfileUsagePresentation.sessionWindow,
+            now: now) == nil)
+    }
+
+    @Test func resetExactlyNowIsPeriodOverYieldsNil() {
+        // Boundary: remaining == 0 fails the `remaining > 0` guard.
+        #expect(ProfileUsagePresentation.elapsedFraction(
+            resetsAt: now,
+            windowDuration: ProfileUsagePresentation.sessionWindow,
+            now: now) == nil)
+    }
+
+    @Test func midWindowIsHalfElapsed() throws {
+        // 2.5h remaining of a 5h window → half the window has elapsed.
+        let fraction = try #require(ProfileUsagePresentation.elapsedFraction(
+            resetsAt: now.addingTimeInterval(2.5 * 60 * 60),
+            windowDuration: ProfileUsagePresentation.sessionWindow,
+            now: now))
+        #expect(abs(fraction - 0.5) < 1e-9)
+    }
+
+    @Test func resetBeyondTheWindowClampsToZeroNotNegative() throws {
+        // reset 10h out on a 5h window → elapsed is negative; clamp to 0, stay in 0...1.
+        let fraction = try #require(ProfileUsagePresentation.elapsedFraction(
+            resetsAt: now.addingTimeInterval(10 * 60 * 60),
+            windowDuration: ProfileUsagePresentation.sessionWindow,
+            now: now))
+        #expect(fraction >= 0)
+        #expect(fraction <= 1)
+        #expect(abs(fraction - 0) < 1e-9)
+    }
+}
+
 // MARK: - Picker sort ordering
 
 @Suite("ProfileUsagePresentation — picker sort")
