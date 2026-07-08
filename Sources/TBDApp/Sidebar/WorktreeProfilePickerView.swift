@@ -1,8 +1,8 @@
 import SwiftUI
 import TBDShared
 
-/// Popover content rendered when the user long-presses (or, for this
-/// prototype, Option-clicks) the `+` button next to a repo in the sidebar.
+/// Popover content rendered when the user long-presses or Option-clicks the
+/// `+` button next to a repo in the sidebar.
 ///
 /// Two in-place pages (NOT nested popovers — those are fragile on macOS):
 ///  - `.profiles` (default): a fixed "Choose a branch…" drill-in row at the
@@ -94,34 +94,43 @@ struct WorktreeProfilePickerView: View {
                     }
 
                     ForEach(appState.modelProfiles, id: \.profile.id) { entry in
-                        if showsUsageBars(for: entry) {
-                            // OAuth profile with a usage snapshot that has
-                            // buckets: render the two-bar meter instead of the
-                            // single-line usage text.
-                            UsageBarsProfileRow(
-                                entry: entry,
-                                isDefault: entry.profile.id == appState.defaultProfileID
-                            ) {
-                                pick(profileID: entry.profile.id)
-                            }
-                        } else {
-                            let line = ProfileUsagePresentation.menuLine(for: entry)
-                            let subtitle = profileSubtitle(for: entry, usageNote: line.secondary)
-                            ProfilePickerRow(
-                                title: line.primary,
-                                subtitle: subtitle.text,
-                                systemImage: "person.crop.circle",
-                                isDefault: entry.profile.id == appState.defaultProfileID,
-                                // Always reserve subtitle height so the row never
-                                // shifts, whichever state it resolves to.
-                                reservesSubtitle: true,
-                                // Skeleton is reserved for the ONE genuine loading
-                                // case (logged-in OAuth awaiting its first poll).
-                                showsSubtitleSkeleton: subtitle.showsSkeleton
-                            ) {
-                                pick(profileID: entry.profile.id)
+                        // A not-logged-in OAuth profile is not selectable: dim it
+                        // and disable its Button so its tap can't create a
+                        // worktree pinned to an account that can't run. apiKey /
+                        // bedrock rows report selectable and stay actionable.
+                        let isSelectable = ProfileUsagePresentation.isSelectable(entry)
+                        Group {
+                            if showsUsageBars(for: entry) {
+                                // OAuth profile with a usage snapshot that has
+                                // buckets: render the two-bar meter instead of the
+                                // single-line usage text.
+                                UsageBarsProfileRow(
+                                    entry: entry,
+                                    isDefault: entry.profile.id == appState.defaultProfileID
+                                ) {
+                                    pick(profileID: entry.profile.id)
+                                }
+                            } else {
+                                let line = ProfileUsagePresentation.menuLine(for: entry)
+                                let subtitle = profileSubtitle(for: entry, usageNote: line.secondary)
+                                ProfilePickerRow(
+                                    title: line.primary,
+                                    subtitle: subtitle.text,
+                                    systemImage: "person.crop.circle",
+                                    isDefault: entry.profile.id == appState.defaultProfileID,
+                                    // Always reserve subtitle height so the row never
+                                    // shifts, whichever state it resolves to.
+                                    reservesSubtitle: true,
+                                    // Skeleton is reserved for the ONE genuine loading
+                                    // case (logged-in OAuth awaiting its first poll).
+                                    showsSubtitleSkeleton: subtitle.showsSkeleton
+                                ) {
+                                    pick(profileID: entry.profile.id)
+                                }
                             }
                         }
+                        .disabled(!isSelectable)
+                        .opacity(isSelectable ? 1 : 0.5)
                     }
                 }
             }
@@ -167,7 +176,7 @@ struct WorktreeProfilePickerView: View {
     /// the session / weekly buckets the meter draws. Every other case (logged-in
     /// awaiting first poll, logged out, apiKey/bedrock) keeps its text subtitle.
     private func showsUsageBars(for entry: ModelProfileWithUsage) -> Bool {
-        guard entry.profile.kind == .oauth else { return false }
+        guard entry.profile.kind == .oauth, ProfileUsagePresentation.isSelectable(entry) else { return false }
         return ProfileUsagePresentation.sessionBucket(entry.usageSnapshot) != nil
             || ProfileUsagePresentation.weeklyAllBucket(entry.usageSnapshot) != nil
     }
