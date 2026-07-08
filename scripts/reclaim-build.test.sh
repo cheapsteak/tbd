@@ -188,7 +188,7 @@ test_main_real_run_reclaims_and_seeds() {
   local root; root="$(mktmpd)"; local now=2000000000
   local a="$root/active-a" b="$root/active-b"
   _mk_worktree "$a" "$now" 200000 200000   # tier2 -> whole .build deleted
-  _mk_worktree "$b" "$now" 25000 60         # tier1 -> only index-build deleted
+  _mk_worktree "$b" "$now" 25000 3600       # tier1 -> only index-build deleted (debug past active-grace window)
   local j="$root/wt.json"
   cat > "$j" <<JSON
 [
@@ -238,6 +238,30 @@ JSON
   assert_contains "swift worktree planned" "$out" "PLAN tier2 $a"
   assert_missing "non-swift worktree skipped entirely" "$out" "$b"
   rm -rf "$root"
+}
+
+test_main_skips_recently_touched_build() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/wt"
+  _mk_worktree "$a" "$now" 200000 200000   # arm64 + index both stale -> tier2 by clocks
+  mkdir -p "$a/.build/repositories"
+  : > "$a/.build/repositories/fresh"; touch_age "$a/.build/repositories/fresh" "$now" 0   # touched "now"
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$a","status":"active","liveClaudeSessionCount":0}]
+JSON
+  RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD='printf ""' bash "$HERE/reclaim-build.sh" >/dev/null 2>&1
+  assert_eq "recently-touched .build NOT deleted" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_plan_tier2_works_on_x86_64_triple() {
+  local d; d="$(mktmpd)"; local now=2000000000
+  mkdir -p "$d/.build/x86_64-apple-macosx/debug"
+  : > "$d/.build/x86_64-apple-macosx/debug/app.o"; touch_age "$d/.build/x86_64-apple-macosx/debug/app.o" "$now" 200000
+  local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
+  assert_eq "x86_64 triple -> tier2" "PLAN tier2 $d" "$out"
+  rm -rf "$d"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done

@@ -16,6 +16,7 @@
 
 RECLAIM_T1_SECONDS="${RECLAIM_T1_SECONDS:-21600}"
 RECLAIM_T2_SECONDS="${RECLAIM_T2_SECONDS:-172800}"
+RECLAIM_ACTIVE_GRACE="${RECLAIM_ACTIVE_GRACE:-600}"
 
 log() { printf '%s\n' "$*" >&2; }
 
@@ -69,12 +70,15 @@ plan_worktree() {
     return 0
   fi
 
-  local now t1 t2 dbg_m idx_m
+  local now t1 t2 dbg_m idx_m dbg_dir
   now="$(_now)"; t1="$RECLAIM_T1_SECONDS"; t2="$RECLAIM_T2_SECONDS"
 
   # Tier 2 first (deleting the whole .build subsumes Tier 1). Measured on the
   # debug build, which Tier 1 never touches, so the clock is independent.
-  dbg_m="$(newest_mtime "$build/arm64-apple-macosx")"
+  # Derive the build-triple dir by glob so this fires on Intel
+  # (x86_64-apple-macosx) as well as Apple Silicon (arm64-apple-macosx).
+  dbg_dir="$(find "$build" -maxdepth 1 -type d -name '*-apple-macosx' 2>/dev/null | head -1)"
+  dbg_m="$(newest_mtime "$dbg_dir")"
   if [[ -n "$dbg_m" ]] && (( now - dbg_m >= t2 )) && (( sessions == 0 )); then
     echo "PLAN tier2 $wt"
     return 0
@@ -90,13 +94,14 @@ plan_worktree() {
   echo "SKIP fresh $wt"
 }
 
-_avail_kb() { df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}'; }
+_avail_kb() { df -k /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}' || true; }
 
 main() {
   local dry=false
   [[ "${1:-}" == "--dry-run" ]] && dry=true
 
-  local avail_before; avail_before="$(_avail_kb)"
+  local avail_before=""
+  if [[ "$dry" != "true" ]]; then avail_before="$(_avail_kb)"; fi
   local plan_file; plan_file="$(mktemp)"
 
   local wt sessions
@@ -112,6 +117,14 @@ main() {
     while read -r action tier path; do
       [[ "$action" == "PLAN" ]] || continue
       if has_active_build "$path"; then log "skip (now active): $path"; continue; fi
+      # Defense-in-depth: has_active_build's ps allowlist misses the dependency
+      # fetch phase (top-level swift-build carries no worktree path; its git
+      # children do the writing). A live fetch/build/index touches .build
+      # continuously, so skip if anything under .build was written very recently.
+      local newest; newest="$(newest_mtime "$path/.build")"
+      if [[ -n "$newest" ]] && (( $(_now) - newest < RECLAIM_ACTIVE_GRACE )); then
+        log "skip (recently active): $path"; continue
+      fi
       case "$tier" in
         tier1)
           if rm -rf "$path/.build/index-build"; then log "reclaimed index-build: $path"; else log "rm failed: $path"; fi ;;
@@ -121,10 +134,12 @@ main() {
     done < "$plan_file"
   fi
 
-  local avail_after; avail_after="$(_avail_kb)"
   rm -f "$plan_file"
-  if [[ -n "${avail_before:-}" && -n "${avail_after:-}" ]]; then
-    log "df delta: $(( (avail_after - avail_before) / 1024 )) MiB freed on /System/Volumes/Data"
+  if [[ "$dry" != "true" ]]; then
+    local avail_after; avail_after="$(_avail_kb)"
+    if [[ -n "${avail_before:-}" && -n "${avail_after:-}" ]]; then
+      log "df delta: $(( (avail_after - avail_before) / 1024 )) MiB freed on /System/Volumes/Data"
+    fi
   fi
 }
 
