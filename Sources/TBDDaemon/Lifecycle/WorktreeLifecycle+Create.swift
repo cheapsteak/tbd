@@ -410,7 +410,7 @@ extension WorktreeLifecycle {
     /// broadcast `.terminalCreated` for each.
     @discardableResult
     func spawnPrimaryTerminals(
-        worktree: Worktree, repo: Repo,
+        worktree: Worktree, repo: Repo?,
         worktreePath: String? = nil, skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil,
         initialPrompt: String? = nil,
@@ -453,7 +453,7 @@ extension WorktreeLifecycle {
         var resolvedProfile: ResolvedModelProfile? = nil
         if needsResolvedClaudeProfile, let resolver = modelProfileResolver {
             do {
-                resolvedProfile = try await resolver.resolve(repoID: repo.id)
+                resolvedProfile = try await resolver.resolve(repoID: repo?.id)
             } catch {
                 logger.warning("model profile resolution failed; falling back to keychain login")
                 resolvedProfile = nil
@@ -465,7 +465,7 @@ extension WorktreeLifecycle {
         // on top (below), so it can't be clobbered. See docs/env-overrides.md.
         let mergedEnvOverrides = EnvOverrideResolver.merge(
             global: config.envOverrides,
-            repo: repo.envOverrides,
+            repo: repo?.envOverrides,
             profile: resolvedProfile?.envOverrides
         )
 
@@ -590,52 +590,56 @@ extension WorktreeLifecycle {
             (id: plannedTerminalID1, label: primaryLabel)
         ]
 
-        // Create terminal 2: setup hook
-        let plannedTerminalID2 = UUID()
-        createdTerminalIDs.append(plannedTerminalID2)
-        let setupHookPath = hooks.resolve(
-            event: .setup,
-            repoPath: worktreePath,
-            appHookPath: worktree.repoID.map {
-                TBDConstants.hookPath(repoID: $0, eventName: HookEvent.setup.rawValue)
-            }
-        )
-        let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
-        // Suppress the omz update prompt only when a setup hook actually
-        // resolves — a hook-less "Setup" tab is just a regular shell and must
-        // keep oh-my-zsh update checks (see `hookPaneEnv`).
-        let setupSensitiveEnv = setupHookPath != nil ? Self.hookPaneEnv : [:]
-        // Full hook environment per docs/worktree-hooks.md (matches the
-        // preSession and archive hooks). TBD_WORKTREE_NAME uses
-        // `worktree.name` for consistency with the archive hook's env.
-        let setupEnv: [String: String] = [
-            "TBD_WORKTREE_ID": worktreeID.uuidString,
-            "TBD_TERMINAL_ID": plannedTerminalID2.uuidString,
-            "TBD_EVENT": HookEvent.setup.rawValue,
-            "TBD_WORKTREE_NAME": worktree.name,
-            "TBD_WORKTREE_PATH": worktreePath,
-            "TBD_REPO_PATH": repo.path,
-            "TBD_BRANCH": worktree.branch,
-        ]
-        let window2 = try await tmux.createWindow(
-            server: tmuxServer,
-            session: "main",
-            cwd: worktreePath,
-            shellCommand: setupCommand,
-            env: setupEnv,
-            sensitiveEnv: setupSensitiveEnv,
-            cols: resolvedCols,
-            rows: resolvedRows
-        )
-        _ = try await db.terminals.create(
-            id: plannedTerminalID2,
-            worktreeID: worktreeID,
-            tmuxWindowID: window2.windowID,
-            tmuxPaneID: window2.paneID,
-            label: TerminalLabel.setup,
-            kind: .shell
-        )
-        createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
+        // Create terminal 2: setup hook. Repo-backed worktrees only — scratch
+        // spaces (repo == nil) have no repo path/setup hook and get just the
+        // primary terminal, so the tab order stays `[primary]`.
+        if let repo {
+            let plannedTerminalID2 = UUID()
+            createdTerminalIDs.append(plannedTerminalID2)
+            let setupHookPath = hooks.resolve(
+                event: .setup,
+                repoPath: worktreePath,
+                appHookPath: worktree.repoID.map {
+                    TBDConstants.hookPath(repoID: $0, eventName: HookEvent.setup.rawValue)
+                }
+            )
+            let setupCommand = shellWrapped(setupHookPath ?? defaultShell)
+            // Suppress the omz update prompt only when a setup hook actually
+            // resolves — a hook-less "Setup" tab is just a regular shell and must
+            // keep oh-my-zsh update checks (see `hookPaneEnv`).
+            let setupSensitiveEnv = setupHookPath != nil ? Self.hookPaneEnv : [:]
+            // Full hook environment per docs/worktree-hooks.md (matches the
+            // preSession and archive hooks). TBD_WORKTREE_NAME uses
+            // `worktree.name` for consistency with the archive hook's env.
+            let setupEnv: [String: String] = [
+                "TBD_WORKTREE_ID": worktreeID.uuidString,
+                "TBD_TERMINAL_ID": plannedTerminalID2.uuidString,
+                "TBD_EVENT": HookEvent.setup.rawValue,
+                "TBD_WORKTREE_NAME": worktree.name,
+                "TBD_WORKTREE_PATH": worktreePath,
+                "TBD_REPO_PATH": repo.path,
+                "TBD_BRANCH": worktree.branch,
+            ]
+            let window2 = try await tmux.createWindow(
+                server: tmuxServer,
+                session: "main",
+                cwd: worktreePath,
+                shellCommand: setupCommand,
+                env: setupEnv,
+                sensitiveEnv: setupSensitiveEnv,
+                cols: resolvedCols,
+                rows: resolvedRows
+            )
+            _ = try await db.terminals.create(
+                id: plannedTerminalID2,
+                worktreeID: worktreeID,
+                tmuxWindowID: window2.windowID,
+                tmuxPaneID: window2.paneID,
+                label: TerminalLabel.setup,
+                kind: .shell
+            )
+            createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
+        }
 
         // Restore any archived Claude sessions that were not consumed by the
         // primary terminal.

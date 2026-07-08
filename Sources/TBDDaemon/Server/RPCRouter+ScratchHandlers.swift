@@ -48,8 +48,24 @@ extension RPCRouter {
             throw error
         }
 
+        // Spawn the default primary agent terminal (Claude/Codex/shell per the
+        // global primary-agent preference), mirroring what repo worktrees get on
+        // creation. Best-effort: a spawn failure must not fail scratch creation —
+        // the row + folder already exist and the user can add a terminal manually.
+        var createdTerminals: [(id: UUID, label: String)] = []
+        do {
+            createdTerminals = try await lifecycle.spawnPrimaryTerminals(
+                worktree: wt, repo: nil, skipClaude: false, preSessionTerminalID: nil)
+        } catch {
+            scratchLogger.warning("scratch.create: primary terminal spawn failed for \(wt.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+
         subscriptions.broadcast(delta: .worktreeCreated(WorktreeDelta(
             worktreeID: wt.id, repoID: nil, name: wt.name, path: wt.path, status: wt.status)))
+        for terminal in createdTerminals {
+            subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
+                terminalID: terminal.id, worktreeID: wt.id, label: terminal.label)))
+        }
         scratchLogger.info("scratch.create: \(wt.id, privacy: .public) at \(wt.path, privacy: .public)")
         return try RPCResponse(result: wt)
     }
