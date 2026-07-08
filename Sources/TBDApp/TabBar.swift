@@ -626,7 +626,7 @@ private struct TabBarItem: View {
         .overlay(alignment: .bottom) {
             if isSelected {
                 Rectangle()
-                    .fill(Color.accentColor)
+                    .fill(Color(nsColor: .separatorColor))
                     .frame(height: 2)
             }
         }
