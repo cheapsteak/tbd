@@ -204,5 +204,17 @@ JSON
   rm -rf "$root"
 }
 
+test_write_plist_contains_label_interval_and_script() {
+  # shellcheck source=/dev/null
+  source "$HERE/install-reclaim-agent.sh"   # source-guarded; must not run install
+  local out; out="$(mktmpd)/agent.plist"
+  write_plist "$out" "/repo/scripts/reclaim-build.sh"
+  local body; body="$(cat "$out")"
+  assert_contains "plist has label"        "$body" "com.tbd.reclaim-build"
+  assert_contains "plist hourly interval"  "$body" "<integer>3600</integer>"
+  assert_contains "plist runs the script"  "$body" "/repo/scripts/reclaim-build.sh"
+  rm -rf "$(dirname "$out")"
+}
+
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
 exit $FAIL
