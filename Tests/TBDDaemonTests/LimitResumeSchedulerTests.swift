@@ -263,4 +263,107 @@ final class OutcomeCollector: @unchecked Sendable {
         #expect(collector.events.isEmpty)
         await scheduler.stop()
     }
+
+    // MARK: - scheduleTransient (spec 2026-07-08 §Backoff)
+
+    @Test func scheduleTransientFireAtIsExactNoSlackNoJitter() async throws {
+        // Non-zero jitter provider proves scheduleTransient never consults it.
+        let scheduler = makeScheduler(actuator: FakeActuator(), jitter: 999)
+        let now = clock.now()
+        let row = await scheduler.scheduleTransient(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            delay: 60, rawMessage: "m")
+        #expect(row != nil)
+        #expect(row!.limitType == ScheduledResume.apiErrorLimitType)
+        #expect(row!.fireAt == now.addingTimeInterval(60))
+        #expect(row!.resetsAt == row!.fireAt)
+    }
+
+    @Test func scheduleTransientLatchSecondCallReturnsNil() async throws {
+        let scheduler = makeScheduler(actuator: FakeActuator())
+        _ = await scheduler.scheduleTransient(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            delay: 60, rawMessage: "m")
+        let second = await scheduler.scheduleTransient(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            delay: 60, rawMessage: "m")
+        #expect(second == nil)
+    }
+
+    /// Api-error row fires purely off `autoResumeOnApiError`, independent of
+    /// `autoResumeOnLimitReset` — mirror-image of
+    /// `sessionRowGatedOnlyByLimitResetToggle` below (spec 2026-07-08 §Gating).
+    @Test func apiErrorRowGatedOnlyByApiErrorToggle() async throws {
+        try await db.config.setAutoResumeOnLimitReset(false)
+        try await db.config.setAutoResumeOnApiError(true)
+        let actuator = FakeActuator([.sent])
+        let scheduler = makeScheduler(actuator: actuator)
+        await scheduler.start()
+        let scheduled = await scheduler.scheduleTransient(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            delay: 60, rawMessage: "m")
+        #expect(scheduled != nil)
+        await clock.advance(by: 65)
+        await pump()
+        #expect(actuator.calls.count == 1)
+        let row = try await db.scheduledResumes.get(id: scheduled!.id)
+        #expect(row?.status == .sent)
+        await scheduler.stop()
+    }
+
+    @Test func apiErrorRowCancelledWhenApiErrorToggleOffEvenIfLimitResetOn() async throws {
+        try await db.config.setAutoResumeOnLimitReset(true)
+        try await db.config.setAutoResumeOnApiError(false)
+        let actuator = FakeActuator([.sent])
+        let scheduler = makeScheduler(actuator: actuator)
+        await scheduler.start()
+        let scheduled = await scheduler.scheduleTransient(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            delay: 60, rawMessage: "m")
+        #expect(scheduled != nil)
+        await clock.advance(by: 65)
+        await pump()
+        #expect(actuator.calls.isEmpty)
+        let row = try await db.scheduledResumes.get(id: scheduled!.id)
+        #expect(row?.status == .cancelled)
+        await scheduler.stop()
+    }
+
+    /// Session row fires purely off `autoResumeOnLimitReset`, independent of
+    /// `autoResumeOnApiError` — mirror-image of the api_error pair above.
+    @Test func sessionRowGatedOnlyByLimitResetToggle() async throws {
+        try await db.config.setAutoResumeOnLimitReset(true)
+        try await db.config.setAutoResumeOnApiError(false)
+        let actuator = FakeActuator([.sent])
+        let scheduler = makeScheduler(actuator: actuator)
+        await scheduler.start()
+        let scheduled = await scheduler.schedule(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            resetsAt: clock.now().addingTimeInterval(60), limitType: "session", rawMessage: "m")
+        #expect(scheduled != nil)
+        await clock.advance(by: 130)
+        await pump()
+        #expect(actuator.calls.count == 1)
+        let row = try await db.scheduledResumes.get(id: scheduled!.id)
+        #expect(row?.status == .sent)
+        await scheduler.stop()
+    }
+
+    @Test func sessionRowCancelledWhenLimitResetToggleOffEvenIfApiErrorOn() async throws {
+        try await db.config.setAutoResumeOnLimitReset(false)
+        try await db.config.setAutoResumeOnApiError(true)
+        let actuator = FakeActuator([.sent])
+        let scheduler = makeScheduler(actuator: actuator)
+        await scheduler.start()
+        let scheduled = await scheduler.schedule(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
+            resetsAt: clock.now().addingTimeInterval(60), limitType: "session", rawMessage: "m")
+        #expect(scheduled != nil)
+        await clock.advance(by: 130)
+        await pump()
+        #expect(actuator.calls.isEmpty)
+        let row = try await db.scheduledResumes.get(id: scheduled!.id)
+        #expect(row?.status == .cancelled)
+        await scheduler.stop()
+    }
 }

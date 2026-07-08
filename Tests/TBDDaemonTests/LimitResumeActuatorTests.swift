@@ -255,6 +255,62 @@ struct FakeInspector: PaneProcessInspecting {
         #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
     }
 
+    // MARK: - Eligibility 0a: limitType-aware gate (spec 2026-07-08 §Gating)
+
+    /// `row` (limitType "session") occupies the terminal's latch, so these
+    /// api_error-row tests clear it first and insert their own pending row
+    /// for the same terminal — mirrors how `scheduler.scheduleTransient`
+    /// always inserts before `actuate` ever sees a row.
+    private func insertApiErrorRow() async throws -> ScheduledResume {
+        _ = try await db.scheduledResumes.cancelPending(terminalID: terminalID)
+        let apiErrorRow = ScheduledResume(
+            terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: "sess",
+            resetsAt: row.resetsAt, fireAt: row.fireAt,
+            limitType: ScheduledResume.apiErrorLimitType, rawMessage: "m", createdAt: row.createdAt)
+        guard let inserted = try await db.scheduledResumes.insertPending(apiErrorRow) else {
+            Issue.record("expected latch to accept row after cancelPending")
+            return apiErrorRow
+        }
+        return inserted
+    }
+
+    @Test func apiErrorRowCancelledExternallyWhenApiErrorToggleOffEvenIfLimitResetOn() async throws {
+        try await db.config.setAutoResumeOnLimitReset(true)
+        try await db.config.setAutoResumeOnApiError(false)
+        let apiErrorRow = try await insertApiErrorRow()
+        let outcome = await makeActuator().actuate(apiErrorRow)
+        #expect(outcome == .cancelledExternally)
+        #expect(tmux.sends.isEmpty)
+    }
+
+    @Test func apiErrorRowProceedsPastEligibility0aWhenApiErrorToggleOnEvenIfLimitResetOff() async throws {
+        try await db.config.setAutoResumeOnLimitReset(false)
+        try await db.config.setAutoResumeOnApiError(true)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        let apiErrorRow = try await insertApiErrorRow()
+        let outcome = await makeActuator().actuate(apiErrorRow)
+        // Falls through past 0a and runs the full send sequence (happy path).
+        #expect(outcome == .sent)
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+    }
+
+    @Test func sessionRowUnaffectedByApiErrorToggle() async throws {
+        try await db.config.setAutoResumeOnLimitReset(true)
+        try await db.config.setAutoResumeOnApiError(false)
+        try await db.terminals.setActivityState(id: terminalID, activityState: .working)
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .sent)
+        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+    }
+
+    @Test func sessionRowCancelledExternallyWhenLimitResetOffEvenIfApiErrorOn() async throws {
+        try await db.config.setAutoResumeOnLimitReset(false)
+        try await db.config.setAutoResumeOnApiError(true)
+        let outcome = await makeActuator().actuate(row)
+        #expect(outcome == .cancelledExternally)
+        #expect(tmux.sends.isEmpty)
+    }
+
     @Test func rowCancelledBetweenAttemptsCancelsAfterOneSend() async throws {
         // Same timeout setup as above, but instead of the global toggle,
         // the ROW is cancelled between attempts (mirrors
