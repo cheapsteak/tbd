@@ -1101,7 +1101,7 @@ func testLiveSessionSurvivesReconcile() async throws {
     let git = GitManager()
     let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
-    // Create a worktree and terminal
+    // Create a worktree
     let lifecycle = WorktreeLifecycle(
         db: db,
         git: git,
@@ -1109,17 +1109,29 @@ func testLiveSessionSurvivesReconcile() async throws {
         hooks: HookResolver()
     )
     let worktree = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-    let terminals = try await db.terminals.list(worktreeID: worktree.id)
-    let terminal = try #require(terminals.first)
 
-    // Simulate hibernation: mark the terminal as hibernated (as if it was parked before restart)
+    // Create a .claude-kind terminal directly (mimicking a real Claude session terminal)
+    // This is crucial: the reconcile safety check only applies to isClaudeResumable terminals,
+    // which requires kind == .claude. The sibling tests (testReconcileDeadWindowClaudeTerminalSuspended,
+    // testReconcileHibernatedTerminalSkippedOnDeadWindow) follow this pattern.
     let sessionID = UUID().uuidString
+    let terminal = try await db.terminals.create(
+        worktreeID: worktree.id,
+        tmuxWindowID: "@mock-0",
+        tmuxPaneID: "%mock-0",
+        label: "claude",
+        claudeSessionID: sessionID,
+        kind: .claude
+    )
+
+    // Mark as hibernated (parked before daemon restart)
     try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
 
     // Verify the terminal is parked
     var parkedTerminal = try #require(await db.terminals.get(id: terminal.id))
     #expect(parkedTerminal.isParked, "Terminal should be marked as parked")
     #expect(parkedTerminal.hibernatedAt != nil, "Terminal should have hibernatedAt set")
+    #expect(parkedTerminal.isClaudeResumable, "Terminal should be Claude-resumable for this test")
 
     // Now simulate reconcileOnStartup() finding the window alive with Claude running
     let tmux = TmuxManager(
