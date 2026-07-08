@@ -33,7 +33,8 @@ struct RepoSectionView: View {
     @State private var isChevronHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
     @State private var showRemoveConfirm = false
-    // PROTOTYPE: model-profile picker on the `+` button (long-press + Option-click).
+    // Long-press or Option-click the `+` opens the model-profile picker; a plain
+    // click creates a worktree with the default profile.
     @State private var showProfilePicker = false
     // Set when a long-press opens the profile picker, so the Button's own tap
     // action (which fires on finger-up, after the long-press's onEnded) doesn't
