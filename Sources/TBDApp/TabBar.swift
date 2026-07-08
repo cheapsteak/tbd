@@ -465,6 +465,24 @@ enum SwapProfileMenu {
         guard mode == .inPlace, activityState == .working else { return nil }
         return interruptsRunCaption
     }
+
+    /// Formats a swap-profile menu item label with compact usage stats appended.
+    /// Examples: "Gmail", "Gmail — 5h 40% · wk 16%", "Gmail — no data".
+    /// The usage suffix is sourced from the same per-profile snapshots the
+    /// hover cards and account picker use.
+    static func menuLabel(
+        for profile: ModelProfile,
+        usage: ProfileUsageSnapshot?
+    ) -> String {
+        let baseName = profile.name
+        guard let snapshot = usage, !snapshot.buckets.isEmpty else {
+            return baseName
+        }
+        guard let summary = ProfileUsagePresentation.usageSummary(for: snapshot) else {
+            return baseName
+        }
+        return "\(baseName) — \(summary)"
+    }
 }
 
 // MARK: - TabBarItem
@@ -739,7 +757,7 @@ private struct TabBarItem: View {
     }
 
     private func formatProfileSubmenuLabel(_ entry: ModelProfileWithUsage) -> String {
-        entry.profile.name
+        SwapProfileMenu.menuLabel(for: entry.profile, usage: entry.usageSnapshot)
     }
 
     @ViewBuilder
