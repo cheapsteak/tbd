@@ -2,7 +2,16 @@ import SwiftUI
 import TBDShared
 
 struct RepoHooksSettingsView: View {
+    /// Scroll target for the pre-session section (see `RepoSettingsView`).
+    static let preSessionAnchor = "hook-section-preSession"
+
+    /// Focusable hook editors. Only `.preSession` is targeted today.
+    enum HookField: Hashable {
+        case preSession
+    }
+
     let repoID: UUID
+    var focusedHook: FocusState<HookField?>.Binding
 
     @State private var preSessionDraft: String = ""
     @State private var setupDraft: String = ""
@@ -25,8 +34,10 @@ struct RepoHooksSettingsView: View {
                     + "10 minutes; on failure the agent starts anyway.",
                 draft: $preSessionDraft,
                 filePath: preSessionPath,
-                showSaved: $preSessionSaved
+                showSaved: $preSessionSaved,
+                field: .preSession
             )
+            .id(Self.preSessionAnchor)
 
             Divider()
 
@@ -62,7 +73,8 @@ struct RepoHooksSettingsView: View {
         description: String,
         draft: Binding<String>,
         filePath: String,
-        showSaved: Binding<Bool>
+        showSaved: Binding<Bool>,
+        field: HookField? = nil
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
@@ -73,12 +85,19 @@ struct RepoHooksSettingsView: View {
                 .foregroundStyle(.secondary)
 
             ZStack(alignment: .topLeading) {
-                TextEditor(text: draft)
-                    .font(.body.monospaced())
-                    .frame(minHeight: 100)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                Group {
+                    if let field {
+                        TextEditor(text: draft)
+                            .focused(focusedHook, equals: field)
+                    } else {
+                        TextEditor(text: draft)
+                    }
+                }
+                .font(.body.monospaced())
+                .frame(minHeight: 100)
+                .scrollContentBackground(.hidden)
+                .padding(8)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
 
                 if draft.wrappedValue.isEmpty {
                     Text("e.g. npm install && brew bundle")

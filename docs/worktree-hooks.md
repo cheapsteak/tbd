@@ -29,9 +29,11 @@ The split is your repo's choice; the rule of thumb is *preSession = "the agent m
 
 ## Re-running `preSession`
 
-You can re-run a worktree's `preSession` hook at any time, without recreating the worktree: right-click it in the sidebar and choose **Re-run setup hook**. It runs in a fresh background tab that does not steal focus, and it does not disturb anything already running — no restart, no hibernation, no status change. The menu item only appears when a `preSession` hook actually resolves for that worktree; where none does, it's simply absent from the menu.
+You can re-run a worktree's `preSession` hook at any time, without recreating the worktree: right-click it in the sidebar and choose **Re-run pre-session hook**. It runs in a fresh background tab that does not steal focus, and it does not disturb anything already running — no restart, no hibernation, no status change.
 
-Only one run is allowed per worktree at a time. Triggering a second one while the first is still in flight is refused with: `Setup hook is already running for this worktree.`
+When no `preSession` hook resolves for that worktree, the entry instead reads **Create pre-session hook…** and opens the repo's hook editor (Settings tab), scrolled to the Pre-session hook section. Scratch spaces have no repo, and therefore no hooks editor — for them the entry is simply absent when no hook resolves.
+
+Only one run is allowed per worktree at a time. Triggering a second one while the first is still in flight is refused with: `Pre-session hook is already running for this worktree.`
 
 Scratch spaces can run a `preSession` hook too. Previously they couldn't, because hook spawning required a backing repo. A scratch space has no repo, so for it `TBD_REPO_PATH` (see below) falls back to the worktree's own path.
 

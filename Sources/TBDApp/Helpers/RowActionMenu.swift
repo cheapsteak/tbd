@@ -36,6 +36,8 @@ enum RowActionMenu {
         case archive
         /// Re-run this worktree's `preSession` hook in a fresh, non-focused tab.
         case rerunPreSessionHook
+        /// Reveal the repo's pre-session hook editor so the user can author one.
+        case createPreSessionHook
         /// Fork a specific Claude session into a new tab on the same account.
         /// Carries the session's terminal and its own (possibly ambient/nil)
         /// profile, so the dispatcher can resume+fork it.
@@ -122,9 +124,9 @@ enum RowActionMenu {
         /// Forkable Claude sessions in tab order. Drives the per-session
         /// "Fork session" entries (empty → none).
         var claudeSessions: [ClaudeSessionRef]
-        /// A `preSession` hook resolves for this worktree — gates the re-run
-        /// item entirely (no hook, no item). Resolved by the surface via the
-        /// shared `HookResolver`, so `items(...)` stays pure.
+        /// A `preSession` hook resolves for this worktree. Selects between the
+        /// re-run and create items. Resolved by the surface via the shared
+        /// `HookResolver`, so `items(...)` stays pure.
         var hasPreSessionHook: Bool
 
         init(hasHibernatableClaude: Bool = false,
@@ -171,7 +173,10 @@ enum RowActionMenu {
     static let wakeLabel = "Wake"
     static let keepWarmLabel = "Keep warm"
     static let allowHibernationLabel = "Allow hibernation"
-    static let rerunPreSessionLabel = "Re-run setup hook"
+    static let rerunPreSessionLabel = "Re-run pre-session hook"
+    /// Trailing character is U+2026 HORIZONTAL ELLIPSIS — the macOS convention
+    /// for an item that opens further UI rather than acting immediately.
+    static let createPreSessionLabel = "Create pre-session hook…"
 
     /// Title for a fork-session action: plain when the worktree hosts a single
     /// Claude session, suffixed with the session label when there are several.
@@ -190,8 +195,8 @@ enum RowActionMenu {
     /// 2. Hibernation — Wake / Hibernate now / keep-warm toggle (conditional).
     /// 3. Sessions & spawning — per-session Fork entries, plus (regular only)
     ///    Create Nested Worktree / New worktree from this branch.
-    /// 4. Maintenance — Re-run setup hook (only when a `preSession` hook
-    ///    resolves).
+    /// 4. Maintenance — Re-run pre-session hook when one resolves, else Create
+    ///    pre-session hook… (repo-backed rows only).
     /// 5. Filesystem — Open in Finder, Copy Path.
     /// 6. (scratch only) Delete Scratch Space, with the promote-hint caption
     ///    beneath it.
@@ -232,12 +237,16 @@ enum RowActionMenu {
         return actions
     }
 
-    /// The maintenance section — currently just the hook re-run. Empty when no
-    /// `preSession` hook resolves, so `joined(...)` collapses the section and no
-    /// dangling divider renders.
+    /// The maintenance section. Three states: re-run when a `preSession` hook
+    /// resolves; otherwise an offer to create one; and, for a scratch space,
+    /// nothing at all — it has no repo, so there is no hooks editor to reveal,
+    /// and `joined(...)` collapses the empty section with no dangling divider.
     static func maintenanceActions(context: Context) -> [Action] {
-        guard context.hasPreSessionHook else { return [] }
-        return [Action(kind: .rerunPreSessionHook, title: rerunPreSessionLabel)]
+        if context.hasPreSessionHook {
+            return [Action(kind: .rerunPreSessionHook, title: rerunPreSessionLabel)]
+        }
+        guard context.hasRepoID else { return [] }
+        return [Action(kind: .createPreSessionHook, title: createPreSessionLabel)]
     }
 
     private static func forkActions(context: Context) -> [Action] {

@@ -47,7 +47,8 @@ private func expectWellFormedDividers(_ items: [RowActionMenu.Item]) {
 struct RowActionMenuRegularTests {
     @Test func fullShapeWithAllSectionsPresent() {
         // Every conditional on: rename/archive | hibernation | fork/nested |
-        // finder/copy — four sections, three dividers.
+        // maintenance | finder/copy — five sections, four dividers. A
+        // repo-backed row with no hook resolving offers Create.
         let s = session("Claude 1")
         let ctx = RowActionMenu.Context(hasHibernatableClaude: true,
                                         hasHibernatedClaude: true,
@@ -67,19 +68,20 @@ struct RowActionMenuRegularTests {
             .forkSession(terminalID: s.terminalID, profileID: s.profileID),
             .createNestedWorktree,
             .newWorktreeFromBranch,
+            .createPreSessionHook,
             .openInFinder,
             .copyPath,
         ])
-        // Section boundaries: after archive, after the hibernation block, and
-        // after the fork/nested block.
-        #expect(dividerIndices(items) == [2, 7, 11])
+        // Section boundaries: after archive, after the hibernation block,
+        // after the fork/nested block, and after the maintenance item.
+        #expect(dividerIndices(items) == [2, 7, 11, 13])
         expectWellFormedDividers(items)
     }
 
     @Test func emptyHibernationSectionCollapses() {
         // No Claude sessions at all: the hibernation and fork sections are
-        // empty, so exactly two dividers remain — rename/archive | nested |
-        // finder/copy — with no doubled or dangling dividers.
+        // empty, so exactly three dividers remain — rename/archive | nested |
+        // maintenance | finder/copy — with no doubled or dangling dividers.
         let ctx = RowActionMenu.Context(hasRepoID: true, branch: "tbd/x")
         let items = RowActionMenu.items(context: ctx)
         #expect(kinds(items) == [
@@ -87,10 +89,11 @@ struct RowActionMenuRegularTests {
             .archive,
             .createNestedWorktree,
             .newWorktreeFromBranch,
+            .createPreSessionHook,
             .openInFinder,
             .copyPath,
         ])
-        #expect(dividerIndices(items) == [2, 5])
+        #expect(dividerIndices(items) == [2, 5, 7])
         expectWellFormedDividers(items)
     }
 
@@ -150,17 +153,31 @@ struct RowActionMenuRegularTests {
         #expect(archive?.disabledHelp == nil)
     }
 
-    @Test("re-run item appears only when a preSession hook resolves")
-    func rerunItemGatedOnHook() {
-        let without = RowActionMenu.items(context: .init(hasPreSessionHook: false))
-        #expect(!without.contains(.action(.init(
-            kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
-        ))))
-
+    @Test("regular row with a hook offers Re-run; without one, offers Create")
+    func maintenanceItemThreeStates() {
         let with = RowActionMenu.items(context: .init(hasPreSessionHook: true))
         #expect(with.contains(.action(.init(
             kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
         ))))
+        #expect(!kinds(with).contains(.createPreSessionHook))
+
+        let without = RowActionMenu.items(context: .init(hasPreSessionHook: false))
+        #expect(without.contains(.action(.init(
+            kind: .createPreSessionHook, title: RowActionMenu.createPreSessionLabel
+        ))))
+        #expect(!kinds(without).contains(.rerunPreSessionHook))
+    }
+
+    @Test("the create item sits in its own section directly above Open in Finder")
+    func createItemSection() throws {
+        let items = RowActionMenu.items(context: .init(hasPreSessionHook: false))
+        let create = try #require(items.firstIndex(of: .action(.init(
+            kind: .createPreSessionHook, title: RowActionMenu.createPreSessionLabel
+        ))))
+        #expect(items[create - 1] == .divider)
+        #expect(items[create + 1] == .divider)
+        #expect(items[create + 2] == .action(.init(kind: .openInFinder, title: "Open in Finder")))
+        expectWellFormedDividers(items)
     }
 
     @Test("re-run item sits in its own section directly above Open in Finder")
@@ -169,25 +186,38 @@ struct RowActionMenuRegularTests {
         let rerun = try #require(items.firstIndex(of: .action(.init(
             kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
         ))))
-        // Divider immediately before and after → its own section.
         #expect(items[rerun - 1] == .divider)
         #expect(items[rerun + 1] == .divider)
         #expect(items[rerun + 2] == .action(.init(kind: .openInFinder, title: "Open in Finder")))
+        expectWellFormedDividers(items)
     }
 
-    @Test("scratch rows get the re-run item, main rows never do")
-    func rerunItemRowScope() {
-        let scratch = RowActionMenu.items(context: .init(isScratch: true, hasPreSessionHook: true))
-        #expect(scratch.contains(.action(.init(
-            kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
-        ))))
-
-        let main = RowActionMenu.items(context: .init(
-            status: .main, hasPreSessionHook: true
+    @Test("scratch rows get Re-run but never Create; the section collapses cleanly")
+    func maintenanceItemRowScopeScratch() {
+        // A scratch space has no repo hooks editor to reveal (isScratch IS repoID == nil).
+        let scratchWith = RowActionMenu.items(context: .init(
+            hasRepoID: false, isScratch: true, hasPreSessionHook: true
         ))
-        #expect(!main.contains(.action(.init(
-            kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
-        ))))
+        #expect(kinds(scratchWith).contains(.rerunPreSessionHook))
+
+        let scratchWithout = RowActionMenu.items(context: .init(
+            hasRepoID: false, isScratch: true, hasPreSessionHook: false
+        ))
+        #expect(!kinds(scratchWithout).contains(.createPreSessionHook))
+        #expect(!kinds(scratchWithout).contains(.rerunPreSessionHook))
+        // The empty maintenance section must leave no doubled or dangling divider.
+        expectWellFormedDividers(scratchWithout)
+    }
+
+    @Test("main rows get neither maintenance item")
+    func maintenanceItemRowScopeMain() {
+        for hasHook in [true, false] {
+            let main = RowActionMenu.items(context: .init(
+                status: .main, hasPreSessionHook: hasHook
+            ))
+            #expect(!kinds(main).contains(.rerunPreSessionHook))
+            #expect(!kinds(main).contains(.createPreSessionHook))
+        }
     }
 
 }
@@ -205,6 +235,7 @@ struct RowActionMenuScratchTests {
                                         hasHibernatedClaude: true,
                                         hasUnpinnedClaude: true,
                                         hasKeepWarmClaude: true,
+                                        hasRepoID: false,
                                         isScratch: true,
                                         isPromoted: false,
                                         claudeSessions: [s])
@@ -232,7 +263,7 @@ struct RowActionMenuScratchTests {
         // No Claude sessions at all: hibernation and fork sections vanish, so
         // the menu is rename/archive | finder/copy | delete(+caption) with
         // exactly two dividers — never doubled.
-        let ctx = RowActionMenu.Context(isScratch: true, isPromoted: false)
+        let ctx = RowActionMenu.Context(hasRepoID: false, isScratch: true, isPromoted: false)
         let items = RowActionMenu.items(context: ctx)
         #expect(kinds(items) == [
             .rename,
@@ -247,18 +278,22 @@ struct RowActionMenuScratchTests {
     }
 
     @Test func promoteHintOmittedWhenAlreadyPromoted() {
-        let ctx = RowActionMenu.Context(isScratch: true, isPromoted: true)
+        let ctx = RowActionMenu.Context(hasRepoID: false, isScratch: true, isPromoted: true)
         let items = RowActionMenu.items(context: ctx)
         #expect(!items.contains(.caption(RowActionMenu.promoteHint)))
         // Delete then becomes the literal last item.
         #expect(items.last?.actionKind == .deleteScratch)
+        // A scratch row has no repo hooks editor to reveal: neither
+        // maintenance item should ever appear.
+        #expect(!kinds(items).contains(.createPreSessionHook))
+        #expect(!kinds(items).contains(.rerunPreSessionHook))
     }
 
     @Test func scratchWithClaudeSessionCarriesForkEntries() {
         // Scratch spaces host Claude sessions too: the fork entries appear in
         // the middle section, same as the regular branch.
         let s = session("Claude 1")
-        let ctx = RowActionMenu.Context(isScratch: true, claudeSessions: [s])
+        let ctx = RowActionMenu.Context(hasRepoID: false, isScratch: true, claudeSessions: [s])
         let items = RowActionMenu.items(context: ctx)
         #expect(kinds(items) == [
             .rename,
@@ -272,10 +307,15 @@ struct RowActionMenuScratchTests {
     }
 
     @Test func scratchArchiveAndDeleteAreDestructive() {
-        let ctx = RowActionMenu.Context(isScratch: true)
-        let actions = RowActionMenu.items(context: ctx).compactMap(\.action)
+        let ctx = RowActionMenu.Context(hasRepoID: false, isScratch: true)
+        let items = RowActionMenu.items(context: ctx)
+        let actions = items.compactMap(\.action)
         #expect(actions.first { $0.kind == .archiveScratch }?.role == .destructive)
         #expect(actions.first { $0.kind == .deleteScratch }?.role == .destructive)
+        // A scratch row has no repo hooks editor to reveal: neither
+        // maintenance item should ever appear.
+        #expect(!kinds(items).contains(.createPreSessionHook))
+        #expect(!kinds(items).contains(.rerunPreSessionHook))
     }
 }
 

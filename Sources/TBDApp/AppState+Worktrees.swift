@@ -293,9 +293,9 @@ extension AppState {
         do {
             let size = mainAreaTerminalSize()
             try await daemonClient.rerunPreSessionHook(worktreeID: worktreeID, cols: size.cols, rows: size.rows)
-            logger.info("Re-running setup hook for worktree \(worktreeID, privacy: .public)")
+            logger.info("Re-running pre-session hook for worktree \(worktreeID, privacy: .public)")
         } catch {
-            logger.error("Failed to re-run setup hook: \(error)")
+            logger.error("Failed to re-run pre-session hook: \(error)")
             showAlert("\(error)", isError: true)
         }
     }
@@ -537,6 +537,18 @@ extension AppState {
         selectedRepoID = id
         selectedScratchSection = false
         Task { await refreshArchivedWorktrees(repoID: id) }
+    }
+
+    /// Reveal the repo's pre-session hook editor: select the repo, switch its
+    /// detail pane to Settings, scroll to and focus the hook's editor.
+    ///
+    /// Ordering matters. `selectRepo` clears the worktree/scratch selection so
+    /// `ContentView` swaps in `RepoDetailView`; the reveal is posted after, and
+    /// survives until that view consumes it — whether it mounts fresh (onAppear)
+    /// or is reused from another repo (onChange).
+    func revealPreSessionHookEditor(repoID: UUID) {
+        selectRepo(id: repoID)
+        repoDetailReveal = .preSessionHook(repoID: repoID)
     }
 
     /// User-facing label for the repo-less scratch section. Single source for

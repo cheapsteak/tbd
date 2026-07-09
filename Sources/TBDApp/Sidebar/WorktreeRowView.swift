@@ -284,7 +284,7 @@ struct WorktreeRowView: View {
 
     /// Subtitle under the name while the worktree is `.creating`. A visible
     /// pre-session hook terminal means the git checkout is done and the
-    /// blocking setup hook is what the user is waiting on.
+    /// blocking pre-session hook is what the user is waiting on.
     static func creatingSubtitle(hasPreSessionTerminal: Bool) -> String {
         hasPreSessionTerminal ? "Running setup…" : "Creating worktree…"
     }
