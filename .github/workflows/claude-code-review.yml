@@ -129,6 +129,8 @@ jobs:
 
             Do not read or review changes in generated files like graphql codegen output.
 
+            TUI screen-scraping is a High-severity defect. REJECT any PR that adds logic parsing captured terminal screen text (tmux capture-pane output, pane text, composer lines) to infer agent state — e.g. matching TUI glyphs like ❯, prompts, placeholder or status strings. Agent state must come from machine interfaces (Claude Code hooks, transcript JSONL, control mode, exit codes). Likewise treat as High severity any file added to the `excluded:` lists of the `no_tui_scraping_literals` or `capture_pane_allowlist` rules in .swiftlint.yml without a compelling justification in the PR description. See the CLAUDE.md section "No TUI screen-scraping".
+
             IMPORTANT: You are to execute in three phases. Do not write the review content to your text response during Phases 1 and 2 — save that for Phase 3. Tool calls and brief phase transitions are fine.
 
             Phase 1: Write out your feedback and comments on the changes in a local txt file in the current working directory (not to GitHub). Use the Write tool to create the file, not shell redirection. Do not write to /tmp/.
