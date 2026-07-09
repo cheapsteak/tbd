@@ -324,6 +324,32 @@ test_restart_sh_launches_reclaim_async_and_silent() {
   assert_contains "restart.sh honors TBD_SKIP_RECLAIM opt-out" "$body" 'TBD_SKIP_RECLAIM'
   # shellcheck disable=SC2016
   assert_contains "restart.sh guards on reclaim script executability" "$body" '[ -x "$RECLAIM_SCRIPT" ]'
+
+  # The launch line itself must be fully detached from the terminal: stderr
+  # merged into the log and stdin redirected from /dev/null, then backgrounded.
+  local launch_line
+  # shellcheck disable=SC2016
+  launch_line="$(grep -F 'nohup "$RECLAIM_SCRIPT"' "$restart")"
+  assert_contains "launch line merges stderr into the log" "$launch_line" '2>&1'
+  assert_contains "launch line redirects stdin from /dev/null" "$launch_line" '< /dev/null'
+  assert_contains "launch line is backgrounded" "$launch_line" '/dev/null &'
+
+  # Regression guard: a bare `disown` under restart.sh's set -e aborts the
+  # whole restart if the reclaim job already finished and was reaped (and
+  # prints "no such job" to the terminal). nohup + full fd redirection in a
+  # non-interactive shell detaches on its own; disown must never come back.
+  assert_missing "restart.sh contains no disown" "$body" 'disown'
+
+  # Ordering: the reclaim launch must precede the swift build so the two
+  # overlap instead of the reclaim running after the restart's slow phase.
+  local nohup_ln build_ln
+  # shellcheck disable=SC2016
+  nohup_ln="$(grep -nF 'nohup "$RECLAIM_SCRIPT"' "$restart" | head -1 | cut -d: -f1)"
+  # shellcheck disable=SC2016
+  build_ln="$(grep -nF '(cd "$REPO_ROOT" && swift build)' "$restart" | head -1 | cut -d: -f1)"
+  local order="unknown"
+  if [[ -n "$nohup_ln" && -n "$build_ln" ]] && (( nohup_ln < build_ln )); then order="before"; fi
+  assert_eq "reclaim launch (line ${nohup_ln:-?}) precedes swift build (line ${build_ln:-?})" "before" "$order"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done
