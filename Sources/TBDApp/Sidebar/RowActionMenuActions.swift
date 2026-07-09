@@ -174,6 +174,11 @@ struct RowActionMenuActions {
             let wtID = worktree.id
             Task { await appState.rerunPreSessionHook(worktreeID: wtID) }
 
+        case .createPreSessionHook:
+            // TODO: wired up in a follow-on task — reveal the repo's
+            // pre-session hook editor so the user can author one.
+            break
+
         case let .forkSession(terminalID, profileID):
             // Duplicate the conversation into a NEW tab on the SAME account —
             // swapTerminalProfile with the session's own profileID (nil = same
