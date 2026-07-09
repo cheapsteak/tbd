@@ -47,6 +47,16 @@ enum DaemonLiveness {
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
         guard length > 0 else { return nil }
-        return String(cString: buffer)
+        // proc_pidpath NUL-terminates at `length`; truncate to the path's
+        // actual bytes before decoding so trailing zero-fill from the
+        // oversized buffer isn't folded into the string (String(cString:)
+        // stopped at the first NUL for free — String(decoding:as:) does not).
+        let pathBytes = buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }
+        // String(bytes:encoding:) is failable and would turn an invalid-UTF8
+        // path into `nil` ("not our daemon"); String(cString:) never failed
+        // that way (lossy U+FFFD repair), so String(decoding:as:) is the
+        // correct like-for-like replacement here, not Data.
+        // swiftlint:disable:next optional_data_string_conversion
+        return String(decoding: pathBytes, as: UTF8.self)
     }
 }
