@@ -63,15 +63,29 @@ import GRDB
 
     @Test func configHibernationDefaultsAndRoundTrip() async throws {
         let db = try TBDDatabase(inMemory: true)
-        // Defaults: ON, 30 min.
+        // Defaults: idle sweep OFF (forced off by migration v50), 30 min.
         let initial = try await db.config.get()
-        #expect(initial.autoHibernateEnabled == true)
+        #expect(initial.autoHibernateEnabled == false)
         #expect(initial.hibernateIdleMinutes == Config.defaultHibernateIdleMinutes)
 
-        try await db.config.setAutoHibernate(enabled: false, idleMinutes: 45)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 45)
         let updated = try await db.config.get()
-        #expect(updated.autoHibernateEnabled == false)
+        #expect(updated.autoHibernateEnabled == true)
         #expect(updated.hibernateIdleMinutes == 45)
+    }
+
+    /// Migration v50 forces the idle-sweep master switch off on a fresh DB, and
+    /// a subsequent user opt-in must round-trip (the migration must not fight a
+    /// later `setAutoHibernate(enabled: true, ...)`).
+    @Test func migrationV50ForcesIdleSweepOffButAllowsOptIn() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        // A fresh DB runs every migration through v50 → sweep off.
+        #expect(try await db.config.get().autoHibernateEnabled == false)
+
+        // User opts back in; the value must stick.
+        try await db.config.setAutoHibernate(
+            enabled: true, idleMinutes: Config.defaultHibernateIdleMinutes)
+        #expect(try await db.config.get().autoHibernateEnabled == true)
     }
 
     @Test func configIdleMinutesFlooredAtOne() async throws {

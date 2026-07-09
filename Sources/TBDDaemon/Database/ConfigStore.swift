@@ -44,7 +44,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             scratchProfileOverrideID: scratch_profile_override_id.flatMap(UUID.init(uuidString:)),
             nightwatchMode: nightwatch_mode
                 .flatMap(NightwatchMode.init(rawValue:)) ?? .off,
-            autoHibernateEnabled: auto_hibernate_enabled ?? true,
+            autoHibernateEnabled: auto_hibernate_enabled ?? false,
             hibernateIdleMinutes: hibernate_idle_minutes ?? Config.defaultHibernateIdleMinutes,
             controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false

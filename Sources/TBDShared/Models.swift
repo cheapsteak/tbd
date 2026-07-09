@@ -731,9 +731,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// Nightwatch mode flag: off, daywatch, or nightwatch.
     public var nightwatchMode: NightwatchMode
     /// Master switch for the daemon-side auto-hibernate idle timer. Default
-    /// ON: idle Claude sessions are auto-hibernated to reclaim memory (their
-    /// prompt cache has already expired, so resume is cheap). When false, only
-    /// manual "Hibernate now" hibernates.
+    /// OFF: the idle sweep drives a sanctioned TUI screen-scrape
+    /// (`HibernationSafetyChecks.hasPendingInput`) whose failure direction is
+    /// asymmetric — a composer-rendering change in Claude Code could let the
+    /// park eat typed-but-unsent input — so it is opt-in. When true, idle
+    /// Claude sessions are auto-hibernated to reclaim memory (their prompt
+    /// cache has already expired, so resume is cheap). When false, only manual
+    /// "Hibernate now" hibernates.
     public var autoHibernateEnabled: Bool
     /// Minutes a Claude session must sit idle-at-rest before the auto-hibernate
     /// timer terminates its process. Clamped to a sane floor by the daemon.
@@ -762,7 +766,7 @@ public struct Config: Codable, Sendable, Equatable {
                 scratchRenamePrompt: String? = nil,
                 scratchProfileOverrideID: UUID? = nil,
                 nightwatchMode: NightwatchMode = .off,
-                autoHibernateEnabled: Bool = true,
+                autoHibernateEnabled: Bool = false,
                 hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
                 controlModeEnabled: Bool = false,
                 autoResumeOnApiError: Bool = false) {
@@ -805,7 +809,7 @@ public struct Config: Codable, Sendable, Equatable {
         scratchProfileOverrideID = try c.decodeIfPresent(UUID.self, forKey: .scratchProfileOverrideID)
         nightwatchMode = try c.decodeIfPresent(
             NightwatchMode.self, forKey: .nightwatchMode) ?? .off
-        autoHibernateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateEnabled) ?? true
+        autoHibernateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateEnabled) ?? false
         hibernateIdleMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateIdleMinutes)
             ?? Config.defaultHibernateIdleMinutes
         controlModeEnabled = try c.decodeIfPresent(

@@ -833,6 +833,27 @@ public final class TBDDatabase: Sendable {
                 type: .boolean, defaults: false)
         }
 
+        // One-time forced opt-out of the auto-hibernate idle sweep.
+        //
+        // The idle sweep drives `HibernationSafetyChecks.hasPendingInput`, a
+        // sanctioned TUI screen-scrape whose failure direction is asymmetric:
+        // if Claude Code changes its `>` composer rendering, typed-but-unsent
+        // input goes unrecognized and gets EATEN by the park. Defaulting the
+        // sweep off shrinks the default-on scraping surface to zero.
+        //
+        // A forcing UPDATE (not just a Swift default flip) is required: v39
+        // added `auto_hibernate_enabled` with `DEFAULT 1`, and SQLite's
+        // `ADD COLUMN ... DEFAULT 1` backfills every pre-existing row to `1`
+        // rather than NULL — so an explicit-true is byte-identical to a
+        // never-touched-true, and `auto_hibernate_enabled ?? true` never fires.
+        // The only way to move existing installs off the sweep is to rewrite
+        // the column. This deliberately clears an explicit `true` too; that is
+        // the approved one-time opt-out. Naturally idempotent, and a later user
+        // opt-in (`setAutoHibernate(enabled: true, ...)`) is not fought.
+        migrator.registerMigration("v50_auto_hibernate_idle_sweep_off_by_default") { db in
+            try db.execute(sql: "UPDATE config SET auto_hibernate_enabled = 0")
+        }
+
         return migrator
     }
 }
