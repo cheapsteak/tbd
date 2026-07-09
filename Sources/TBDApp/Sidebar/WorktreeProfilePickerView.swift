@@ -17,6 +17,9 @@ import TBDShared
 /// Modeled on `BranchPickerView` for consistent popover sizing/styling.
 struct WorktreeProfilePickerView: View {
     let repoID: UUID
+    /// When set, created worktrees are nested under this parent (the nested `+`
+    /// on a worktree row). Nil for the repo-header `+` (top-level worktrees).
+    var parentWorktreeID: UUID? = nil
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
@@ -162,13 +165,13 @@ struct WorktreeProfilePickerView: View {
 
             // Reused branch list: selecting a branch creates on that existing
             // branch with the default model and dismisses the whole popover.
-            BranchListView(repoID: repoID)
+            BranchListView(repoID: repoID, parentWorktreeID: parentWorktreeID)
         }
     }
 
     private func pick(profileID: UUID?) {
         dismiss()
-        appState.createWorktree(repoID: repoID, profileID: profileID)
+        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, profileID: profileID)
     }
 
     /// Whether a profile row should render the two-bar usage meter (instead of

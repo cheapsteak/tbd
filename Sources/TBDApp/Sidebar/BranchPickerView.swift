@@ -23,6 +23,8 @@ struct BranchPickerView: View {
 /// under the back bar.
 struct BranchListView: View {
     let repoID: UUID
+    /// Forwarded so a branch chosen from a nested `+` creates a child worktree.
+    var parentWorktreeID: UUID? = nil
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
@@ -102,7 +104,7 @@ struct BranchListView: View {
     private func pick(_ branch: BranchInfo) {
         dismiss()
         // Branch selection always uses the default model (no profile override).
-        appState.createWorktree(repoID: repoID, existingBranch: branch)
+        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, existingBranch: branch)
     }
 
     private func selectFirstMatch() {
