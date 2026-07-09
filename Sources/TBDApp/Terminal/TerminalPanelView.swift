@@ -44,6 +44,14 @@ struct TerminalPanelView: View {
     /// `tmuxWindowID` changes, the view is recreated (`.id` changes) with
     /// this flag false, and tmux connects normally.
     var isSuspendedSnapshot: Bool = false
+    /// Reason-phrased hibernate notice for a PARKED pane (see
+    /// `HibernatedBannerModel.message(for:)`). When set alongside
+    /// `isSuspendedSnapshot`, the notice is composed INTO the fed snapshot as
+    /// its last row — in the terminal's own grid/font — via
+    /// `ParkedSnapshotComposer` (render-time only; the stored snapshot stays
+    /// clean). nil for live terminals: the snapshot is fed untouched (it is
+    /// the reconnect backdrop on wake).
+    var parkedNoticeMessage: String? = nil
     /// Called on every scroll/click event. When it returns `true`, both
     /// NSEvent monitors short-circuit — the terminal does NOT consume the
     /// event, leaving it for whatever SwiftUI overlay (currently a
@@ -117,6 +125,7 @@ struct TerminalPanelView: View {
                 onDeadWindow: onDeadWindow,
                 initialSnapshot: initialSnapshot,
                 isSuspendedSnapshot: isSuspendedSnapshot,
+                parkedNoticeMessage: parkedNoticeMessage,
                 shouldSuppressEvents: shouldSuppressEvents
             )
         }
@@ -197,6 +206,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     var onDeadWindow: (() -> Void)?
     var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
+    var parkedNoticeMessage: String? = nil
     var shouldSuppressEvents: @MainActor () -> Bool = { false }
 
     func makeNSView(context: Context) -> TBDTerminalView {
@@ -233,6 +243,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // Feed snapshot before tmux connects so the user sees the last state
         let snapshot = initialSnapshot
         let suspendedOnCreate = isSuspendedSnapshot
+        let parkedMessage = parkedNoticeMessage
         // Control-mode branch (Phase 2, opt-in): gate on the DAEMON-reported
         // capability — the app cannot read TBD_TMUX_CONTROL_MODE itself (it is
         // launched via `open`, which drops shell env). Resolve the terminal's
@@ -248,10 +259,27 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // Start tmux client as soon as the view has real dimensions from layout
         tv.onReady = { [weak tv] in
             guard let tv else { return }
-            if let snapshot {
+            // PARKED pane: compose the hibernate notice INTO the snapshot as
+            // its last row (overwriting the frozen status bar), padded to the
+            // view's REAL column count — onReady fires once layout has given
+            // the terminal its true dimensions, so `tv.terminal.cols` is the
+            // same source the resize paths use. A nil snapshot still yields
+            // the bar alone (a capture-less parked pane used to be pitch
+            // black). The live/wake path (`suspendedOnCreate == false`) feeds
+            // the snapshot untouched — it is the reconnect backdrop.
+            let feedText: String?
+            if suspendedOnCreate, let parkedMessage {
+                feedText = ParkedSnapshotComposer.compose(
+                    snapshot: snapshot, message: parkedMessage, columns: tv.terminal.cols)
+            } else {
+                feedText = snapshot
+            }
+            if let feedText {
                 // SwiftTerm expects \r\n line endings. Normalize first to avoid
                 // doubling any \r\n that might already exist in the snapshot.
-                let normalized = snapshot
+                // The composed notice bar rides the same normalization so it
+                // cannot stair-step.
+                let normalized = feedText
                     .replacingOccurrences(of: "\r\n", with: "\n")
                     .replacingOccurrences(of: "\n", with: "\r\n")
                 tv.feed(text: normalized)

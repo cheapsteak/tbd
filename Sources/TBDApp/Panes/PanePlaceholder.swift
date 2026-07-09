@@ -366,6 +366,14 @@ struct PanePlaceholder: View {
                     // captures a snapshot into `suspendedSnapshot`, so hibernated
                     // rows have one too.
                     isSuspendedSnapshot: terminal.isParked,
+                    // Reason-phrased hibernate notice, composed INTO the
+                    // frozen snapshot's last row at feed time (in the
+                    // terminal's own grid/font — see ParkedSnapshotComposer).
+                    // nil for a live terminal so the wake/reconnect path
+                    // feeds the snapshot untouched.
+                    parkedNoticeMessage: terminal.isParked
+                        ? HibernatedBannerModel.message(for: terminal.hibernateReason)
+                        : nil,
                     shouldSuppressEvents: { [overlayCoordinator] in
                         shouldSuppressEvents(in: overlayCoordinator, forTerminalID: terminalID)
                     }
@@ -375,7 +383,8 @@ struct PanePlaceholder: View {
                     // Full-surface click-to-wake for a PARKED pane: the whole
                     // frozen snapshot is the resume affordance (the old
                     // corner "Click to resume session" chip was easy to miss;
-                    // the HibernatedNoticeStrip below carries the text). Gated
+                    // the in-grid notice bar composed into the snapshot's
+                    // last row carries the text). Gated
                     // by ParkedPaneWakeModel so a LIVE terminal never gets a
                     // click-catching layer over it. A transparent plain Button
                     // (not .onTapGesture, which blocks .contextMenu on macOS)
@@ -406,24 +415,6 @@ struct PanePlaceholder: View {
                             if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                         }
                         .help("Click to resume session")
-                    }
-                }
-                .overlay(alignment: .bottom) {
-                    // Hibernate notice for a PARKED pane: a thin status-line
-                    // strip drawn OVER the frozen snapshot's last text row —
-                    // deliberately not a layout-shifting footer, so the parked
-                    // pane keeps the exact geometry of the live one. Decided
-                    // by the same HibernatedBannerModel that suppresses the
-                    // footer banner (parked → .hibernatedOverlay). Must sit
-                    // AFTER the wake-button overlay (source order) but BEFORE
-                    // the TranscriptOverlayView overlay below so that stays on
-                    // top, and must never intercept clicks — allowsHitTesting
-                    // false lets a click "through" the strip reach the
-                    // full-surface wake button.
-                    if case .hibernatedOverlay(let message) =
-                        HibernatedBannerModel.banner(for: terminal) {
-                        HibernatedNoticeStrip(message: message)
-                            .allowsHitTesting(false)
                     }
                 }
                 .overlay {
@@ -570,36 +561,6 @@ struct PanePlaceholder: View {
             direction: direction,
             newContent: .terminal(terminalID: newTerminal.id)
         )
-    }
-}
-
-// MARK: - HibernatedNoticeStrip
-
-/// One-line hibernate notice overlaid on the bottom edge of a PARKED pane's
-/// frozen snapshot — visually a status line covering roughly the last text
-/// row, not a layout-shifting footer. `.ultraThinMaterial` keeps it readable
-/// over arbitrary snapshot content. The message comes from
-/// `HibernatedBannerModel.message(for:)` so the per-reason phrasing stays
-/// unit-tested; the caller disables hit testing so clicks pass through to the
-/// full-surface wake button underneath.
-private struct HibernatedNoticeStrip: View {
-    let message: String
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "moon.zzz")
-                .font(.system(size: 10, weight: .semibold))
-                .frame(width: 12, height: 12)
-            Text(message)
-                .font(.system(size: 11))
-                .lineLimit(1)
-            Spacer(minLength: 0)
-        }
-        .foregroundStyle(Color.indigo)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.ultraThinMaterial)
     }
 }
 
