@@ -137,4 +137,70 @@ struct AutoHibernateOnMergeCoordinatorTests {
         let notifications = try await db.notifications.unread(worktreeID: wtID)
         #expect(notifications.isEmpty)
     }
+
+    // MARK: - Already-parked terminal is untouched (idempotent late/repeat merge)
+
+    /// A merged transition fired against a worktree whose terminal is ALREADY
+    /// parked must be a silent no-op: `hibernateForMerge` returns
+    /// `.alreadyHibernated`, so the existing `hibernatedAt` / `hibernateReason`
+    /// are NOT overwritten and — because `parked == 0` — no notification is
+    /// created. This pins the "a repeat/late merge event can't stomp a manual
+    /// park" property: merged transitions re-fire after every daemon restart
+    /// while the PR stays merged.
+    @Test func alreadyParkedTerminalNotOverwrittenAndNoNotification() async throws {
+        let (coord, db, wtID, terminalID) = try await makeDeps()
+        try await db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+
+        // Park the terminal FIRST with a distinctive manual reason + old stamp.
+        let originalStamp = Date(timeIntervalSince1970: 1_000_000)
+        try await db.terminals.setHibernated(
+            id: terminalID, sessionID: "sess-1", snapshot: nil,
+            reason: .manual, at: originalStamp)
+
+        await coord.handleMergedTransition(worktreeID: wtID, prNumber: 10)
+
+        let after = try await db.terminals.get(id: terminalID)
+        // The manual park survives — reason and timestamp are both unchanged
+        // (NOT re-stamped to `.merged` / now).
+        #expect(after?.hibernateReason == .manual)
+        #expect(after?.hibernatedAt == originalStamp)
+        // parked == 0 → no summary notification.
+        let notifications = try await db.notifications.unread(worktreeID: wtID)
+        #expect(notifications.isEmpty)
+    }
+
+    // MARK: - Notification pluralization (plural branch)
+
+    /// Two parkable Claude terminals on one armed worktree → BOTH park with
+    /// `.merged`, and exactly ONE summary notification is created whose message
+    /// uses the plural "sessions" ("Hibernated 2 sessions …"). Every other test
+    /// parks a single terminal, so this is the only cover for the
+    /// `parked == 1 ? "session" : "sessions"` plural arm.
+    @Test func twoParkedTerminalsPluralNotification() async throws {
+        let (coord, db, wtID, terminalID1) = try await makeDeps()
+        try await db.worktrees.setAutoHibernateOnMerge(id: wtID, value: true)
+
+        // Add a SECOND idle Claude terminal on the same worktree.
+        let terminal2 = try await db.terminals.create(
+            worktreeID: wtID, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "claude2", claudeSessionID: "sess-2", kind: .claude)
+        try await db.terminals.setActivityState(id: terminal2.id, activityState: .idle)
+
+        await coord.handleMergedTransition(worktreeID: wtID, prNumber: 11)
+
+        // Both terminals parked with the merge reason.
+        let after1 = try await db.terminals.get(id: terminalID1)
+        let after2 = try await db.terminals.get(id: terminal2.id)
+        #expect(after1?.hibernatedAt != nil)
+        #expect(after1?.hibernateReason == .merged)
+        #expect(after2?.hibernatedAt != nil)
+        #expect(after2?.hibernateReason == .merged)
+
+        // Exactly one summary notification, using the plural wording.
+        let notifications = try await db.notifications.unread(worktreeID: wtID)
+        #expect(notifications.count == 1)
+        #expect(notifications.first?.type == .taskComplete)
+        #expect(notifications.first?.message?.contains("2 sessions") == true)
+        #expect(notifications.first?.message?.contains("#11") == true)
+    }
 }
