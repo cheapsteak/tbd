@@ -82,6 +82,8 @@
       var RETURN_DELAY_MS = 600;
       var armedUntil = 0;
       var returned = false;
+      var returnTimer = null;
+      var fallbackStatusHTML = status.innerHTML;
 
       function arm() {
         armedUntil = Date.now() + DETECT_WINDOW_MS;
@@ -96,7 +98,8 @@
           : 'TBD opened — you can close this tab.';
         // Short delay so the scheme launch isn't interrupted by navigating
         // away; the tab is backgrounded at this point, so it's seamless.
-        setTimeout(function () {
+        returnTimer = setTimeout(function () {
+          returnTimer = null;
           if (canGoBack) {
             history.back();
           } else {
@@ -108,7 +111,17 @@
       }
 
       document.addEventListener('visibilitychange', function () {
-        if (document.hidden && Date.now() <= armedUntil) onOpened();
+        if (document.hidden) {
+          if (Date.now() <= armedUntil) onOpened();
+        } else if (returnTimer !== null) {
+          // Tab became visible again before the return fired — the hide was
+          // incidental (alt-tab, a notification), not TBD activating. Cancel
+          // the pending navigation and restore the fallback UI intact.
+          clearTimeout(returnTimer);
+          returnTimer = null;
+          returned = false;
+          status.innerHTML = fallbackStatusHTML;
+        }
       });
 
       // The manual button fires the same tbd:// URL — arm the same
