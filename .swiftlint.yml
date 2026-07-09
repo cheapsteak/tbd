@@ -97,3 +97,46 @@ custom_rules:
       - string
     message: "setenv(\"TBD_HOME\") is only allowed in TBDDaemonTests under TBDHomeSerialized — it races concurrent suites in other targets (see CLAUDE.md, ConstantsTests flake)."
     severity: error
+
+  no_tui_scraping_literals:
+    name: "No agent-TUI literals in Sources/"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/.*\\.swift"
+    excluded:
+      # Sanctioned scrapers, exempt with refactor-later intent — see CLAUDE.md "No TUI screen-scraping".
+      # Drives the interactive `claude /login` TUI; no machine interface exists pre-login.
+      - "Sources/TBDDaemon/Claude/LoginSessionCoordinator\\.swift"
+      # Typed-but-unsent-input hibernation safety rail; no machine signal for composer state.
+      - "Sources/TBDDaemon/Lifecycle/HibernationSafetyChecks\\.swift"
+      # Embedded Nightwatch Python: fleet babysitting via screen classification is its purpose;
+      # belongs outside TBD once a plugin/extensibility surface exists.
+      - "Sources/TBDShared/NightwatchSkillContent\\.swift"
+    regex: '❯|\[Pasted text|esc to interrupt|Do you want to proceed|Enter to select|Tab/Arrow keys|Ready to submit|Select login method|Ask Claude|Type a message|context used|until auto-compact|bypass permissions'
+    match_kinds:
+      - string
+    message: "Don't infer agent state from rendered screen text — use hooks, transcript JSONL, control mode, or exit codes. See CLAUDE.md 'No TUI screen-scraping'."
+    severity: error
+
+  capture_pane_allowlist:
+    name: "capture-pane use outside allowlisted files"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Sources/.*\\.swift"
+    excluded:
+      # The allowlist. Capturing pane text is legitimate ONLY as verbatim pass-through
+      # (display / transport / snapshot). Adding a file here draws High-severity review
+      # scrutiny — see CLAUDE.md "No TUI screen-scraping".
+      - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                     # defines the capture API
+      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"  # terminal.read returns text verbatim
+      - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"     # ANSI display snapshot + safety-rail feed
+      # Capture-for-replay: rebuilds a pane's display state verbatim for control-mode
+      # attach/repair (replay bytes); never parses captured content for agent state.
+      - "Sources/TBDDaemon/Tmux/ControlMode/PaneCaptureReplay\\.swift"
+      - "Sources/TBDShared/NightwatchSkillContent\\.swift"               # embedded Python babysitter (see rule above)
+    regex: 'capturePane\w*\s*\(|capture-pane'
+    match_kinds:
+      - identifier
+      - string
+    message: "capture-pane text may only be passed through verbatim (display/transport/snapshot) from allowlisted files — never parsed for agent state. See CLAUDE.md 'No TUI screen-scraping'."
+    severity: error
