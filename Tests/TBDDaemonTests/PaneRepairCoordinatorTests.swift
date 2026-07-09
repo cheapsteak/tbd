@@ -153,6 +153,7 @@ struct PaneRepairCoordinatorTests {
         // The app catches up — the pipe becomes writable.
         drainPipe(readFD)
         try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
+        try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
         #expect(recorder.writes[1] == """
             capture-pane -peqJN -S -50000 -E -1 -q -t %1
             capture-pane -peqJN -t %1
@@ -332,6 +333,7 @@ struct PaneRepairCoordinatorTests {
         // endRepair, streaming resumed. No new attach needed.
         drainPipe(readFD)
         try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
+        try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
         #expect(recorder.writes[1].hasSuffix("refresh-client -A '%4:continue'"),
                 "the same repair must send batch 2 once the reader drains")
         await succeed(client, captureAndContinueReplies(paneID: paneID))
