@@ -47,7 +47,7 @@ struct TerminalPanelView: View {
     /// Reason-phrased hibernate notice for a PARKED pane (see
     /// `HibernatedBannerModel.message(for:)`). When set alongside
     /// `isSuspendedSnapshot`, the notice is composed INTO the fed snapshot as
-    /// its last row — in the terminal's own grid/font — via
+    /// its last rows — in the terminal's own grid/font — via
     /// `ParkedSnapshotComposer` (render-time only; the stored snapshot stays
     /// clean). nil for live terminals: the snapshot is fed untouched (it is
     /// the reconnect backdrop on wake).
@@ -260,11 +260,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         tv.onReady = { [weak tv] in
             guard let tv else { return }
             // PARKED pane: compose the hibernate notice INTO the snapshot as
-            // its last row (overwriting the frozen status bar), padded to the
+            // its last rows (a notice block overwriting the frozen status-bar
+            // chrome), padded to the
             // view's REAL column count — onReady fires once layout has given
             // the terminal its true dimensions, so `tv.terminal.cols` is the
             // same source the resize paths use. A nil snapshot still yields
-            // the bar alone (a capture-less parked pane used to be pitch
+            // the block alone (a capture-less parked pane used to be pitch
             // black). The live/wake path (`suspendedOnCreate == false`) feeds
             // the snapshot untouched — it is the reconnect backdrop.
             let feedText: String?
@@ -277,8 +278,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             if let feedText {
                 // SwiftTerm expects \r\n line endings. Normalize first to avoid
                 // doubling any \r\n that might already exist in the snapshot.
-                // The composed notice bar rides the same normalization so it
-                // cannot stair-step.
+                // The composed notice block rides the same normalization so
+                // it cannot stair-step.
                 let normalized = feedText
                     .replacingOccurrences(of: "\r\n", with: "\n")
                     .replacingOccurrences(of: "\n", with: "\r\n")

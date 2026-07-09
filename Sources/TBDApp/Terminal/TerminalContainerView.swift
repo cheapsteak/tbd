@@ -213,7 +213,7 @@ struct SingleWorktreeView: View {
                 //   here once per active tab instead of per background tab.
                 // - Parked (hibernated / legacy-suspended): NO footer at all —
                 //   the hibernate notice is composed INTO the frozen
-                //   snapshot's last row at feed time (see
+                //   snapshot's last rows at feed time (see
                 //   ParkedSnapshotComposer), which also wins
                 //   over scheduled-resume: a parked session's "TBD types
                 //   continue at ..." text would be misleading because nothing
@@ -335,7 +335,7 @@ enum HibernatedBannerModel {
     enum Banner: Equatable {
         /// Terminal is parked (hibernated or legacy-suspended) → the footer
         /// slot stays EMPTY; the hibernate notice is composed into the frozen
-        /// snapshot's last row instead (see `ParkedSnapshotComposer` and the
+        /// snapshot's last rows instead (see `ParkedSnapshotComposer` and the
         /// `parkedNoticeMessage` wiring in PanePlaceholder), carrying this
         /// reason-phrased message.
         case hibernatedOverlay(message: String)

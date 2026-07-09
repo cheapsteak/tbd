@@ -367,7 +367,7 @@ struct PanePlaceholder: View {
                     // rows have one too.
                     isSuspendedSnapshot: terminal.isParked,
                     // Reason-phrased hibernate notice, composed INTO the
-                    // frozen snapshot's last row at feed time (in the
+                    // frozen snapshot's last rows at feed time (in the
                     // terminal's own grid/font — see ParkedSnapshotComposer).
                     // nil for a live terminal so the wake/reconnect path
                     // feeds the snapshot untouched.
@@ -383,8 +383,8 @@ struct PanePlaceholder: View {
                     // Full-surface click-to-wake for a PARKED pane: the whole
                     // frozen snapshot is the resume affordance (the old
                     // corner "Click to resume session" chip was easy to miss;
-                    // the in-grid notice bar composed into the snapshot's
-                    // last row carries the text). Gated
+                    // the in-grid notice block composed into the snapshot's
+                    // last rows carries the text). Gated
                     // by ParkedPaneWakeModel so a LIVE terminal never gets a
                     // click-catching layer over it. A transparent plain Button
                     // (not .onTapGesture, which blocks .contextMenu on macOS)

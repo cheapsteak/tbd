@@ -3,124 +3,204 @@ import Testing
 @testable import TBDApp
 
 /// The parked pane's in-grid hibernate notice: `ParkedSnapshotComposer`
-/// composes the frozen snapshot with a truecolor notice bar as its LAST ROW
-/// (overwriting the frozen status bar). Every branch of the pure compose
-/// function is exercised here without SwiftUI, in the same fixture style as
-/// `HibernatedBannerModelTests`.
+/// composes the frozen snapshot with a truecolor indigo notice BLOCK as its
+/// last `blockRows` (3) rows — padding row, text row, padding row —
+/// consuming the same number of trailing content rows (the frozen status
+/// bar + input-box chrome) so the pane never shifts. Every branch of the
+/// pure compose function is exercised here without SwiftUI, in the same
+/// fixture style as `HibernatedBannerModelTests`.
 @Suite("Parked snapshot composer")
 struct ParkedSnapshotComposerTests {
     private let message = "Hibernated — click anywhere in the pane to resume"
     private let bgSGR = ParkedSnapshotComposer.barBackgroundSGR
     private let fgSGR = ParkedSnapshotComposer.barForegroundSGR
     private let reset = ParkedSnapshotComposer.sgrReset
+    private let blockRows = ParkedSnapshotComposer.blockRows
 
     private func compose(_ snapshot: String?, columns: Int = 80) -> String {
         ParkedSnapshotComposer.compose(snapshot: snapshot, message: message, columns: columns)
     }
 
-    /// The bar's visible text: everything with SGR escape sequences stripped.
+    /// Visible text: everything with SGR escape sequences stripped.
     private func visibleText(of composed: String) -> String {
         composed.replacingOccurrences(
             of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
     }
 
-    /// The bar line alone (last line of the composed output).
-    private func lastLine(of composed: String) -> String {
-        composed.components(separatedBy: "\n").last ?? ""
+    private func lines(of composed: String) -> [String] {
+        composed.components(separatedBy: "\n")
     }
 
-    // MARK: - Snapshot line handling
+    /// The text row — the middle row of the trailing notice block.
+    private func textRow(of composed: String) -> String {
+        let all = lines(of: composed)
+        return all[all.count - 2]
+    }
 
-    /// Multi-line snapshot → the final content line (the frozen status bar)
-    /// is dropped, earlier lines are intact, and the bar is the new last row.
-    @Test func multiLineSnapshotReplacesLastContentLine() {
-        let composed = compose("line one\nline two\nclaude status bar")
-        let lines = composed.components(separatedBy: "\n")
-        #expect(lines.count == 3)
-        #expect(lines[0] == "line one")
-        #expect(lines[1] == "line two")
-        #expect(!composed.contains("claude status bar"))
-        #expect(lines[2].contains(message))
+    // MARK: - Colors
+
+    /// The bar colors are the indigo family the deleted SwiftUI banner used:
+    /// truecolor systemIndigo background (88/86/214), pure white foreground.
+    @Test func colorsAreSystemIndigoOnWhite() {
+        #expect(bgSGR == "\u{1B}[48;2;88;86;214m")
+        #expect(fgSGR == "\u{1B}[38;2;255;255;255m")
+        let composed = compose(nil)
+        #expect(composed.contains(bgSGR))
+        #expect(composed.contains(fgSGR))
+    }
+
+    // MARK: - Block shape
+
+    /// The notice is a 3-row block: blank padding row, text row, blank
+    /// padding row — the height matches the `blockRows` constant.
+    @Test func blockIsThreeRows() {
+        #expect(blockRows == 3)
+        let composed = compose(nil)
+        let rows = lines(of: composed)
+        #expect(rows.count == blockRows)
+        #expect(rows[1].contains(message))
+        #expect(!rows[0].contains(message))
+        #expect(!rows[2].contains(message))
+    }
+
+    /// Both padding rows carry the block background SGR and are space-padded
+    /// to the full column width so the background spans the row.
+    @Test func paddingRowsCarryBackgroundAndFullWidth() {
+        let composed = compose(nil, columns: 60)
+        let rows = lines(of: composed)
+        for row in [rows[0], rows[2]] {
+            #expect(row.contains(bgSGR))
+            #expect(row.hasSuffix(reset))
+            #expect(visibleText(of: row) == String(repeating: " ", count: 60))
+        }
+    }
+
+    /// The text row leads with the two-space inset then the moon glyph,
+    /// inside the colored bar.
+    @Test func textRowHasTwoSpaceInsetBeforeMoonGlyph() {
+        let composed = compose(nil)
+        #expect(visibleText(of: textRow(of: composed)).hasPrefix("  ☾ "))
+    }
+
+    // MARK: - Snapshot line handling (drop = blockRows)
+
+    /// Multi-line snapshot → the last `blockRows` content lines (status bar
+    /// + input-box chrome) are dropped, earlier lines intact, and the block
+    /// forms the new last rows — total row count unchanged (zero shift).
+    @Test func multiLineSnapshotReplacesLastThreeContentLines() {
+        let composed = compose("line one\nline two\nchrome a\nchrome b\nstatus bar")
+        let rows = lines(of: composed)
+        #expect(rows.count == 5)
+        #expect(rows[0] == "line one")
+        #expect(rows[1] == "line two")
+        #expect(!composed.contains("chrome a"))
+        #expect(!composed.contains("chrome b"))
+        #expect(!composed.contains("status bar"))
+        #expect(rows[3].contains(message))
     }
 
     /// Trailing whitespace-only lines are trimmed BEFORE the drop, so the
-    /// bar lands directly after the last real content line — the dropped
-    /// line is the status bar, not a blank.
+    /// three dropped lines are real content (the chrome), not blanks.
     @Test func trailingBlankLinesTrimmedBeforeDrop() {
-        let composed = compose("line one\nclaude status bar\n   \n\n")
-        let lines = composed.components(separatedBy: "\n")
-        #expect(lines.count == 2)
-        #expect(lines[0] == "line one")
-        #expect(!composed.contains("claude status bar"))
-        #expect(lines[1].contains(message))
+        let composed = compose("line one\nchrome a\nchrome b\nstatus bar\n   \n\n")
+        let rows = lines(of: composed)
+        #expect(rows.count == 1 + blockRows)
+        #expect(rows[0] == "line one")
+        #expect(!composed.contains("chrome"))
+        #expect(!composed.contains("status bar"))
+        #expect(rows[2].contains(message))
     }
 
     /// \r\n snapshots: the trailing \r on each split line is whitespace, so
-    /// blank-trimming and the status-bar drop behave identically.
+    /// blank-trimming and the chrome drop behave identically.
     @Test func crlfSnapshotHandled() {
-        let composed = compose("line one\r\nclaude status bar\r\n")
+        let composed = compose("line one\r\nchrome a\r\nchrome b\r\nstatus bar\r\n")
         #expect(composed.hasPrefix("line one"))
-        #expect(!composed.contains("claude status bar"))
-        #expect(lastLine(of: composed).contains(message))
+        #expect(!composed.contains("status bar"))
+        #expect(textRow(of: composed).contains(message))
     }
 
-    /// nil snapshot (a capture-less parked pane) → just the bar, so the pane
-    /// explains itself instead of rendering pitch black.
-    @Test func nilSnapshotProducesBarOnly() {
+    /// nil snapshot (a capture-less parked pane) → just the block, so the
+    /// pane explains itself instead of rendering pitch black.
+    @Test func nilSnapshotProducesBlockOnly() {
         let composed = compose(nil)
-        #expect(!composed.contains("\n"))
+        #expect(lines(of: composed).count == blockRows)
         #expect(composed.contains(message))
     }
 
-    /// Empty-string snapshot → bar only, same as nil.
-    @Test func emptySnapshotProducesBarOnly() {
+    /// Empty-string snapshot → block only, same as nil.
+    @Test func emptySnapshotProducesBlockOnly() {
         let composed = compose("")
-        #expect(!composed.contains("\n"))
+        #expect(lines(of: composed).count == blockRows)
         #expect(composed.contains(message))
     }
 
-    /// Whitespace-only snapshot → every line trims away → bar only.
-    @Test func whitespaceOnlySnapshotProducesBarOnly() {
+    /// Whitespace-only snapshot → every line trims away → block only.
+    @Test func whitespaceOnlySnapshotProducesBlockOnly() {
         let composed = compose("   \n\n  \n")
-        #expect(!composed.contains("\n"))
+        #expect(lines(of: composed).count == blockRows)
         #expect(composed.contains(message))
     }
 
-    /// Single-line snapshot → the bar replaces it entirely (acceptable: the
-    /// sole line of a parked capture is the status bar being overwritten).
+    /// Single-line snapshot → fewer content lines than the block consumes →
+    /// replaced entirely by the block.
     @Test func singleLineSnapshotReplacedEntirely() {
         let composed = compose("only status line")
         #expect(!composed.contains("only status line"))
-        #expect(!composed.contains("\n"))
+        #expect(lines(of: composed).count == blockRows)
         #expect(composed.contains(message))
     }
 
-    // MARK: - Bar styling
+    /// Two-line snapshot (fewer than `blockRows`) → both lines dropped, the
+    /// block stands alone — no partial retention.
+    @Test func twoLineSnapshotReplacedEntirely() {
+        let composed = compose("line one\nstatus bar")
+        #expect(!composed.contains("line one"))
+        #expect(!composed.contains("status bar"))
+        #expect(lines(of: composed).count == blockRows)
+        #expect(composed.contains(message))
+    }
 
-    /// The bar carries the truecolor background + foreground SGR and ends
-    /// with a full reset so its colors can't bleed into later output.
-    @Test func barContainsTruecolorSGRAndReset() {
-        let composed = compose("line one\nstatus")
-        let bar = lastLine(of: composed)
-        #expect(bar.contains(bgSGR))
-        #expect(bar.contains(fgSGR))
-        #expect(bar.hasSuffix(reset))
+    /// Exactly `blockRows` content lines → all consumed, block only; one
+    /// more line and the first survives (the boundary of the drop rule).
+    @Test func exactlyBlockRowsLinesReplacedEntirely() {
+        let atBoundary = compose("a\nb\nc")
+        #expect(lines(of: atBoundary).count == blockRows)
+        #expect(!atBoundary.contains("a\n"))
+
+        let overBoundary = compose("keep\na\nb\nc")
+        let rows = lines(of: overBoundary)
+        #expect(rows.count == 1 + blockRows)
+        #expect(rows[0] == "keep")
+    }
+
+    // MARK: - Styling / SGR hygiene
+
+    /// Every block row starts fresh and ends reset: the text row carries the
+    /// truecolor bg + fg SGR and a trailing reset so the block's colors
+    /// can't bleed into later output.
+    @Test func textRowContainsTruecolorSGRAndReset() {
+        let composed = compose("one\ntwo\nthree\nfour")
+        let row = textRow(of: composed)
+        #expect(row.contains(bgSGR))
+        #expect(row.contains(fgSGR))
+        #expect(row.hasSuffix(reset))
     }
 
     /// Dangling SGR state from the retained snapshot lines (e.g. an unclosed
-    /// red foreground) must be reset BEFORE the bar's own styling starts.
-    @Test func resetPrecedesBarAfterDanglingSGR() {
-        let composed = compose("\u{1B}[31mred text\nstatus")
-        guard let barStart = composed.range(of: bgSGR) else {
-            Issue.record("bar background SGR missing")
+    /// red foreground) must be reset BEFORE the block's own styling starts.
+    @Test func resetPrecedesBlockAfterDanglingSGR() {
+        let composed = compose("\u{1B}[31mred text\na\nb\nc")
+        guard let blockStart = composed.range(of: bgSGR) else {
+            Issue.record("block background SGR missing")
             return
         }
-        let beforeBar = String(composed[..<barStart.lowerBound])
-        #expect(beforeBar.contains("red text"))
-        // A reset must sit between the retained content and the bar's SGR.
-        guard let resetRange = beforeBar.range(of: reset, options: .backwards),
-              let redRange = beforeBar.range(of: "red text") else {
-            Issue.record("expected a reset between the retained content and the bar")
+        let beforeBlock = String(composed[..<blockStart.lowerBound])
+        #expect(beforeBlock.contains("red text"))
+        // A reset must sit between the retained content and the block's SGR.
+        guard let resetRange = beforeBlock.range(of: reset, options: .backwards),
+              let redRange = beforeBlock.range(of: "red text") else {
+            Issue.record("expected a reset between the retained content and the block")
             return
         }
         #expect(resetRange.lowerBound >= redRange.upperBound)
@@ -128,41 +208,34 @@ struct ParkedSnapshotComposerTests {
 
     // MARK: - Column padding / truncation
 
-    /// The bar's visible text is padded with spaces to exactly `columns`, so
-    /// the background spans the full row.
-    @Test func barPaddedToColumnWidth() {
+    /// The text row's visible text is padded with spaces to exactly
+    /// `columns`, so the background spans the full row.
+    @Test func textRowPaddedToColumnWidth() {
         let composed = compose(nil, columns: 120)
-        #expect(visibleText(of: composed).count == 120)
-        #expect(visibleText(of: composed).hasSuffix(" "))
+        let visible = visibleText(of: textRow(of: composed))
+        #expect(visible.count == 120)
+        #expect(visible.hasSuffix(" "))
     }
 
     /// Message longer than the column count → truncated with an ellipsis to
     /// exactly `columns` visible cells.
     @Test func longMessageTruncatedWithEllipsis() {
         let composed = compose(nil, columns: 10)
-        let visible = visibleText(of: composed)
+        let visible = visibleText(of: textRow(of: composed))
         #expect(visible.count == 10)
         #expect(visible.hasSuffix("…"))
     }
 
     /// columns <= 0 (defensive: dimensions not yet known) → no padding and
-    /// no truncation, just the styled glyph + message.
+    /// no truncation, just the inset + styled glyph + message.
     @Test func zeroColumnsEmitsUnpaddedText() {
         let composed = compose(nil, columns: 0)
-        let visible = visibleText(of: composed)
-        #expect(visible == "☾ \(message)")
+        #expect(visibleText(of: textRow(of: composed)) == "  ☾ \(message)")
     }
 
     /// Negative columns behave like zero (defensive).
     @Test func negativeColumnsEmitsUnpaddedText() {
         let composed = compose(nil, columns: -5)
-        #expect(visibleText(of: composed) == "☾ \(message)")
-    }
-
-    /// The moon glyph leads the bar so the notice reads as a hibernate state
-    /// at a glance.
-    @Test func barLeadsWithMoonGlyph() {
-        let composed = compose(nil)
-        #expect(visibleText(of: composed).hasPrefix("☾ "))
+        #expect(visibleText(of: textRow(of: composed)) == "  ☾ \(message)")
     }
 }

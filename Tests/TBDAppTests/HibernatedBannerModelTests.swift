@@ -6,7 +6,7 @@ import TBDShared
 /// The parked-pane bottom-edge notice + full-surface click-to-wake gate.
 /// Tests the two pure decisions — `HibernatedBannerModel.banner(for:)`
 /// (parked → `.hibernatedOverlay`: the footer slot stays empty and the
-/// reason-phrased message is composed into the frozen snapshot's last row
+/// reason-phrased message is composed into the frozen snapshot's last rows
 /// via `ParkedSnapshotComposer`;
 /// live + scheduled → the `.scheduledResume` footer; parked beats scheduled)
 /// and `ParkedPaneWakeModel.showsWakeOverlay(for:)` (parked panes get the
@@ -28,7 +28,8 @@ struct HibernatedBannerModelTests {
     // MARK: - Hibernated overlay message per park reason
     //
     // Parked → `.hibernatedOverlay(message:)`: no footer banner (the notice
-    // bar composed into the snapshot's last row carries the message instead).
+    // block composed into the snapshot's last rows carries the message
+    // instead).
 
     /// Manual park ("Hibernate now") → plain "Hibernated" phrasing.
     @Test func manualParkMessage() {
