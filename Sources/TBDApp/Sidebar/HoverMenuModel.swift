@@ -14,7 +14,7 @@ import SwiftUI
 final class HoverMenuModel: ObservableObject {
     @Published private(set) var isOpen = false
 
-    private var overTrigger = false
+    @Published private(set) var isTriggerHovered = false
     private var overMenu = false
     private var openTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
@@ -35,11 +35,11 @@ final class HoverMenuModel: ObservableObject {
         self.closeGrace = closeGrace
     }
 
-    private var pointerInside: Bool { overTrigger || overMenu }
+    private var pointerInside: Bool { isTriggerHovered || overMenu }
 
     /// Pointer entered/left the `+` button.
     func triggerHover(_ inside: Bool) {
-        overTrigger = inside
+        isTriggerHovered = inside
         reconcile()
     }
 
@@ -58,7 +58,7 @@ final class HoverMenuModel: ObservableObject {
     /// A row was chosen, or the popover was dismissed by an outside click.
     func closeNow() {
         cancelTasks()
-        overTrigger = false
+        isTriggerHovered = false
         overMenu = false
         isOpen = false
     }

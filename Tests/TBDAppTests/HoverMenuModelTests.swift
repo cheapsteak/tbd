@@ -85,4 +85,24 @@ struct HoverMenuModelTests {
         m.isOpenBinding.wrappedValue = false
         #expect(!m.isOpen)
     }
+
+    // MARK: isTriggerHovered
+
+    @Test("triggerHover toggles isTriggerHovered")
+    func triggerHoverTogglesIsTriggerHovered() {
+        let m = HoverMenuModel()
+        m.triggerHover(true)
+        #expect(m.isTriggerHovered)
+        m.triggerHover(false)
+        #expect(!m.isTriggerHovered)
+    }
+
+    @Test("closeNow clears isTriggerHovered")
+    func closeNowClearsIsTriggerHovered() {
+        let m = HoverMenuModel()
+        m.openImmediately()
+        m.triggerHover(true)
+        m.closeNow()
+        #expect(!m.isTriggerHovered)
+    }
 }

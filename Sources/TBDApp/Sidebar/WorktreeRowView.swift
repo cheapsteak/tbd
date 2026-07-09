@@ -55,7 +55,7 @@ struct WorktreeRowView: View {
         )
         .onHover { newChildMenu.triggerHover($0) }
         .popover(isPresented: newChildMenu.isOpenBinding, arrowEdge: .trailing) {
-            WorktreeProfilePickerView(repoID: repoID, parentWorktreeID: worktree.id)
+            WorktreeProfilePickerView(repoID: repoID, parentWorktreeID: worktree.id, highlightDefaultProfile: newChildMenu.isTriggerHovered)
                 .environmentObject(appState)
                 .onHover { newChildMenu.menuHover($0) }
         }

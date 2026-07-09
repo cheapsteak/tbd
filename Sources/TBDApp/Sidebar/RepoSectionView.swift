@@ -147,7 +147,7 @@ struct RepoSectionView: View {
                     .disabled(repo.status == .missing)
                     .onHover { newWorktreeMenu.triggerHover($0) }
                     .popover(isPresented: newWorktreeMenu.isOpenBinding, arrowEdge: .trailing) {
-                        WorktreeProfilePickerView(repoID: repo.id)
+                        WorktreeProfilePickerView(repoID: repo.id, highlightDefaultProfile: newWorktreeMenu.isTriggerHovered)
                             .environmentObject(appState)
                             .onHover { newWorktreeMenu.menuHover($0) }
                     }
