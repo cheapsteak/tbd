@@ -114,3 +114,24 @@ import Foundation
         #expect(TBDConstants.socketPath.hasSuffix("/sock"))
     }
 }
+
+@Test func worktreesDirFollowsTBDHome() {
+    let env = ["TBD_HOME": "/tmp/tbd-wt"]
+    #expect(TBDConstants.worktreesDir(environment: env).path == "/tmp/tbd-wt/worktrees")
+}
+
+@Test func worktreesDirFallsBackToHomeTbdWorktrees() {
+    #expect(TBDConstants.worktreesDir(environment: [:]).path.hasSuffix("/tbd/worktrees"))
+}
+
+@Test func notesPathRepoScope() {
+    let repoID = UUID(uuidString: "12345678-1234-1234-1234-123456789abc")!
+    let path = TBDConstants.notesPath(repoID: repoID, environment: ["TBD_HOME": "/tmp/tbd-notes"])
+    #expect(path == "/tmp/tbd-notes/repos/12345678-1234-1234-1234-123456789ABC/notes.md")
+}
+
+@Test func notesPathWorktreeScope() {
+    let wtID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+    let path = TBDConstants.notesPath(worktreeID: wtID, environment: ["TBD_HOME": "/tmp/tbd-notes"])
+    #expect(path == "/tmp/tbd-notes/worktrees/AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE/notes.md")
+}
