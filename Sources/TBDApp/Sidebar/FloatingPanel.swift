@@ -57,9 +57,11 @@ class FloatingPanel: NSPanel {
         }
     }
 
-    /// Show to the trailing (right) side of `view`, top-aligned with it, clamped
-    /// to the screen's visible frame so a tall menu near an edge stays on-screen.
-    /// Falls back to the leading side if the menu won't fit on the right.
+    /// Show to the trailing (right) side of `view`, vertically centered on it —
+    /// the menu's leading edge sits at the trigger, its mid-height aligned with
+    /// the trigger's center — clamped to the screen's visible frame so a tall
+    /// menu near an edge stays on-screen. Falls back to the leading side if the
+    /// menu won't fit on the right.
     func showAsMenu(relativeTo view: NSView) {
         guard let window = view.window else { return }
         let anchor = window.convertToScreen(view.convert(view.bounds, to: nil))
@@ -71,7 +73,7 @@ class FloatingPanel: NSPanel {
         var x = anchor.maxX + gap
         if x + size.width > screen.maxX { x = anchor.minX - size.width - gap }
         x = max(screen.minX, min(x, screen.maxX - size.width))
-        var y = anchor.maxY - size.height           // top-align, grow downward
+        var y = anchor.midY - size.height / 2       // vertically center on the anchor
         y = max(screen.minY, min(y, screen.maxY - size.height))
         setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
         if !isVisible { orderFront(nil) }
