@@ -10,23 +10,12 @@ import TBDShared
 @Suite("ControlModeInputRouter")
 struct ControlModeInputRouterTests {
 
-    /// Thread-safe, synchronous recorder of stream writes in call order.
-    private final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _writes: [String] = []
-        func record(_ line: String) { lock.lock(); _writes.append(line); lock.unlock() }
-        var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
-    }
-
     /// Build a router whose single server "srv" resolves to a client backed by
     /// `recorder`. An unknown server resolves to nil.
     private func makeRouter(chunkSize: Int = 330,
                             latency: InputLatencyRecorder = InputLatencyRecorder())
-        -> (ControlModeInputRouter, Recorder) {
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
+        -> (ControlModeInputRouter, LineRecorder) {
+        let (client, recorder) = makeFakeClient()
         let router = ControlModeInputRouter(
             commandProvider: { server in server == "srv" ? client : nil },
             latency: latency,
@@ -34,20 +23,14 @@ struct ControlModeInputRouterTests {
         return (router, recorder)
     }
 
-    /// Poll until `recorder` has at least `count` writes, or fail on timeout.
-    /// 15 s deadline + a final post-deadline re-check: under parallel-suite
-    /// load a sleep slice can overshoot the deadline AFTER the writes landed
-    /// (observed live as `timedOut(got: N, want: N)` at loadavg ~40), and the
-    /// old 2 s budget starved outright (`got: 2, want: 4`).
-    private func waitForWrites(_ recorder: Recorder, count: Int,
-                               timeout: Duration = .seconds(60)) async throws {
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            if recorder.writes.count >= count { return }
-            try await Task.sleep(for: .milliseconds(10))
+    /// Poll until `recorder` has at least `count` writes, or fail on timeout
+    /// (shared `waitFor`, which keeps the post-deadline re-check this suite
+    /// needed under parallel-suite load).
+    private func waitForWrites(_ recorder: LineRecorder, count: Int,
+                               sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        try await waitFor("\(count) stream writes", sourceLocation: sourceLocation) {
+            recorder.writes.count >= count
         }
-        guard recorder.writes.count < count else { return }
-        throw RouterTestError.timedOut(got: recorder.writes.count, want: count)
     }
 
     @Test("keystrokes for many frames are delivered to the stream in order")
@@ -111,8 +94,8 @@ struct ControlModeInputRouterTests {
     /// written stream line (a command list is one `\n`-joined write) is answered
     /// with one `%end` per contained command, preserving FIFO order.
     private func makeSelfRespondingRouter(chunkSize: Int = 330)
-        -> (ControlModeInputRouter, Recorder) {
-        let recorder = Recorder()
+        -> (ControlModeInputRouter, LineRecorder) {
+        let recorder = LineRecorder()
         let holder = ClientHolder()
         let client = TmuxControlCommandClient(
             writeLine: { line in
@@ -162,7 +145,7 @@ struct ControlModeInputRouterTests {
         // Client whose paste-buffer command FAILS (%error, tolerated). The
         // keystroke after the paste must still be written — deliverPaste logs
         // the failure and tears nothing down.
-        let recorder = Recorder()
+        let recorder = LineRecorder()
         let holder = ClientHolder()
         let client = TmuxControlCommandClient(
             writeLine: { line in
@@ -213,5 +196,3 @@ struct ControlModeInputRouterTests {
         router.shutdown()
     }
 }
-
-private enum RouterTestError: Error { case timedOut(got: Int, want: Int) }

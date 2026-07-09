@@ -4,11 +4,6 @@ import Testing
 
 @testable import TBDDaemonLib
 
-/// Positive-wait deadline sized for starved CI runners (PR #379: cooperative-pool
-/// starvation stretched sub-second async-drain deliveries past a 5 s poll).
-/// Passing runs still complete in milliseconds — only failures wait this long.
-private let ciSafeDeadline: Duration = .seconds(30)
-
 /// Phase B M2 — the attach-boundary fence (issue #376, second bullet).
 ///
 /// Before M2, output a pane emitted between the attach's capture and the
@@ -30,21 +25,10 @@ private let ciSafeDeadline: Duration = .seconds(30)
 struct AttachReplayFenceTests {
     private let server = "tbd-fence-unit"
 
-    /// Thread-safe, synchronous recorder of stream writes in call order.
-    private final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _writes: [String] = []
-        func record(_ line: String) { lock.lock(); _writes.append(line); lock.unlock() }
-        var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
-    }
-
     private func makeHarness() -> (
-        TmuxControlSupervisor, AttachReplayOrchestrator, Recorder, TmuxControlCommandClient
+        TmuxControlSupervisor, AttachReplayOrchestrator, LineRecorder, TmuxControlCommandClient
     ) {
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
+        let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
         let orchestrator = AttachReplayOrchestrator(
             supervisor: supervisor,
@@ -56,21 +40,6 @@ struct AttachReplayFenceTests {
     /// cursor at (x=2, y=1) — the replay's final CUP must be `ESC[2;3H`.
     private func stateLine(paneID: String) -> String {
         "\(paneID) 2 1 0 4294967295 4294967295 0 23 1 0 0 0 1 0 0 0 0 0 0 80 24 1"
-    }
-
-    /// Poll until `condition`, failing after `deadline` (async work — the
-    /// orchestrator's batch writes — lands on other tasks).
-    private func waitFor(
-        _ what: String, deadline: Duration = ciSafeDeadline,
-        sourceLocation: SourceLocation = #_sourceLocation,
-        _ condition: @Sendable () async -> Bool
-    ) async throws {
-        let end = ContinuousClock.now + deadline
-        while ContinuousClock.now < end {
-            if await condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
     /// Complete the next `lines.count` pending commands with `%end`.

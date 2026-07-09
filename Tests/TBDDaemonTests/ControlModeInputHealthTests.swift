@@ -27,41 +27,25 @@ struct ControlModeInputHealthTests {
         }
     }
 
-    /// Thread-safe recorder of stream writes.
-    private final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _writes: [String] = []
-        func record(_ line: String) { lock.lock(); _writes.append(line); lock.unlock() }
-        var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
-    }
-
     private final class ClientHolder: @unchecked Sendable {
         weak var client: TmuxControlCommandClient?
     }
 
-    /// Poll until `recorder` has at least `count` health events (15 s deadline +
-    /// post-deadline re-check; see ControlModeInputRouterTests.waitForWrites for
-    /// why the budget is generous under parallel-suite load).
+    /// Poll until `recorder` has at least `count` health events (shared
+    /// `waitFor`, which keeps the post-deadline re-check this suite needed
+    /// under parallel-suite load).
     private func waitForEvents(_ recorder: HealthRecorder, count: Int,
-                               timeout: Duration = .seconds(60)) async throws {
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            if recorder.events.count >= count { return }
-            try await Task.sleep(for: .milliseconds(10))
+                               sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        try await waitFor("\(count) health events", sourceLocation: sourceLocation) {
+            recorder.events.count >= count
         }
-        guard recorder.events.count < count else { return }
-        throw HealthTestError.timedOut(got: recorder.events.count, want: count)
     }
 
-    private func waitForWrites(_ recorder: Recorder, count: Int,
-                               timeout: Duration = .seconds(60)) async throws {
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            if recorder.writes.count >= count { return }
-            try await Task.sleep(for: .milliseconds(10))
+    private func waitForWrites(_ recorder: LineRecorder, count: Int,
+                               sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        try await waitFor("\(count) stream writes", sourceLocation: sourceLocation) {
+            recorder.writes.count >= count
         }
-        guard recorder.writes.count < count else { return }
-        throw HealthTestError.timedOut(got: recorder.writes.count, want: count)
     }
 
     /// A router whose client replies to every command: `%error` when
@@ -69,8 +53,8 @@ struct ControlModeInputHealthTests {
     /// back one per command in FIFO order, so completion order matches write
     /// order and health transitions are deterministic.
     private func makeRouter(shouldFail: @escaping @Sendable (String) -> Bool)
-        -> (ControlModeInputRouter, Recorder, HealthRecorder) {
-        let recorder = Recorder()
+        -> (ControlModeInputRouter, LineRecorder, HealthRecorder) {
+        let recorder = LineRecorder()
         let health = HealthRecorder()
         let holder = ClientHolder()
         let client = TmuxControlCommandClient(
@@ -297,5 +281,3 @@ struct ControlModeInputHealthTests {
         router.shutdown()
     }
 }
-
-private enum HealthTestError: Error { case timedOut(got: Int, want: Int) }
