@@ -145,7 +145,10 @@ struct RepoSectionView: View {
                         action: handlePlusButton
                     )
                     .disabled(repo.status == .missing)
-                    .onHover { newWorktreeMenu.triggerHover($0) }
+                    // `.disabled` blocks the click path but NOT `.onHover`
+                    // tracking-area events, so gate the hover-open explicitly —
+                    // a missing repo must never open the picker.
+                    .onHover { if repo.status != .missing { newWorktreeMenu.triggerHover($0) } }
                     .background(
                         FloatingMenuAnchor(
                             isPresented: newWorktreeMenu.isOpen,

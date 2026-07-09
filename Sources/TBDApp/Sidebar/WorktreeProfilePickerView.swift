@@ -1,8 +1,9 @@
 import SwiftUI
 import TBDShared
 
-/// Popover content rendered when the user long-presses or Option-clicks the
-/// `+` button next to a repo in the sidebar.
+/// Menu content shown when the user hovers (or ⌥-clicks) the `+` button next to
+/// a repo in the sidebar. Presented in a borderless `FloatingPanel` (see
+/// `FloatingMenuAnchor`), not a SwiftUI popover.
 ///
 /// Two in-place pages (NOT nested popovers — those are fragile on macOS):
 ///  - `.profiles` (default): a fixed "Choose a branch…" drill-in row at the
