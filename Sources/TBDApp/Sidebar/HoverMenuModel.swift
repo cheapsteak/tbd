@@ -19,6 +19,14 @@ final class HoverMenuModel: ObservableObject {
     private var openTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
 
+    // Monotonic counters let a task's continuation verify — after its
+    // `Task.sleep` resumes — that it is still the current open/close task
+    // before nil-ing the ivar. Without this, a cancelled task whose
+    // continuation resumes after a newer task has already been assigned to
+    // the same ivar would nil out that newer, still-live task.
+    private var openTaskGeneration = 0
+    private var closeTaskGeneration = 0
+
     private let openDelay: Duration
     private let closeGrace: Duration
 
@@ -71,20 +79,24 @@ final class HoverMenuModel: ObservableObject {
         if pointerInside {
             closeTask?.cancel(); closeTask = nil
             guard !isOpen, openTask == nil else { return }
+            openTaskGeneration += 1
+            let generation = openTaskGeneration
             openTask = Task { [weak self] in
                 try? await Task.sleep(for: self?.openDelay ?? .zero)
                 guard let self else { return }
-                self.openTask = nil
+                if self.openTaskGeneration == generation { self.openTask = nil }
                 guard !Task.isCancelled, self.pointerInside else { return }
                 self.isOpen = true
             }
         } else {
             openTask?.cancel(); openTask = nil
             guard isOpen, closeTask == nil else { return }
+            closeTaskGeneration += 1
+            let generation = closeTaskGeneration
             closeTask = Task { [weak self] in
                 try? await Task.sleep(for: self?.closeGrace ?? .zero)
                 guard let self else { return }
-                self.closeTask = nil
+                if self.closeTaskGeneration == generation { self.closeTask = nil }
                 guard !Task.isCancelled, !self.pointerInside else { return }
                 self.isOpen = false
             }
