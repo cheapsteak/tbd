@@ -12,15 +12,11 @@ struct RepoDetailView: View {
 
     @EnvironmentObject var appState: AppState
     @State private var selectedTab: Tab = .archived
-    /// Bumped each time a reveal lands, so `RepoSettingsView` re-runs its
-    /// scroll even if the Settings tab was already showing.
-    @State private var revealNonce: Int = 0
-    /// The repo the most recent reveal targeted. `RepoDetailView` itself is
-    /// NOT `.id(repoID)`-keyed, so it is reused across repo switches and
-    /// `revealNonce` alone would leak into whichever repo is shown next.
-    /// Gating on the target repo makes the reveal order-independent: only
-    /// the repo the nonce was actually bumped for ever sees it.
-    @State private var revealTargetRepoID: UUID?
+    /// The repo whose pre-session hook editor should be revealed, pending
+    /// consumption by `RepoSettingsView`. Cleared the moment that view scrolls,
+    /// so a later remount (repo switch, or tabbing away and back) does not
+    /// re-scroll or re-steal focus.
+    @State private var pendingHookReveal: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,11 +38,8 @@ struct RepoDetailView: View {
                 RepoInstructionsView(repoID: repoID)
                     .id(repoID)
             case .settings:
-                RepoSettingsView(
-                    repoID: repoID,
-                    revealHookNonce: revealTargetRepoID == repoID ? revealNonce : 0
-                )
-                .id(repoID)
+                RepoSettingsView(repoID: repoID, pendingHookReveal: $pendingHookReveal)
+                    .id(repoID)
             }
         }
         // Fresh mount (no repo was selected before).
@@ -60,16 +53,16 @@ struct RepoDetailView: View {
     private func consumeReveal(_ reveal: AppState.RepoDetailReveal?) {
         guard case let .preSessionHook(id) = reveal, id == repoID else { return }
         selectedTab = .settings
-        revealNonce += 1
-        revealTargetRepoID = repoID
+        pendingHookReveal = repoID
         appState.repoDetailReveal = nil
     }
 }
 
 struct RepoSettingsView: View {
     let repoID: UUID
-    /// Changes whenever a pre-session-hook reveal lands. `0` = no reveal.
-    var revealHookNonce: Int = 0
+    /// Set by `RepoDetailView` when a pre-session-hook reveal targets this
+    /// repo; consumed (set back to `nil`) the moment this view acts on it.
+    @Binding var pendingHookReveal: UUID?
     @EnvironmentObject var appState: AppState
     /// Drives focus into the pre-session TextEditor once scrolled.
     @FocusState private var focusedHook: RepoHooksSettingsView.HookField?
@@ -112,17 +105,20 @@ struct RepoSettingsView: View {
                     }
                     .padding()
                 }
-                .onAppear { scrollToHookIfRequested(proxy) }
-                .onChange(of: revealHookNonce) { _, _ in scrollToHookIfRequested(proxy) }
+                .onAppear { consumeHookReveal(proxy) }
+                .onChange(of: pendingHookReveal) { _, _ in consumeHookReveal(proxy) }
             }
         }
     }
 
-    /// Scroll the pre-session hook section into view and focus its editor.
-    /// A nonce of 0 means the user opened Settings themselves — leave the
-    /// scroll position and focus alone.
-    private func scrollToHookIfRequested(_ proxy: ScrollViewProxy) {
-        guard revealHookNonce > 0 else { return }
+    /// Scroll the pre-session hook section into view and focus its editor,
+    /// but only if a reveal is pending for this repo. Consumes the reveal
+    /// (clears it to `nil`) before acting, so it is a true one-shot: a later
+    /// remount of this view (repo switch, or tab away and back) does not
+    /// re-scroll or re-steal focus.
+    private func consumeHookReveal(_ proxy: ScrollViewProxy) {
+        guard pendingHookReveal == repoID else { return }
+        pendingHookReveal = nil
         withAnimation { proxy.scrollTo(RepoHooksSettingsView.preSessionAnchor, anchor: .top) }
         focusedHook = .preSession
     }
