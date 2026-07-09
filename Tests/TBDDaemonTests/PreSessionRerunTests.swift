@@ -158,7 +158,7 @@ struct PreSessionRerunTests {
         #expect(first.error == nil)
 
         let second = try await router.handleWorktreeRerunPreSession(params)
-        #expect(second.error == "Setup hook is already running for this worktree.")
+        #expect(second.error == "Pre-session hook is already running for this worktree.")
     }
 }
 }

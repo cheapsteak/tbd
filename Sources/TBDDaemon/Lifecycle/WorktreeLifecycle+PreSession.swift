@@ -463,11 +463,11 @@ public enum RerunPreSessionError: Error, Equatable, CustomStringConvertible {
         case .worktreeNotFound(let id):
             return "Worktree not found: \(id)"
         case .noHookConfigured:
-            return "No preSession hook is configured for this worktree."
+            return "No pre-session hook is configured for this worktree."
         case .alreadyRunning:
-            return "Setup hook is already running for this worktree."
+            return "Pre-session hook is already running for this worktree."
         case .worktreeBusy:
-            return "This worktree is still being created — its setup hook is already running."
+            return "This worktree is still being created — its pre-session hook is already running."
         }
     }
 
@@ -551,12 +551,12 @@ extension WorktreeLifecycle {
         case .completed(let exitCode):
             await notifyPreSessionProblem(
                 worktree: worktree, terminalID: preSession.terminalID,
-                message: "Setup hook failed (exit \(exitCode)) — its tab is left open with the output"
+                message: "Pre-session hook failed (exit \(exitCode)) — its tab is left open with the output"
             )
         case .timedOut:
             await notifyPreSessionProblem(
                 worktree: worktree, terminalID: preSession.terminalID,
-                message: "Setup hook timed out after \(Int(preSessionTimeout))s"
+                message: "Pre-session hook timed out after \(Int(preSessionTimeout))s"
             )
         case .paneKilled:
             // Not an error on a re-run: the user closed the tab, a legitimate
