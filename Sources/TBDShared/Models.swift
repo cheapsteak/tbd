@@ -976,9 +976,18 @@ public struct PRStatus: Codable, Sendable, Equatable {
     public let commits: Int?
     /// UUID of the worktree that authored this PR, if known.
     public let authorWorktreeID: UUID?
+    /// 1-indexed position in GitHub's merge queue (front of queue == 1), or nil
+    /// when the PR is not in a merge queue. Sourced from
+    /// `PullRequest.mergeQueueEntry.position` — not expressible via
+    /// `mergeStateStatus` (there is no `QUEUED` value). Optional with a nil
+    /// default so JSON persisted before this field existed still decodes: it
+    /// rides in the existing `worktree.prStatus` TEXT column (migration v34),
+    /// so no new migration is required.
+    public let mergeQueuePosition: Int?
 
     public init(number: Int, url: String, state: PRMergeableState, reason: String? = nil,
-                files: [String]? = nil, commits: Int? = nil, authorWorktreeID: UUID? = nil) {
+                files: [String]? = nil, commits: Int? = nil, authorWorktreeID: UUID? = nil,
+                mergeQueuePosition: Int? = nil) {
         self.number = number
         self.url = url
         self.state = state
@@ -986,6 +995,7 @@ public struct PRStatus: Codable, Sendable, Equatable {
         self.files = files
         self.commits = commits
         self.authorWorktreeID = authorWorktreeID
+        self.mergeQueuePosition = mergeQueuePosition
     }
 }
 
