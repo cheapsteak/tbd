@@ -4,16 +4,18 @@ import Testing
 
 /// The parked pane's in-grid hibernate notice: `ParkedSnapshotComposer`
 /// composes the frozen snapshot with a truecolor indigo notice BLOCK as its
-/// last `blockRows` (3) rows — padding row, text row, padding row —
-/// consuming the same number of trailing content rows (the frozen status
-/// bar + input-box chrome) so the pane never shifts. Every branch of the
-/// pure compose function is exercised here without SwiftUI, in the same
-/// fixture style as `HibernatedBannerModelTests`.
+/// last `blockRows` (3) rows — a ▄ half-row of indigo, the text row (white
+/// on indigo), a ▀ half-row — consuming the same number of trailing content
+/// rows (the frozen status bar + input-box chrome) so the pane never
+/// shifts. Every branch of the pure compose function is exercised here
+/// without SwiftUI, in the same fixture style as
+/// `HibernatedBannerModelTests`.
 @Suite("Parked snapshot composer")
 struct ParkedSnapshotComposerTests {
     private let message = "Hibernated — click anywhere in the pane to resume"
     private let bgSGR = ParkedSnapshotComposer.barBackgroundSGR
     private let fgSGR = ParkedSnapshotComposer.barForegroundSGR
+    private let padFgSGR = ParkedSnapshotComposer.paddingForegroundSGR
     private let reset = ParkedSnapshotComposer.sgrReset
     private let blockRows = ParkedSnapshotComposer.blockRows
 
@@ -40,19 +42,22 @@ struct ParkedSnapshotComposerTests {
     // MARK: - Colors
 
     /// The bar colors are the indigo family the deleted SwiftUI banner used:
-    /// truecolor systemIndigo background (88/86/214), pure white foreground.
+    /// truecolor systemIndigo background (88/86/214), pure white foreground
+    /// — and the padding rows draw the SAME indigo as a foreground.
     @Test func colorsAreSystemIndigoOnWhite() {
         #expect(bgSGR == "\u{1B}[48;2;88;86;214m")
         #expect(fgSGR == "\u{1B}[38;2;255;255;255m")
+        #expect(padFgSGR == "\u{1B}[38;2;88;86;214m")
         let composed = compose(nil)
         #expect(composed.contains(bgSGR))
         #expect(composed.contains(fgSGR))
+        #expect(composed.contains(padFgSGR))
     }
 
     // MARK: - Block shape
 
-    /// The notice is a 3-row block: blank padding row, text row, blank
-    /// padding row — the height matches the `blockRows` constant.
+    /// The notice is a 3-row block: half-row padding, text row, half-row
+    /// padding — the height matches the `blockRows` constant.
     @Test func blockIsThreeRows() {
         #expect(blockRows == 3)
         let composed = compose(nil)
@@ -63,15 +68,19 @@ struct ParkedSnapshotComposerTests {
         #expect(!rows[2].contains(message))
     }
 
-    /// Both padding rows carry the block background SGR and are space-padded
-    /// to the full column width so the background spans the row.
-    @Test func paddingRowsCarryBackgroundAndFullWidth() {
+    /// The padding rows are HALF rows of indigo: full-width runs of the
+    /// half-block glyphs (▄ above the bar, ▀ below), drawn as indigo
+    /// FOREGROUND on the default background — no background SGR, so only
+    /// half the cell height is colored.
+    @Test func paddingRowsAreIndigoHalfBlocksOnDefaultBackground() {
         let composed = compose(nil, columns: 60)
         let rows = lines(of: composed)
+        #expect(visibleText(of: rows[0]) == String(repeating: "▄", count: 60))
+        #expect(visibleText(of: rows[2]) == String(repeating: "▀", count: 60))
         for row in [rows[0], rows[2]] {
-            #expect(row.contains(bgSGR))
+            #expect(row.contains(padFgSGR))
+            #expect(!row.contains(bgSGR))
             #expect(row.hasSuffix(reset))
-            #expect(visibleText(of: row) == String(repeating: " ", count: 60))
         }
     }
 
@@ -188,11 +197,12 @@ struct ParkedSnapshotComposerTests {
     }
 
     /// Dangling SGR state from the retained snapshot lines (e.g. an unclosed
-    /// red foreground) must be reset BEFORE the block's own styling starts.
+    /// red foreground) must be reset BEFORE the block's own styling starts
+    /// (the top padding row's indigo foreground is the block's first SGR).
     @Test func resetPrecedesBlockAfterDanglingSGR() {
         let composed = compose("\u{1B}[31mred text\na\nb\nc")
-        guard let blockStart = composed.range(of: bgSGR) else {
-            Issue.record("block background SGR missing")
+        guard let blockStart = composed.range(of: padFgSGR) else {
+            Issue.record("block padding foreground SGR missing")
             return
         }
         let beforeBlock = String(composed[..<blockStart.lowerBound])
