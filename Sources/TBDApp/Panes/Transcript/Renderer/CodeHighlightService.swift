@@ -30,9 +30,11 @@ struct HighlightColorRun {
 /// safe even though the compiler cannot prove it statically.
 final class CodeHighlightService: @unchecked Sendable {
     /// Process singleton. The type is `@unchecked Sendable` (see above), so no
-    /// `nonisolated(unsafe)` is needed here — the same serial-queue confinement
-    /// pattern the sibling `DiffSyntaxHighlighter` uses for its shared
-    /// `Highlightr`s.
+    /// `nonisolated(unsafe)` is needed here — the safety argument is the same
+    /// serial-queue confinement the sibling `DiffSyntaxHighlighter` relies on for
+    /// its shared `Highlightr`s, though that class expresses it with
+    /// property-level `nonisolated(unsafe)` rather than class-level
+    /// `@unchecked Sendable`.
     static let shared = CodeHighlightService()
 
     /// Dedicated serial queue. The lazily-created `Highlightr` and EVERY call into
