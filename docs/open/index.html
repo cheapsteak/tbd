@@ -70,10 +70,72 @@
         return c === '<' ? '&lt;' : '&amp;';
       }) + '</code>…';
 
+      // Success detection: navigating to a custom scheme does NOT unload this
+      // page — the tab stays here. We can't observe the handler directly, but
+      // when TBD activates, macOS brings it frontmost and the tab becomes
+      // hidden. So: document.hidden flipping true within a short window of
+      // firing the redirect means the handler opened. window.blur alone is a
+      // false-positive signal — the browser's "Open TBD.app?" confirmation
+      // dialog blurs the window even if the user cancels — but that dialog
+      // does not hide the document, so visibilitychange is safe.
+      var DETECT_WINDOW_MS = 3000;
+      var RETURN_DELAY_MS = 600;
+      var armedUntil = 0;
+      var returned = false;
+      var returnTimer = null;
+      var fallbackStatusHTML = status.innerHTML;
+
+      function arm() {
+        armedUntil = Date.now() + DETECT_WINDOW_MS;
+      }
+
+      function onOpened() {
+        if (returned) return; // guard against double-fire
+        returned = true;
+        var canGoBack = history.length > 1;
+        status.textContent = canGoBack
+          ? 'Opened in TBD — taking you back…'
+          : 'TBD opened — you can close this tab.';
+        // Short delay so the scheme launch isn't interrupted by navigating
+        // away; the tab is backgrounded at this point, so it's seamless.
+        returnTimer = setTimeout(function () {
+          returnTimer = null;
+          if (canGoBack) {
+            history.back();
+          } else {
+            // Works for script/link-opened tabs; silently no-ops otherwise,
+            // in which case the status text above already tells the user.
+            window.close();
+          }
+        }, RETURN_DELAY_MS);
+      }
+
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          if (Date.now() <= armedUntil) onOpened();
+        } else if (returnTimer !== null) {
+          // Tab became visible again before the return fired — the hide was
+          // incidental (alt-tab, a notification), not TBD activating. Cancel
+          // the pending navigation and restore the fallback UI intact.
+          clearTimeout(returnTimer);
+          returnTimer = null;
+          returned = false;
+          status.innerHTML = fallbackStatusHTML;
+        }
+      });
+
+      // The manual button fires the same tbd:// URL — arm the same
+      // success-detection/auto-return logic on click.
+      link.addEventListener('click', arm);
+
       // Trigger the custom scheme. location.replace avoids a back-button trap.
       // Browsers handle the unknown scheme silently if the handler isn't installed,
-      // so we leave the manual button visible as a fallback.
-      setTimeout(function () { location.replace(target); }, 50);
+      // so we leave the manual button visible as a fallback: if success is never
+      // detected, the status message, button, and install hint stay as-is.
+      setTimeout(function () {
+        arm();
+        location.replace(target);
+      }, 50);
     })();
   </script>
 </body>
