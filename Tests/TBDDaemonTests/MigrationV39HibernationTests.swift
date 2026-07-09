@@ -86,6 +86,14 @@ import GRDB
         try await db.config.setAutoHibernate(
             enabled: true, idleMinutes: Config.defaultHibernateIdleMinutes)
         #expect(try await db.config.get().autoHibernateEnabled == true)
+
+        // ...and opting back out persists too. This is the only direct
+        // config-level assertion of the false write path now that
+        // `configHibernationDefaultsAndRoundTrip` was repointed at the true
+        // case — the toggle's off-branch must round-trip through `get()`.
+        try await db.config.setAutoHibernate(
+            enabled: false, idleMinutes: Config.defaultHibernateIdleMinutes)
+        #expect(try await db.config.get().autoHibernateEnabled == false)
     }
 
     @Test func configIdleMinutesFlooredAtOne() async throws {
