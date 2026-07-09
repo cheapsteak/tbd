@@ -12,6 +12,7 @@ struct WorktreeRowView: View {
     @State private var isRowHovered: Bool = false
     @State private var isPRIconHovered: Bool = false
     @State private var isNameTruncated = false
+    @StateObject private var newChildMenu = HoverMenuModel()
 
     private var isPending: Bool {
         worktree.status == .creating
@@ -46,13 +47,29 @@ struct WorktreeRowView: View {
         return terminals.contains { $0.activityState == .working }
     }
 
-    /// Hover card for the "+" affordance: what the button does, and which
-    /// worktree the new child is created under.
-    private var newNestedWorktreeHoverCard: HoverCardModel {
-        HoverCardModel(
-            title: "New nested worktree",
-            titleCaption: "Creates a child worktree under \(worktree.displayName)"
+    @ViewBuilder
+    private func nestedPlusButton(repoID: UUID) -> some View {
+        SectionHeaderPlusButton(
+            help: "New nested worktree under \(worktree.displayName) (hover to pick a model profile, or \u{2325}-click)",
+            action: { handleNestedPlus(repoID: repoID) }
         )
+        .onHover { newChildMenu.triggerHover($0) }
+        .popover(isPresented: newChildMenu.isOpenBinding, arrowEdge: .trailing) {
+            WorktreeProfilePickerView(repoID: repoID, parentWorktreeID: worktree.id)
+                .environmentObject(appState)
+                .onHover { newChildMenu.menuHover($0) }
+        }
+        .padding(.trailing, 4)
+    }
+
+    private func handleNestedPlus(repoID: UUID) {
+        switch HoverMenuModel.plusOutcome(optionHeld: NSEvent.modifierFlags.contains(.option)) {
+        case .openMenu:
+            newChildMenu.openImmediately()
+        case .createDefault:
+            newChildMenu.closeNow()
+            appState.createWorktree(repoID: repoID, parentWorktreeID: worktree.id)
+        }
     }
 
     @ViewBuilder
@@ -253,21 +270,10 @@ struct WorktreeRowView: View {
             }
         }
         .overlay(alignment: .trailing) {
-            if isRowHovered && !isMain {
-                Button(action: {
-                    let parentID = worktree.id
-                    // Scratch spaces have no repo, so nested-worktree creation
-                    // isn't offered for them — this affordance is repo-only.
-                    guard let repoID = worktree.repoID else { return }
-                    appState.createWorktree(repoID: repoID, parentWorktreeID: parentID)
-                }) {
-                    Image(systemName: "plus")
-                        .font(.caption)
-                        .frame(width: 20, height: 20)
-                }
-                .buttonStyle(HoverPressButtonStyle())
-                .hoverCard(newNestedWorktreeHoverCard)
-                .padding(.trailing, 4)
+            if HoverMenuModel.shouldShowPlus(hovered: isRowHovered, menuOpen: newChildMenu.isOpen),
+               !isMain,
+               let repoID = worktree.repoID {
+                nestedPlusButton(repoID: repoID)
             }
         }
         .onHover { isRowHovered = $0 }
