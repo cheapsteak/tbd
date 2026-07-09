@@ -6,14 +6,17 @@ import Testing
 @testable import TBDShared
 
 @Suite("PRButtonLabel")
+@MainActor
 struct PRButtonLabelTests {
     private static func makeStatus(
         number: Int = 42,
         url: String? = nil,
         state: PRMergeableState = .mergeable,
-        reason: String? = nil
+        reason: String? = nil,
+        mergeQueuePosition: Int? = nil
     ) -> PRStatus {
-        PRStatus(number: number, url: url ?? "https://example.com/\(number)", state: state, reason: reason)
+        PRStatus(number: number, url: url ?? "https://example.com/\(number)", state: state,
+                 reason: reason, mergeQueuePosition: mergeQueuePosition)
     }
 
     private static func makeKey(
@@ -50,14 +53,38 @@ struct PRButtonLabelTests {
         #expect(label.bakedWidth > PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: false).bakedWidth)
     }
 
+    @Test("bakedWidth stays a single square for a queued PR even when armed")
+    func bakedWidthQueuedSuppressesArchiveBadge() {
+        // Queue mode supersedes the archivebox armed-badge: the bus is one
+        // full-color square with its position baked in, so the label must not
+        // reserve the extra gap+badge width.
+        let queuedArmed = PRButtonLabel(
+            prStatus: Self.makeStatus(state: .pending, mergeQueuePosition: 2),
+            isAutoArchiveArmed: true
+        )
+        #expect(queuedArmed.isMergeQueued)
+        #expect(queuedArmed.bakedWidth == PRButtonLabel.iconSide)
+    }
+
+    @Test("coloredIcon bakes a single square for a queued PR (bus, untinted)")
+    func coloredIconQueuedIsSquare() throws {
+        let label = PRButtonLabel(
+            prStatus: Self.makeStatus(state: .pending, mergeQueuePosition: 3),
+            isAutoArchiveArmed: true
+        )
+        let presentation = try #require(PRStatusPresentation.make(for: label.prStatus))
+        let icon = try #require(label.coloredIcon(presentation, colorScheme: .light))
+        #expect(icon.size == NSSize(width: PRButtonLabel.iconSide, height: PRButtonLabel.iconSide))
+        #expect(icon.isTemplate == false)
+    }
+
     // MARK: - coloredIcon baked image size (armed gate, both branches)
 
-    @MainActor
     @Test("coloredIcon bakes a square image when not armed and a wide badge composite when armed")
     func coloredIconSizeMatchesArmedState() throws {
         let unarmed = PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: false)
         let armed = PRButtonLabel(prStatus: Self.makeStatus(), isAutoArchiveArmed: true)
-        let presentation = PRStatusPresentation(iconName: "git-merge", colorSemantic: .merged)
+        let presentation = PRStatusPresentation(glyph: .asset("git-merge"), colorSemantic: .merged)
 
         let unarmedIcon = try #require(unarmed.coloredIcon(presentation, colorScheme: .light))
         let armedIcon = try #require(armed.coloredIcon(presentation, colorScheme: .light))
@@ -143,12 +170,27 @@ struct PRButtonLabelTests {
         // url — reason deliberately excluded), so a new field is otherwise
         // silently unkeyed: decide whether the split button renders it and
         // update prSplitButtonID (and this count) accordingly.
-        // 7 = number, state, url, reason + the nightwatch gate metadata
+        // 8 = number, state, url, reason + the nightwatch gate metadata
         // (files, commits, authorWorktreeID), which the split button does NOT
         // render — deliberately excluded like reason, else every metadata
-        // fetch would force a spurious toolbar-item rebuild.
+        // fetch would force a spurious toolbar-item rebuild — plus
+        // mergeQueuePosition, which the split button DOES render (bus glyph +
+        // baked position badge) and which IS keyed.
         let status = Self.makeStatus()
-        #expect(Mirror(reflecting: status).children.count == 7)
+        #expect(Mirror(reflecting: status).children.count == 8)
+    }
+
+    @Test("id key differs by merge-queue position so a queue move rebuilds the item")
+    func idKeyDiffersByMergeQueuePosition() {
+        let worktreeID = UUID()
+        // A queued PR keeps state UNKNOWN→.pending as it advances, so state
+        // alone can't distinguish position 2 from 1; the baked position badge
+        // would go stale unless mergeQueuePosition is part of the key.
+        let notQueued = Self.makeKey(worktreeID: worktreeID, prStatus: Self.makeStatus(state: .pending))
+        let atTwo = Self.makeKey(worktreeID: worktreeID, prStatus: Self.makeStatus(state: .pending, mergeQueuePosition: 2))
+        let atOne = Self.makeKey(worktreeID: worktreeID, prStatus: Self.makeStatus(state: .pending, mergeQueuePosition: 1))
+        #expect(notQueued != atTwo)
+        #expect(atOne != atTwo)
     }
 
     @Test("id key differs between blocked states, color schemes, and worktrees")

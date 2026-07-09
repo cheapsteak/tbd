@@ -414,8 +414,13 @@ struct PRButtonLabel: View {
     static let iconSide: CGFloat = 12
     static let badgeGap: CGFloat = 3
 
+    /// A queued PR renders the full-color bus (with its position baked in)
+    /// instead of the status icon; the archivebox armed-badge is suppressed in
+    /// that mode, so the baked image stays a single square.
+    var isMergeQueued: Bool { prStatus.mergeQueuePosition != nil }
+
     var bakedWidth: CGFloat {
-        isAutoArchiveArmed ? Self.iconSide + Self.badgeGap + Self.iconSide : Self.iconSide
+        (isAutoArchiveArmed && !isMergeQueued) ? Self.iconSide + Self.badgeGap + Self.iconSide : Self.iconSide
     }
 
     /// The `.id` key for the PR split-button toolbar item. AppKit materializes
@@ -427,10 +432,13 @@ struct PRButtonLabel: View {
     /// before the row appears would otherwise stay permanently empty. The key
     /// contains exactly the `PRStatus` fields the label/menu/primaryAction
     /// consume: `number` (label text/help), `state` (icon via
-    /// `PRStatusPresentation`), and `url` (captured by `primaryAction`, so a
-    /// re-pointed PR must recreate the item too). `reason` is deliberately
-    /// excluded — the split button's presentation ignores it, and keying on it
-    /// would force spurious toolbar-item rebuilds for zero visual change.
+    /// `PRStatusPresentation`), `url` (captured by `primaryAction`, so a
+    /// re-pointed PR must recreate the item too), and `mergeQueuePosition`
+    /// (the bus glyph short-circuits on it and bakes the position into the
+    /// icon, so a 2→1 queue move with an unchanged `state` must still rebuild).
+    /// `reason` is deliberately excluded — the split button's presentation
+    /// ignores it, and keying on it would force spurious toolbar-item rebuilds
+    /// for zero visual change.
     ///
     /// This key MUST stay a String. The macOS 26 toolbar bridge only honors
     /// `.id` identity changes for String values here — a custom Hashable
@@ -447,6 +455,7 @@ struct PRButtonLabel: View {
     ) -> String {
         "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(blocked)"
             + "-\(prStatus.number)-\(prStatus.state.rawValue)-\(prStatus.url)"
+            + "-\(prStatus.mergeQueuePosition.map(String.init) ?? "nil")"
             + "-\(colorScheme)"
     }
 
@@ -491,8 +500,9 @@ struct PRButtonLabel: View {
         )
     }
 
-    /// Cache for baked icons, keyed by (iconName, colorSemantic, armed,
-    /// colorScheme). The bake does disk I/O (`Bundle.module.url` +
+    /// Cache for baked `.asset` icons, keyed by (asset name, colorSemantic,
+    /// armed, colorScheme). (The `.emoji` bus glyph is cached separately by
+    /// `PRStatusPresentation.busImage`.) The bake does disk I/O (`Bundle.module.url` +
     /// `NSImage(contentsOf:)`) plus symbol creation on every body evaluation,
     /// and — per the materialize-once behavior documented at the `.id` call
     /// site — those re-evaluations never reach AppKit anyway. MainActor
@@ -512,9 +522,16 @@ struct PRButtonLabel: View {
     /// must live inside it.
     @MainActor
     func coloredIcon(_ presentation: PRStatusPresentation, colorScheme: ColorScheme) -> NSImage? {
-        let cacheKey = "\(presentation.iconName)-\(presentation.colorSemantic)-\(isAutoArchiveArmed)-\(colorScheme)"
+        // Merge-queue bus: full-color glyph with its position baked in via the
+        // SAME shared helper the sidebar uses. It must NOT be tinted, so skip
+        // the color-baking fill path entirely (and the archivebox armed-badge —
+        // queue mode supersedes it, matching `bakedWidth`).
+        if case .emoji = presentation.glyph {
+            return PRStatusPresentation.busImage(position: presentation.badge, side: Self.iconSide)
+        }
+        guard case .asset(let name) = presentation.glyph else { return nil }
+        let cacheKey = "\(name)-\(presentation.colorSemantic)-\(isAutoArchiveArmed)-\(colorScheme)"
         if let cached = Self.bakedIconCache[cacheKey] { return cached }
-        let name = presentation.iconName
         let nsColor = presentation.nsColor
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
               let base = NSImage(contentsOf: url) else { return nil }

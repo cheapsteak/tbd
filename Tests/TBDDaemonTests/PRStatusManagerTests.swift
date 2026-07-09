@@ -370,6 +370,215 @@ struct PRStatusManagerTests {
         #expect(nodes[2].headRefName == "feature/not-tbd")
     }
 
+    @Test("parsePRNodes decodes mergeQueueEntry.position and tolerates a null entry")
+    func parsesMergeQueuePosition() throws {
+        let json = """
+        {
+          "data": {
+            "viewer": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 12,
+                    "url": "https://github.com/acme/acme-prod/pull/12",
+                    "state": "OPEN",
+                    "mergeStateStatus": "UNKNOWN",
+                    "reviewDecision": null,
+                    "headRefName": "acme/queued-feature",
+                    "createdAt": "2026-03-24T10:00:00Z",
+                    "mergeQueueEntry": { "position": 3 }
+                  },
+                  {
+                    "number": 34,
+                    "url": "https://github.com/acme/acme-prod/pull/34",
+                    "state": "OPEN",
+                    "mergeStateStatus": "CLEAN",
+                    "reviewDecision": null,
+                    "headRefName": "acme/not-queued",
+                    "createdAt": "2026-03-24T11:00:00Z",
+                    "mergeQueueEntry": null
+                  },
+                  {
+                    "number": 56,
+                    "url": "https://github.com/acme/acme-prod/pull/56",
+                    "state": "OPEN",
+                    "mergeStateStatus": "CLEAN",
+                    "reviewDecision": null,
+                    "headRefName": "acme/no-entry-key",
+                    "createdAt": "2026-03-24T12:00:00Z"
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let nodes = try PRStatusManager.parsePRNodes(from: json)
+        #expect(nodes.count == 3)
+        #expect(nodes[0].mergeQueuePosition == 3)      // front-of-queue is 1-indexed; this PR is 3rd
+        #expect(nodes[1].mergeQueuePosition == nil)    // explicit null entry
+        #expect(nodes[2].mergeQueuePosition == nil)    // absent key entirely
+    }
+
+    // MARK: - parsePRByBranch (rewritten refresh() decoder)
+
+    @Test("parsePRByBranch decodes the same field set, including mergeQueuePosition")
+    func parsePRByBranchDecodesFields() throws {
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 77,
+                    "url": "https://github.com/acme/acme-prod/pull/77",
+                    "state": "OPEN",
+                    "mergeStateStatus": "UNKNOWN",
+                    "reviewDecision": "APPROVED",
+                    "isDraft": false,
+                    "mergeQueueEntry": { "position": 1 }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let result = try #require(try PRStatusManager.parsePRByBranch(from: json))
+        #expect(result.number == 77)
+        #expect(result.url == "https://github.com/acme/acme-prod/pull/77")
+        #expect(result.state == "OPEN")
+        #expect(result.mergeStateStatus == "UNKNOWN")
+        #expect(result.reviewDecision == "APPROVED")
+        #expect(result.isDraft == false)
+        #expect(result.mergeQueuePosition == 1)
+    }
+
+    @Test("parsePRByBranch yields nil position for a null mergeQueueEntry")
+    func parsePRByBranchNullQueueEntry() throws {
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 88,
+                    "url": "https://github.com/acme/acme-prod/pull/88",
+                    "state": "OPEN",
+                    "mergeStateStatus": "CLEAN",
+                    "reviewDecision": null,
+                    "isDraft": false,
+                    "mergeQueueEntry": null
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let result = try #require(try PRStatusManager.parsePRByBranch(from: json))
+        #expect(result.mergeQueuePosition == nil)
+        #expect(result.reviewDecision == nil)
+    }
+
+    @Test("parsePRByBranch picks the highest-priority PR (OPEN over CLOSED) for a reused branch")
+    func parsePRByBranchPicksBestNode() throws {
+        // Query orders newest-first; a branch reused across a closed then
+        // reopened PR must resolve to the OPEN one regardless of node order.
+        let json = """
+        {
+          "data": {
+            "repository": {
+              "pullRequests": {
+                "nodes": [
+                  {
+                    "number": 91,
+                    "url": "https://github.com/acme/acme-prod/pull/91",
+                    "state": "CLOSED",
+                    "mergeStateStatus": "UNKNOWN",
+                    "reviewDecision": null,
+                    "isDraft": false,
+                    "mergeQueueEntry": null
+                  },
+                  {
+                    "number": 90,
+                    "url": "https://github.com/acme/acme-prod/pull/90",
+                    "state": "OPEN",
+                    "mergeStateStatus": "UNKNOWN",
+                    "reviewDecision": null,
+                    "isDraft": false,
+                    "mergeQueueEntry": { "position": 2 }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """.data(using: .utf8)!
+
+        let result = try #require(try PRStatusManager.parsePRByBranch(from: json))
+        #expect(result.number == 90)
+        #expect(result.state == "OPEN")
+        #expect(result.mergeQueuePosition == 2)
+    }
+
+    @Test("parsePRByBranch returns nil when the branch has no PR")
+    func parsePRByBranchEmpty() throws {
+        let json = """
+        { "data": { "repository": { "pullRequests": { "nodes": [] } } } }
+        """.data(using: .utf8)!
+        #expect(try PRStatusManager.parsePRByBranch(from: json) == nil)
+    }
+
+    @Test("parsePRByBranch throws on a malformed outer shape")
+    func parsePRByBranchThrows() {
+        let json = "{ \"data\": { \"repository\": null } }".data(using: .utf8)!
+        #expect(throws: PRStatusError.self) {
+            _ = try PRStatusManager.parsePRByBranch(from: json)
+        }
+    }
+
+    // MARK: - prByBranchArgs (branch passed as a GraphQL variable, never interpolated)
+
+    @Test("prByBranchArgs passes owner/name/branch as fields, not interpolated into the query")
+    func prByBranchArgsUsesVariables() {
+        let args = PRStatusManager.prByBranchArgs(owner: "acme", name: "acme-prod", branch: "feature/x")
+
+        // The query itself must reference GraphQL variables, never the literal values.
+        let queryArg = args.first { $0.hasPrefix("query=") }
+        #expect(queryArg?.contains("$branch") == true)
+        #expect(queryArg?.contains("$owner") == true)
+        #expect(queryArg?.contains("acme-prod") == false)
+        #expect(queryArg?.contains("feature/x") == false)
+
+        // Values are bound as raw-string (`-f`) fields so String! typing survives.
+        #expect(args.contains("owner=acme"))
+        #expect(args.contains("name=acme-prod"))
+        #expect(args.contains("branch=feature/x"))
+        #expect(!args.contains("-F"))   // -F would coerce a numeric/bool-looking branch
+    }
+
+    @Test("prByBranchArgs handles a branch containing a double-quote without corrupting the query")
+    func prByBranchArgsHandlesQuoteInBranch() {
+        // A git ref may legally contain `"`. Interpolating it into the query text
+        // (the old `headRefName: "\(branch)"`) produced malformed GraphQL; as a
+        // variable field the quote is inert and round-trips verbatim.
+        let branch = "foo\"bar"
+        let args = PRStatusManager.prByBranchArgs(owner: "acme", name: "acme-prod", branch: branch)
+
+        let queryArg = args.first { $0.hasPrefix("query=") }
+        #expect(queryArg?.contains(branch) == false)   // the quote never reaches the query text
+        #expect(queryArg?.contains("$branch") == true)
+
+        // The branch survives intact as its own field value (execve arg), quote and all.
+        #expect(args.contains("branch=\(branch)"))
+    }
+
     @Test("graphQLOutputData keeps non-empty stdout")
     func graphQLOutputDataUsesNonEmptyStdout() {
         let stdout = """

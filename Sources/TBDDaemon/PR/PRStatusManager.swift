@@ -190,7 +190,8 @@ public actor PRStatusManager {
                 requiredChecksFailing: signals.failing,
                 requiredChecksPending: signals.pending
             )
-            let status = PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason)
+            let status = PRStatus(number: match.node.number, url: match.node.url, state: state, reason: reason,
+                                  mergeQueuePosition: match.node.mergeQueuePosition)
             await apply(status, for: match.worktreeID)
             await onPRStatusComputed?(match.worktreeID, status, repoPath)
         }
@@ -204,15 +205,30 @@ public actor PRStatusManager {
         return state != "SUCCESS"
     }
 
-    /// Refresh a single worktree using `gh pr view`. Used for on-select refresh.
+    /// Refresh a single worktree via `gh api graphql`. Used for on-select refresh.
+    ///
+    /// Deliberately NOT `gh pr view --json`: that field set exposes neither
+    /// `isInMergeQueue` nor `mergeQueueEntry`, so a manual refresh through it
+    /// would clobber `mergeQueuePosition` back to nil and flicker the bus away
+    /// until the next batch poll. The GraphQL path requests the same
+    /// merge-queue field set the batch query does. `gh repo view` resolves the
+    /// checkout's `owner/name` so the query can scope to this repo+branch —
+    /// which, unlike the 100-PR viewer batch, always finds an old PR.
     public func refresh(worktreeID: UUID, branch: String, upstreamBranch: String?, repoPath: String) async -> PRStatus? {
+        guard let ownerRepo = await resolveNameWithOwner(repoPath: repoPath) else {
+            return cache[worktreeID]   // can't resolve owner/name → leave cache unchanged
+        }
         let candidates = Self.branchCandidates(localBranch: branch, upstreamBranch: upstreamBranch)
         for candidate in candidates {
-            let args = ["pr", "view", candidate,
-                        "--json", "number,url,state,mergeStateStatus,reviewDecision,isDraft"]
-            guard let output = await runGH(args: args, repoPath: repoPath),
-                  let data = output.data(using: .utf8),
-                  let obj = try? JSONDecoder().decode(GHPRViewResult.self, from: data) else {
+            let args = Self.prByBranchArgs(owner: ownerRepo.owner, name: ownerRepo.name, branch: candidate)
+            let result = await runGHResult(args: args, repoPath: repoPath)
+            guard let result,
+                  result.exitStatus == 0,
+                  let data = Self.graphQLOutputData(stdout: result.stdout),
+                  let obj = try? Self.parsePRByBranch(from: data) else {
+                let exit = result?.exitStatus ?? -1
+                let errSuffix = result?.stderr.trimmingCharacters(in: .whitespacesAndNewlines) ?? "gh not launched"
+                logger.debug("refresh: gh graphql failed or unparseable for branch \(candidate, privacy: .public) (exit \(exit, privacy: .public)): \(errSuffix, privacy: .public); trying next candidate")
                 continue
             }
 
@@ -235,7 +251,8 @@ public actor PRStatusManager {
                 requiredChecksFailing: signals.failing,
                 requiredChecksPending: signals.pending
             )
-            let status = PRStatus(number: obj.number, url: obj.url, state: state, reason: reason)
+            let status = PRStatus(number: obj.number, url: obj.url, state: state, reason: reason,
+                                  mergeQueuePosition: obj.mergeQueuePosition)
             await apply(status, for: worktreeID)
             lastDirectUpdate[worktreeID] = Date()
             await onPRStatusComputed?(worktreeID, status, repoPath)
@@ -243,6 +260,7 @@ public actor PRStatusManager {
         }
 
         // gh exited non-zero or parse failed for every candidate — leave cache unchanged.
+        logger.debug("refresh: no candidate branch yielded a PR for worktree \(worktreeID, privacy: .public); keeping cached status")
         return cache[worktreeID]
     }
 
@@ -482,6 +500,49 @@ public actor PRStatusManager {
         """
     }
 
+    /// Single-PR refresh query: the same per-PR field set as the batch query
+    /// (including `mergeQueueEntry { position }`), scoped to one repo + head
+    /// branch. Ordered newest-first so `parsePRByBranch` can pick the best node
+    /// without a separate `createdAt` tiebreak. `first: 10` covers a branch
+    /// reused across a closed+reopened PR pair.
+    ///
+    /// `owner`/`name`/`branch` are GraphQL **variables**, never interpolated
+    /// into the query text: a git ref may legally contain `"`, and interpolating
+    /// `headRefName: "\(branch)"` for a branch like `foo"bar` produced a
+    /// malformed query (a regression from the old `gh pr view <branch>` execve
+    /// arg). `prByBranchArgs` binds the values as raw-string fields.
+    static func prByBranchQuery() -> String {
+        """
+        query($owner: String!, $name: String!, $branch: String!) {
+          repository(owner: $owner, name: $name) {
+            pullRequests(headRefName: $branch, first: 10,
+                         orderBy: {field: CREATED_AT, direction: DESC}) {
+              nodes {
+                number url state mergeStateStatus reviewDecision isDraft
+                mergeQueueEntry { position }
+              }
+            }
+          }
+        }
+        """
+    }
+
+    /// The `gh api graphql` argument vector for the single-PR refresh, binding
+    /// `owner`/`name`/`branch` as GraphQL variables. Uses `-f` (raw string), not
+    /// `-F` (typed): the variables are declared `String!`, and `-F` would coerce
+    /// a branch that looks like a number or `true`/`false`/`null` into the wrong
+    /// JSON type and be rejected. Passing them as fields — not interpolated text
+    /// — also makes a `"` in any value harmless.
+    static func prByBranchArgs(owner: String, name: String, branch: String) -> [String] {
+        [
+            "api", "graphql",
+            "-f", "query=\(prByBranchQuery())",
+            "-f", "owner=\(owner)",
+            "-f", "name=\(name)",
+            "-f", "branch=\(branch)"
+        ]
+    }
+
     /// Compute human-readable reason string for the PR merge state.
     /// Delegates to mapStateAndReason() for the single source of truth.
     public static func computeReason(
@@ -532,6 +593,9 @@ public actor PRStatusManager {
         public let createdAt: String        // ISO 8601, e.g. "2026-03-24T15:58:27Z"
         public let isDraft: Bool
         public let statusCheckRollupState: String?
+        /// 1-indexed merge-queue position (`mergeQueueEntry.position`), or nil
+        /// when the PR is not queued or reports a null position.
+        public let mergeQueuePosition: Int?
     }
 
     public static func parsePRNodes(from data: Data) throws -> [PRNode] {
@@ -554,17 +618,75 @@ public actor PRStatusManager {
             let isDraft = node["isDraft"] as? Bool ?? false
             let statusCheckRollup = node["statusCheckRollup"] as? [String: Any]
             let statusCheckRollupState = statusCheckRollup?["state"] as? String
+            // A null/absent mergeQueueEntry (not queued) yields nil; only a real
+            // entry carrying an Int position gates the bus icon.
+            let mergeQueueEntry = node["mergeQueueEntry"] as? [String: Any]
+            let mergeQueuePosition = mergeQueueEntry?["position"] as? Int
             return PRNode(number: number, url: url, state: state,
                           mergeStateStatus: mergeStateStatus,
                           reviewDecision: reviewDecision,
                           headRefName: headRefName,
                           createdAt: createdAt,
                           isDraft: isDraft,
-                          statusCheckRollupState: statusCheckRollupState)
+                          statusCheckRollupState: statusCheckRollupState,
+                          mergeQueuePosition: mergeQueuePosition)
         }
     }
 
+    /// Parse the single-PR refresh response (`prByBranchQuery`).
+    ///
+    /// Walks `data.repository.pullRequests.nodes` and returns the best node —
+    /// highest state priority (OPEN > MERGED > CLOSED), and, because the query
+    /// orders newest-first, the first node seen at that priority. Returns nil
+    /// when the branch has no PR (empty nodes). Throws `PRStatusError.invalidJSON`
+    /// only when the outer shape can't be parsed at all.
+    static func parsePRByBranch(from data: Data) throws -> GHPRViewResult? {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataObj = root["data"] as? [String: Any],
+              let repository = dataObj["repository"] as? [String: Any],
+              let prs = repository["pullRequests"] as? [String: Any],
+              let nodes = prs["nodes"] as? [Any] else {
+            throw PRStatusError.invalidJSON
+        }
+
+        var best: GHPRViewResult?
+        var bestPriority = Int.min
+        for node in nodes.compactMap({ $0 as? [String: Any] }) {
+            guard let number = node["number"] as? Int,
+                  let url = node["url"] as? String,
+                  let state = node["state"] as? String,
+                  let mergeStateStatus = node["mergeStateStatus"] as? String else { continue }
+            let priority = Self.prPriority(state)
+            // Nodes are newest-first, so the first node seen at a priority is the
+            // newest; only a strictly higher priority displaces it.
+            guard priority > bestPriority else { continue }
+            let mergeQueueEntry = node["mergeQueueEntry"] as? [String: Any]
+            best = GHPRViewResult(
+                number: number,
+                url: url,
+                state: state,
+                mergeStateStatus: mergeStateStatus,
+                reviewDecision: node["reviewDecision"] as? String,
+                isDraft: node["isDraft"] as? Bool ?? false,
+                mergeQueuePosition: mergeQueueEntry?["position"] as? Int
+            )
+            bestPriority = priority
+        }
+        return best
+    }
+
     // MARK: - Shell helpers
+
+    /// Resolve the checkout's `owner/name` for repo-scoped GraphQL queries.
+    /// Uses `gh repo view` (git-remote resolution) so `refresh` need not already
+    /// hold a PR URL to parse.
+    private nonisolated func resolveNameWithOwner(repoPath: String) async -> (owner: String, name: String)? {
+        let args = ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]
+        guard let output = await runGH(args: args, repoPath: repoPath) else { return nil }
+        let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/")
+        guard parts.count == 2 else { return nil }
+        return (owner: String(parts[0]), name: String(parts[1]))
+    }
 
     private nonisolated func runGHGraphQL(repoPath: String) async -> Data? {
         let query = """
@@ -575,6 +697,7 @@ public actor PRStatusManager {
               nodes {
                 number url state mergeStateStatus reviewDecision headRefName createdAt isDraft
                 statusCheckRollup { state }
+                mergeQueueEntry { position }
               }
             }
           }
@@ -704,13 +827,19 @@ private struct GHCommandResult {
 
 // MARK: - Supporting types
 
-private struct GHPRViewResult: Codable {
+/// Result of the single-PR refresh query, populated by `parsePRByBranch`.
+/// (No longer `Codable`: the refresh path moved from `gh pr view --json` to
+/// `gh api graphql`, whose nested `mergeQueueEntry { position }` shape is hand
+/// parsed like the batch response.) Internal so tests can assert the decode.
+struct GHPRViewResult {
     let number: Int
     let url: String
     let state: String
     let mergeStateStatus: String
     let reviewDecision: String?
     let isDraft: Bool
+    /// 1-indexed merge-queue position, or nil when not queued.
+    let mergeQueuePosition: Int?
 }
 
 public enum PRStatusError: Error {

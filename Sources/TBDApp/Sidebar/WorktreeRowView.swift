@@ -62,25 +62,22 @@ struct WorktreeRowView: View {
             hasPRStatus: prPresentation != nil
         ) {
         case .prStatus:
-            if let presentation = prPresentation,
-               let nsImage = Self.loadIcon(presentation.iconName),
-               let status = prStatus {
-                let reasonText = status.reason ?? status.state.displayReason
+            if let presentation = prPresentation, let status = prStatus {
+                // A queued PR describes itself by its queue position, not its
+                // underlying (UNKNOWN→pending) check reason.
+                let detail = presentation.badge.map { "in merge queue, position \($0)" }
+                    ?? (status.reason ?? status.state.displayReason)
                 Button(action: openPR) {
-                    Image(nsImage: nsImage)
-                        .renderingMode(.template)
-                        .resizable()
-                        .scaledToFit()
+                    prGlyph(presentation)
                         .frame(width: 12, height: 12)
-                        .foregroundStyle(presentation.color)
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .onHover { isPRIconHovered = $0 }
-                .accessibilityLabel("PR #\(status.number): \(reasonText)")
+                .accessibilityLabel("PR #\(status.number): \(detail)")
                 .anchorPreference(key: RowTooltipPreferenceKey.self, value: .bounds) { anchor in
                     isPRIconHovered
-                        ? RowTooltipPreference(text: "PR #\(status.number) · \(reasonText)", anchor: anchor)
+                        ? RowTooltipPreference(text: "PR #\(status.number) · \(detail)", anchor: anchor)
                         : nil
                 }
             }
@@ -91,6 +88,29 @@ struct WorktreeRowView: View {
                 .frame(width: 12, height: 12)
         case nil:
             EmptyView()
+        }
+    }
+
+    /// The leading PR glyph. `.asset` is a bundled monochrome SVG tinted with
+    /// the status color; `.emoji` (the merge-queue bus) is full-color and must
+    /// NOT be tinted — so it drops `.renderingMode(.template)`/`.foregroundStyle`
+    /// and, when queued, bakes its position badge via the shared `busImage`.
+    @ViewBuilder
+    private func prGlyph(_ presentation: PRStatusPresentation) -> some View {
+        switch presentation.glyph {
+        case .asset(let name):
+            if let nsImage = Self.loadIcon(name) {
+                Image(nsImage: nsImage)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(presentation.color)
+            }
+        case .emoji:
+            Image(nsImage: PRStatusPresentation.busImage(position: presentation.badge, side: 12))
+                .renderingMode(.original)
+                .resizable()
+                .scaledToFit()
         }
     }
 

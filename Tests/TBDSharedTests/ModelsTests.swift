@@ -527,3 +527,27 @@ import Testing
     #expect(s.contains("\"worktreeSlot\":\"r\""))
     #expect(s.contains("\"status\":\"missing\""))
 }
+
+// MARK: - PRStatus persisted-JSON compatibility
+
+/// PRStatus rides in the single `worktree.prStatus` TEXT column (migration
+/// v34) as JSON. `mergeQueuePosition` was added as an OPTIONAL field with no
+/// new migration, so a blob written before the field existed (no
+/// `mergeQueuePosition` key) must still decode — yielding nil.
+@Test func prStatusDecodesLegacyJSONWithoutMergeQueuePosition() throws {
+    let legacy = """
+    {"number":123,"url":"https://github.com/acme/acme-prod/pull/123","state":"pending","reason":"Checks pending"}
+    """
+    let decoded = try JSONDecoder().decode(PRStatus.self, from: Data(legacy.utf8))
+    #expect(decoded.number == 123)
+    #expect(decoded.state == .pending)
+    #expect(decoded.mergeQueuePosition == nil)
+}
+
+@Test func prStatusRoundTripsMergeQueuePosition() throws {
+    let status = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
+                          state: .pending, reason: "Checks pending", mergeQueuePosition: 2)
+    let data = try JSONEncoder().encode(status)
+    let decoded = try JSONDecoder().decode(PRStatus.self, from: data)
+    #expect(decoded.mergeQueuePosition == 2)
+}
