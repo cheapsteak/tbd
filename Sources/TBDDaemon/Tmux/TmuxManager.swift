@@ -298,13 +298,6 @@ public struct TmuxManager: Sendable {
         ["-L", server, "capture-pane", "-p", "-t", paneID]
     }
 
-    /// Capture pane content with wrapped lines joined (but no ANSI escape sequences).
-    /// Used by verify-and-retry so wrapped composer lines are not split; the plain text
-    /// avoids prefixing ANSI escapes before `❯` which would break the starts-with check.
-    public static func capturePaneJoinedCommand(server: String, paneID: String) -> [String] {
-        ["-L", server, "capture-pane", "-p", "-J", "-t", paneID]
-    }
-
     /// Capture pane content with ANSI escape sequences and joined wrapped lines preserved.
     public static func capturePaneWithAnsiCommand(server: String, paneID: String) -> [String] {
         ["-L", server, "capture-pane", "-p", "-e", "-J", "-t", paneID]
@@ -594,19 +587,6 @@ public struct TmuxManager: Sendable {
         // can exercise the park path's snapshot capture end-to-end.
         if dryRun { return dryRunCapturePane?(server, paneID) ?? "" }
         let args = Self.capturePaneWithAnsiCommand(server: server, paneID: paneID)
-        return try await runTmux(args)
-    }
-
-    /// Capture pane content with wrapped lines joined but no ANSI escape sequences.
-    /// Used for text pattern matching (e.g. detecting `[Pasted text`) where line wraps
-    /// can split patterns across physical lines.
-    public func capturePaneOutputJoined(server: String, paneID: String) async throws -> String {
-        if dryRun {
-            let args = Self.capturePaneJoinedCommand(server: server, paneID: paneID)
-            dryRunRecorder?(args)
-            return dryRunCapturePane?(server, paneID) ?? ""
-        }
-        let args = Self.capturePaneJoinedCommand(server: server, paneID: paneID)
         return try await runTmux(args)
     }
 

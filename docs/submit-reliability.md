@@ -1,6 +1,6 @@
 # `tbd terminal send --submit` silent non-submit — design brief
 
-**Status:** Option 2 shipped (PR #389); Option 3 implemented — see "Implementation Status" below
+**Status:** Option 2 shipped (PR #389); Option 3 implemented (PR #398) then removed as dead code (2026-07-09) — see "Implementation Status" below
 **Branch:** `tbd/submit-reliability-brainstorm`
 **Author:** investigation session, 2026-07-08
 
@@ -219,30 +219,23 @@ started 16:00; the reports predate that restart. 16 live trials against the #389
 including the reported waiting-on-background-agent state and SIGSTOP-forced input coalescing — all
 submitted.
 
-**Option 3 implemented (this change):** verify-and-retry scoped to the `[Pasted text`
-composer signature. After the initial Enter, if both:
-- `params.submit == true` (a real submit, not a manual flush)
-- `!params.text.isEmpty` (non-empty text was sent, not the empty-text escape hatch)
+**Option 3 (verify-and-retry) — implemented in PR #398, then removed (2026-07-09).** A live
+spike against real Claude Code v2.1.205 (isolated `tmux -L`, byte-0 pty capture) showed the
+residual race Option 3 defended is unreachable: across a full session spanning idle prompt,
+streaming turns, the slash menu, and a `/model` modal open+close, Claude emitted `CSI ?2004h`
+exactly once at startup and `CSI ?2004l` zero times — bracketed-paste mode is pinned ON while
+the composer is live. The exact production paste+Enter sequence submitted every time, including
+SIGSTOP-forced input coalescing; a control run reproduced the ORIGINAL bug with raw
+`send-keys -l`, confirming the negatives are real. With the mode always ON, `paste-buffer -p`
+is always bracketed and the Enter is always outside the paste, so Option 2 alone is sufficient.
+Option 3 added a ~300 ms verify pass to every submit-with-text call (up to ~2.4 s when it
+wrongly detected a stuck submit) and coupled the daemon RPC layer to brittle Claude-TUI strings
+(`❯`, `[Pasted text`) that would degrade silently if the TUI changed. Removed as dead code.
 
-then the handler spawns a bounded retry loop (3 delays: 300/500/800 ms) that:
-1. Sleeps for each delay
-2. Captures the pane output (best-effort; failure is silent)
-3. Finds the LAST line starting with `❯` (the composer prompt, not transcript echoes)
-4. If that line contains `[Pasted text`, logs a warning and retries Enter
-5. If the composer is clear or capture failed, stops (success)
-
-If all retries exhaust and `[Pasted text` persists, logs a warning but returns `.ok()` (the
-RPC and CLI exit code remain unchanged — Option 4 semantics are still deferred). The clean
-path costs one ~300 ms verification pass on every submit-with-text call (bounded ~2.4 s
-worst case when stuck); the empty-text flush and text-only sends are unaffected. This
-provides a self-healing defense in depth on top of Option 2.
-
-**Test coverage:** six new tests cover:
-- Stuck-then-cleared: retry succeeds after 1 attempt
-- Clean first verify: no retry needed
-- Never clears: bounded by retry schedule (success anyway)
-- No-submit case: zero retries, zero captures
-- Empty-text submit: manual flush, zero retries, zero captures
-- Composer scoping: earlier transcript `❯ [Pasted text` does not trigger false-positive retry
+**Caveat (accepted):** the spike tested Claude Code only, not Codex. If a future/other agent
+TUI toggles `?2004l` while its composer is live, the silent-non-submit risk returns for that
+TUI; the fix then is a PROPER loud detector (report the drop through the RPC / exit code), not
+a silent retry. Also note nightwatch's `dispatch()` still returns success unconditionally
+without inspecting the result — a separate latent gap, out of scope here.
 
 **Exit-code semantics (Option 4)** remain deferred (documented as open question in this doc).
