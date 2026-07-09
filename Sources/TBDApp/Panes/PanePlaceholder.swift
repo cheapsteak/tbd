@@ -23,6 +23,20 @@ func shouldSuppressEvents(in coordinator: TranscriptOverlayCoordinator, forTermi
     return false
 }
 
+// MARK: - ParkedPaneWakeModel
+
+/// Pure gate behind the parked pane's full-surface click-to-wake overlay:
+/// only a PARKED terminal (hibernated or legacy-suspended) gets the
+/// transparent click-catching layer — a live pane must never have one (it
+/// would eat clicks meant for the terminal). Extracted from the view so both
+/// branches are unit-testable without SwiftUI (same pattern as
+/// `TabParkMenuModel`).
+enum ParkedPaneWakeModel {
+    static func showsWakeOverlay(for terminal: Terminal?) -> Bool {
+        terminal?.isParked == true
+    }
+}
+
 // MARK: - PanePlaceholder
 
 /// Universal leaf wrapper that renders the appropriate pane content
@@ -357,29 +371,41 @@ struct PanePlaceholder: View {
                     }
                 )
                 .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(terminal.isParked)")
-                .overlay(alignment: .topTrailing) {
-                    if terminal.isParked {
+                .overlay {
+                    // Full-surface click-to-wake for a PARKED pane: the whole
+                    // frozen snapshot is the resume affordance (the old
+                    // corner "Click to resume session" chip was easy to miss;
+                    // the bottom HibernatedBanner now carries the text). Gated
+                    // by ParkedPaneWakeModel so a LIVE terminal never gets a
+                    // click-catching layer over it. A transparent plain Button
+                    // (not .onTapGesture, which blocks .contextMenu on macOS)
+                    // — applied BEFORE the TranscriptOverlayView overlay below
+                    // so that overlay stays on top in hit-testing. Plain
+                    // left-clicks reach it: TerminalPanelView's click monitor
+                    // only consumes Cmd+clicks that resolve a file path.
+                    if ParkedPaneWakeModel.showsWakeOverlay(for: terminal) {
                         Button {
                             Task {
                                 // Wake is the single resume path for parked
                                 // sessions (hibernated or legacy-suspended).
-                                try? await appState.daemonClient.terminalWake(terminalID: terminal.id)
-                                await appState.refreshTerminals(worktreeID: worktree.id)
+                                // Singleflighted in AppState; explicit user
+                                // action → surface the failure (single wake,
+                                // so the coalescer yields the bare message).
+                                if let failure = await appState.wakeTerminal(
+                                    terminalID: terminal.id, worktreeID: worktree.id, userInitiated: true
+                                ), let message = AppState.coalescedWakeFailureMessage(failures: [failure]) {
+                                    appState.showAlert(message, isError: true)
+                                }
                             }
                         } label: {
-                            Text("Click to resume session")
-                                .font(.caption2)
-                                .fontWeight(.medium)
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
-                                .padding(8)
+                            Color.clear
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .onHover { hovering in
                             if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                         }
+                        .help("Click to resume session")
                     }
                 }
                 .overlay {

@@ -206,14 +206,25 @@ struct SingleWorktreeView: View {
                         Color.clear.preference(key: MainAreaSizeKey.self, value: geometry.size)
                     })
 
-                // Thin footer when the active tab's terminal has a scheduled
-                // auto-resume: the wide "⏳ resumes ..." text used to live in
-                // the tab label (inflating tab width), now shown here at the
-                // bottom of the pane once per active tab instead of per
-                // background tab.
-                if let resumeAt = activeTabTerminal?.pendingResumeAt {
+                // Thin footer for the active tab's terminal. Two mutually
+                // exclusive banners share this slot (precedence encoded in
+                // HibernatedBannerModel.banner(for:)):
+                // - Parked (hibernated / legacy-suspended): tell the user the
+                //   whole pane is click-to-resume. Wins over scheduled-resume —
+                //   a parked session's "TBD types continue at ..." text would
+                //   be misleading because nothing is running to receive it.
+                // - Scheduled auto-resume: the wide "⏳ resumes ..." text that
+                //   used to live in the tab label (inflating tab width), shown
+                //   here once per active tab instead of per background tab.
+                switch HibernatedBannerModel.banner(for: activeTabTerminal) {
+                case .hibernated(let message)?:
+                    Divider()
+                    HibernatedBanner(message: message)
+                case .scheduledResume(let resumeAt)?:
                     Divider()
                     ScheduledResumeBanner(resumeAt: resumeAt)
+                case nil:
+                    EmptyView()
                 }
             }
             .sheet(isPresented: $showAccountPicker) {
@@ -311,6 +322,83 @@ struct SingleWorktreeView: View {
 
     private func closeTab(at index: Int) {
         appState.closeTab(worktreeID: worktreeID, index: index)
+    }
+}
+
+// MARK: - HibernatedBannerModel
+
+/// Pure decision behind the bottom-of-pane footer banner: which banner (if
+/// any) the active tab's terminal gets, and the exact hibernated phrasing per
+/// `hibernateReason`. Extracted from the view so each branch — including the
+/// parked-beats-scheduled precedence — is unit-testable without SwiftUI (same
+/// pattern as `TabParkMenuModel` / `terminalIDToWakeOnFocus`).
+enum HibernatedBannerModel {
+    enum Banner: Equatable {
+        /// Terminal is parked (hibernated or legacy-suspended) → tell the
+        /// user the pane is click-to-resume, phrased per park reason.
+        case hibernated(message: String)
+        /// Terminal has a scheduled auto-resume → the "⏳ resumes ..." footer.
+        case scheduledResume(Date)
+    }
+
+    /// nil = no footer banner. Precedence: a parked terminal shows ONLY the
+    /// hibernated banner even when `pendingResumeAt` is also set (possible —
+    /// #404 parks on PR merge while limit-resume scheduling exists): the
+    /// scheduled text promises TBD will type "continue", but nothing is
+    /// running in a parked session to receive it.
+    static func banner(for terminal: Terminal?) -> Banner? {
+        guard let terminal else { return nil }
+        if terminal.isParked {
+            return .hibernated(message: message(for: terminal.hibernateReason))
+        }
+        if let resumeAt = terminal.pendingResumeAt {
+            return .scheduledResume(resumeAt)
+        }
+        return nil
+    }
+
+    /// One-line phrasing per park reason. nil (legacy pre-v46 rows) reads the
+    /// same as `.auto` — the reason the migration can't attribute is almost
+    /// always the idle sweep.
+    static func message(for reason: HibernateReason?) -> String {
+        switch reason {
+        case .manual:
+            return "Hibernated — click anywhere in the pane to resume"
+        case .recovery:
+            return "Parked after a restart — click anywhere in the pane to resume"
+        case .merged:
+            return "Hibernated after the PR merged — click anywhere in the pane to resume"
+        case .auto, nil:
+            return "Hibernated while idle — click anywhere in the pane to resume"
+        }
+    }
+}
+
+// MARK: - HibernatedBanner
+
+/// Slim footer bar shown at the bottom of the pane when the active tab's
+/// terminal is parked (hibernated or legacy-suspended). Same visual idiom as
+/// `ScheduledResumeBanner` below; the message comes from
+/// `HibernatedBannerModel.message(for:)` so phrasing stays unit-tested.
+private struct HibernatedBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "moon.zzz")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color.indigo)
+                .frame(width: 12, height: 12)
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(Color.indigo)
+                .lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.indigo.opacity(0.15))
     }
 }
 
