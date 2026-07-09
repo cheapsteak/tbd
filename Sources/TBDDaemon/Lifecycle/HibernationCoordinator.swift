@@ -203,6 +203,35 @@ public actor HibernationCoordinator {
         }
     }
 
+    /// Park a session because its worktree's PR merged. Honors every safety rail
+    /// (including keep-warm, unlike `manualHibernate`) but NOT the idle window or
+    /// the idle-sweep master switch — see `HibernationGate.decideForMerge`.
+    public func hibernateForMerge(terminalID: UUID) async -> HibernateResult {
+        guard let terminal = try? await db.terminals.get(id: terminalID) else {
+            return .notFound
+        }
+        guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
+        if let blocked = HibernationGate.blockingRail(terminal: terminal) {
+            return .notEligible(reason: Self.mergeBlockReason(blocked))
+        }
+        return await performHibernate(terminal: terminal, reason: .merged)
+    }
+
+    /// The reason a merge-park was refused, for logging/telemetry. Mirrors
+    /// `manualBlockReason` but maps every `blockingRail` case — including
+    /// keep-warm, which merge-park honors but manual bypasses.
+    private static func mergeBlockReason(_ decision: HibernationGate.Decision) -> String {
+        switch decision {
+        case .notClaudeResumable: return "Not a resumable Claude session"
+        case .alreadyHibernated: return "Terminal is already hibernated"
+        case .suspended: return "Terminal is suspended"
+        case .keepWarm: return "Terminal is pinned keep-warm"
+        case .running: return "Session is actively running"
+        case .waitingForUser: return "Session is waiting on a permission prompt"
+        case .eligible, .featureDisabled, .notIdleLongEnough: return "Not hibernatable"
+        }
+    }
+
     /// Gracefully terminate the pane's Claude and swap the pane to a bare shell
     /// via `respawn-window` (window + tab survive). Marks the row hibernated.
     ///

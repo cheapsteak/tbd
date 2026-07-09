@@ -161,6 +161,7 @@ struct ContentView: View {
                    let prURL = URL(string: prStatus.url) {
                     let worktree = appState.findWorktree(id: worktreeID)
                     let armed = worktree.map { appState.effectiveAutoArchive(for: $0) } ?? false
+                    let hibernateArmed = worktree.map { appState.effectiveAutoHibernate(for: $0) } ?? false
                     let blocked = !appState.children(of: worktreeID).isEmpty
                     ToolbarItem(placement: .primaryAction) {
                         ControlGroup {
@@ -178,9 +179,24 @@ struct ContentView: View {
                                         }
                                     ))
                                     .disabled(blocked)
+                                    // Plain 2-state toggle bound to the EFFECTIVE
+                                    // value; the setter always writes explicit
+                                    // true/false (no UI path back to nil — the
+                                    // tri-state stays reachable via daemon/DB only,
+                                    // matching auto-archive). Deliberately NOT
+                                    // `.disabled(blocked)`: `blocked` is the
+                                    // archive-specific active-children rule, and the
+                                    // daemon's precedence lets an armed-but-blocked
+                                    // archive still hibernate.
+                                    Toggle("Auto-hibernate sessions on PR merge", isOn: Binding(
+                                        get: { hibernateArmed },
+                                        set: { newValue in
+                                            Task { await appState.setAutoHibernate(worktreeID: worktreeID, enabled: newValue) }
+                                        }
+                                    ))
                                 }
                             } label: {
-                                PRButtonLabel(prStatus: prStatus, isAutoArchiveArmed: armed)
+                                PRButtonLabel(prStatus: prStatus, isAutoArchiveArmed: armed, isAutoHibernateArmed: hibernateArmed)
                             } primaryAction: {
                                 let existingTabs = appState.tabs[worktreeID] ?? []
                                 if let existingIndex = existingTabs.firstIndex(where: {
@@ -201,32 +217,42 @@ struct ContentView: View {
                             // split button otherwise accent-tints it); the icon keeps
                             // its baked status color via renderingMode(.original).
                             .tint(.primary)
-                            // Three-way: while child worktrees exist the daemon's
+                            // Build the tooltip as an ordered clause list so
+                            // "more options" is structurally guaranteed to land
+                            // last, whatever combination of arm states applies.
+                            // The archive clause keeps its three-way wording:
+                            // while child worktrees exist the daemon's
                             // AutoArchiveOnMergeCoordinator skips archiving (it
-                            // re-checks at merge time), so an armed-but-blocked
-                            // worktree must not promise "auto-archives on merge".
-                            .help(
-                                armed && blocked
-                                    ? "Open PR #\(prStatus.number) · auto-archive armed (paused while child worktrees exist) · more options"
-                                    : armed
-                                        ? "Open PR #\(prStatus.number) · auto-archives on merge · more options"
-                                        : "Open PR #\(prStatus.number) · more options"
-                            )
+                            // re-checks active children at merge time), so an
+                            // armed-but-blocked worktree must not promise
+                            // "auto-archives on merge".
+                            .help({
+                                var clauses = ["Open PR #\(prStatus.number)"]
+                                if armed && blocked {
+                                    clauses.append("auto-archive armed (paused while child worktrees exist)")
+                                } else if armed {
+                                    clauses.append("auto-archives on merge")
+                                }
+                                if hibernateArmed { clauses.append("auto-hibernates on merge") }
+                                clauses.append("more options")
+                                return clauses.joined(separator: " · ")
+                            }())
                             // AppKit materializes this split button's NSMenu and
                             // label ONCE; later SwiftUI re-evaluations of the
                             // Toggle checkmark and armed badge never reach the
                             // already-built NSMenuToolbarItem. Changing the id
                             // forces the item to be recreated, so the key must
                             // include EVERYTHING the label/menu render: worktree
-                            // + whether its row has loaded (gates the menu's only
-                            // item), armed + blocked (menu + help), the rendered
-                            // PRStatus fields (number, state, url — not reason,
-                            // which presentation ignores), and colorScheme
-                            // (baked icon colors).
+                            // + whether its row has loaded (gates the menu's
+                            // items), armed + hibernateArmed + blocked (menu +
+                            // help), the rendered PRStatus fields (number, state,
+                            // url — not reason, which presentation ignores), and
+                            // colorScheme (baked icon colors).
                             .id(PRButtonLabel.prSplitButtonID(
                                 worktreeID: worktreeID,
                                 worktreeFound: worktree != nil,
                                 armed: armed,
+                                hibernateArmed: hibernateArmed,
                                 blocked: blocked,
                                 prStatus: prStatus,
                                 colorScheme: colorScheme
@@ -406,32 +432,46 @@ private func overlayFrameIsWindowRoot(
 struct PRButtonLabel: View {
     let prStatus: PRStatus
     let isAutoArchiveArmed: Bool
+    let isAutoHibernateArmed: Bool
     // Feeds the baked-icon cache key (and, at the ContentView level, the
     // toolbar item's .id key) so light/dark changes re-bake the non-template
     // icon, which can't auto-adapt the way a tinted template would.
     @Environment(\.colorScheme) private var colorScheme
 
-    /// Baked image geometry: 12×12 status icon, plus (when armed) a 3pt gap
-    /// and a 12×12 archivebox badge composited into the same bitmap.
+    /// Baked image geometry: a 12×12 status icon, followed left→right by up to
+    /// two 12×12 armed badges — an `archivebox` (auto-archive) then a
+    /// `moon.zzz` (auto-hibernate) — each preceded by a 3pt gap and composited
+    /// into the same bitmap. The order is stable regardless of which flags are
+    /// armed: when only hibernate is armed, `moon.zzz` occupies the first badge
+    /// slot immediately after the icon (no empty archivebox gap).
     static let iconSide: CGFloat = 12
     static let badgeGap: CGFloat = 3
 
     /// A queued PR renders the full-color bus (with its position baked in)
-    /// instead of the status icon; the archivebox armed-badge is suppressed in
-    /// that mode, so the baked image stays a single square.
+    /// instead of the status icon; BOTH armed badges are suppressed in that
+    /// mode (the bus owns the label), so the baked image stays a single square.
     var isMergeQueued: Bool { prStatus.mergeQueuePosition != nil }
 
+    /// Number of armed badges to composite. Zero when queued (the bus glyph
+    /// supersedes both badges), otherwise one per armed flag.
+    var badgeCount: Int {
+        guard !isMergeQueued else { return 0 }
+        return (isAutoArchiveArmed ? 1 : 0) + (isAutoHibernateArmed ? 1 : 0)
+    }
+
     var bakedWidth: CGFloat {
-        (isAutoArchiveArmed && !isMergeQueued) ? Self.iconSide + Self.badgeGap + Self.iconSide : Self.iconSide
+        Self.iconSide + CGFloat(badgeCount) * (Self.badgeGap + Self.iconSide)
     }
 
     /// The `.id` key for the PR split-button toolbar item. AppKit materializes
     /// the split button's NSMenu and label ONCE, so the key must include
     /// EVERYTHING the label/menu render — anything omitted here can change in
     /// SwiftUI state without ever reaching the materialized AppKit item.
-    /// `worktreeFound` matters because the menu's only item (the auto-archive
-    /// Toggle) is gated on the worktree row having loaded: a menu materialized
-    /// before the row appears would otherwise stay permanently empty. The key
+    /// `worktreeFound` matters because the menu's items (the auto-archive and
+    /// auto-hibernate Toggles) are gated on the worktree row having loaded: a
+    /// menu materialized before the row appears would otherwise stay
+    /// permanently empty. `hibernateArmed` mirrors `armed`: without it the
+    /// hibernate Toggle's checkmark would freeze at its first-render value. The key
     /// contains exactly the `PRStatus` fields the label/menu/primaryAction
     /// consume: `number` (label text/help), `state` (icon via
     /// `PRStatusPresentation`), `url` (captured by `primaryAction`, so a
@@ -451,11 +491,12 @@ struct PRButtonLabel: View {
         worktreeID: UUID,
         worktreeFound: Bool,
         armed: Bool,
+        hibernateArmed: Bool,
         blocked: Bool,
         prStatus: PRStatus,
         colorScheme: ColorScheme
     ) -> String {
-        "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(blocked)"
+        "pr-split-\(worktreeID)-\(worktreeFound)-\(armed)-\(hibernateArmed)-\(blocked)"
             + "-\(prStatus.number)-\(prStatus.state.rawValue)-\(prStatus.url)"
             + "-\(prStatus.mergeQueuePosition.map(String.init) ?? "nil")"
             + "-\(colorScheme)"
@@ -489,21 +530,26 @@ struct PRButtonLabel: View {
             // macOS 26 flattens a toolbar split-button (Menu) label to exactly
             // ONE image + ONE plain text string: a separate trailing Image is
             // dropped, and an inline Text(Image(...)) attachment is stripped
-            // entirely. Any badge (like the auto-archive-armed archivebox)
-            // must therefore be composited INTO the single baked NSImage.
+            // entirely. Any badge (like the auto-archive-armed archivebox or
+            // the auto-hibernate-armed moon.zzz) must therefore be composited
+            // INTO the single baked NSImage.
             Text(verbatim: "#\(prStatus.number)")
                 .font(.caption)
                 .fontWeight(.medium)
         }
-        .accessibilityLabel(
-            isAutoArchiveArmed
-                ? "PR #\(prStatus.number), auto-archive on merge is on"
-                : "PR #\(prStatus.number)"
-        )
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var accessibilityLabel: String {
+        var clauses = ["PR #\(prStatus.number)"]
+        if isAutoArchiveArmed { clauses.append("auto-archive on merge is on") }
+        if isAutoHibernateArmed { clauses.append("auto-hibernate on merge is on") }
+        return clauses.joined(separator: ", ")
     }
 
     /// Cache for baked `.asset` icons, keyed by (asset name, colorSemantic,
-    /// armed, colorScheme). (The `.emoji` bus glyph is cached separately by
+    /// archiveArmed, hibernateArmed, colorScheme). (The `.emoji` bus glyph is
+    /// cached separately by
     /// `PRStatusPresentation.busImage`.) The bake does disk I/O (`Bundle.module.url` +
     /// `NSImage(contentsOf:)`) plus symbol creation on every body evaluation,
     /// and — per the materialize-once behavior documented at the `.id` call
@@ -518,29 +564,42 @@ struct PRButtonLabel: View {
     /// split-button labels render template images monochrome (AppKit tints
     /// them with the control color and ignores `.foregroundStyle`), so the
     /// icon must carry its own color and be drawn with `.renderingMode(.original)`.
-    /// When auto-archive is armed, an `archivebox` badge (tinted
-    /// `secondaryLabelColor`) is composited to the right of the status icon —
-    /// the flattened toolbar label keeps only this one image, so the badge
-    /// must live inside it.
+    /// When auto-archive and/or auto-hibernate are armed, an `archivebox`
+    /// and/or `moon.zzz` badge (each tinted `secondaryLabelColor`) is
+    /// composited left→right after the status icon — the flattened toolbar
+    /// label keeps only this one image, so the badges must live inside it.
     @MainActor
     func coloredIcon(_ presentation: PRStatusPresentation, colorScheme: ColorScheme) -> NSImage? {
         // Merge-queue bus: full-color glyph with its position baked in via the
         // SAME shared helper the sidebar uses. It must NOT be tinted, so skip
-        // the color-baking fill path entirely (and the archivebox armed-badge —
-        // queue mode supersedes it, matching `bakedWidth`).
+        // the color-baking fill path entirely (and both armed badges — queue
+        // mode supersedes them, matching `bakedWidth`).
         if case .emoji = presentation.glyph {
             return PRStatusPresentation.busImage(position: presentation.badge, side: Self.iconSide)
         }
         guard case .asset(let name) = presentation.glyph else { return nil }
-        let cacheKey = "\(name)-\(presentation.colorSemantic)-\(isAutoArchiveArmed)-\(colorScheme)"
+        // Both armed flags MUST be in the key: an armed/unarmed pair otherwise
+        // renders from the same cached bitmap and the badge silently never
+        // updates.
+        let cacheKey = "\(name)-\(presentation.colorSemantic)"
+            + "-\(isAutoArchiveArmed)-\(isAutoHibernateArmed)-\(colorScheme)"
         if let cached = Self.bakedIconCache[cacheKey] { return cached }
         let nsColor = presentation.nsColor
         guard let url = Bundle.module.url(forResource: name, withExtension: "svg", subdirectory: "Icons"),
               let base = NSImage(contentsOf: url) else { return nil }
         base.isTemplate = true
-        let badge: NSImage? = isAutoArchiveArmed
-            ? NSImage(systemSymbolName: "archivebox", accessibilityDescription: "Auto-archive on merge is on")
-            : nil
+        // Ordered list of armed badge symbols, left→right: archivebox then
+        // moon.zzz. Only the armed ones are included, so when only hibernate is
+        // armed moon.zzz takes the first slot immediately after the status icon.
+        var badges: [NSImage] = []
+        if isAutoArchiveArmed,
+           let archive = NSImage(systemSymbolName: "archivebox", accessibilityDescription: "Auto-archive on merge is on") {
+            badges.append(archive)
+        }
+        if isAutoHibernateArmed,
+           let moon = NSImage(systemSymbolName: "moon.zzz", accessibilityDescription: "Auto-hibernate on merge is on") {
+            badges.append(moon)
+        }
         let side = Self.iconSide
         let img = NSImage(size: NSSize(width: bakedWidth, height: side), flipped: false) { _ in
             // Colors are resolved inside this draw handler, so dynamic colors
@@ -549,11 +608,12 @@ struct PRButtonLabel: View {
             base.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
             nsColor.set()
             iconRect.fill(using: .sourceAtop)
-            if let badge {
-                // Aspect-fit: the archivebox symbol's intrinsic size is
-                // non-square (~16×14); drawing it straight into the square
-                // slot would stretch it ~12% vertically.
-                let slot = NSRect(x: side + Self.badgeGap, y: 0, width: side, height: side)
+            for (index, badge) in badges.enumerated() {
+                // Aspect-fit: the badge symbols' intrinsic sizes are non-square
+                // (archivebox ~16×14); drawing them straight into the square
+                // slot would stretch them.
+                let slotX = side + CGFloat(index + 1) * Self.badgeGap + CGFloat(index) * side
+                let slot = NSRect(x: slotX, y: 0, width: side, height: side)
                 let badgeRect = Self.aspectFitRect(for: badge.size, in: slot)
                 badge.draw(in: badgeRect, from: .zero, operation: .sourceOver, fraction: 1)
                 NSColor.secondaryLabelColor.set()

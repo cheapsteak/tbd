@@ -45,8 +45,26 @@ public enum HibernationGate {
         now: Date
     ) -> Decision {
         guard autoHibernateEnabled else { return .featureDisabled }
-        // Rails that don't depend on idle duration, ordered so the returned
-        // reason is the most specific blocker.
+        // Hard safety rails that don't depend on idle duration (returns the most
+        // specific blocker, or nil when all pass).
+        if let blocked = blockingRail(terminal: terminal) { return blocked }
+        // Idle-duration rail: needs a marker and enough elapsed time.
+        guard let idleSince, now.timeIntervalSince(idleSince) >= idleTimeout else {
+            return .notIdleLongEnough
+        }
+        return .eligible
+    }
+
+    /// The hard safety rails shared by EVERY park path — the ones that don't
+    /// depend on the idle-sweep master switch or the idle-duration window.
+    /// Returns the blocking `Decision` (the most specific blocker) or `nil` when
+    /// all rails pass.
+    ///
+    /// Ordered so the returned reason is the most specific blocker; callers rely
+    /// on this exact precedence (e.g. an already-hibernated running terminal
+    /// reports `.alreadyHibernated`, not `.running`). Kept identical to the cascade
+    /// that used to be inlined in `decide` so existing behavior is preserved.
+    static func blockingRail(terminal: Terminal) -> Decision? {
         guard terminal.isClaudeResumable else { return .notClaudeResumable }
         guard terminal.hibernatedAt == nil else { return .alreadyHibernated }
         guard terminal.suspendedAt == nil else { return .suspended }
@@ -57,12 +75,29 @@ public enum HibernationGate {
         case .waitingForUser:
             return .waitingForUser
         case .idle, .unknown:
-            break
+            return nil
         }
-        // Idle-duration rail: needs a marker and enough elapsed time.
-        guard let idleSince, now.timeIntervalSince(idleSince) >= idleTimeout else {
-            return .notIdleLongEnough
-        }
-        return .eligible
+    }
+
+    /// The park decision for a MERGE-triggered hibernate (PR merged →
+    /// auto-park the worktree's idle sessions).
+    ///
+    /// Deliberately consults NEITHER the idle-sweep master switch NOR the
+    /// idle-duration window — and this is the single most likely thing a future
+    /// reader gets wrong, so it is spelled out:
+    ///
+    ///  - No master switch: `config.autoHibernateEnabled` is the *idle sweep's*
+    ///    on/off. Merge-park is an independent feature armed by the per-worktree
+    ///    tri-state + `config.autoHibernateOnMergeDefault`, so gating it on the
+    ///    idle sweep's switch would wrongly couple the two.
+    ///  - No idle window: the trigger is the merge event, not "has been at rest
+    ///    for N minutes". A session that just went idle when its PR merged is a
+    ///    valid park target.
+    ///
+    /// It still honors every hard safety rail via `blockingRail` — including
+    /// keep-warm, unlike `manualHibernate` — because this is system-initiated,
+    /// not an explicit user request.
+    public static func decideForMerge(terminal: Terminal) -> Decision {
+        blockingRail(terminal: terminal) ?? .eligible
     }
 }

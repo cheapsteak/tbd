@@ -727,6 +727,30 @@ extension AppState {
         }
     }
 
+    /// Resolve the effective auto-hibernate-on-merge setting for a worktree.
+    /// Returns the per-worktree override when explicitly set; otherwise falls
+    /// back to the global default (`autoHibernateOnMergeDefault`).
+    func effectiveAutoHibernate(for worktree: Worktree) -> Bool {
+        worktree.autoHibernateOnMerge ?? autoHibernateOnMergeDefault
+    }
+
+    /// Set the per-worktree auto-hibernate override and update local state optimistically.
+    func setAutoHibernate(worktreeID: UUID, enabled: Bool) async {
+        do {
+            try await daemonClient.setWorktreeAutoHibernate(id: worktreeID, enabled: enabled)
+            // Optimistic local update so the toolbar reflects it immediately.
+            for (key, list) in worktrees {
+                if let idx = list.firstIndex(where: { $0.id == worktreeID }) {
+                    worktrees[key]?[idx].autoHibernateOnMerge = enabled
+                    break
+                }
+            }
+        } catch {
+            logger.error("Failed to set auto-hibernate: \(error, privacy: .public)")
+            showAlert("Couldn't update auto-hibernate: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     /// Repo ID of the repo containing the given worktree, if any.
     private func repoIDForWorktree(_ id: UUID) -> UUID? {
         for (rid, rows) in worktrees where rows.contains(where: { $0.id == id }) {

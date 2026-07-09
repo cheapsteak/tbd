@@ -164,8 +164,10 @@ public enum RPCMethod {
     public static let repoSetEnvOverrides         = "repo.setEnvOverrides"
     public static let modelProfileSetEnvOverrides = "modelProfile.setEnvOverrides"
     public static let worktreeSetAutoArchive = "worktree.setAutoArchive"
+    public static let worktreeSetAutoHibernate = "worktree.setAutoHibernate"
     public static let configGet = "config.get"
     public static let configSetAutoArchiveOnMergeDefault = "config.setAutoArchiveOnMergeDefault"
+    public static let configSetAutoHibernateOnMergeDefault = "config.setAutoHibernateOnMergeDefault"
     public static let configSetAutoResumeOnLimitReset = "config.setAutoResumeOnLimitReset"
     public static let configSetAutoResumeOnApiError = "config.setAutoResumeOnApiError"
     public static let configSetScratchInstructions = "config.setScratchInstructions"
@@ -500,6 +502,7 @@ public struct ModelProfileListResult: Codable, Sendable {
     /// other config-derived fields so the app loads it in one round-trip.
     public let globalEnvOverrides: [String: String]
     public let autoArchiveOnMergeDefault: Bool
+    public let autoHibernateOnMergeDefault: Bool
     public let nightwatchMode: NightwatchMode
     public let autoResumeOnLimitReset: Bool
     public let autoResumeOnApiError: Bool
@@ -509,6 +512,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
         globalEnvOverrides: [String: String] = [:],
         autoArchiveOnMergeDefault: Bool = false,
+        autoHibernateOnMergeDefault: Bool = false,
         nightwatchMode: NightwatchMode = .off,
         autoResumeOnLimitReset: Bool = false,
         autoResumeOnApiError: Bool = false
@@ -518,6 +522,7 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.primaryAgentPreference = primaryAgentPreference
         self.globalEnvOverrides = globalEnvOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
+        self.autoHibernateOnMergeDefault = autoHibernateOnMergeDefault
         self.nightwatchMode = nightwatchMode
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.autoResumeOnApiError = autoResumeOnApiError
@@ -537,6 +542,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         ) ?? [:]
         autoArchiveOnMergeDefault = try c.decodeIfPresent(
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
+        autoHibernateOnMergeDefault = try c.decodeIfPresent(
+            Bool.self, forKey: .autoHibernateOnMergeDefault) ?? false
         nightwatchMode = try c.decodeIfPresent(
             NightwatchMode.self, forKey: .nightwatchMode) ?? .off
         autoResumeOnLimitReset = try c.decodeIfPresent(
@@ -1038,6 +1045,19 @@ public struct WorktreeSetAutoArchiveParams: Codable, Sendable {
 }
 
 public struct ConfigSetAutoArchiveDefaultParams: Codable, Sendable {
+    public let enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+public struct WorktreeSetAutoHibernateParams: Codable, Sendable {
+    public let worktreeID: UUID
+    public let enabled: Bool
+    public init(worktreeID: UUID, enabled: Bool) {
+        self.worktreeID = worktreeID; self.enabled = enabled
+    }
+}
+
+public struct ConfigSetAutoHibernateDefaultParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }

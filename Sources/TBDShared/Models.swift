@@ -139,6 +139,11 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// explicit. Only set explicitly by user action (toolbar toggle / CLI);
     /// there is no UI to return to `nil`.
     public var autoArchiveOnMerge: Bool?
+    /// Per-worktree auto-hibernate-on-PR-merge override. `nil` = follow the
+    /// global default (`Config.autoHibernateOnMergeDefault`); `true`/`false` =
+    /// explicit. Only set explicitly by user action (toolbar toggle / CLI);
+    /// there is no UI to return to `nil`.
+    public var autoHibernateOnMerge: Bool?
     /// Last-known GitHub PR status, persisted in the DB so the PR icon survives
     /// app/daemon restarts. nil = never observed. Refreshed live by the daemon's
     /// PR poll; the app seeds from this only when it has no fresher live value.
@@ -165,6 +170,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 liveClaudeSessionCount: Int? = nil,
                 parentWorktreeID: UUID? = nil,
                 autoArchiveOnMerge: Bool? = nil,
+                autoHibernateOnMerge: Bool? = nil,
                 promotedToRepoID: UUID? = nil,
                 prStatus: PRStatus? = nil) {
         self.id = id
@@ -184,6 +190,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.liveClaudeSessionCount = liveClaudeSessionCount
         self.parentWorktreeID = parentWorktreeID
         self.autoArchiveOnMerge = autoArchiveOnMerge
+        self.autoHibernateOnMerge = autoHibernateOnMerge
         self.promotedToRepoID = promotedToRepoID
         self.prStatus = prStatus
     }
@@ -193,6 +200,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case hasConflicts, createdAt, archivedAt, tmuxServer
         case archivedClaudeSessions, sortOrder, archivedHeadSHA
         case liveClaudeSessionCount, parentWorktreeID, autoArchiveOnMerge
+        case autoHibernateOnMerge
         case promotedToRepoID, prStatus
     }
 
@@ -215,6 +223,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         liveClaudeSessionCount = try c.decodeIfPresent(Int.self, forKey: .liveClaudeSessionCount)
         parentWorktreeID = try c.decodeIfPresent(UUID.self, forKey: .parentWorktreeID)
         autoArchiveOnMerge = try c.decodeIfPresent(Bool.self, forKey: .autoArchiveOnMerge)
+        autoHibernateOnMerge = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateOnMerge)
         promotedToRepoID = try c.decodeIfPresent(UUID.self, forKey: .promotedToRepoID)
         prStatus = try c.decodeIfPresent(PRStatus.self, forKey: .prStatus)
     }
@@ -238,6 +247,23 @@ public enum HibernateReason: String, Codable, Sendable {
     case manual
     /// Crash-recovery / reconcile parking (window or server gone).
     case recovery
+    /// Parked because the worktree's PR merged — system-initiated, so it
+    /// auto-wakes on focus like `.auto`.
+    case merged
+
+    // Custom lenient decoder: the SYNTHESIZED `Decodable` throws
+    // `DecodingError.dataCorrupted` on any raw value this build doesn't know.
+    // Because `Terminal.hibernateReason` and `TerminalHibernationDelta`
+    // .hibernateReason ride the RPC wire, a `.merged` (or any future case)
+    // written by a newer daemon would fail the ENTIRE Terminal/delta decode on
+    // an older app binary — the blank-app class of failure. Falling back to
+    // `.auto` is semantically safe: wake-on-focus only special-cases `.manual`,
+    // so an unknown reason and `.auto` behave identically. `Encodable` stays
+    // synthesized (always writes the true raw value).
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = HibernateReason(rawValue: raw) ?? .auto
+    }
 }
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public let id: UUID
@@ -684,6 +710,9 @@ public struct Config: Codable, Sendable, Equatable {
     /// Global default for auto-archive-on-PR-merge, applied to worktrees whose
     /// per-worktree override is `nil`.
     public var autoArchiveOnMergeDefault: Bool
+    /// Global default for auto-hibernate-on-PR-merge, applied to worktrees whose
+    /// per-worktree override is `nil`.
+    public var autoHibernateOnMergeDefault: Bool
     /// Global gate for session-limit auto-resume (spec 2026-07-03). Daemon-
     /// side because the daemon must act while the app is closed. Default OFF.
     public var autoResumeOnLimitReset: Bool
@@ -727,6 +756,7 @@ public struct Config: Codable, Sendable, Equatable {
                 envSettingOverrides: [String: ClaudeEnvValue] = [:],
                 envOverrides: [String: String] = [:],
                 autoArchiveOnMergeDefault: Bool = false,
+                autoHibernateOnMergeDefault: Bool = false,
                 autoResumeOnLimitReset: Bool = false,
                 scratchInstructions: String? = nil,
                 scratchRenamePrompt: String? = nil,
@@ -741,6 +771,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.envSettingOverrides = envSettingOverrides
         self.envOverrides = envOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
+        self.autoHibernateOnMergeDefault = autoHibernateOnMergeDefault
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.scratchInstructions = scratchInstructions
         self.scratchRenamePrompt = scratchRenamePrompt
@@ -765,6 +796,8 @@ public struct Config: Codable, Sendable, Equatable {
             [String: String].self, forKey: .envOverrides) ?? [:]
         autoArchiveOnMergeDefault = try c.decodeIfPresent(
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
+        autoHibernateOnMergeDefault = try c.decodeIfPresent(
+            Bool.self, forKey: .autoHibernateOnMergeDefault) ?? false
         autoResumeOnLimitReset = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnLimitReset) ?? false
         scratchInstructions = try c.decodeIfPresent(String.self, forKey: .scratchInstructions) ?? nil

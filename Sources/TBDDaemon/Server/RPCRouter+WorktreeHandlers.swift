@@ -259,4 +259,10 @@ extension RPCRouter {
         try await db.worktrees.setAutoArchiveOnMerge(id: params.worktreeID, value: params.enabled)
         return .ok()
     }
+
+    func handleWorktreeSetAutoHibernate(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeSetAutoHibernateParams.self, from: paramsData)
+        try await db.worktrees.setAutoHibernateOnMerge(id: params.worktreeID, value: params.enabled)
+        return .ok()
+    }
 }

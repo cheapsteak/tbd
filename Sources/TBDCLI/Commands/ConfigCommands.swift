@@ -23,6 +23,7 @@ struct ConfigGet: AsyncParsableCommand {
             printJSON(config)
         } else {
             print("auto-archive-on-merge: \(config.autoArchiveOnMergeDefault ? "on" : "off")")
+            print("auto-hibernate-on-merge: \(config.autoHibernateOnMergeDefault ? "on" : "off")")
         }
     }
 }
@@ -30,7 +31,7 @@ struct ConfigGet: AsyncParsableCommand {
 struct ConfigSet: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "set", abstract: "Set a global setting")
 
-    @Argument(help: "Setting key (currently: auto-archive-on-merge)")
+    @Argument(help: "Setting key (currently: auto-archive-on-merge, auto-hibernate-on-merge)")
     var key: String
 
     @Argument(help: "on or off")
@@ -44,8 +45,13 @@ struct ConfigSet: AsyncParsableCommand {
                 method: RPCMethod.configSetAutoArchiveOnMergeDefault,
                 params: ConfigSetAutoArchiveDefaultParams(enabled: value.boolValue))
             print("Set auto-archive-on-merge default to \(value.rawValue).")
+        case "auto-hibernate-on-merge":
+            try client.callVoid(
+                method: RPCMethod.configSetAutoHibernateOnMergeDefault,
+                params: ConfigSetAutoHibernateDefaultParams(enabled: value.boolValue))
+            print("Set auto-hibernate-on-merge default to \(value.rawValue).")
         default:
-            throw CLIError.invalidArgument("Unknown config key '\(key)'. Known keys: auto-archive-on-merge")
+            throw CLIError.invalidArgument("Unknown config key '\(key)'. Known keys: auto-archive-on-merge, auto-hibernate-on-merge")
         }
     }
 }

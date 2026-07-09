@@ -136,6 +136,12 @@ struct GeneralSettingsTab: View {
                 ))
                 .help("Default for new worktrees. Each worktree can override this from its toolbar toggle.")
 
+                Toggle("Auto-hibernate sessions when their PR merges", isOn: Binding(
+                    get: { appState.autoHibernateOnMergeDefault },
+                    set: { newValue in Task { await appState.setAutoHibernateOnMergeDefault(newValue) } }
+                ))
+                .help("Default for new worktrees. Parks each idle Claude session (freeing its memory, keeping the frozen screen and resumability) instead of archiving the worktree. Each worktree can override this from its PR toolbar menu.")
+
                 Toggle("Show Scratch section", isOn: $showScratchSection)
                     .help("Hide the repo-less Scratch section. Existing scratch spaces and their terminals keep running.")
             }

@@ -17,6 +17,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// JSON-encoded `[String: String]` free-form env overrides (global scope).
     var env_overrides: String?
     var auto_archive_on_merge_default: Bool?
+    var auto_hibernate_on_merge_default: Bool?
     var auto_resume_on_limit_reset: Bool?
     var scratch_instructions: String?
     var scratch_rename_prompt: String?
@@ -36,6 +37,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             envSettingOverrides: ConfigStore.decodeOverrides(claude_env_settings),
             envOverrides: EnvOverridesCoding.decode(env_overrides),
             autoArchiveOnMergeDefault: auto_archive_on_merge_default ?? false,
+            autoHibernateOnMergeDefault: auto_hibernate_on_merge_default ?? false,
             autoResumeOnLimitReset: auto_resume_on_limit_reset ?? false,
             scratchInstructions: scratch_instructions,
             scratchRenamePrompt: scratch_rename_prompt,
@@ -129,6 +131,18 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET auto_archive_on_merge_default = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the global auto-hibernate-on-merge default. When true, every
+    /// worktree that hasn't overridden `autoHibernateOnMerge` will have its
+    /// Claude sessions hibernated when its PR merges.
+    public func setAutoHibernateOnMergeDefault(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET auto_hibernate_on_merge_default = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

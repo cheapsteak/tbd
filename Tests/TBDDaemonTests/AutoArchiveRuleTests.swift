@@ -177,3 +177,34 @@ import TestSupport
     #expect(after?.autoArchiveOnMerge == false,
             "reviving a worktree must disarm its auto-archive flag so a still-merged PR can't re-archive it immediately")
 }
+
+/// Companion to `reviveDisarmsWorktree`, exercising the same bare inline (no
+/// preSession hook) revive path but asserting the auto-HIBERNATE override is
+/// disarmed too — a still-merged PR would otherwise immediately re-park the
+/// sessions in the worktree the user just deliberately revived.
+@Test func reviveDisarmsAutoHibernate() async throws {
+    let (tempDir, repoDir) = try await createTestRepo()
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    let db = try TBDDatabase(inMemory: true)
+    let lifecycle = WorktreeLifecycle(
+        db: db,
+        git: GitManager(),
+        tmux: TmuxManager(dryRun: true),
+        hooks: HookResolver()
+    )
+    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+    // Create and archive a worktree, then arm both merge overrides.
+    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
+    try await db.worktrees.setAutoHibernateOnMerge(id: wt.id, value: true)
+    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+
+    // Revive it — this should disarm the auto-hibernate flag.
+    let revived = try await lifecycle.reviveWorktree(worktreeID: wt.id, skipClaude: true)
+
+    #expect(revived.status == .active)
+    let after = try await db.worktrees.get(id: wt.id)
+    #expect(after?.autoHibernateOnMerge == false,
+            "reviving a worktree must disarm its auto-hibernate flag (explicitly false, not nil) so a still-merged PR can't re-park it immediately")
+}
