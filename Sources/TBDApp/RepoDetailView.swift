@@ -1,17 +1,17 @@
 import SwiftUI
 import TBDShared
 
+enum RepoDetailTab: String, CaseIterable {
+    case archived = "Archived"
+    case instructions = "Instructions"
+    case settings = "Settings"
+}
+
 struct RepoDetailView: View {
     let repoID: UUID
-
-    enum Tab: String, CaseIterable {
-        case archived = "Archived"
-        case instructions = "Instructions"
-        case settings = "Settings"
-    }
-
     @EnvironmentObject var appState: AppState
-    @State private var selectedTab: Tab = .archived
+
+    @State private var selectedTab: RepoDetailTab = .archived
     /// The repo whose pre-session hook editor should be revealed, pending
     /// consumption by `RepoSettingsView`. Cleared the moment that view scrolls,
     /// so a later remount (repo switch, or tabbing away and back) does not
@@ -21,7 +21,7 @@ struct RepoDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $selectedTab) {
-                ForEach(Tab.allCases, id: \.self) { tab in
+                ForEach(RepoDetailTab.allCases, id: \.self) { tab in
                     Text(tab.rawValue).tag(tab)
                 }
             }
@@ -43,9 +43,13 @@ struct RepoDetailView: View {
             }
         }
         // Fresh mount (no repo was selected before).
-        .onAppear { consumeReveal(appState.repoDetailReveal) }
+        .onAppear {
+            consumeReveal(appState.repoDetailReveal)
+            applyPendingTab()
+        }
         // Reused instance (another repo was selected, or this one on another tab).
         .onChange(of: appState.repoDetailReveal) { _, reveal in consumeReveal(reveal) }
+        .onChange(of: appState.pendingRepoDetailTab) { _, _ in applyPendingTab() }
     }
 
     /// Apply a reveal addressed to this repo, then clear it so navigating back
@@ -55,6 +59,13 @@ struct RepoDetailView: View {
         selectedTab = .settings
         pendingHookReveal = repoID
         appState.repoDetailReveal = nil
+    }
+
+    private func applyPendingTab() {
+        if let pending = appState.pendingRepoDetailTab {
+            selectedTab = pending
+            appState.pendingRepoDetailTab = nil
+        }
     }
 }
 

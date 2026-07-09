@@ -153,6 +153,10 @@ final class AppState: ObservableObject {
             recordNavigation(.repo(id))
         }
     }
+    /// When set, the next `RepoDetailView` to appear selects this tab instead
+    /// of its default (`.archived`). Consumed (cleared) by the view on apply.
+    /// Drives the toolbar repo-name dropdown → repo detail tab navigation.
+    @Published var pendingRepoDetailTab: RepoDetailTab?
     /// Selected — set when the "Scratch" sidebar section header is clicked,
     /// shows `ScratchDetailView` (Archived/Instructions/Settings tabs) in the
     /// content pane. Parallel to `selectedRepoID` but with no `NavigationEntry`

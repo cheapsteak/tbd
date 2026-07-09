@@ -16,28 +16,50 @@ struct NotepadPopoverView: View {
     @State private var loadedContent: String = ""
     @State private var didLoad = false
     @State private var saveTask: Task<Void, Never>?
+    @FocusState private var editorFocused: Bool
+
+    private var placeholder: String {
+        switch scope {
+        case .repo: return "Notes for this repo — shared across all its worktrees"
+        case .worktree: return "Notes for this worktree"
+        }
+    }
 
     var body: some View {
-        TextEditor(text: $content)
-            .font(.body)
-            .frame(width: 360, height: 280)
-            .scrollContentBackground(.hidden)
-            .padding(8)
-            .onChange(of: content) { _, newValue in
-                guard didLoad else { return }
-                debounceSave(newValue)
+        ZStack(alignment: .topLeading) {
+            TextEditor(text: $content)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .focused($editorFocused)
+
+            if content.isEmpty {
+                Text(placeholder)
+                    .font(.body)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 5)
+                    .allowsHitTesting(false)
             }
-            .task(id: scope.notesPath) {
-                let disk = store.read(at: scope.notesPath)
-                content = disk
-                loadedContent = disk
-                didLoad = true
-            }
-            .onDisappear {
-                saveTask?.cancel()
-                saveTask = nil
-                flushSave()
-            }
+        }
+        .frame(width: 360, height: 280)
+        .padding(10)
+        .defaultFocus($editorFocused, true)
+        .onChange(of: content) { _, newValue in
+            guard didLoad else { return }
+            debounceSave(newValue)
+        }
+        .task(id: scope.notesPath) {
+            let disk = store.read(at: scope.notesPath)
+            content = disk
+            loadedContent = disk
+            didLoad = true
+            try? await Task.sleep(for: .milliseconds(200))
+            editorFocused = true
+        }
+        .onDisappear {
+            saveTask?.cancel()
+            saveTask = nil
+            flushSave()
+        }
     }
 
     private func debounceSave(_ newValue: String) {

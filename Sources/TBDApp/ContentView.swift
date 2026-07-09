@@ -20,6 +20,17 @@ struct ContentView: View {
         return appState.findWorktree(id: id)
     }
 
+    @ViewBuilder
+    private var worktreeTitleItem: some View {
+        if let worktree = selectedWorktree {
+            WorktreeTitleView(
+                appState: appState,
+                worktree: worktree,
+                repoName: worktree.repoID.flatMap { appState.repoName(for: $0) }
+            )
+        }
+    }
+
     /// Returns the set of terminal IDs currently rendered anywhere in the
     /// detail layout. Used so the window-root fallback overlay only fires
     /// when the bound terminal is NOT visible (closed terminal, History
@@ -132,12 +143,14 @@ struct ContentView: View {
                     .keyboardShortcut("]", modifiers: .command)
                 }
 
-                ToolbarItem(placement: .principal) {
-                    if let worktree = selectedWorktree {
-                        WorktreeTitleView(
-                            worktree: worktree,
-                            repoName: worktree.repoID.flatMap { appState.repoName(for: $0) }
-                        )
+                if #available(macOS 26.0, *) {
+                    ToolbarItem(placement: .principal) {
+                        worktreeTitleItem
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .principal) {
+                        worktreeTitleItem
                     }
                 }
 
