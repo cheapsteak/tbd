@@ -375,8 +375,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         // Close-on-exec so spawned children don't inherit the pipe ends.
-        fcntl(fds[0], F_SETFD, FD_CLOEXEC)
-        fcntl(fds[1], F_SETFD, FD_CLOEXEC)
+        _ = fcntl(fds[0], F_SETFD, FD_CLOEXEC)
+        _ = fcntl(fds[1], F_SETFD, FD_CLOEXEC)
         _relaunchPipeWriteEnd = fds[1]
 
         signal(SIGUSR1) { _ in

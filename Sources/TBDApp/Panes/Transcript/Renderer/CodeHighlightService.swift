@@ -23,12 +23,19 @@ struct HighlightColorRun {
 /// thread-confined). Code blocks render as plain monospaced text synchronously;
 /// the colors computed here are applied later, over the SAME fixed monospaced font,
 /// so they change only `.foregroundColor` and never the layout/height.
-final class CodeHighlightService {
-    /// Process singleton. `nonisolated(unsafe)` because the type's only mutable
-    /// state (the lazy `Highlightr`) is confined to `queue`, so access is
-    /// serialized at runtime rather than checked by the compiler — the same pattern
-    /// the sibling `DiffSyntaxHighlighter` uses for its shared `Highlightr`s.
-    nonisolated(unsafe) static let shared = CodeHighlightService()
+///
+/// `@unchecked Sendable` is justified by the same serial-queue confinement: the
+/// only mutable state (`highlightr`, `didCreateHighlightr`) is read/written
+/// exclusively on `queue`, so the `queue.async` closures capturing `self` are
+/// safe even though the compiler cannot prove it statically.
+final class CodeHighlightService: @unchecked Sendable {
+    /// Process singleton. The type is `@unchecked Sendable` (see above), so no
+    /// `nonisolated(unsafe)` is needed here — the safety argument is the same
+    /// serial-queue confinement the sibling `DiffSyntaxHighlighter` relies on for
+    /// its shared `Highlightr`s, though that class expresses it with
+    /// property-level `nonisolated(unsafe)` rather than class-level
+    /// `@unchecked Sendable`.
+    static let shared = CodeHighlightService()
 
     /// Dedicated serial queue. The lazily-created `Highlightr` and EVERY call into
     /// it happen only here — JSContext is thread-confined, so confining all access

@@ -601,7 +601,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     // Generation-scoped like the daemon-side detach below: a
                     // closing view's clear racing a new view's attach for the
                     // same pane must not drop the fresh attach's record.
-                    await appState.controlModePaneDetached(
+                    appState.controlModePaneDetached(
                         worktreeID: attach.worktreeID, paneID: attach.paneID,
                         generation: attach.generation)
                     // Order matters: detach first so the daemon closes the

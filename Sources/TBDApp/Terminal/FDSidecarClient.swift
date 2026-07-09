@@ -38,7 +38,7 @@ final class FDSidecarClient: @unchecked Sendable {
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let sunPathSize = MemoryLayout.size(ofValue: addr.sun_path)
-        _ = path.withCString { src in
+        path.withCString { src in
             withUnsafeMutablePointer(to: &addr.sun_path) { dst in
                 dst.withMemoryRebound(to: CChar.self, capacity: sunPathSize) { dstChars in
                     _ = strlcpy(dstChars, src, sunPathSize)

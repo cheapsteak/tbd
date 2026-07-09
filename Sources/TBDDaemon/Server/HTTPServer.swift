@@ -143,14 +143,16 @@ private final class HTTPRPCHandler: ChannelInboundHandler, @unchecked Sendable {
             let responseData = try JSONEncoder().encode(response)
             guard let responseString = String(data: responseData, encoding: .utf8) else { return }
 
-            let context = wrappedCtx.context
-            context.eventLoop.execute {
+            let eventLoop = wrappedCtx.context.eventLoop
+            eventLoop.execute {
+                let context = wrappedCtx.context
                 guard context.channel.isActive else { return }
                 Self.sendResponseOnLoop(context: context, status: .ok, body: responseString)
             }
         } catch {
-            let context = wrappedCtx.context
-            context.eventLoop.execute {
+            let eventLoop = wrappedCtx.context.eventLoop
+            eventLoop.execute {
+                let context = wrappedCtx.context
                 guard context.channel.isActive else { return }
                 Self.sendResponseOnLoop(context: context, status: .internalServerError,
                                         body: "{\"success\":false,\"error\":\"Failed to encode response\"}")

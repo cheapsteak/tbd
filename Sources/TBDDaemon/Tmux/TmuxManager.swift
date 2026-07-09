@@ -366,19 +366,19 @@ public struct TmuxManager: Sendable {
             let output = try await runTmux(args)
             logger.info("ensureServer: created tmux server \(server, privacy: .public)")
             // Hide tmux chrome globally — TBD app provides its own UI
-            try? await runTmux(["-L", server, "set", "-g", "status", "off"])
-            try? await runTmux(["-L", server, "set", "-g", "pane-border-style", "fg=black"])
-            try? await runTmux(["-L", server, "set", "-g", "pane-border-indicators", "off"])
-            try? await runTmux(["-L", server, "set", "-g", "default-terminal", "xterm-256color"])
+            _ = try? await runTmux(["-L", server, "set", "-g", "status", "off"])
+            _ = try? await runTmux(["-L", server, "set", "-g", "pane-border-style", "fg=black"])
+            _ = try? await runTmux(["-L", server, "set", "-g", "pane-border-indicators", "off"])
+            _ = try? await runTmux(["-L", server, "set", "-g", "default-terminal", "xterm-256color"])
             // Enable mouse so scroll wheel enters copy-mode and scrolls history
-            try? await runTmux(["-L", server, "set", "-g", "mouse", "on"])
+            _ = try? await runTmux(["-L", server, "set", "-g", "mouse", "on"])
             // Enable extended key sequences so Shift+Arrow etc. pass through to applications
-            try? await runTmux(["-L", server, "set", "-g", "xterm-keys", "on"])
+            _ = try? await runTmux(["-L", server, "set", "-g", "xterm-keys", "on"])
             // Enable Kitty keyboard protocol so apps can distinguish Shift+Enter from Enter
-            try? await runTmux(["-L", server, "set", "-g", "extended-keys", "on"])
-            try? await runTmux(["-L", server, "set", "-g", "extended-keys-format", "kitty"])
+            _ = try? await runTmux(["-L", server, "set", "-g", "extended-keys", "on"])
+            _ = try? await runTmux(["-L", server, "set", "-g", "extended-keys-format", "kitty"])
             // Set SSH_AUTH_SOCK to stable symlink so shells get a resilient path
-            try? await runTmux(["-L", server, "setenv", "-g", "SSH_AUTH_SOCK", SSHAgentResolver.defaultSymlinkPath])
+            _ = try? await runTmux(["-L", server, "setenv", "-g", "SSH_AUTH_SOCK", SSHAgentResolver.defaultSymlinkPath])
             return output.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
@@ -500,7 +500,7 @@ public struct TmuxManager: Sendable {
         // if the option flip stumbles. Detached panes still keep the
         // resize-window dimensions; only client-driven re-sizing depends on
         // window-size being non-manual.
-        try? await runTmux(unfreezeArgs)
+        _ = try? await runTmux(unfreezeArgs)
     }
 
     public func sendKeys(server: String, paneID: String, text: String) async throws {
