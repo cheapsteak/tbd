@@ -39,6 +39,9 @@ Legitimate capture (verbatim pass-through):
   to the caller unparsed.
 - `HibernationCoordinator.swift:269` — ANSI screen snapshot before hibernation
   (capture-for-display).
+- `PaneCaptureReplay.swift` — control-mode attach/repair capture batch; reassembles
+  captured lines into replay bytes verbatim for display reconstruction (post-audit
+  addition, found by the rule itself during implementation).
 
 Sanctioned scrapers (exempt now, refactor later):
 
@@ -100,7 +103,8 @@ to scrutinize.
   (kind `string`), as one alternation with `match_kinds: [identifier, string]`.
 - `excluded`: `TmuxManager.swift` (defines the API), `RPCRouter+TerminalHandlers.swift`
   (verbatim `terminal.read`), `HibernationCoordinator.swift` (display snapshot),
-  `NightwatchSkillContent.swift` (embedded Python).
+  `PaneCaptureReplay.swift` (capture-for-replay), `NightwatchSkillContent.swift`
+  (embedded Python).
 
 ### Layer 3: PR-review gate instruction
 
