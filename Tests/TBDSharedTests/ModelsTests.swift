@@ -311,10 +311,11 @@ import Testing
 }
 
 @Test func testConfigDecodesWithoutHibernationFields() throws {
-    // Config JSON from before v39 must decode with feature ON, 30 min.
+    // Config JSON with no hibernation fields must decode with the idle sweep
+    // OFF (opt-in) and 30 min.
     let json = "{}".data(using: .utf8)!
     let decoded = try JSONDecoder().decode(Config.self, from: json)
-    #expect(decoded.autoHibernateEnabled == true)
+    #expect(decoded.autoHibernateEnabled == false)
     #expect(decoded.hibernateIdleMinutes == Config.defaultHibernateIdleMinutes)
 }
 

@@ -429,7 +429,7 @@ final class AppState: ObservableObject {
     @Published var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.
-    @Published var autoHibernateEnabled: Bool = true
+    @Published var autoHibernateEnabled: Bool = false
     /// Auto-hibernate idle timeout in minutes. Loaded from `Config`.
     @Published var hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes
     /// Daemon-persisted gate for session-limit auto-resume (default OFF).
