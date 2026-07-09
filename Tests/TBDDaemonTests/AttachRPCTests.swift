@@ -123,7 +123,16 @@ struct AttachRPCOrchestrationTests {
         supervisor: TmuxControlSupervisor,
         vending: FDVendingServer,
         gateOn: Bool = true,
-        readyTimeout: Duration = .seconds(5),
+        // Effectively-infinite default: the ready-timeout is incidental
+        // machinery in these orchestration tests, and it spawns a REAL
+        // wall-clock timer per attach.request that tears down an un-acked
+        // attach. Under parallel CI load a test task can be starved for
+        // seconds between an attach.request and its attach.ready; a short
+        // default lets the timer fire in that gap, tear down the sink, and
+        // fail the ready with notAttached (observed CI flake). The one test
+        // that exercises the timeout, `unackedAttachTornDownAfterTimeout`,
+        // passes its own short value explicitly.
+        readyTimeout: Duration = .seconds(600),
         commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
