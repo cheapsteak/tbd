@@ -50,7 +50,8 @@ struct WorktreeProfilePickerView: View {
                 branchesPage
             }
         }
-        .frame(width: 300, height: 400)
+        .frame(width: 300)
+        .frame(minHeight: 320)
         .task {
             // Ensure the list (and usage suffixes) are populated even if the
             // user hasn't opened Settings yet this session.
@@ -90,48 +91,46 @@ struct WorktreeProfilePickerView: View {
             Divider()
                 .padding(.vertical, 2)
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(appState.modelProfiles, id: \.profile.id) { entry in
-                        // A not-logged-in OAuth profile is not selectable: dim it
-                        // and disable its Button so its tap can't create a
-                        // worktree pinned to an account that can't run. apiKey /
-                        // bedrock rows report selectable and stay actionable.
-                        let isSelectable = ProfileUsagePresentation.isSelectable(entry)
-                        let isTheDefault = entry.profile.id == appState.defaultProfileID
-                        Group {
-                            if showsUsageBars(for: entry) {
-                                // OAuth profile with a usage snapshot that has
-                                // buckets: render the two-bar meter instead of the
-                                // single-line usage text.
-                                UsageBarsProfileRow(
-                                    entry: entry,
-                                    highlighted: isTheDefault && highlightDefaultProfile
-                                ) {
-                                    pick(profileID: entry.profile.id)
-                                }
-                            } else {
-                                let line = ProfileUsagePresentation.menuLine(for: entry)
-                                let subtitle = profileSubtitle(for: entry, usageNote: line.secondary)
-                                ProfilePickerRow(
-                                    title: line.primary,
-                                    subtitle: subtitle.text,
-                                    systemImage: "person.crop.circle",
-                                    highlighted: isTheDefault && highlightDefaultProfile,
-                                    // Always reserve subtitle height so the row never
-                                    // shifts, whichever state it resolves to.
-                                    reservesSubtitle: true,
-                                    // Skeleton is reserved for the ONE genuine loading
-                                    // case (logged-in OAuth awaiting its first poll).
-                                    showsSubtitleSkeleton: subtitle.showsSkeleton
-                                ) {
-                                    pick(profileID: entry.profile.id)
-                                }
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(appState.modelProfiles, id: \.profile.id) { entry in
+                    // A not-logged-in OAuth profile is not selectable: dim it
+                    // and disable its Button so its tap can't create a
+                    // worktree pinned to an account that can't run. apiKey /
+                    // bedrock rows report selectable and stay actionable.
+                    let isSelectable = ProfileUsagePresentation.isSelectable(entry)
+                    let isTheDefault = entry.profile.id == appState.defaultProfileID
+                    Group {
+                        if showsUsageBars(for: entry) {
+                            // OAuth profile with a usage snapshot that has
+                            // buckets: render the two-bar meter instead of the
+                            // single-line usage text.
+                            UsageBarsProfileRow(
+                                entry: entry,
+                                highlighted: isTheDefault && highlightDefaultProfile
+                            ) {
+                                pick(profileID: entry.profile.id)
+                            }
+                        } else {
+                            let line = ProfileUsagePresentation.menuLine(for: entry)
+                            let subtitle = profileSubtitle(for: entry, usageNote: line.secondary)
+                            ProfilePickerRow(
+                                title: line.primary,
+                                subtitle: subtitle.text,
+                                systemImage: "person.crop.circle",
+                                highlighted: isTheDefault && highlightDefaultProfile,
+                                // Always reserve subtitle height so the row never
+                                // shifts, whichever state it resolves to.
+                                reservesSubtitle: true,
+                                // Skeleton is reserved for the ONE genuine loading
+                                // case (logged-in OAuth awaiting its first poll).
+                                showsSubtitleSkeleton: subtitle.showsSkeleton
+                            ) {
+                                pick(profileID: entry.profile.id)
                             }
                         }
-                        .disabled(!isSelectable)
-                        .opacity(isSelectable ? 1 : 0.5)
                     }
+                    .disabled(!isSelectable)
+                    .opacity(isSelectable ? 1 : 0.5)
                 }
             }
         }
