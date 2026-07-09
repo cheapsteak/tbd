@@ -10,14 +10,6 @@ import Testing
 @Suite("ControlModeResizeCoordinator")
 struct ControlModeResizeCoordinatorTests {
 
-    /// Thread-safe, synchronous recorder of stream writes in call order.
-    private final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _writes: [String] = []
-        func record(_ line: String) { lock.lock(); _writes.append(line); lock.unlock() }
-        var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
-    }
-
     /// Thread-safe monotonic call counter for the provider seam.
     private final class CallCounter: @unchecked Sendable {
         private let lock = NSLock()
@@ -45,11 +37,8 @@ struct ControlModeResizeCoordinatorTests {
     /// `recorder`; an unknown server resolves to nil. The client is returned so
     /// tests can feed reply blocks (`%end`/`%error`) back into it.
     private func makeCoordinator()
-        -> (ControlModeResizeCoordinator, Recorder, TmuxControlCommandClient) {
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
+        -> (ControlModeResizeCoordinator, LineRecorder, TmuxControlCommandClient) {
+        let (client, recorder) = makeFakeClient()
         let coordinator = ControlModeResizeCoordinator(
             commandProvider: { server in server == "srv" ? client : nil })
         return (coordinator, recorder, client)
@@ -141,10 +130,7 @@ struct ControlModeResizeCoordinatorTests {
         // SocketServer spawns an unstructured Task per RPC, so two resize()
         // calls for one window can overlap; the OLDER call's provider hop
         // resolving LAST must not put the older geometry on the wire last.
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
+        let (client, recorder) = makeFakeClient()
         let gate = ProviderGate()
         let calls = CallCounter()
         let coordinator = ControlModeResizeCoordinator(

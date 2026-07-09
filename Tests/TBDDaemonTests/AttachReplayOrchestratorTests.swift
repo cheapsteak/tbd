@@ -17,14 +17,6 @@ import Testing
 struct AttachReplayOrchestratorTests {
     private let server = "tbd-orch-unit"
 
-    /// Thread-safe, synchronous recorder of stream writes in call order.
-    private final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _writes: [String] = []
-        func record(_ line: String) { lock.lock(); _writes.append(line); lock.unlock() }
-        var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
-    }
-
     /// Parks the FIRST `commandProvider` call until `release()`; every later
     /// call passes straight through. Models a stale attach.ready task
     /// preempted at the provider hop while a successor's sequence runs.
@@ -94,11 +86,8 @@ struct AttachReplayOrchestratorTests {
         historyDepth: Int = 50_000,
         onHistoryTruncation: (@Sendable (Int) -> Void)? = nil,
         onPauseFailure: (@Sendable (String) -> Void)? = nil
-    ) -> (TmuxControlSupervisor, AttachReplayOrchestrator, Recorder, TmuxControlCommandClient) {
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
+    ) -> (TmuxControlSupervisor, AttachReplayOrchestrator, LineRecorder, TmuxControlCommandClient) {
+        let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
         let orchestrator = AttachReplayOrchestrator(
             supervisor: supervisor,
@@ -122,21 +111,6 @@ struct AttachReplayOrchestratorTests {
         "\(paneID) 2 1 1 0 0 0 23 1 0 0 0 1 0 0 0 0 0 0 80 24 \(historySize)"
     }
 
-    /// Poll until `condition`, failing after `deadline` (async work — the
-    /// orchestrator's batch write — lands on other tasks).
-    private func waitFor(
-        _ what: String, deadline: Duration = .seconds(60),
-        sourceLocation: SourceLocation = #_sourceLocation,
-        _ condition: @Sendable () async -> Bool
-    ) async throws {
-        let end = ContinuousClock.now + deadline
-        while ContinuousClock.now < end {
-            if await condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
-    }
-
     /// Complete the next `count` pending commands with `%end`, per-command lines.
     private func succeed(_ client: TmuxControlCommandClient, _ lines: [[String]]) async {
         for reply in lines {
@@ -148,7 +122,7 @@ struct AttachReplayOrchestratorTests {
     /// captures + continue) being written, then feed the 6 capture replies
     /// and the batched continue's reply.
     private func feedSequence(
-        _ client: TmuxControlCommandClient, recorder: Recorder,
+        _ client: TmuxControlCommandClient, recorder: LineRecorder,
         captures: [[String]],
         sourceLocation: SourceLocation = #_sourceLocation
     ) async throws {
@@ -657,7 +631,7 @@ struct AttachReplayOrchestratorTests {
 
     @Test("pause %error is surfaced but the replay still runs and the gate opens (review M4)")
     func pauseFailureSurfacedReplayProceeds() async throws {
-        let failures = Recorder()
+        let failures = LineRecorder()
         let (supervisor, orchestrator, recorder, client) = makeHarness(
             onPauseFailure: { failures.record($0) })
         let paneID = "%15"
@@ -687,7 +661,7 @@ struct AttachReplayOrchestratorTests {
 
     @Test("a successful pause does not trip the pause-failure hook")
     func pauseSuccessDoesNotFireHook() async throws {
-        let failures = Recorder()
+        let failures = LineRecorder()
         let (supervisor, orchestrator, recorder, client) = makeHarness(
             onPauseFailure: { failures.record($0) })
         let paneID = "%16"
@@ -708,10 +682,7 @@ struct AttachReplayOrchestratorTests {
     @Test("stale task parked at the provider hop sends ZERO commands once a successor's FULL sequence completed (R10-3)")
     func staleTaskParkedAtProviderHopSendsNothing() async throws {
         let gate = ProviderGate()
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
+        let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
         let orchestrator = AttachReplayOrchestrator(
             supervisor: supervisor,
@@ -726,7 +697,7 @@ struct AttachReplayOrchestratorTests {
 
         // The stale sequence acknowledges gen1, then is preempted at the
         // `await commandProvider(server)` hop (parked in the gate).
-        let staleDone = Recorder()
+        let staleDone = LineRecorder()
         let staleTask = Task { () throws -> AttachReplayOrchestrator.Outcome in
             defer { staleDone.record("done") }
             return try await orchestrator.performAttachReady(

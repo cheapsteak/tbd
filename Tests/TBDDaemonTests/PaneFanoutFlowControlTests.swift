@@ -4,11 +4,6 @@ import Testing
 
 @testable import TBDDaemonLib
 
-/// Positive-wait deadline sized for starved CI runners (PR #379: cooperative-pool
-/// starvation stretched sub-second async-drain deliveries past a 5 s poll).
-/// Passing runs still complete in milliseconds — only failures wait this long.
-private let ciSafeDeadline: TimeInterval = 30
-
 /// Phase B M1 — `PaneFanout.route` backpressure: instead of dropping the
 /// unwritten remainder on EAGAIN (issue #376's corruption source), the
 /// remainder is queued per (key, generation) and an async drain task delivers
@@ -17,6 +12,14 @@ private let ciSafeDeadline: TimeInterval = 30
 @Suite("PaneFanout flow control")
 struct PaneFanoutFlowControlTests {
     private let server = "tbd-test-server"
+
+    /// Positive-wait deadline sized for starved CI runners (PR #379:
+    /// cooperative-pool starvation stretched sub-second async-drain deliveries
+    /// past a 5 s poll). Passing runs complete in milliseconds — only failures
+    /// wait this long. Scoped inside the suite (TimeInterval idiom) so it
+    /// cannot collide with the shared Duration `ciSafeDeadline` in
+    /// ControlModeTestSupport.swift.
+    private static let ciSafeDeadline: TimeInterval = 30
 
     /// Darwin pipes buffer at most 64 KB; chunks are routed in 32 KB slices.
     private static let chunkSize = 32 * 1024
@@ -128,7 +131,7 @@ struct PaneFanoutFlowControlTests {
         #expect(received == total, "stream must arrive intact and in order across backpressure")
 
         // Queue must eventually report empty.
-        let deadline = Date().addingTimeInterval(ciSafeDeadline)
+        let deadline = Date().addingTimeInterval(Self.ciSafeDeadline)
         while Date() < deadline, (fanout.flowStats(key: key)?.queuedBytes ?? 0) > 0 {
             usleep(5_000)
         }
@@ -415,7 +418,7 @@ struct PaneFanoutFlowControlTests {
         let received = readAll(fd: readFD, expected: fenced.count)
         #expect(received == fenced, "markReady must flush the fence queue intact and in order")
 
-        let deadline = Date().addingTimeInterval(ciSafeDeadline)
+        let deadline = Date().addingTimeInterval(Self.ciSafeDeadline)
         while Date() < deadline, (fanout.flowStats(key: key)?.queuedBytes ?? 0) > 0 {
             usleep(5_000)
         }

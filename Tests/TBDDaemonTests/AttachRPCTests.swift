@@ -123,7 +123,16 @@ struct AttachRPCOrchestrationTests {
         supervisor: TmuxControlSupervisor,
         vending: FDVendingServer,
         gateOn: Bool = true,
-        readyTimeout: Duration = .seconds(5),
+        // Effectively-infinite default: the ready-timeout is incidental
+        // machinery in these orchestration tests, and it spawns a REAL
+        // wall-clock timer per attach.request that tears down an un-acked
+        // attach. Under parallel CI load a test task can be starved for
+        // seconds between an attach.request and its attach.ready; a short
+        // default lets the timer fire in that gap, tear down the sink, and
+        // fail the ready with notAttached (observed CI flake). The one test
+        // that exercises the timeout, `unackedAttachTornDownAfterTimeout`,
+        // passes its own short value explicitly.
+        readyTimeout: Duration = .seconds(600),
         commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
@@ -135,14 +144,6 @@ struct AttachRPCOrchestrationTests {
             commandProvider: commandProvider)
     }
 
-    /// Thread-safe, synchronous recorder of fake-client stream writes.
-    private final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _writes: [String] = []
-        func record(_ line: String) { lock.lock(); _writes.append(line); lock.unlock() }
-        var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
-    }
-
     /// Thread-safe monotonic counter — lets a commandProvider hand each
     /// successive attach.ready sequence its OWN fake correlator, so a test
     /// can complete a later sequence's replies before an earlier one's.
@@ -150,16 +151,6 @@ struct AttachRPCOrchestrationTests {
         private let lock = NSLock()
         private var count = 0
         func next() -> Int { lock.lock(); defer { lock.unlock() }; let c = count; count += 1; return c }
-    }
-
-    /// A fake-backed correlator (real FIFO, recorded writes) for the bridge's
-    /// commandProvider seam — the M4.3 attach.ready sequence rides it.
-    private func makeFakeClient() -> (TmuxControlCommandClient, Recorder) {
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
-        return (client, recorder)
     }
 
     /// A 22-field state line for `paneID` (80x24, primary screen, cursor 0,0,
@@ -176,7 +167,7 @@ struct AttachRPCOrchestrationTests {
     /// (R8-M3), so it carries the history content these tests assert on
     /// (screen leg empty → combined == history).
     private func feedCaptureReplies(
-        _ client: TmuxControlCommandClient, recorder: Recorder, paneID: String,
+        _ client: TmuxControlCommandClient, recorder: LineRecorder, paneID: String,
         history: [String], captureBatchWrites: Int = 2,
         sourceLocation: SourceLocation = #_sourceLocation
     ) async throws {
@@ -187,19 +178,6 @@ struct AttachRPCOrchestrationTests {
         for lines in [history, [], [], history, [stateLine(paneID: paneID)], [], [] as [String]] {
             await client.handle(.commandSucceeded(number: 0, fromClient: true, lines: lines))
         }
-    }
-
-    private func waitFor(
-        _ what: String, deadline: Duration = .seconds(60),
-        sourceLocation: SourceLocation = #_sourceLocation,
-        _ condition: @Sendable () async -> Bool
-    ) async throws {
-        let end = ContinuousClock.now + deadline
-        while ContinuousClock.now < end {
-            if await condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
     /// Drain everything currently readable from `fd` (made nonblocking).

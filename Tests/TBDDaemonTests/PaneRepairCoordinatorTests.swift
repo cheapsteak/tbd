@@ -4,11 +4,6 @@ import Testing
 
 @testable import TBDDaemonLib
 
-/// Positive-wait deadline sized for starved CI runners (PR #379: cooperative-pool
-/// starvation stretched sub-second async-drain deliveries past a 5 s poll).
-/// Passing runs still complete in milliseconds — only failures wait this long.
-private let ciSafeDeadline: Duration = .seconds(30)
-
 /// Phase B M3 — the overflow repair cycle (issue #376, the queue-overflow
 /// residual M1/M2 left behind). When a ready, unfenced pane's backpressure
 /// queue overflows, the fanout clears the queue, marks the sink `repairing`,
@@ -26,14 +21,6 @@ private let ciSafeDeadline: Duration = .seconds(30)
 struct PaneRepairCoordinatorTests {
     private let server = "tbd-repair-unit"
 
-    /// Thread-safe, synchronous recorder of stream writes in call order.
-    private final class Recorder: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _writes: [String] = []
-        func record(_ line: String) { lock.lock(); _writes.append(line); lock.unlock() }
-        var writes: [String] { lock.lock(); defer { lock.unlock() }; return _writes }
-    }
-
     /// Thread-safe overflow-signal counter.
     private final class SignalCounter: @unchecked Sendable {
         private let lock = NSLock()
@@ -46,11 +33,8 @@ struct PaneRepairCoordinatorTests {
         writableCheckInterval: Duration = .milliseconds(10),
         writableSlowInterval: Duration = .milliseconds(25),
         writableEscalationThreshold: Duration = .milliseconds(50)
-    ) -> (TmuxControlSupervisor, PaneRepairCoordinator, Recorder, TmuxControlCommandClient, SignalCounter) {
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
+    ) -> (TmuxControlSupervisor, PaneRepairCoordinator, LineRecorder, TmuxControlCommandClient, SignalCounter) {
+        let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
         let coordinator = PaneRepairCoordinator(
             supervisor: supervisor,
@@ -106,20 +90,6 @@ struct PaneRepairCoordinatorTests {
             let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
             if n <= 0 { break }
         }
-    }
-
-    /// Poll until `condition`, failing after `deadline`.
-    private func waitFor(
-        _ what: String, deadline: Duration = ciSafeDeadline,
-        sourceLocation: SourceLocation = #_sourceLocation,
-        _ condition: @Sendable () async -> Bool
-    ) async throws {
-        let end = ContinuousClock.now + deadline
-        while ContinuousClock.now < end {
-            if await condition() { return }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
     /// Complete the next `lines.count` pending commands with `%end`.
@@ -183,6 +153,7 @@ struct PaneRepairCoordinatorTests {
         // The app catches up — the pipe becomes writable.
         drainPipe(readFD)
         try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
+        try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
         #expect(recorder.writes[1] == """
             capture-pane -peqJN -S -50000 -E -1 -q -t %1
             capture-pane -peqJN -t %1
@@ -362,6 +333,7 @@ struct PaneRepairCoordinatorTests {
         // endRepair, streaming resumed. No new attach needed.
         drainPipe(readFD)
         try await waitFor("captures+continue write") { recorder.writes.count >= 2 }
+        try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
         #expect(recorder.writes[1].hasSuffix("refresh-client -A '%4:continue'"),
                 "the same repair must send batch 2 once the reader drains")
         await succeed(client, captureAndContinueReplies(paneID: paneID))
@@ -515,10 +487,7 @@ struct PaneRepairCoordinatorTests {
         // returning the client, superseding the repair generation exactly
         // inside the provider hop — the entry guard has already passed, so
         // this pins the post-hop ownership re-check (R10-3).
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
+        let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
         let paneID = "%10"
         let key = PaneKey(server: server, paneID: paneID)
@@ -604,10 +573,7 @@ struct PaneRepairCoordinatorTests {
         // A REAL TmuxControlModeBridge with its DEFAULT repair coordinator:
         // only the command provider is faked. This drives the production
         // `onOverflowRepair` closure installed in the bridge's init.
-        let recorder = Recorder()
-        let client = TmuxControlCommandClient(
-            writeLine: { recorder.record($0) },
-            onFatalError: {})
+        let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
         let bridge = TmuxControlModeBridge(
             supervisor: supervisor,
