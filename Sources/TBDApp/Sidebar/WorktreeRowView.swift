@@ -54,11 +54,21 @@ struct WorktreeRowView: View {
             action: { handleNestedPlus(repoID: repoID) }
         )
         .onHover { newChildMenu.triggerHover($0) }
-        .popover(isPresented: newChildMenu.isOpenBinding, arrowEdge: .trailing) {
-            WorktreeProfilePickerView(repoID: repoID, parentWorktreeID: worktree.id, highlightDefaultProfile: newChildMenu.isTriggerHovered)
+        .background(
+            FloatingMenuAnchor(
+                isPresented: newChildMenu.isOpen,
+                content: WorktreeProfilePickerView(
+                    repoID: repoID,
+                    parentWorktreeID: worktree.id,
+                    highlightDefaultProfile: newChildMenu.isTriggerHovered,
+                    onClose: { newChildMenu.closeNow() }
+                )
                 .environmentObject(appState)
+                .background(.ultraThickMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
                 .onHover { newChildMenu.menuHover($0) }
-        }
+            )
+        )
         .padding(.trailing, 4)
     }
 

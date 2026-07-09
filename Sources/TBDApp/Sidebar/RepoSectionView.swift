@@ -146,11 +146,20 @@ struct RepoSectionView: View {
                     )
                     .disabled(repo.status == .missing)
                     .onHover { newWorktreeMenu.triggerHover($0) }
-                    .popover(isPresented: newWorktreeMenu.isOpenBinding, arrowEdge: .trailing) {
-                        WorktreeProfilePickerView(repoID: repo.id, highlightDefaultProfile: newWorktreeMenu.isTriggerHovered)
+                    .background(
+                        FloatingMenuAnchor(
+                            isPresented: newWorktreeMenu.isOpen,
+                            content: WorktreeProfilePickerView(
+                                repoID: repo.id,
+                                highlightDefaultProfile: newWorktreeMenu.isTriggerHovered,
+                                onClose: { newWorktreeMenu.closeNow() }
+                            )
                             .environmentObject(appState)
+                            .background(.ultraThickMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                             .onHover { newWorktreeMenu.menuHover($0) }
-                    }
+                        )
+                    )
                 } else {
                     Color.clear
                 }

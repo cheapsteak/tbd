@@ -77,15 +77,6 @@ struct HoverMenuModelTests {
         #expect(!m.isOpen)
     }
 
-    @Test("popover binding set to false routes through closeNow")
-    func bindingDismissCloses() {
-        let m = HoverMenuModel()
-        m.openImmediately()
-        #expect(m.isOpenBinding.wrappedValue == true)
-        m.isOpenBinding.wrappedValue = false
-        #expect(!m.isOpen)
-    }
-
     // MARK: isTriggerHovered
 
     @Test("triggerHover toggles isTriggerHovered")

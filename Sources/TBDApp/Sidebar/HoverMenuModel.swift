@@ -73,13 +73,6 @@ final class HoverMenuModel: ObservableObject {
         withTransaction(transaction) { isOpen = value }
     }
 
-    /// Binding for `.popover(isPresented:)`. SwiftUI sets it false on an outside
-    /// click or `dismiss()`; we route that through `closeNow()`. We never drive
-    /// it true from here (opening happens via the hover/⌥-click methods).
-    var isOpenBinding: Binding<Bool> {
-        Binding(get: { self.isOpen }, set: { newValue in if !newValue { self.closeNow() } })
-    }
-
     private func cancelTasks() {
         openTask?.cancel(); openTask = nil
         closeTask?.cancel(); closeTask = nil

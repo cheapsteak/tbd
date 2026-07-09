@@ -27,6 +27,10 @@ struct WorktreeProfilePickerView: View {
     /// menu. Fades once the pointer moves into the menu and normal per-row
     /// hover takes over.
     var highlightDefaultProfile: Bool = false
+    /// Explicit close hook for the `FloatingPanel` presentation, which has no
+    /// `@Environment(\.dismiss)` of its own (that's a SwiftUI popover/sheet
+    /// concept). Wired to the owning `HoverMenuModel.closeNow()`.
+    var onClose: () -> Void = {}
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
@@ -158,12 +162,13 @@ struct WorktreeProfilePickerView: View {
 
             // Reused branch list: selecting a branch creates on that existing
             // branch with the default model and dismisses the whole popover.
-            BranchListView(repoID: repoID, parentWorktreeID: parentWorktreeID)
+            BranchListView(repoID: repoID, parentWorktreeID: parentWorktreeID, onClose: onClose)
         }
     }
 
     private func pick(profileID: UUID?) {
         dismiss()
+        onClose()
         appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, profileID: profileID)
     }
 
