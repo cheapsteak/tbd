@@ -79,9 +79,11 @@ Custom rule in `.swiftlint.yml`, following the `no_print_in_sources` pattern
   `TmuxManager.swift:303`).
 - `regex`: alternation of high-signal agent-UI strings:
   `❯`, `[Pasted text`, `esc to interrupt`, `Do you want to proceed`,
-  `Enter to select`, `Tab/Arrow keys`, `Select login method`, `Run /login`,
+  `Enter to select`, `Tab/Arrow keys`, `Ready to submit`, `Select login method`,
   `Ask Claude`, `Type a message`, `context used`, `until auto-compact`,
-  `bypass permissions`.
+  `bypass permissions`. (`Run /login` is deliberately absent: it false-positives
+  on TBD's own UI caption `"Run /login once"` in `Models.swift`; the login
+  scraper file is excluded wholesale anyway.)
 - `excluded` (each with a why-comment and refactor-later note): the three sanctioned
   scrapers listed above.
 - `message`: infer agent state from hooks, transcript JSONL, control mode, or exit
