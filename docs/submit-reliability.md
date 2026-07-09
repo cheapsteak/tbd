@@ -232,9 +232,10 @@ then the handler spawns a bounded retry loop (3 delays: 300/500/800 ms) that:
 5. If the composer is clear or capture failed, stops (success)
 
 If all retries exhaust and `[Pasted text` persists, logs a warning but returns `.ok()` (the
-RPC and CLI exit code remain unchanged — Option 4 semantics are still deferred). This
-bounds the latency hit to unattended paths (nightwatch) while providing a self-healing
-defense in depth on top of Option 2.
+RPC and CLI exit code remain unchanged — Option 4 semantics are still deferred). The clean
+path costs one ~300 ms verification pass on every submit-with-text call (bounded ~2.4 s
+worst case when stuck); the empty-text flush and text-only sends are unaffected. This
+provides a self-healing defense in depth on top of Option 2.
 
 **Test coverage:** six new tests cover:
 - Stuck-then-cleared: retry succeeds after 1 attempt

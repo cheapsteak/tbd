@@ -292,12 +292,14 @@ extension RPCRouterTests {
 
     @Test("terminal.send with submit and text: clean first verify (no retry needed)")
     func terminalSendSubmitCleanFirstVerify() async throws {
+        let recorder = SendRecorder()
         let captureCounter = CaptureCounter()
         let clearedComposer = "some transcript\n❯ \n──\n  footer"
         captureCounter.setUp(responses: [clearedComposer])
 
         let tmux = TmuxManager(
             dryRun: true,
+            dryRunRecorder: { recorder.record($0) },
             dryRunCapturePane: { _, _ in captureCounter.nextResponse() }
         )
         let db = try TBDDatabase(inMemory: true)
@@ -336,6 +338,10 @@ extension RPCRouterTests {
             )
         )
         #expect(await router.handle(request).success)
+
+        // Verify the capture command used -J for joined wrapped lines
+        #expect(recorder.calls.contains { $0.contains("capture-pane") && $0.contains("-J") })
+
         // Only one capture call: composer was clear on first check
         #expect(captureCounter.count == 1)
     }

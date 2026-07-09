@@ -1369,7 +1369,7 @@ extension RPCRouter {
                 await verifyAndRetrySubmit(
                     server: worktree.tmuxServer,
                     paneID: terminal.tmuxPaneID,
-                    textLength: params.text.count
+                    textLength: params.text.utf8.count
                 )
             }
         }
@@ -1386,11 +1386,14 @@ extension RPCRouter {
         textLength: Int
     ) async {
         var retryCount = 0
-        for delay in submitVerifyDelays {
+        for (attemptIndex, delay) in submitVerifyDelays.enumerated() {
             try? await Task.sleep(for: delay)
 
-            // Capture pane output; failure is silent (best-effort verification).
-            guard let paneText = try? await tmux.capturePaneOutput(server: server, paneID: paneID) else {
+            // Capture pane output with wrapped lines joined. Failure is best-effort.
+            guard let paneText = try? await tmux.capturePaneOutputJoined(server: server, paneID: paneID) else {
+                logger.debug(
+                    "terminal.send submit verification: capture failed on attempt \(attemptIndex + 1, privacy: .public), stopping verification"
+                )
                 return
             }
 
