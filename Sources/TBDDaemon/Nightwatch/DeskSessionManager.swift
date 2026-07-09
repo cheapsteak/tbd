@@ -71,7 +71,12 @@ public actor DeskSessionManager {
         var name = "watch-desk"
         var deskPath = scratchDir.appendingPathComponent(name)
         var attempts = 0
-        while fm.fileExists(atPath: deskPath.path) || (try await db.worktrees.findByPath(path: deskPath.path) != nil) {
+        while true {
+            let existsOnDisk = fm.fileExists(atPath: deskPath.path)
+            let existsInDB = try await db.worktrees.findByPath(path: deskPath.path) != nil
+            if !existsOnDisk && !existsInDB {
+                break
+            }
             name = "watch-desk-\(UUID().uuidString.prefix(8))"
             deskPath = scratchDir.appendingPathComponent(name)
             attempts += 1
@@ -199,6 +204,9 @@ public actor DeskSessionManager {
             }
         }
 
+        // Resolve profileConfigDir if there's a profile
+        let profileConfigDir = ClaudeProfileConfigDirManager.resolveConfigDir(for: resolvedProfile)
+
         // Build spawn command
         let sessionID = UUID().uuidString
         let initialPrompt = NightwatchDeskPrompts.initialPrompt(mode: mode)
@@ -214,7 +222,7 @@ public actor DeskSessionManager {
             profileModel: model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
-            profileConfigDir: nil,  // ResolvedModelProfile doesn't have configDir
+            profileConfigDir: profileConfigDir,
             cmd: nil,
             shellFallback: "/bin/zsh",
             settingsOverlayPath: ClaudeHookOverlay.overlayPath,
@@ -228,23 +236,23 @@ public actor DeskSessionManager {
         _ = try await tmux.ensureServer(
             server: tmuxServer,
             session: "main",
-            cwd: skillDir,
+            cwd: worktree.path,
             cols: TmuxManager.defaultCols,
             rows: TmuxManager.defaultRows
         )
 
         // Create the window
         let terminalID = UUID()
-        let windowID = try await tmux.createWindow(
+        let (windowID, paneID) = try await tmux.createWindow(
             server: tmuxServer,
-            label: TerminalLabel.claudeCode,
-            cwd: skillDir,
-            command: spawnResult.command,
+            session: "main",
+            cwd: worktree.path,
+            shellCommand: spawnResult.command,
+            env: [:],
             sensitiveEnv: spawnResult.sensitiveEnv
         )
 
         // Record the terminal in the database
-        let paneID = "1:0"  // Default pane ID for new window
         _ = try await db.terminals.create(
             id: terminalID,
             worktreeID: worktree.id,

@@ -88,17 +88,18 @@ enum NightwatchModeTheme {
     }
 }
 
-#Preview {
-    VStack(spacing: 0) {
-        NightwatchDeskStatusBanner()
-            .environmentObject({
-                let state = AppState()
-                state.nightwatchMode = .daywatch
-                return state
-            }())
-
-        Text("Content area")
-            .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
+// #Preview disabled — PreviewsMacros plugin unavailable in this build context
+// #Preview {
+//    VStack(spacing: 0) {
+//        NightwatchDeskStatusBanner()
+//            .environmentObject({
+//                let state = AppState()
+//                state.nightwatchMode = .daywatch
+//                return state
+//            }())
+//
+//        Text("Content area")
+//            .padding()
+//            .frame(maxWidth: .infinity, maxHeight: .infinity)
+//    }
+// }
