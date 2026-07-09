@@ -335,12 +335,18 @@ extension WorktreeLifecycle {
         // otherwise preserve them so a subsequent revive (without skipClaude) can use them.
         try await db.worktrees.revive(id: worktreeID, clearSessions: !skipClaude)
 
-        // Deliberate revive: disarm auto-archive so a still-merged PR doesn't
-        // immediately re-archive the worktree the user just revived.
+        // Deliberate revive: disarm auto-archive AND auto-hibernate so a
+        // still-merged PR doesn't immediately re-archive or re-park the
+        // worktree the user just revived.
         do {
             try await db.worktrees.setAutoArchiveOnMerge(id: worktreeID, value: false)
         } catch {
             archiveLogger.warning("failed to disarm auto-archive for \(worktreeID, privacy: .public): \(error, privacy: .public)")
+        }
+        do {
+            try await db.worktrees.setAutoHibernateOnMerge(id: worktreeID, value: false)
+        } catch {
+            archiveLogger.warning("failed to disarm auto-hibernate for \(worktreeID, privacy: .public): \(error, privacy: .public)")
         }
 
         // Return updated worktree
