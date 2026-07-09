@@ -189,6 +189,49 @@ test_write_plist_contains_label_interval_and_script() {
   rm -rf "$(dirname "$out")"
 }
 
+test_main_exclude_path_skips_only_that_worktree() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/excluded" b="$root/sibling"
+  _mk_worktree "$a" "$now" 200000 200000   # tier2-eligible — but excluded
+  _mk_worktree "$b" "$now" 200000 200000   # tier2-eligible sibling, same run
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[
+  {"path":"$a","status":"active","liveClaudeSessionCount":0},
+  {"path":"$b","status":"active","liveClaudeSessionCount":0}
+]
+JSON
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_EXCLUDE_PATH="$a" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "excluded worktree logged as skipped" "$out" "SKIP excluded $a"
+  assert_missing  "excluded worktree never planned"     "$out" "PLAN tier2 $a"
+  assert_contains "sibling still planned in same run"   "$out" "PLAN tier2 $b"
+  assert_eq "excluded .build survives"  "true"  "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  assert_eq "sibling .build reclaimed"  "false" "$([[ -d "$b/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
+test_main_exclude_path_canonicalizes_variants() {
+  local root; root="$(mktmpd)"; local now=2000000000
+  local a="$root/real"
+  _mk_worktree "$a" "$now" 200000 200000   # tier2-eligible
+  ln -s "$a" "$root/link"                   # symlinked route to the same dir
+  local j="$root/wt.json"
+  cat > "$j" <<JSON
+[{"path":"$a","status":"active","liveClaudeSessionCount":0}]
+JSON
+  # Exclude via a symlink AND a trailing slash — textually nothing like the
+  # listed path; only canonicalization of both sides can match them.
+  local out
+  out="$(RECLAIM_NOW=$now RECLAIM_WT_JSON="$j" RECLAIM_PS_CMD="$NO_PS" RECLAIM_EXCLUDE_PATH="$root/link/" \
+    bash "$HERE/reclaim-build.sh" 2>&1)"
+  assert_contains "unnormalized exclude still skips"   "$out" "SKIP excluded $a"
+  assert_missing  "unnormalized exclude blocks plan"   "$out" "PLAN tier2 $a"
+  assert_eq "excluded .build survives symlink variant" "true" "$([[ -d "$a/.build" ]] && echo true || echo false)"
+  rm -rf "$root"
+}
+
 test_main_skips_worktree_without_package_swift() {
   local root; root="$(mktmpd)"; local now=2000000000
   local a="$root/swift-wt" b="$root/nonswift-wt"
@@ -307,6 +350,54 @@ test_plan_tier2_works_on_x86_64_triple() {
   local out; out="$(RECLAIM_NOW=$now RECLAIM_PS_CMD="$NO_PS" plan_worktree "$d" 0)"
   assert_eq "x86_64 triple -> tier2" "PLAN tier2 $d" "$out"
   rm -rf "$d"
+}
+
+# Static check (not a functional test — restart.sh builds/launches the real
+# app, so it can't be exercised here): confirm restart.sh still wires up the
+# opportunistic background reclaim launch it added in scripts/restart.sh —
+# async (nohup, backgrounded), silent (no bare invocation without redirects),
+# and gated on both the opt-out env var and the script actually being present.
+test_restart_sh_launches_reclaim_async_and_silent() {
+  local restart="$HERE/restart.sh"
+  local body; body="$(cat "$restart")"
+  # shellcheck disable=SC2016 # single-quoted on purpose: searching restart.sh
+  # for these literal, unexpanded strings, not expanding them ourselves.
+  assert_contains "restart.sh backgrounds reclaim-build.sh with nohup" "$body" 'nohup "$RECLAIM_SCRIPT"'
+  assert_contains "restart.sh redirects reclaim output to the shared log file" "$body" 'Library/Logs/tbd-reclaim-build.log'
+  assert_contains "restart.sh honors TBD_SKIP_RECLAIM opt-out" "$body" 'TBD_SKIP_RECLAIM'
+  # shellcheck disable=SC2016
+  assert_contains "restart.sh guards on reclaim script executability" "$body" '[ -x "$RECLAIM_SCRIPT" ]'
+
+  # The launch line itself must be fully detached from the terminal: stderr
+  # merged into the log and stdin redirected from /dev/null, then backgrounded.
+  local launch_line
+  # shellcheck disable=SC2016
+  launch_line="$(grep -F 'nohup "$RECLAIM_SCRIPT"' "$restart")"
+  assert_contains "launch line merges stderr into the log" "$launch_line" '2>&1'
+  assert_contains "launch line redirects stdin from /dev/null" "$launch_line" '< /dev/null'
+  assert_contains "launch line is backgrounded" "$launch_line" '/dev/null &'
+  # Self-collision guard: the reclaim must never sweep the very worktree
+  # whose build it overlaps (a revived ≥48h-stale .build is tier2-eligible
+  # at plan time, before the new build has touched it).
+  # shellcheck disable=SC2016
+  assert_contains "launch line excludes its own worktree" "$launch_line" 'RECLAIM_EXCLUDE_PATH="$REPO_ROOT"'
+
+  # Regression guard: a bare `disown` under restart.sh's set -e aborts the
+  # whole restart if the reclaim job already finished and was reaped (and
+  # prints "no such job" to the terminal). nohup + full fd redirection in a
+  # non-interactive shell detaches on its own; disown must never come back.
+  assert_missing "restart.sh contains no disown" "$body" 'disown'
+
+  # Ordering: the reclaim launch must precede the swift build so the two
+  # overlap instead of the reclaim running after the restart's slow phase.
+  local nohup_ln build_ln
+  # shellcheck disable=SC2016
+  nohup_ln="$(grep -nF 'nohup "$RECLAIM_SCRIPT"' "$restart" | head -1 | cut -d: -f1)"
+  # shellcheck disable=SC2016
+  build_ln="$(grep -nF '(cd "$REPO_ROOT" && swift build)' "$restart" | head -1 | cut -d: -f1)"
+  local order="unknown"
+  if [[ -n "$nohup_ln" && -n "$build_ln" ]] && (( nohup_ln < build_ln )); then order="before"; fi
+  assert_eq "reclaim launch (line ${nohup_ln:-?}) precedes swift build (line ${build_ln:-?})" "before" "$order"
 }
 
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do "$t"; done

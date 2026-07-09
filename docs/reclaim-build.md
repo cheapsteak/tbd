@@ -2,6 +2,13 @@
 
 Keeps each TBD worktree's SwiftPM `.build` small. **Not part of the shipped product** — it is developer machine tooling, like `scripts/restart.sh`.
 
+## Triggers
+
+The reaper runs from two places, both writing to the same log:
+
+- **Hourly via launchd**, if installed (see Install / uninstall below).
+- **Automatically in the background on every `scripts/restart.sh`** — launched with `nohup ... &` before the build starts so the two overlap, fully silent (no terminal output), logging to `~/Library/Logs/tbd-reclaim-build.log`. This makes it zero-setup for contributors who never installed the launchd agent. Opt out with `TBD_SKIP_RECLAIM=1`. restart.sh excludes its own worktree from the sweep (`RECLAIM_EXCLUDE_PATH`) so the reclaim can never race the build it overlaps — without that, restarting a dormant worktree whose `.build` is ≥48h stale would make it Tier-2 eligible at plan time, before the fresh build has touched it.
+
 ## What it does (hourly, via launchd)
 Only acts on worktrees containing a `Package.swift` (SwiftPM packages) — `tbd worktree list` spans every repo TBD manages, including non-Swift ones (e.g. longeye-app, longeye-docs, agent-channels), which are skipped entirely.
 
@@ -53,6 +60,8 @@ scripts/reclaim-build.sh             # reclaim now
 | `RECLAIM_ACTIVE_GRACE` | `600` (10m) | Skip a `.build` whose newest mtime is more recent than this, even if a `PLAN` was made |
 | `RECLAIM_NOW` | `date +%s` | Epoch seconds treated as "now" (tests) |
 | `RECLAIM_REPO_ROOTS` | derived from the TBD worktree list's git-common-dir | Newline-separated repo roots to scan for `.claude/worktrees/*` — overrides derivation entirely (tests, or to point at a repo TBD doesn't manage) |
+| `RECLAIM_EXCLUDE_PATH` | unset | Single worktree path to skip unconditionally (both tiers, both enumeration sources); canonicalized before comparing, so symlink/trailing-slash variants still match. `scripts/restart.sh` passes its own worktree here |
+| `TBD_SKIP_RECLAIM` | unset | Set to `1` to skip the background reclaim launch that `scripts/restart.sh` fires on every run |
 
 ## Future
 The ~4.6 GiB of compiled artifacts can only be de-duplicated across worktrees via SwiftPM compilation caching (LLVM CAS + prefix mapping) on the new Swift Build engine — currently an opt-in pitch. Track and pilot when it lands.

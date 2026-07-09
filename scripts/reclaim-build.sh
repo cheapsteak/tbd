@@ -15,6 +15,12 @@
 #   RECLAIM_NOW         epoch seconds treated as "now"      (default: date +%s)
 #   RECLAIM_REPO_ROOTS  newline-separated repo roots to scan for .claude/worktrees/*
 #                       (default: derived from the TBD worktree list's git-common-dir)
+#   RECLAIM_EXCLUDE_PATH  single worktree path to skip unconditionally (both tiers,
+#                       both enumeration sources). Paths are canonicalized before
+#                       comparing, so symlinked/trailing-slash/relative variants of
+#                       the same dir still match. Empty/unset = no exclusion.
+#                       restart.sh passes its own worktree here so the background
+#                       reclaim it fires can never race the swift build it overlaps.
 
 RECLAIM_T1_SECONDS="${RECLAIM_T1_SECONDS:-21600}"
 RECLAIM_T2_SECONDS="${RECLAIM_T2_SECONDS:-172800}"
@@ -28,6 +34,13 @@ _worktree_json() { if [[ -n "${RECLAIM_WT_JSON:-}" ]]; then cat "$RECLAIM_WT_JSO
 _ps_lines()      { if [[ -n "${RECLAIM_PS_CMD:-}" ]]; then eval "$RECLAIM_PS_CMD"; else ps -axo pid,args; fi; }
 
 # --- helpers -----------------------------------------------------------------
+
+# canon_path PATH -> physical path (symlinks resolved, trailing slash dropped);
+# falls back to the input verbatim if the directory doesn't exist, so two
+# references to a vanished dir still compare equal textually.
+canon_path() {
+  (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
+}
 
 # newest_mtime DIR -> epoch of newest regular file under DIR (empty if none)
 newest_mtime() {
@@ -142,9 +155,23 @@ main() {
   if [[ "$dry" != "true" ]]; then avail_before="$(_avail_kb)"; fi
   local plan_file; plan_file="$(mktemp)"
 
+  # Canonicalize the exclusion once up front; per-worktree paths are
+  # canonicalized in the loop so symlink/trailing-slash/relative variants of
+  # the same dir can't defeat the match (restart.sh derives its REPO_ROOT
+  # from dirname "$0", which need not be textually identical to what the
+  # TBD list or the .claude/worktrees glob reports).
+  local exclude_canon=""
+  if [[ -n "${RECLAIM_EXCLUDE_PATH:-}" ]]; then
+    exclude_canon="$(canon_path "$RECLAIM_EXCLUDE_PATH")"
+  fi
+
   local wt sessions
   while IFS=$'\t' read -r wt sessions; do
     [[ -n "$wt" ]] || continue
+    if [[ -n "$exclude_canon" && "$(canon_path "$wt")" == "$exclude_canon" ]]; then
+      echo "SKIP excluded $wt"
+      continue
+    fi
     [[ -f "$wt/Package.swift" ]] || continue   # only SwiftPM-package worktrees produce .build/index-build
     plan_worktree "$wt" "$sessions"
   done < <(list_all_worktrees_tsv) | tee "$plan_file" >&2
