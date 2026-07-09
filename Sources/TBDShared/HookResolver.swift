@@ -1,7 +1,9 @@
 import Foundation
 import os
-import TBDShared
 
+// Subsystem stays `com.tbd.daemon` even though the type now lives in TBDShared:
+// hook resolution is still a daemon-side activity in practice, and existing
+// `log stream --predicate 'category == "hooks"'` recipes must keep working.
 private let hooksLogger = Logger(subsystem: "com.tbd.daemon", category: "hooks")
 
 public enum HookEvent: String, Sendable {
@@ -36,12 +38,12 @@ public struct HookResolver: Sendable {
     public let globalHooksDir: String
 
     public init(globalHooksDir: String? = nil) {
-        // Resolve in this module's compilation context. Cross-module default
-        // expressions that reference `TBDConstants.configDir` get re-emitted
-        // at the caller's site, and under Swift 6 / Xcode 26.3 that re-emission
-        // generates a reference to the property's `unsafeMutableAddressor`
-        // symbol — which doesn't exist for a computed `static var`, breaking
-        // the link step in test targets. See PR #153 CI failure for context.
+        // Resolved here rather than as a cross-module default expression.
+        // When this type lived in TBDDaemon, referencing `TBDConstants.configDir`
+        // in a default argument got re-emitted at each caller's site, generating
+        // a reference to an `unsafeMutableAddressor` symbol that doesn't exist
+        // for a computed `static var` — breaking the link step in test targets
+        // (PR #153). Same-module now, but keep the explicit resolution.
         self.globalHooksDir = globalHooksDir
             ?? TBDConstants.configDir.appendingPathComponent("hooks/default").path
     }

@@ -34,6 +34,8 @@ enum RowActionMenu {
         /// Create a child worktree based on THIS worktree's current branch.
         case newWorktreeFromBranch
         case archive
+        /// Re-run this worktree's `preSession` hook in a fresh, non-focused tab.
+        case rerunPreSessionHook
         /// Fork a specific Claude session into a new tab on the same account.
         /// Carries the session's terminal and its own (possibly ambient/nil)
         /// profile, so the dispatcher can resume+fork it.
@@ -120,6 +122,10 @@ enum RowActionMenu {
         /// Forkable Claude sessions in tab order. Drives the per-session
         /// "Fork session" entries (empty → none).
         var claudeSessions: [ClaudeSessionRef]
+        /// A `preSession` hook resolves for this worktree — gates the re-run
+        /// item entirely (no hook, no item). Resolved by the surface via the
+        /// shared `HookResolver`, so `items(...)` stays pure.
+        var hasPreSessionHook: Bool
 
         init(hasHibernatableClaude: Bool = false,
              hasHibernatedClaude: Bool = false,
@@ -132,7 +138,8 @@ enum RowActionMenu {
              status: WorktreeStatus = .active,
              isPromoted: Bool = false,
              branch: String = "",
-             claudeSessions: [ClaudeSessionRef] = []) {
+             claudeSessions: [ClaudeSessionRef] = [],
+             hasPreSessionHook: Bool = false) {
             self.hasHibernatableClaude = hasHibernatableClaude
             self.hasHibernatedClaude = hasHibernatedClaude
             self.hasUnpinnedClaude = hasUnpinnedClaude
@@ -145,6 +152,7 @@ enum RowActionMenu {
             self.isPromoted = isPromoted
             self.branch = branch
             self.claudeSessions = claudeSessions
+            self.hasPreSessionHook = hasPreSessionHook
         }
     }
 
@@ -163,6 +171,7 @@ enum RowActionMenu {
     static let wakeLabel = "Wake"
     static let keepWarmLabel = "Keep warm"
     static let allowHibernationLabel = "Allow hibernation"
+    static let rerunPreSessionLabel = "Re-run setup hook"
 
     /// Title for a fork-session action: plain when the worktree hosts a single
     /// Claude session, suffixed with the session label when there are several.
@@ -181,8 +190,10 @@ enum RowActionMenu {
     /// 2. Hibernation — Wake / Hibernate now / keep-warm toggle (conditional).
     /// 3. Sessions & spawning — per-session Fork entries, plus (regular only)
     ///    Create Nested Worktree / New worktree from this branch.
-    /// 4. Filesystem — Open in Finder, Copy Path.
-    /// 5. (scratch only) Delete Scratch Space, with the promote-hint caption
+    /// 4. Maintenance — Re-run setup hook (only when a `preSession` hook
+    ///    resolves).
+    /// 5. Filesystem — Open in Finder, Copy Path.
+    /// 6. (scratch only) Delete Scratch Space, with the promote-hint caption
     ///    beneath it.
     ///
     /// Sections are joined with a single divider each; empty sections collapse,
@@ -219,6 +230,14 @@ enum RowActionMenu {
             actions.append(Action(kind: .toggleKeepWarm(enable: false), title: allowHibernationLabel))
         }
         return actions
+    }
+
+    /// The maintenance section — currently just the hook re-run. Empty when no
+    /// `preSession` hook resolves, so `joined(...)` collapses the section and no
+    /// dangling divider renders.
+    static func maintenanceActions(context: Context) -> [Action] {
+        guard context.hasPreSessionHook else { return [] }
+        return [Action(kind: .rerunPreSessionHook, title: rerunPreSessionLabel)]
     }
 
     private static func forkActions(context: Context) -> [Action] {
@@ -259,6 +278,7 @@ enum RowActionMenu {
             // Scratch spaces host Claude sessions too — same fork entries as
             // the regular branch.
             forkActions(context: context).map(Item.action),
+            maintenanceActions(context: context).map(Item.action),
             [
                 .action(Action(kind: .openInFinder, title: "Open in Finder")),
                 .action(Action(kind: .copyPath, title: "Copy Path")),
@@ -306,6 +326,7 @@ enum RowActionMenu {
             ],
             hibernationActions(context: context).map(Item.action),
             spawning,
+            maintenanceActions(context: context).map(Item.action),
             [
                 .action(Action(kind: .openInFinder, title: "Open in Finder")),
                 .action(Action(kind: .copyPath, title: "Copy Path")),

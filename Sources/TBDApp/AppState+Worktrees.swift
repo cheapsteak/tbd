@@ -281,6 +281,25 @@ extension AppState {
         }
     }
 
+    /// Re-run the worktree's `preSession` hook. The daemon spawns a
+    /// non-focused tab and closes it on a clean exit; a failing hook leaves its
+    /// tab open with the output and raises an `.error` notification. Running
+    /// agents are untouched.
+    ///
+    /// The only thing to surface here is a refusal (no hook, already running,
+    /// still creating) — hook FAILURE arrives later as a notification, not as
+    /// an error on this call.
+    func rerunPreSessionHook(worktreeID: UUID) async {
+        do {
+            let size = mainAreaTerminalSize()
+            try await daemonClient.rerunPreSessionHook(worktreeID: worktreeID, cols: size.cols, rows: size.rows)
+            logger.info("Re-running setup hook for worktree \(worktreeID, privacy: .public)")
+        } catch {
+            logger.error("Failed to re-run setup hook: \(error)")
+            showAlert("\(error)", isError: true)
+        }
+    }
+
     /// Revive an archived worktree.
     /// Mirrors `reviveWithSession`'s lingering-snapshot UX: keeps the row
     /// visible with a status pill until the user navigates away, instead

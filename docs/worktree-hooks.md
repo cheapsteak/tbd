@@ -23,9 +23,17 @@ Both run on worktree creation — and again when an archived worktree is revived
 - **`preSession` is blocking.** Its terminal is created first, and the agent (Claude/Codex/shell) does not spawn until the hook exits. Use it for anything the agent must not start without — copying `.env` files, writing local config, linking caches.
 - **`setup` is parallel.** It runs in its own terminal alongside the agent, which is already started. Use it for slow work the agent doesn't need on its first turn — `npm install`, warming build caches.
 
-The split is your repo's choice; the rule of thumb is *preSession = "the agent must not start before this finishes"*. The `preSession` hook runs in a visible terminal tab (labeled `pre-session`), so you can watch its output live; the pane drops into a regular shell when the hook exits.
+The split is your repo's choice; the rule of thumb is *preSession = "the agent must not start before this finishes"*. The `preSession` hook runs in a visible terminal tab (labeled `pre-session`), so you can watch its output live. That tab is **ephemeral on success**: once the hook exits 0 and the agent terminals exist, TBD closes it automatically. If the hook exits non-zero, times out, or its pane gets killed, the tab is left open instead — dropped into a regular shell with the hook's output still on screen — and TBD raises an error notification.
 
-`preSession` has a 600-second timeout. A non-zero exit status or a timeout does **not** abort worktree creation or block the agent forever — TBD posts a notification and starts the agent anyway.
+`preSession` has a 600-second timeout. A non-zero exit status, a timeout, or a killed pane does **not** abort worktree creation or block the agent forever — TBD posts a notification and starts the agent anyway, leaving the hook's tab open as described above.
+
+## Re-running `preSession`
+
+You can re-run a worktree's `preSession` hook at any time, without recreating the worktree: right-click it in the sidebar and choose **Re-run setup hook**. It runs in a fresh background tab that does not steal focus, and it does not disturb anything already running — no restart, no hibernation, no status change. The menu item only appears when a `preSession` hook actually resolves for that worktree; where none does, it's simply absent from the menu.
+
+Only one run is allowed per worktree at a time. Triggering a second one while the first is still in flight is refused with: `Setup hook is already running for this worktree.`
+
+Scratch spaces can run a `preSession` hook too. Previously they couldn't, because hook spawning required a backing repo. A scratch space has no repo, so for it `TBD_REPO_PATH` (see below) falls back to the worktree's own path.
 
 ## Environment
 

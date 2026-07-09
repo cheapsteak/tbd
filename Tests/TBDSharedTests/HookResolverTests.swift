@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import TBDDaemonLib
+@testable import TBDShared
 
 private func makeTempDir() throws -> URL {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

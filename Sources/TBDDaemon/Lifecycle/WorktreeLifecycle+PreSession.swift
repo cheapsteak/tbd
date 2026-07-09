@@ -90,14 +90,22 @@ extension WorktreeLifecycle {
 
     // MARK: - Phase 2b: spawn the pre-session terminal
 
-    /// Resolves the `preSession` hook and, if present, creates its terminal as
-    /// the FIRST window of the worktree's tmux session. Returns nil when no
-    /// hook resolves — callers then spawn the primary terminals directly
-    /// (today's behavior, unchanged).
+    /// Resolves the `preSession` hook and, if present, creates its terminal.
+    /// Returns nil when no hook resolves — callers then spawn the primary
+    /// terminals directly (today's behavior, unchanged).
+    ///
+    /// `claimsFocus` distinguishes the two callers. Create/revive spawn this
+    /// as the FIRST and only window, so they claim tab order and focus. A
+    /// manual re-run lands beside live agent tabs: it appends to the existing
+    /// order and leaves `activeTabID` untouched.
+    ///
+    /// `repo` is optional because scratch spaces have none. `TBD_REPO_PATH`
+    /// then falls back to the worktree's own path.
     func spawnPreSessionTerminal(
-        worktree: Worktree, repo: Repo,
+        worktree: Worktree, repo: Repo?,
         worktreePath: String,
-        cols: Int? = nil, rows: Int? = nil
+        cols: Int? = nil, rows: Int? = nil,
+        claimsFocus: Bool = true
     ) async throws -> PreSessionSpawn? {
         guard let hookPath = hooks.resolve(
             event: .preSession,
@@ -144,7 +152,7 @@ extension WorktreeLifecycle {
             "TBD_EVENT": HookEvent.preSession.rawValue,
             "TBD_WORKTREE_NAME": worktree.name,
             "TBD_WORKTREE_PATH": worktreePath,
-            "TBD_REPO_PATH": repo.path,
+            "TBD_REPO_PATH": repo?.path ?? worktreePath,
             "TBD_BRANCH": worktree.branch,
         ]
         let window = try await tmux.createWindow(
@@ -165,11 +173,30 @@ extension WorktreeLifecycle {
             label: TerminalLabel.preSession,
             kind: .shell
         )
-        // The pre-session terminal is the only tab until phase 3 runs.
-        try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: [terminalID])
-        try await db.worktrees.setActiveTabID(worktreeID: worktreeID, tabID: terminalID)
+        if claimsFocus {
+            // The pre-session terminal is the only tab until phase 3 runs.
+            try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: [terminalID])
+            try await db.worktrees.setActiveTabID(worktreeID: worktreeID, tabID: terminalID)
+        } else {
+            // Manual re-run: append beside the live agent tabs, don't steal focus.
+            var order = try await db.worktrees.getTabOrder(worktreeID: worktreeID)
+            order.append(terminalID)
+            try await db.worktrees.setTabOrder(worktreeID: worktreeID, tabIDs: order)
+            // The create/revive path broadcasts terminalCreated for the primaries
+            // later in phase 3; the hook tab there arrives bundled with the
+            // worktree row. A re-run has no such follow-up broadcast, so the app
+            // needs this one to render the tab immediately.
+            subscriptions?.broadcast(delta: .terminalCreated(TerminalDelta(
+                terminalID: terminalID,
+                worktreeID: worktreeID,
+                label: TerminalLabel.preSession
+            )))
+        }
 
         // Kill the untracked initial window now that a real window exists.
+        // Only the focus-claiming (create/revive) path can have created it —
+        // `ensureServer` returns nil when the server already exists, so this
+        // stays correct for the re-run path without a `claimsFocus` check.
         if let initialWindowID {
             try? await tmux.killWindow(server: tmuxServer, windowID: initialWindowID)
         }
@@ -284,6 +311,8 @@ extension WorktreeLifecycle {
             return
         }
 
+        let succeeded = outcome == .completed(exitCode: 0)
+
         switch outcome {
         case .completed(exitCode: 0):
             logger.info("preSession hook completed for worktree \(worktree.id, privacy: .public)")
@@ -312,7 +341,9 @@ extension WorktreeLifecycle {
                 archivedClaudeSessions: archivedClaudeSessions,
                 initialPrompt: initialPrompt,
                 cols: cols, rows: rows,
-                preSessionTerminalID: preSession.terminalID,
+                // On success the hook tab is about to be deleted — never splice
+                // it into tab order. On failure it stays, at index 1 as before.
+                preSessionTerminalID: succeeded ? nil : preSession.terminalID,
                 overrideProfileID: overrideProfileID
             )
             for terminal in created {
@@ -321,6 +352,18 @@ extension WorktreeLifecycle {
                     worktreeID: worktree.id,
                     label: terminal.label
                 )))
+            }
+
+            // Close the hook tab only after the primaries exist and
+            // `spawnPrimaryTerminals` has moved activeTabID onto the primary —
+            // the worktree is never momentarily tab-less, and focus never sits
+            // on a tab that is about to vanish. Deliberately INSIDE the `do`:
+            // if the spawn threw, the primaries don't exist, so tearing the
+            // hook tab down would leave the worktree tab-less — keep it instead.
+            // `.paneKilled` already has no window; the kill is best-effort so
+            // the row/tab cleanup still runs.
+            if succeeded {
+                await closePreSessionTerminal(worktree: worktree, preSession: preSession)
             }
         } catch {
             logger.error("phase-3 primary terminal spawn failed for worktree \(worktree.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -358,9 +401,35 @@ extension WorktreeLifecycle {
         }
     }
 
+    /// Tears the pre-session tab down after a clean run: kill the tmux window,
+    /// delete the terminal + tab rows, broadcast `.terminalRemoved`.
+    ///
+    /// Deliberately NOT reusing `RPCRouter.handleTerminalDelete`: that handler
+    /// also cancels scheduled resumes, clears pending questions, cancels
+    /// auto-login, and reclaims a per-session `ClaudeHookOverlay` — all Claude
+    /// concerns, all no-ops for this `.shell` tab, and several reach for
+    /// `RPCRouter` state the lifecycle doesn't hold.
+    ///
+    /// Best-effort: a failure here must never take down the worktree, whose
+    /// checkout and agent terminals are already valid.
+    func closePreSessionTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
+        try? await tmux.killWindow(
+            server: worktree.tmuxServer, windowID: preSession.windowID
+        )
+        do {
+            try await db.terminals.delete(id: preSession.terminalID)
+            try await db.tabs.delete(tabID: preSession.terminalID)
+            subscriptions?.broadcast(delta: .terminalRemoved(TerminalIDDelta(
+                terminalID: preSession.terminalID
+            )))
+        } catch {
+            logger.warning("failed to close pre-session terminal \(preSession.terminalID, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Records a daemon notification and broadcasts it (same pattern as
     /// `handleNotify` in RPCRouter+TerminalHandlers).
-    private func notifyPreSessionProblem(
+    func notifyPreSessionProblem(
         worktree: Worktree, terminalID: UUID, message: String
     ) async {
         logger.warning("preSession: \(message, privacy: .public) (worktree \(worktree.id, privacy: .public))")
@@ -379,5 +448,124 @@ extension WorktreeLifecycle {
         } catch {
             logger.error("failed to record preSession notification: \(error.localizedDescription, privacy: .public)")
         }
+    }
+}
+
+/// Why a manual `preSession` re-run was refused.
+public enum RerunPreSessionError: Error, Equatable, CustomStringConvertible {
+    case worktreeNotFound(UUID)
+    case noHookConfigured
+    case alreadyRunning
+    case worktreeBusy
+
+    public var description: String {
+        switch self {
+        case .worktreeNotFound(let id):
+            return "Worktree not found: \(id)"
+        case .noHookConfigured:
+            return "No preSession hook is configured for this worktree."
+        case .alreadyRunning:
+            return "Setup hook is already running for this worktree."
+        case .worktreeBusy:
+            return "This worktree is still being created — its setup hook is already running."
+        }
+    }
+
+    public var errorDescription: String? { description }
+}
+
+extension WorktreeLifecycle {
+
+    /// Re-runs the `preSession` hook in a fresh, non-focused tab, leaving the
+    /// worktree's status and its running agents completely alone.
+    ///
+    /// Returns as soon as the hook's terminal exists. A detached task awaits the
+    /// outcome, then closes the tab (clean exit) or leaves it open with its
+    /// output and records an `.error` notification (non-zero / timeout / killed
+    /// pane).
+    func rerunPreSessionHook(
+        worktreeID: UUID, cols: Int? = nil, rows: Int? = nil
+    ) async throws {
+        guard let worktree = try await db.worktrees.get(id: worktreeID) else {
+            throw RerunPreSessionError.worktreeNotFound(worktreeID)
+        }
+        // A `.creating` worktree is already running its hook under phase 3.
+        guard worktree.status != .creating else {
+            throw RerunPreSessionError.worktreeBusy
+        }
+        var repo: Repo?
+        if let repoID = worktree.repoID {
+            repo = try await db.repos.get(id: repoID)
+        }
+
+        // Claim before spawning: the marker path is keyed by worktree ID, so two
+        // concurrent runs would race the same file and each other's teardown.
+        guard await preSessionRuns.begin(worktreeID) else {
+            throw RerunPreSessionError.alreadyRunning
+        }
+
+        let spawn: PreSessionSpawn?
+        do {
+            spawn = try await spawnPreSessionTerminal(
+                worktree: worktree, repo: repo,
+                worktreePath: worktree.path,
+                cols: cols, rows: rows,
+                claimsFocus: false
+            )
+        } catch {
+            await preSessionRuns.end(worktreeID)
+            throw error
+        }
+
+        guard let spawn else {
+            await preSessionRuns.end(worktreeID)
+            throw RerunPreSessionError.noHookConfigured
+        }
+
+        logger.info("preSession hook re-run started for worktree \(worktreeID, privacy: .public)")
+
+        let lifecycle = self
+        Task.detached {
+            await lifecycle.finishRerunPreSession(worktree: worktree, preSession: spawn)
+        }
+    }
+
+    /// Detached tail of a manual re-run: wait, then close-on-success or
+    /// notify-on-failure. Always releases the registry claim — this is a
+    /// single linear function (no early returns, and none of the awaited
+    /// calls below throw), so the final `preSessionRuns.end` at the bottom
+    /// runs on every path.
+    private func finishRerunPreSession(
+        worktree: Worktree, preSession: PreSessionSpawn
+    ) async {
+        let outcome = await waitForPreSessionCompletion(
+            preSession: preSession, tmuxServer: worktree.tmuxServer
+        )
+        // The marker must never outlive the wait, whatever the outcome.
+        try? FileManager.default.removeItem(atPath: preSession.markerPath)
+
+        switch outcome {
+        case .completed(exitCode: 0):
+            logger.info("preSession hook re-run completed for worktree \(worktree.id, privacy: .public)")
+            await closePreSessionTerminal(worktree: worktree, preSession: preSession)
+        case .completed(let exitCode):
+            await notifyPreSessionProblem(
+                worktree: worktree, terminalID: preSession.terminalID,
+                message: "Setup hook failed (exit \(exitCode)) — its tab is left open with the output"
+            )
+        case .timedOut:
+            await notifyPreSessionProblem(
+                worktree: worktree, terminalID: preSession.terminalID,
+                message: "Setup hook timed out after \(Int(preSessionTimeout))s"
+            )
+        case .paneKilled:
+            // Not an error on a re-run: the user closed the tab, a legitimate
+            // cancel. (On the create path this IS a notification, because
+            // there the primary agent is about to start on an unprepared
+            // tree — that concern doesn't apply here.)
+            logger.info("preSession hook re-run pane closed early for worktree \(worktree.id, privacy: .public)")
+        }
+
+        await preSessionRuns.end(worktree.id)
     }
 }

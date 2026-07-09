@@ -74,6 +74,10 @@ public struct WorktreeLifecycle: Sendable {
     /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
     /// An actor reference, so every copy of this struct shares one cache.
     public let conflictSweepCache = ConflictSweepCache()
+    /// In-flight `preSession` runs, keyed by worktree ID. An actor reference,
+    /// so every copy of this struct shares one registry (same rationale as
+    /// `conflictSweepCache`).
+    public let preSessionRuns = PreSessionRunRegistry()
 
     /// Default `preSession` hook timeout (production value).
     public static let defaultPreSessionTimeout: TimeInterval = 600

@@ -168,6 +168,8 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeList(request.paramsData)
             case RPCMethod.worktreeArchive:
                 return try await handleWorktreeArchive(request.paramsData)
+            case RPCMethod.worktreeRerunPreSession:
+                return try await handleWorktreeRerunPreSession(request.paramsData)
             case RPCMethod.worktreeRevive:
                 return try await handleWorktreeRevive(request.paramsData)
             case RPCMethod.worktreeAdopt:

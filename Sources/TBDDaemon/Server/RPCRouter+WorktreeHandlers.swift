@@ -128,6 +128,22 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Re-run the worktree's `preSession` hook. Returns as soon as the hook's
+    /// tab exists; the wait + teardown run detached inside the lifecycle.
+    ///
+    /// Rejections (`no hook`, `already running`, `still creating`) come back as
+    /// RPC errors and surface as an app alert — the menu hides the item when no
+    /// hook resolves, but the app's view can be a keystroke stale.
+    func handleWorktreeRerunPreSession(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(WorktreeRerunPreSessionParams.self, from: paramsData)
+        do {
+            try await lifecycle.rerunPreSessionHook(worktreeID: params.worktreeID, cols: params.cols, rows: params.rows)
+            return .ok()
+        } catch let error as RerunPreSessionError {
+            return RPCResponse(error: error.description)
+        }
+    }
+
     func handleWorktreeForget(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeForgetParams.self, from: paramsData)
 

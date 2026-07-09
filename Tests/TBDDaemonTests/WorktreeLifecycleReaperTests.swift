@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDDaemonLib
+@testable import TBDShared
 
 @Suite struct WorktreeLifecycleReaperTests {
     /// Builds a WorktreeLifecycle with a dryRun tmux (panePID → "0",
