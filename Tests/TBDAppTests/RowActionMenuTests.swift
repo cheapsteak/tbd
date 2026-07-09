@@ -278,11 +278,15 @@ struct RowActionMenuScratchTests {
     }
 
     @Test func promoteHintOmittedWhenAlreadyPromoted() {
-        let ctx = RowActionMenu.Context(isScratch: true, isPromoted: true)
+        let ctx = RowActionMenu.Context(hasRepoID: false, isScratch: true, isPromoted: true)
         let items = RowActionMenu.items(context: ctx)
         #expect(!items.contains(.caption(RowActionMenu.promoteHint)))
         // Delete then becomes the literal last item.
         #expect(items.last?.actionKind == .deleteScratch)
+        // A scratch row has no repo hooks editor to reveal: neither
+        // maintenance item should ever appear.
+        #expect(!kinds(items).contains(.createPreSessionHook))
+        #expect(!kinds(items).contains(.rerunPreSessionHook))
     }
 
     @Test func scratchWithClaudeSessionCarriesForkEntries() {
@@ -303,10 +307,15 @@ struct RowActionMenuScratchTests {
     }
 
     @Test func scratchArchiveAndDeleteAreDestructive() {
-        let ctx = RowActionMenu.Context(isScratch: true)
-        let actions = RowActionMenu.items(context: ctx).compactMap(\.action)
+        let ctx = RowActionMenu.Context(hasRepoID: false, isScratch: true)
+        let items = RowActionMenu.items(context: ctx)
+        let actions = items.compactMap(\.action)
         #expect(actions.first { $0.kind == .archiveScratch }?.role == .destructive)
         #expect(actions.first { $0.kind == .deleteScratch }?.role == .destructive)
+        // A scratch row has no repo hooks editor to reveal: neither
+        // maintenance item should ever appear.
+        #expect(!kinds(items).contains(.createPreSessionHook))
+        #expect(!kinds(items).contains(.rerunPreSessionHook))
     }
 }
 
