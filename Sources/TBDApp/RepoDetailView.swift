@@ -15,6 +15,12 @@ struct RepoDetailView: View {
     /// Bumped each time a reveal lands, so `RepoSettingsView` re-runs its
     /// scroll even if the Settings tab was already showing.
     @State private var revealNonce: Int = 0
+    /// The repo the most recent reveal targeted. `RepoDetailView` itself is
+    /// NOT `.id(repoID)`-keyed, so it is reused across repo switches and
+    /// `revealNonce` alone would leak into whichever repo is shown next.
+    /// Gating on the target repo makes the reveal order-independent: only
+    /// the repo the nonce was actually bumped for ever sees it.
+    @State private var revealTargetRepoID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,8 +42,11 @@ struct RepoDetailView: View {
                 RepoInstructionsView(repoID: repoID)
                     .id(repoID)
             case .settings:
-                RepoSettingsView(repoID: repoID, revealHookNonce: revealNonce)
-                    .id(repoID)
+                RepoSettingsView(
+                    repoID: repoID,
+                    revealHookNonce: revealTargetRepoID == repoID ? revealNonce : 0
+                )
+                .id(repoID)
             }
         }
         // Fresh mount (no repo was selected before).
@@ -52,6 +61,7 @@ struct RepoDetailView: View {
         guard case let .preSessionHook(id) = reveal, id == repoID else { return }
         selectedTab = .settings
         revealNonce += 1
+        revealTargetRepoID = repoID
         appState.repoDetailReveal = nil
     }
 }
