@@ -537,6 +537,15 @@ actor DaemonClient {
         )
     }
 
+    /// Re-run the worktree's `preSession` hook in a fresh, non-focused tab.
+    /// Returns as soon as the tab exists; the hook itself runs on in the daemon.
+    func rerunPreSessionHook(worktreeID: UUID) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.worktreeRerunPreSession,
+            params: WorktreeRerunPreSessionParams(worktreeID: worktreeID)
+        )
+    }
+
     /// Revive an archived worktree. Returns the revived worktree as the daemon
     /// sees it when the RPC completes — still `.creating` while a blocking
     /// `preSession` hook runs, `.active` otherwise.

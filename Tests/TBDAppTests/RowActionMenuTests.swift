@@ -150,6 +150,46 @@ struct RowActionMenuRegularTests {
         #expect(archive?.disabledHelp == nil)
     }
 
+    @Test("re-run item appears only when a preSession hook resolves")
+    func rerunItemGatedOnHook() {
+        let without = RowActionMenu.items(context: .init(hasPreSessionHook: false))
+        #expect(!without.contains(.action(.init(
+            kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
+        ))))
+
+        let with = RowActionMenu.items(context: .init(hasPreSessionHook: true))
+        #expect(with.contains(.action(.init(
+            kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
+        ))))
+    }
+
+    @Test("re-run item sits in its own section directly above Open in Finder")
+    func rerunItemSection() throws {
+        let items = RowActionMenu.items(context: .init(hasPreSessionHook: true))
+        let rerun = try #require(items.firstIndex(of: .action(.init(
+            kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
+        ))))
+        // Divider immediately before and after → its own section.
+        #expect(items[rerun - 1] == .divider)
+        #expect(items[rerun + 1] == .divider)
+        #expect(items[rerun + 2] == .action(.init(kind: .openInFinder, title: "Open in Finder")))
+    }
+
+    @Test("scratch rows get the re-run item, main rows never do")
+    func rerunItemRowScope() {
+        let scratch = RowActionMenu.items(context: .init(isScratch: true, hasPreSessionHook: true))
+        #expect(scratch.contains(.action(.init(
+            kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
+        ))))
+
+        let main = RowActionMenu.items(context: .init(
+            status: .main, hasPreSessionHook: true
+        ))
+        #expect(!main.contains(.action(.init(
+            kind: .rerunPreSessionHook, title: RowActionMenu.rerunPreSessionLabel
+        ))))
+    }
+
 }
 
 // MARK: - Scratch branch

@@ -36,6 +36,27 @@ struct RowActionMenuActions {
         }
     }
 
+    /// Does a `preSession` hook resolve for this worktree? Uses the SAME
+    /// five-step chain the daemon executes (`HookResolver` lives in TBDShared
+    /// precisely so this can't drift): app per-repo config → `.worktree-hooks/`
+    /// → `conductor.json` → `.dmux-hooks/` → global default.
+    ///
+    /// A handful of `fileExists` calls, evaluated when the menu is built on
+    /// right-click — not per frame. Scratch spaces have no `repoID`, so
+    /// `appHookPath` is nil for them and resolution falls through to the
+    /// in-directory hook or the global default.
+    private var hasPreSessionHook: Bool {
+        guard !worktree.path.isEmpty else { return false }
+        let appHookPath = worktree.repoID.map {
+            TBDConstants.hookPath(repoID: $0, eventName: HookEvent.preSession.rawValue)
+        }
+        return HookResolver().resolve(
+            event: .preSession,
+            repoPath: worktree.path,
+            appHookPath: appHookPath
+        ) != nil
+    }
+
     /// Build the pure model context from live `AppState`. Mirrors exactly the
     /// inputs the old `SidebarContextMenu` read inline.
     func context() -> RowActionMenu.Context {
@@ -57,7 +78,8 @@ struct RowActionMenuActions {
             status: worktree.status,
             isPromoted: worktree.promotedToRepoID != nil,
             branch: worktree.branch,
-            claudeSessions: claudeSessions
+            claudeSessions: claudeSessions,
+            hasPreSessionHook: hasPreSessionHook
         )
     }
 
@@ -147,6 +169,10 @@ struct RowActionMenuActions {
         case .archive:
             let wtID = worktree.id
             Task { await appState.archiveWorktree(id: wtID) }
+
+        case .rerunPreSessionHook:
+            let wtID = worktree.id
+            Task { await appState.rerunPreSessionHook(worktreeID: wtID) }
 
         case let .forkSession(terminalID, profileID):
             // Duplicate the conversation into a NEW tab on the SAME account —
