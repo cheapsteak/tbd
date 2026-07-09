@@ -33,13 +33,9 @@ struct RepoSectionView: View {
     @State private var isChevronHovered = false
     @State private var hoverDebounceTask: Task<Void, Error>?
     @State private var showRemoveConfirm = false
-    // Long-press or Option-click the `+` opens the model-profile picker; a plain
-    // click creates a worktree with the default profile.
-    @State private var showProfilePicker = false
-    // Set when a long-press opens the profile picker, so the Button's own tap
-    // action (which fires on finger-up, after the long-press's onEnded) doesn't
-    // ALSO create a default worktree. Reset on the next plain click.
-    @State private var longPressTriggered = false
+    // Hover the `+` (or ⌥-click it) to open the model-profile picker; a plain
+    // click still creates a worktree with the default profile.
+    @StateObject private var newWorktreeMenu = HoverMenuModel()
 
     private func onSectionHoverChange(_ hovering: Bool) {
         if hovering {
@@ -140,39 +136,33 @@ struct RepoSectionView: View {
             Spacer()
 
             Group {
-                if isSectionHovered || showProfilePicker {
+                if HoverMenuModel.shouldShowPlus(hovered: isSectionHovered, menuOpen: newWorktreeMenu.isOpen) {
                     SectionHeaderPlusButton(
-                        // Long-press or Option-click opens the unified profile
-                        // picker; its "Choose a branch…" row drills into the
-                        // (former standalone) branch picker.
-                        help: "New worktree (long-press or \u{2325}-click to pick a model profile)",
+                        // Hover opens the unified profile picker; its "Choose a
+                        // branch…" row drills into the branch list. ⌥-click opens
+                        // it immediately.
+                        help: "New worktree (hover to pick a model profile, or \u{2325}-click)",
                         action: handlePlusButton
                     )
                     .disabled(repo.status == .missing)
-                    // Long-press (~0.3s) opens the profile picker. `.simultaneousGesture`
-                    // runs ALONGSIDE the Button's tap recognizer, so a plain click still
-                    // fires `handlePlusButton` (create-with-default) and long-press doesn't
-                    // swallow it — the guard flag prevents a create on the long-press release.
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.3)
-                            .onEnded { _ in
-                                guard repo.status != .missing else { return }
-                                longPressTriggered = true
-                                showProfilePicker = true
-                            }
-                    )
-                    .popover(isPresented: $showProfilePicker, arrowEdge: .trailing) {
-                        WorktreeProfilePickerView(repoID: repo.id)
+                    // `.disabled` blocks the click path but NOT `.onHover`
+                    // tracking-area events, so gate the hover-open explicitly —
+                    // a missing repo must never open the picker.
+                    .onHover { if repo.status != .missing { newWorktreeMenu.triggerHover($0) } }
+                    .background(
+                        FloatingMenuAnchor(
+                            isPresented: newWorktreeMenu.isOpen,
+                            content: WorktreeProfilePickerView(
+                                repoID: repo.id,
+                                highlightDefaultProfile: newWorktreeMenu.isTriggerHovered,
+                                onClose: { newWorktreeMenu.closeNow() }
+                            )
                             .environmentObject(appState)
-                    }
-                    // Safety net for the orphaned-flag cases: if the long-press
-                    // opened the picker but no follow-up tap on `+` ever cleared
-                    // the flag (press released off-button, or picker dismissed /
-                    // a profile chosen), clear it when the popover closes so the
-                    // next plain click isn't swallowed by the guard.
-                    .onChange(of: showProfilePicker) { _, isShown in
-                        if !isShown { longPressTriggered = false }
-                    }
+                            .background(.ultraThickMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .onHover { newWorktreeMenu.menuHover($0) }
+                        )
+                    )
                 } else {
                     Color.clear
                 }
@@ -248,18 +238,14 @@ struct RepoSectionView: View {
     }
 
     private func handlePlusButton() {
-        // A long-press already handled this interaction (it opened the profile
-        // picker and set the flag); the Button's tap fires on finger-up right
-        // after, so consume it here instead of creating a default worktree.
-        if longPressTriggered {
-            longPressTriggered = false
-            return
-        }
-        // Option-click (like long-press) opens the unified model-profile
-        // picker; branch selection now lives inside it under "Choose a branch…".
-        if NSEvent.modifierFlags.contains(.option) {
-            showProfilePicker = true
-        } else {
+        guard repo.status != .missing else { return }
+        switch HoverMenuModel.plusOutcome(optionHeld: NSEvent.modifierFlags.contains(.option)) {
+        case .openMenu:
+            newWorktreeMenu.openImmediately()
+        case .createDefault:
+            // A plain click short-circuits any hover-opened menu to the fast
+            // default-create path.
+            newWorktreeMenu.closeNow()
             createWorktree()
         }
     }

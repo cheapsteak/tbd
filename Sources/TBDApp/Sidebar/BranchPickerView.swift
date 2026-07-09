@@ -23,6 +23,13 @@ struct BranchPickerView: View {
 /// under the back bar.
 struct BranchListView: View {
     let repoID: UUID
+    /// Forwarded so a branch chosen from a nested `+` creates a child worktree.
+    var parentWorktreeID: UUID? = nil
+    /// Explicit close hook for the `FloatingPanel` presentation (no
+    /// `@Environment(\.dismiss)` there); forwarded from
+    /// `WorktreeProfilePickerView`. The standalone `BranchPickerView` wrapper
+    /// is currently unused, so its default empty closure is harmless.
+    var onClose: () -> Void = {}
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
@@ -101,8 +108,9 @@ struct BranchListView: View {
 
     private func pick(_ branch: BranchInfo) {
         dismiss()
+        onClose()
         // Branch selection always uses the default model (no profile override).
-        appState.createWorktree(repoID: repoID, existingBranch: branch)
+        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, existingBranch: branch)
     }
 
     private func selectFirstMatch() {

@@ -1,15 +1,17 @@
 import SwiftUI
 import TBDShared
 
-/// Popover content rendered when the user long-presses or Option-clicks the
-/// `+` button next to a repo in the sidebar.
+/// Menu content shown when the user hovers (or ⌥-clicks) the `+` button next to
+/// a repo in the sidebar. Presented in a borderless `FloatingPanel` (see
+/// `FloatingMenuAnchor`), not a SwiftUI popover.
 ///
 /// Two in-place pages (NOT nested popovers — those are fragile on macOS):
 ///  - `.profiles` (default): a fixed "Choose a branch…" drill-in row at the
-///    top, then "Resolve automatically" and one row per configured model
-///    profile. Selecting a profile row one-click-creates a worktree pinned to
-///    that profile; "Resolve automatically" creates one with no override
-///    (repo → scratch → global default precedence).
+///    top, then one row per configured model profile. Selecting a profile row
+///    one-click-creates a worktree pinned to that profile. (A plain click on
+///    the `+` — without opening this menu — already creates a default
+///    worktree via repo → scratch → global default precedence, so there is no
+///    separate "resolve automatically" row here.)
 ///  - `.branches`: the reused searchable branch list (`BranchListView`) behind
 ///    a back affordance. Selecting a branch creates a worktree on that existing
 ///    branch using the DEFAULT model (accepted tradeoff).
@@ -17,6 +19,19 @@ import TBDShared
 /// Modeled on `BranchPickerView` for consistent popover sizing/styling.
 struct WorktreeProfilePickerView: View {
     let repoID: UUID
+    /// When set, created worktrees are nested under this parent (the nested `+`
+    /// on a worktree row). Nil for the repo-header `+` (top-level worktrees).
+    var parentWorktreeID: UUID? = nil
+    /// True while the pointer is over the trigger `+` button (not the popover
+    /// itself) — highlights whichever profile row is the default so the user
+    /// can preview the plain-click outcome before the pointer even reaches the
+    /// menu. Fades once the pointer moves into the menu and normal per-row
+    /// hover takes over.
+    var highlightDefaultProfile: Bool = false
+    /// Explicit close hook for the `FloatingPanel` presentation, which has no
+    /// `@Environment(\.dismiss)` of its own (that's a SwiftUI popover/sheet
+    /// concept). Wired to the owning `HoverMenuModel.closeNow()`.
+    var onClose: () -> Void = {}
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
@@ -36,7 +51,8 @@ struct WorktreeProfilePickerView: View {
                 branchesPage
             }
         }
-        .frame(width: 300, height: 400)
+        .frame(width: 300)
+        .frame(minHeight: 320)
         .task {
             // Ensure the list (and usage suffixes) are populated even if the
             // user hasn't opened Settings yet this session.
@@ -76,62 +92,46 @@ struct WorktreeProfilePickerView: View {
             Divider()
                 .padding(.vertical, 2)
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    // Default / automatic resolution (no explicit override).
-                    ProfilePickerRow(
-                        title: "Resolve automatically",
-                        subtitle: "Use the repo / global default",
-                        systemImage: "wand.and.stars",
-                        isDefault: true
-                    ) {
-                        pick(profileID: nil)
-                    }
-
-                    if !appState.modelProfiles.isEmpty {
-                        Divider()
-                            .padding(.vertical, 2)
-                    }
-
-                    ForEach(appState.modelProfiles, id: \.profile.id) { entry in
-                        // A not-logged-in OAuth profile is not selectable: dim it
-                        // and disable its Button so its tap can't create a
-                        // worktree pinned to an account that can't run. apiKey /
-                        // bedrock rows report selectable and stay actionable.
-                        let isSelectable = ProfileUsagePresentation.isSelectable(entry)
-                        Group {
-                            if showsUsageBars(for: entry) {
-                                // OAuth profile with a usage snapshot that has
-                                // buckets: render the two-bar meter instead of the
-                                // single-line usage text.
-                                UsageBarsProfileRow(
-                                    entry: entry,
-                                    isDefault: entry.profile.id == appState.defaultProfileID
-                                ) {
-                                    pick(profileID: entry.profile.id)
-                                }
-                            } else {
-                                let line = ProfileUsagePresentation.menuLine(for: entry)
-                                let subtitle = profileSubtitle(for: entry, usageNote: line.secondary)
-                                ProfilePickerRow(
-                                    title: line.primary,
-                                    subtitle: subtitle.text,
-                                    systemImage: "person.crop.circle",
-                                    isDefault: entry.profile.id == appState.defaultProfileID,
-                                    // Always reserve subtitle height so the row never
-                                    // shifts, whichever state it resolves to.
-                                    reservesSubtitle: true,
-                                    // Skeleton is reserved for the ONE genuine loading
-                                    // case (logged-in OAuth awaiting its first poll).
-                                    showsSubtitleSkeleton: subtitle.showsSkeleton
-                                ) {
-                                    pick(profileID: entry.profile.id)
-                                }
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(appState.modelProfiles, id: \.profile.id) { entry in
+                    // A not-logged-in OAuth profile is not selectable: dim it
+                    // and disable its Button so its tap can't create a
+                    // worktree pinned to an account that can't run. apiKey /
+                    // bedrock rows report selectable and stay actionable.
+                    let isSelectable = ProfileUsagePresentation.isSelectable(entry)
+                    let isTheDefault = entry.profile.id == appState.defaultProfileID
+                    Group {
+                        if showsUsageBars(for: entry) {
+                            // OAuth profile with a usage snapshot that has
+                            // buckets: render the two-bar meter instead of the
+                            // single-line usage text.
+                            UsageBarsProfileRow(
+                                entry: entry,
+                                highlighted: isTheDefault && highlightDefaultProfile
+                            ) {
+                                pick(profileID: entry.profile.id)
+                            }
+                        } else {
+                            let line = ProfileUsagePresentation.menuLine(for: entry)
+                            let subtitle = profileSubtitle(for: entry, usageNote: line.secondary)
+                            ProfilePickerRow(
+                                title: line.primary,
+                                subtitle: subtitle.text,
+                                systemImage: "person.crop.circle",
+                                highlighted: isTheDefault && highlightDefaultProfile,
+                                // Always reserve subtitle height so the row never
+                                // shifts, whichever state it resolves to.
+                                reservesSubtitle: true,
+                                // Skeleton is reserved for the ONE genuine loading
+                                // case (logged-in OAuth awaiting its first poll).
+                                showsSubtitleSkeleton: subtitle.showsSkeleton
+                            ) {
+                                pick(profileID: entry.profile.id)
                             }
                         }
-                        .disabled(!isSelectable)
-                        .opacity(isSelectable ? 1 : 0.5)
                     }
+                    .disabled(!isSelectable)
+                    .opacity(isSelectable ? 1 : 0.5)
                 }
             }
         }
@@ -162,13 +162,14 @@ struct WorktreeProfilePickerView: View {
 
             // Reused branch list: selecting a branch creates on that existing
             // branch with the default model and dismisses the whole popover.
-            BranchListView(repoID: repoID)
+            BranchListView(repoID: repoID, parentWorktreeID: parentWorktreeID, onClose: onClose)
         }
     }
 
     private func pick(profileID: UUID?) {
         dismiss()
-        appState.createWorktree(repoID: repoID, profileID: profileID)
+        onClose()
+        appState.createWorktree(repoID: repoID, parentWorktreeID: parentWorktreeID, profileID: profileID)
     }
 
     /// Whether a profile row should render the two-bar usage meter (instead of
@@ -217,7 +218,7 @@ struct WorktreeProfilePickerView: View {
 /// fixed-single-line reservation only applies to the text rows.
 private struct UsageBarsProfileRow: View {
     let entry: ModelProfileWithUsage
-    var isDefault: Bool = false
+    var highlighted: Bool = false
     let onSelect: () -> Void
 
     @State private var isHovered = false
@@ -237,24 +238,13 @@ private struct UsageBarsProfileRow: View {
                     UsageBarsView(snapshot: entry.usageSnapshot)
                 }
                 Spacer(minLength: 4)
-                if isDefault {
-                    Text("default")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.secondary.opacity(0.10))
-                        )
-                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(isHovered ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .fill(isHovered || highlighted ? Color.accentColor.opacity(0.15) : Color.clear)
             )
             .contentShape(Rectangle())
         }
@@ -267,7 +257,7 @@ private struct ProfilePickerRow: View {
     let title: String
     let subtitle: String?
     let systemImage: String
-    var isDefault: Bool = false
+    var highlighted: Bool = false
     /// When true, a subtitle line is always rendered at full height — real text
     /// when available, otherwise an invisible placeholder — so the row height
     /// never changes across states (no pop-in).
@@ -305,16 +295,6 @@ private struct ProfilePickerRow: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
-                } else if isDefault {
-                    Text("default")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.secondary.opacity(0.10))
-                        )
                 }
             }
             .padding(.horizontal, 10)
@@ -322,7 +302,7 @@ private struct ProfilePickerRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(isHovered ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .fill(isHovered || highlighted ? Color.accentColor.opacity(0.15) : Color.clear)
             )
             .contentShape(Rectangle())
         }
